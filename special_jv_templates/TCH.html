@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>TCH JV</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; padding: 14px; color: #1f2937; background: #f5f6f8; margin: 0; }
+  h2 { margin: 0 0 8px 0; font-size: 16px; }
+  h3 { margin: 0 0 6px 0; font-size: 13px; font-weight: 600; }
+
+  .summary { background: #f9fafb; padding: 8px 10px; border-radius: 4px; margin-bottom: 12px; font-size: 12px; border: 1px solid #e5e7eb; display: flex; gap: 16px; flex-wrap: wrap; }
+  .summary b { color: #1f2937; }
+  .err { color: #b91c1c; font-weight: 600; }
+
+  .tch-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+  .tch-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .tch-card .head .title { font-weight: 700; font-size: 14px; color: #2563eb; }
+  .tch-card .top-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 8px; }
+  .tch-card .top-row > label { display: flex; flex-direction: column; gap: 2px; }
+  .tch-card .top-row > label .lbl { font-size: 11px; font-weight: 600; color: #4b5563; text-transform: uppercase; letter-spacing: 0.3px; }
+
+  .tch-data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .tch-data-table th, .tch-data-table td { border: 1px solid #e5e7eb; padding: 4px 6px; text-align: center; }
+  .tch-data-table thead tr.h1 th { background: #eef2ff; color: #3730a3; font-weight: 700; }
+  .tch-data-table thead tr.h2 th { background: #f9fafb; font-size: 11px; font-weight: 600; color: #4b5563; }
+  .tch-data-table td.computed { background: #fafbfc; color: #1f2937; font-weight: 600; min-width: 80px; }
+  .tch-data-table td.input { background: #fffbeb; min-width: 90px; }
+  .tch-data-table td.input input { width: 100%; border: 1px solid #fde68a; background: #fff; padding: 3px 5px; font-size: 12px; border-radius: 3px; }
+
+  input[type=text], input[type=number], select { border: 1px solid #d1d5db; border-radius: 3px; padding: 4px 6px; font-size: 12px; font-family: inherit; min-width: 110px; }
+  select { background: #fff; }
+
+  .add-tch { background: #fff; border: 2px dashed #93c5fd; color: #2563eb; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+  .add-tch:hover { background: #eff6ff; }
+
+  .rows-table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
+  .rows-table th { background: #f9fafb; padding: 5px 7px; border: 1px solid #e5e7eb; font-size: 11px; font-weight: 600; text-align: left; }
+  .rows-table td { padding: 4px 7px; border: 1px solid #e5e7eb; }
+  .rows-table tr:hover td { background: #fafbfc; }
+  .rows-table .tch-cell select { min-width: 60px; }
+
+  .row-rapid { color: #1d4ed8; font-weight: 600; }
+  .row-of    { color: #b45309; font-weight: 600; }
+  .row-skip  { color: #9ca3af; }
+
+  .actions { display: flex; gap: 8px; padding: 10px 0; position: sticky; bottom: 0; background: #f5f6f8; border-top: 1px solid #e5e7eb; margin-top: 14px; }
+  button { padding: 7px 16px; border-radius: 4px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; font-size: 12px; font-weight: 500; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button.primary:hover { background: #1d4ed8; }
+  button.danger  { background: #fff; color: #b91c1c; border-color: #fca5a5; }
+  button.small   { padding: 3px 8px; font-size: 11px; }
+
+  .preview-pane { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; margin-top: 10px; max-height: 240px; overflow-y: auto; }
+  .preview-pane h4 { margin: 0 0 6px 0; font-size: 12px; }
+  .preview-pane table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .preview-pane th, .preview-pane td { border: 1px solid #e5e7eb; padding: 3px 5px; text-align: left; }
+  .preview-pane th { background: #f9fafb; }
+  .balanced { color: #059669; font-weight: 600; }
+  .unbalanced { color: #b91c1c; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h2>TCH JV — Cross Currency Adjustment &amp; TCH Charges</h2>
+<div id="summary" class="summary"></div>
+
+<div id="tchContainer"></div>
+<button class="add-tch" onclick="addTchSection()">+ Add TCH Section</button>
+
+<h3 style="margin-top:14px;">Source Rows · assign each to a TCH section</h3>
+<div style="background:#fff; border:1px solid #e5e7eb; border-radius:6px; overflow:auto; max-height:340px;">
+  <table class="rows-table" id="rowsTable"><thead></thead><tbody></tbody></table>
+</div>
+
+<div id="previewPane" class="preview-pane" style="display:none;"></div>
+
+<div class="actions">
+  <button onclick="onCancel()">Cancel</button>
+  <button class="small" onclick="togglePreview()" id="previewBtn">Show Preview</button>
+  <div style="flex:1"></div>
+  <button class="primary" onclick="onSubmit()">Generate Lines &amp; Return</button>
+</div>
+
+<script>
+(function () {
+  // ───────────────────────────────────────────────────────────────────────────
+  // 0. Read inputs from the parent (Reco app) — see the spec doc
+  // ───────────────────────────────────────────────────────────────────────────
+  const parentWin = window.parent;
+  const inputs = (parentWin && parentWin._specialJvInputs) || [];
+  const ref    = (parentWin && parentWin._specialJvRef)    || 'TCH';
+  const def    = (parentWin && parentWin._specialJvDef)    || { inputColumns: [] };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 1. Helpers
+  // ───────────────────────────────────────────────────────────────────────────
+  const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function num(v) {
+    if (v == null || v === '') return 0;
+    const n = parseFloat(String(v).replace(/,/g, ''));
+    return isNaN(n) ? 0 : n;
+  }
+  function fmtNum(n) { return (Number(n) || 0).toFixed(2); }
+
+  // Pick a field from a row, trying multiple name variants case-insensitively
+  function pickField(row, candidates) {
+    for (const cand of candidates) {
+      if (row[cand] != null && row[cand] !== '') return row[cand];
+    }
+    const keys = Object.keys(row);
+    for (const cand of candidates) {
+      const k = keys.find(k => k.toLowerCase().replace(/[\s_]/g,'') === cand.toLowerCase().replace(/[\s_]/g,''));
+      if (k && row[k] != null && row[k] !== '') return row[k];
+    }
+    return '';
+  }
+
+  // Parse common date formats: yyyy-mm-dd, dd/mm/yy, dd/mm/yyyy, mm/dd/yy, Excel serial
+  function parseDate(v) {
+    if (v == null || v === '') return null;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+    if (typeof v === 'number') {
+      const d = new Date(Date.UTC(1899, 11, 30) + v * 86400000);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    const s = String(v).trim();
+    let m;
+    m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) { const d = new Date(+m[1], +m[2]-1, +m[3]); return isNaN(d.getTime()) ? null : d; }
+    m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
+    if (m) {
+      // Assume DD/MM/YY (host convention) — ambiguous with MM/DD; we go with DD/MM
+      let y = +m[3]; if (y < 100) y += 2000;
+      const d = new Date(y, +m[2]-1, +m[1]);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Format MM/DD/YY (per user request) for the period inputs
+  function fmtMMDDYY(d) {
+    if (!d) return '';
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const yy = String(d.getFullYear()).slice(-2);
+    return mm + '/' + dd + '/' + yy;
+  }
+
+  // Format the date-range string for the Remarks field: "DD MMM - DD MMM YY"
+  function fmtRangeRemark(fromStr, toStr) {
+    const f = parseDate(fromStr), t = parseDate(toStr);
+    if (!f || !t) return '<period>';
+    const dd = (d) => String(d.getDate()).padStart(2, '0');
+    const mm = (d) => MONTH_NAMES[d.getMonth()];
+    const yy = (d) => String(d.getFullYear()).slice(-2);
+    return dd(f) + ' ' + mm(f) + ' - ' + dd(t) + ' ' + mm(t) + ' ' + yy(t);
+  }
+
+  // Last day of a month
+  function lastDayOfMonth(y, mIdx) { return new Date(y, mIdx + 1, 0).getDate(); }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 2. State
+  // ───────────────────────────────────────────────────────────────────────────
+  let tchSections = [];       // array of {id, periodFrom, periodTo, recoCode, sale: {...}}
+  let nextTchId = 1;
+  let rowAssignments = {};    // rowIndex -> tchId (or 0 for unassigned)
+
+  // Build preset options from input dates ─ for each unique YYYY-MM, three slots
+  function buildPresetRanges() {
+    const monthSet = new Set();
+    inputs.forEach(r => {
+      const d = parseDate(pickField(r, ['Date','date','PostingDate','Posting Date']));
+      if (d) monthSet.add(d.getFullYear() + '-' + d.getMonth());
+    });
+    const months = Array.from(monthSet).map(s => {
+      const [y, m] = s.split('-').map(Number);
+      return { year: y, monthIdx: m };
+    }).sort((a, b) => (a.year - b.year) || (a.monthIdx - b.monthIdx));
+
+    const presets = [];
+    months.forEach(({ year, monthIdx }) => {
+      const eom = lastDayOfMonth(year, monthIdx);
+      const ymStr = MONTH_NAMES[monthIdx] + ' ' + year;
+      const mk = (d1, d2, lbl) => ({
+        label: lbl + ' ' + ymStr,
+        from: fmtMMDDYY(new Date(year, monthIdx, d1)),
+        to:   fmtMMDDYY(new Date(year, monthIdx, d2))
+      });
+      presets.push(mk(1, 10, '1-10'));
+      presets.push(mk(11, 20, '11-20'));
+      presets.push(mk(21, eom, '21-' + eom));
+    });
+    return presets;
+  }
+  const PRESETS = buildPresetRanges();
+
+  function makeTch() {
+    return {
+      id: nextTchId++,
+      periodFrom: '',
+      periodTo: '',
+      recoCode: '',
+      sale: {
+        rubEqUsd:   '',
+        rubEqEur:   '',
+        rubNo21:    '',
+        rubTotal:   '',
+        tchCharges: ''
+      }
+    };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 3. Compute Rapid (net Dr) + OF (net Cr) for each TCH from row assignments
+  // ───────────────────────────────────────────────────────────────────────────
+  function computeTotalsFor(tchId) {
+    const totals = { rapid: { RUB: 0, USD: 0, EUR: 0 }, of: { RUB: 0 } };
+    inputs.forEach((row, i) => {
+      if (rowAssignments[i] !== tchId) return;
+      const txn = String(pickField(row, ['Txn Type','Txn Type','Type','TransactionType'])).trim();
+      const cur = String(pickField(row, ['Currency','Cur','CCY'])).trim().toUpperCase();
+      const amt = num(pickField(row, ['FC Amount','Amt','Value']));
+      if (!txn || !amt) return;
+      if (txn.toUpperCase() === 'RAPID') {
+        if (totals.rapid[cur] != null) totals.rapid[cur] += amt;
+      } else if (txn.toUpperCase().startsWith('OF')) {
+        if (cur === 'RUB') totals.of.RUB += amt;
+      }
+    });
+    return totals;
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 4. UI rendering
+  // ───────────────────────────────────────────────────────────────────────────
+  function renderSummary() {
+    const el = document.getElementById('summary');
+    el.innerHTML =
+      '<div><b>JV:</b> ' + ref + '</div>' +
+      '<div><b>Inputs:</b> ' + inputs.length + ' row(s)</div>' +
+      '<div><b>Months detected:</b> ' + (PRESETS.length / 3) + '</div>' +
+      (inputs.length ? '' : '<div class="err">No rows received from host — check the To-Account dropdown wiring.</div>');
+  }
+
+  function renderTchSections() {
+    const wrap = document.getElementById('tchContainer');
+    wrap.innerHTML = '';
+    tchSections.forEach((tch, idx) => {
+      const totals = computeTotalsFor(tch.id);
+      const card = document.createElement('div');
+      card.className = 'tch-card';
+      card.innerHTML = `
+        <div class="head">
+          <div class="title">TCH ${idx + 1} <span style="color:#9ca3af;font-weight:400;font-size:11px;">(token: T${idx + 1})</span></div>
+          <div>
+            ${tchSections.length > 1 ? `<button class="small danger" onclick="removeTch(${tch.id})">Remove</button>` : ''}
+          </div>
+        </div>
+        <div class="top-row">
+          <label>
+            <span class="lbl">Period From (MM/DD/YY)</span>
+            <input type="text" placeholder="MM/DD/YY" value="${tch.periodFrom}" oninput="setTchField(${tch.id},'periodFrom',this.value)" />
+          </label>
+          <label>
+            <span class="lbl">Period To (MM/DD/YY)</span>
+            <input type="text" placeholder="MM/DD/YY" value="${tch.periodTo}" oninput="setTchField(${tch.id},'periodTo',this.value)" />
+          </label>
+          <label>
+            <span class="lbl">Range Preset</span>
+            <select onchange="applyPreset(${tch.id}, this.value)">
+              <option value="">— pick a slot —</option>
+              ${PRESETS.map((p, pi) => `<option value="${pi}">${p.label} (${p.from} → ${p.to})</option>`).join('')}
+            </select>
+          </label>
+          <label>
+            <span class="lbl">Reco Code</span>
+            <input type="text" placeholder="reco code" value="${tch.recoCode}" oninput="setTchField(${tch.id},'recoCode',this.value)" />
+          </label>
+        </div>
+
+        <table class="tch-data-table">
+          <thead>
+            <tr class="h1">
+              <th colspan="3">Rapid (net Dr) — auto from rows</th>
+              <th>OF (net Cr) — auto</th>
+              <th colspan="5">Sale Data — manual entry</th>
+            </tr>
+            <tr class="h2">
+              <th>RUB</th><th>USD</th><th>EUR</th>
+              <th>RUB</th>
+              <th>RUB Eq for USD</th>
+              <th>RUB Eq for EUR</th>
+              <th>RUB (no 2.1)</th>
+              <th>RUB Total (no 2)</th>
+              <th>TCH Charges</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="computed">${fmtNum(totals.rapid.RUB)}</td>
+              <td class="computed">${fmtNum(totals.rapid.USD)}</td>
+              <td class="computed">${fmtNum(totals.rapid.EUR)}</td>
+              <td class="computed">${fmtNum(totals.of.RUB)}</td>
+              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubEqUsd}" oninput="setSale(${tch.id},'rubEqUsd',this.value)" /></td>
+              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubEqEur}" oninput="setSale(${tch.id},'rubEqEur',this.value)" /></td>
+              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubNo21}" oninput="setSale(${tch.id},'rubNo21',this.value)" /></td>
+              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubTotal}" oninput="setSale(${tch.id},'rubTotal',this.value)" /></td>
+              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.tchCharges}" oninput="setSale(${tch.id},'tchCharges',this.value)" /></td>
+            </tr>
+          </tbody>
+        </table>
+      `;
+      wrap.appendChild(card);
+    });
+  }
+
+  function renderRowsTable() {
+    const tbl = document.getElementById('rowsTable');
+    const thead = tbl.querySelector('thead');
+    const tbody = tbl.querySelector('tbody');
+
+    // Build header
+    const cols = (def.inputColumns || []).map(c => c.name);
+    let head = '<tr><th style="width:70px;">TCH</th>';
+    cols.forEach(c => head += '<th>' + c + '</th>');
+    head += '</tr>';
+    thead.innerHTML = head;
+
+    // Build body
+    let body = '';
+    inputs.forEach((row, i) => {
+      const txn = String(pickField(row, ['TxnType','Txn Type','Type'])).trim().toUpperCase();
+      const isRapid = txn === 'RAPID';
+      const isOf    = txn.startsWith('OF');
+      const cls = isRapid ? 'row-rapid' : (isOf ? 'row-of' : 'row-skip');
+      body += '<tr class="' + cls + '">';
+      // TCH dropdown
+      body += '<td class="tch-cell"><select onchange="assignRow(' + i + ', +this.value)">';
+      body += '<option value="0">—</option>';
+      tchSections.forEach((tch, idx) => {
+        const sel = (rowAssignments[i] === tch.id) ? ' selected' : '';
+        body += '<option value="' + tch.id + '"' + sel + '>T' + (idx + 1) + '</option>';
+      });
+      body += '</select></td>';
+      // Data cells
+      cols.forEach(c => {
+        const v = row[c] != null ? row[c] : '';
+        body += '<td>' + (typeof v === 'string' ? escapeHtml(v) : v) + '</td>';
+      });
+      body += '</tr>';
+    });
+    if (!inputs.length) {
+      body = '<tr><td colspan="' + (cols.length + 1) + '" class="err" style="text-align:center; padding:14px;">No input rows received from host.</td></tr>';
+    }
+    tbody.innerHTML = body;
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function renderAll() {
+    renderTchSections();
+    renderRowsTable();
+    if (document.getElementById('previewPane').style.display !== 'none') renderPreview();
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 5. Wire up handlers (exposed to inline onclicks via window)
+  // ───────────────────────────────────────────────────────────────────────────
+  window.addTchSection = function () { tchSections.push(makeTch()); renderAll(); };
+  window.removeTch = function (id) {
+    if (tchSections.length <= 1) return;
+    tchSections = tchSections.filter(t => t.id !== id);
+    Object.keys(rowAssignments).forEach(k => { if (rowAssignments[k] === id) rowAssignments[k] = 0; });
+    renderAll();
+  };
+  window.setTchField = function (id, field, value) {
+    const t = tchSections.find(x => x.id === id);
+    if (t) { t[field] = value; renderAll(); }
+  };
+  window.setSale = function (id, field, value) {
+    const t = tchSections.find(x => x.id === id);
+    if (t) { t.sale[field] = value; renderAll(); }
+  };
+  window.applyPreset = function (id, pi) {
+    if (pi === '') return;
+    const p = PRESETS[+pi];
+    if (!p) return;
+    const t = tchSections.find(x => x.id === id);
+    if (t) { t.periodFrom = p.from; t.periodTo = p.to; renderAll(); }
+  };
+  window.assignRow = function (rowIdx, tchId) { rowAssignments[rowIdx] = tchId || 0; renderAll(); };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 6. Build accounting lines and post
+  //    Per TCH section, four entries (each = one Dr line + one Cr line):
+  //      Entry 1  Cross Currency Adj (RUB)  Dr 17036/RC 78061   Cr 85001/RC 78061
+  //               Amount = sale.rubEqUsd + sale.rubEqEur
+  //      Entry 2  Cross Currency Adj USD    Dr 85001/RC 78061   Cr 17036/RC 78061
+  //               Amount = rapid.USD
+  //      Entry 3  Cross Currency Adj EUR    Dr 85001/RC 78061   Cr 17036/RC 78061
+  //               Amount = rapid.EUR
+  //      Entry 4  BSP TCH Charges           Dr 35008/RC 50000   Cr 17036/RC 78061
+  //               Amount = -(of.RUB + sale.rubEqUsd + sale.rubEqEur + rapid.RUB)
+  //               If amount < 0, swap sides (Dr 17036/RC 78061  Cr 35008/RC 50000)
+  //    All entries with zero amount are skipped.
+  // ───────────────────────────────────────────────────────────────────────────
+  function buildLinesForTch(tch, idx) {
+    const out = [];
+    const consumedPks = new Set();
+    inputs.forEach((row, i) => {
+      if (rowAssignments[i] === tch.id && row._pk) consumedPks.add(row._pk);
+    });
+
+    const totals = computeTotalsFor(tch.id);
+    const reco = tch.recoCode || ('TCH' + (idx + 1));
+    const remarkCcAdj = 'Cross Currency Adjustment Entry for ' + fmtRangeRemark(tch.periodFrom, tch.periodTo);
+    const remarkBsp  = 'BSP TCH Charges for '             + fmtRangeRemark(tch.periodFrom, tch.periodTo);
+
+    function lineDr(nominal, rc, cur, amt, desc) {
+      return { Reference: '', RC: rc, Nominal: nominal, SubNominal: '0', 'Analysis Key': '0', LOB: '51',
+               Cur: cur, Reco: reco, Dr: amt, Cr: '', Doc: '', Desc: desc };
+    }
+    function lineCr(nominal, rc, cur, amt, desc) {
+      return { Reference: '', RC: rc, Nominal: nominal, SubNominal: '0', 'Analysis Key': '0', LOB: '51',
+               Cur: cur, Reco: reco, Dr: '', Cr: amt, Doc: '', Desc: desc };
+    }
+
+    // Entry 1 — Cross Currency Adj (RUB), amount = rubEqUsd + rubEqEur
+    const e1amt = num(tch.sale.rubEqUsd) + num(tch.sale.rubEqEur);
+    if (Math.abs(e1amt) > 0.001) {
+      const a = Math.abs(e1amt);
+      // user spec: Dr 17036, Cr 85001
+      // If e1amt is negative (unusual), swap
+      if (e1amt > 0) {
+        out.push(lineDr('17036', '78061', 'RUB', a, remarkCcAdj));
+        out.push(lineCr('85001', '78061', 'RUB', a, remarkCcAdj));
+      } else {
+        out.push(lineDr('85001', '78061', 'RUB', a, remarkCcAdj));
+        out.push(lineCr('17036', '78061', 'RUB', a, remarkCcAdj));
+      }
+    }
+
+    // Entry 2 — Cross Currency Adj USD, amount = rapid.USD
+    const e2amt = totals.rapid.USD;
+    if (Math.abs(e2amt) > 0.001) {
+      const a = Math.abs(e2amt);
+      if (e2amt > 0) {
+        out.push(lineDr('85001', '78061', 'USD', a, remarkCcAdj));
+        out.push(lineCr('17036', '78061', 'USD', a, remarkCcAdj));
+      } else {
+        out.push(lineDr('17036', '78061', 'USD', a, remarkCcAdj));
+        out.push(lineCr('85001', '78061', 'USD', a, remarkCcAdj));
+      }
+    }
+
+    // Entry 3 — Cross Currency Adj EUR, amount = rapid.EUR
+    const e3amt = totals.rapid.EUR;
+    if (Math.abs(e3amt) > 0.001) {
+      const a = Math.abs(e3amt);
+      if (e3amt > 0) {
+        out.push(lineDr('85001', '78061', 'EUR', a, remarkCcAdj));
+        out.push(lineCr('17036', '78061', 'EUR', a, remarkCcAdj));
+      } else {
+        out.push(lineDr('17036', '78061', 'EUR', a, remarkCcAdj));
+        out.push(lineCr('85001', '78061', 'EUR', a, remarkCcAdj));
+      }
+    }
+
+    // Entry 4 — BSP TCH Charges, amount = -(of.RUB + rubEqUsd + rubEqEur + rapid.RUB)
+    const e4raw = -1 * (totals.of.RUB + num(tch.sale.rubEqUsd) + num(tch.sale.rubEqEur) + totals.rapid.RUB);
+    if (Math.abs(e4raw) > 0.001) {
+      const a = Math.abs(e4raw);
+      if (e4raw > 0) {
+        // user spec: Dr 35008/RC 50000, Cr 17036/RC 78061
+        out.push(lineDr('35008', '50000', 'RUB', a, remarkBsp));
+        out.push(lineCr('17036', '78061', 'RUB', a, remarkBsp));
+      } else {
+        // negative → swap to keep books balanced
+        out.push(lineDr('17036', '78061', 'RUB', a, remarkBsp));
+        out.push(lineCr('35008', '50000', 'RUB', a, remarkBsp));
+      }
+    }
+
+    return { lines: out, primaryKeys: Array.from(consumedPks) };
+  }
+
+  function buildAll() {
+    const allLines = [];
+    const allPks = new Set();
+    tchSections.forEach((t, idx) => {
+      const r = buildLinesForTch(t, idx);
+      r.lines.forEach(l => allLines.push(l));
+      r.primaryKeys.forEach(pk => allPks.add(pk));
+    });
+    return { lines: allLines, primaryKeys: Array.from(allPks) };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 7. Preview pane (optional)
+  // ───────────────────────────────────────────────────────────────────────────
+  function renderPreview() {
+    const built = buildAll();
+    const el = document.getElementById('previewPane');
+    if (!built.lines.length) { el.innerHTML = '<div class="err">No lines yet — assign rows to a TCH and/or fill Sale Data.</div>'; return; }
+
+    // Per-currency balance check
+    const bal = {};
+    built.lines.forEach(l => {
+      const c = l.Cur || '?';
+      bal[c] = bal[c] || { dr: 0, cr: 0 };
+      bal[c].dr += num(l.Dr);
+      bal[c].cr += num(l.Cr);
+    });
+    let balHtml = '';
+    Object.keys(bal).forEach(c => {
+      const okBal = Math.abs(bal[c].dr - bal[c].cr) < 0.01;
+      balHtml += '<span class="' + (okBal ? 'balanced' : 'unbalanced') + '" style="margin-right:14px;">'
+              + c + ': Dr ' + fmtNum(bal[c].dr) + ' / Cr ' + fmtNum(bal[c].cr)
+              + (okBal ? ' ✓' : ' ✗') + '</span>';
+    });
+
+    let h = '<h4>Preview — ' + built.lines.length + ' line(s) across ' + tchSections.length + ' TCH section(s)</h4>';
+    h += '<div style="margin-bottom:6px;">' + balHtml + '</div>';
+    h += '<table><thead><tr><th>Reco</th><th>Cur</th><th>RC</th><th>Nominal</th><th>SubNom</th><th>AK</th><th>LOB</th><th>Dr</th><th>Cr</th><th>Desc</th></tr></thead><tbody>';
+    built.lines.forEach(l => {
+      h += '<tr>'
+        + '<td>' + escapeHtml(l.Reco) + '</td>'
+        + '<td>' + escapeHtml(l.Cur) + '</td>'
+        + '<td>' + escapeHtml(l.RC) + '</td>'
+        + '<td>' + escapeHtml(l.Nominal) + '</td>'
+        + '<td>' + escapeHtml(l.SubNominal) + '</td>'
+        + '<td>' + escapeHtml(l['Analysis Key']) + '</td>'
+        + '<td>' + escapeHtml(l.LOB) + '</td>'
+        + '<td>' + (l.Dr ? fmtNum(l.Dr) : '') + '</td>'
+        + '<td>' + (l.Cr ? fmtNum(l.Cr) : '') + '</td>'
+        + '<td>' + escapeHtml(l.Desc) + '</td>'
+        + '</tr>';
+    });
+    h += '</tbody></table>';
+    el.innerHTML = h;
+  }
+
+  window.togglePreview = function () {
+    const el = document.getElementById('previewPane');
+    const btn = document.getElementById('previewBtn');
+    if (el.style.display === 'none') {
+      el.style.display = 'block';
+      btn.textContent = 'Hide Preview';
+      renderPreview();
+    } else {
+      el.style.display = 'none';
+      btn.textContent = 'Show Preview';
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 8. Submit / Cancel
+  // ───────────────────────────────────────────────────────────────────────────
+  window.onSubmit = function () {
+    // Validate periods are set on each TCH
+    for (const t of tchSections) {
+      if (!parseDate(t.periodFrom) || !parseDate(t.periodTo)) {
+        alert('TCH section: Period From / To is missing or invalid for one or more sections.\nUse a Range Preset or type MM/DD/YY.');
+        return;
+      }
+      if (!t.recoCode) {
+        if (!confirm('Reco Code is empty for at least one TCH section. Continue anyway? (Reco field will default to "TCH<n>")')) return;
+        break;
+      }
+    }
+    const built = buildAll();
+    if (!built.lines.length) {
+      alert('No accounting lines to post — every entry computes to zero. Did you forget to assign rows or enter Sale Data?');
+      return;
+    }
+    // Final per-currency balance check
+    const bal = {};
+    built.lines.forEach(l => {
+      const c = l.Cur || '?';
+      bal[c] = bal[c] || { dr: 0, cr: 0 };
+      bal[c].dr += num(l.Dr); bal[c].cr += num(l.Cr);
+    });
+    for (const c of Object.keys(bal)) {
+      if (Math.abs(bal[c].dr - bal[c].cr) > 0.01) {
+        alert('Currency ' + c + ' is not balanced: Dr ' + fmtNum(bal[c].dr) + ' vs Cr ' + fmtNum(bal[c].cr) + '. Aborting.');
+        return;
+      }
+    }
+    parent.postMessage({
+      type: 'specialJV.complete',
+      ref: ref,
+      jvId: 'JV_TCH_' + Date.now().toString(36),
+      lines: built.lines,
+      primaryKeys: built.primaryKeys,
+      inputData: inputs
+    }, '*');
+  };
+
+  window.onCancel = function () {
+    parent.postMessage({
+      type: 'specialJV.complete',
+      ref: ref,
+      jvId: 'JV_TCH_cancel_' + Date.now().toString(36),
+      lines: [],
+      primaryKeys: [],
+      inputData: inputs
+    }, '*');
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 9. Boot
+  // ───────────────────────────────────────────────────────────────────────────
+  renderSummary();
+  tchSections.push(makeTch()); // start with one TCH section
+  renderAll();
+})();
+</script>
+</body>
+</html>
