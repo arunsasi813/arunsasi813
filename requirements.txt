@@ -1,0 +1,2 @@
+pywebview>=5.0
+openpyxl>=3.1   # only for the read_xlsx / write_xlsx / read_excel_json bridge helpers
