@@ -4,8 +4,14 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Reco</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<!-- Offline first: SheetJS + PapaParse are vendored in apps/lib/. The CDN is only a fallback
+     for a lib/ folder that is missing them (the app is useless without these two). -->
+<script src="lib/xlsx.full.min.js"></script>
+<script src="lib/papaparse.min.js"></script>
+<script>
+  if (!window.XLSX) document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"><\/script>');
+  if (!window.Papa) document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"><\/script>');
+</script>
 <link rel="stylesheet" href="lib/jspreadsheet.css" />
 <link rel="stylesheet" href="lib/jsuites.css" />
 <script src="lib/jsuites.js"></script>
@@ -728,7 +734,7 @@ function populateThemeSelect() {
     <h1 id="appTitle">Reconciliation APP</h1>
       </div>
   <div class="actions">
-    <button onclick="window.pywebview.api.return_to_hub()" style="padding: 3px 6px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-family: sans-serif;">
+    <button onclick="App.returnToHub()" title="Save pending changes and return to the Automation Hub" style="padding: 3px 6px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-family: sans-serif;">
      🏠 Hub
     </button>
     <select id="themeSelect" onchange="setTheme(this.value)" title="Theme" style="width:auto;min-width:120px;padding:4px 8px;font-size:10px;"></select>
@@ -766,7 +772,37 @@ const U = {
   uid() { return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); },
   esc(v) { if (v==null) return ''; return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); },
   escAttr(v) { return U.esc(v); },
-  num(v) { if (v==null||v==='') return 0; const n=parseFloat(String(v).replace(/,/g,'')); return isNaN(n)?0:n; },
+  /* Value for a single-quoted JS string inside an HTML attribute, e.g.
+     onclick="Fn('+U.jsq(x)+')". Escapes for JS first, then for HTML, so a
+     value containing ' or \ (O'Brien, Cust's Ref) cannot break the handler. */
+  jsq(v) {
+    return U.esc(String(v == null ? '' : v)
+      .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+      .replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+      .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
+  },
+  /* Amount parser. Handles 1,234.50 · (1,234.50) accounting negatives ·
+     1,234.50- trailing-minus (SAP) · space / no-break-space thousands. */
+  num(v) {
+    if (v == null || v === '') return 0;
+    if (typeof v === 'number') return isFinite(v) ? v : 0;
+    let s = String(v).trim();
+    if (!s) return 0;
+    let neg = false;
+    if (s.length > 2 && s[0] === '(' && s[s.length - 1] === ')') { neg = true; s = s.slice(1, -1).trim(); }
+    if (s.length > 1 && s[s.length - 1] === '-' && s[0] !== '-') { neg = !neg; s = s.slice(0, -1).trim(); }
+    s = s.replace(/[,\s\u00a0\u202f]/g, '');
+    const n = parseFloat(s);
+    if (isNaN(n) || !isFinite(n)) return 0;
+    return neg ? -n : n;
+  },
+  /* True when a value looks like a number (used for numeric vs text sorting). */
+  isNumeric(v) {
+    if (v == null) return false;
+    if (typeof v === 'number') return isFinite(v);
+    const s = String(v).trim();
+    return /^\(?[-+]?[\d,\s\u00a0]*\.?\d+\)?-?$/.test(s) && /\d/.test(s);
+  },
   fmtNum(n) { if (n==null) return '0.00'; const v=Number(n); return isNaN(v)?'0.00':v.toFixed(2); },
   toast(msg, kind) {
     const t=document.createElement('div');
@@ -784,23 +820,57 @@ const U = {
     // This prevents accidentally formatting small integers as dates.
     if (num < 10000 || num > 99999) return serial;
 
-    // Excel's epoch starts at 1900. Unix epoch starts at 1970.
-    // 25569 is the exact number of days between the two.
-    const date = new Date(Math.round((num - 25569) * 86400 * 1000));
-    
+    // Build the calendar date locally (not via UTC milliseconds), otherwise
+    // users west of UTC see the previous day.
+    const date = U._excelSerialToDate(num);
+
     const d = String(date.getDate()).padStart(2, '0');
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const y = String(date.getFullYear()).slice(-2); // Extracts "26" from "2026"
     
     return `${d}/${m}/${y}`;
   },
-  download(filename, content, mime) {
-    const blob=new Blob([content],{type:mime||'text/plain'});
+  /* Save a file for the user. Inside the launcher this opens a native
+     "Save as" dialog (show_save_dialog + write_file_abs / write_file_b64_abs);
+     in a plain browser, or with an older launcher, it falls back to a Blob
+     download. `content` may be a string, ArrayBuffer or Uint8Array. */
+  async download(filename, content, mime) {
+    const api = Store._hasApi() ? window.pywebview.api : null;
+    const isBinary = content instanceof ArrayBuffer || ArrayBuffer.isView(content);
+    if (api && typeof api.show_save_dialog === 'function'
+        && (isBinary ? typeof api.write_file_b64_abs === 'function' : typeof api.write_file_abs === 'function')) {
+      try {
+        const path = await api.show_save_dialog(filename);
+        if (!path) return false;   // user cancelled
+        if (isBinary) await api.write_file_b64_abs(path, U.bytesToBase64(content));
+        else await api.write_file_abs(path, String(content));
+        U.toast('Saved ' + String(path).split(/[\\/]/).pop(), 'success');
+        return true;
+      } catch (e) {
+        console.error('save dialog export failed, falling back to download', e);
+      }
+    }
+    const blob=new Blob([content],{type:mime||'application/octet-stream'});
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url;a.download=filename;
     document.body.appendChild(a);a.click();a.remove();
     setTimeout(()=>URL.revokeObjectURL(url),1000);
+    return true;
+  },
+  /* XLSX workbook → file (through U.download so the save dialog is used). */
+  downloadWorkbook(wb, filename) {
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+    return U.download(filename, new Uint8Array(out),
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  },
+  bytesToBase64(content) {
+    const bytes = content instanceof ArrayBuffer ? new Uint8Array(content)
+      : new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
+    let bin = '';
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    return btoa(bin);
   },
   todayStr() { const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); },
   parseFile(file, cb) {
@@ -820,28 +890,49 @@ const U = {
     const r=Papa.parse(txt,{header:true,delimiter:sep,skipEmptyLines:true});
     return { data: r.data, fields: r.meta.fields||Object.keys(r.data[0]||{}) };
   },
-  /* parse a date robustly: accepts dd/mm/yyyy, yyyy-mm-dd, mm/dd/yyyy, Excel serial, etc */
+  /* parse a date robustly: accepts dd/mm/yyyy, yyyy-mm-dd, mm/dd/yyyy (when
+     the first part cannot be a day), dd-MMM-yy, Excel serials (number or the
+     same number stored as text after a CSV round trip). Impossible dates such
+     as 31/02/2026 return null instead of rolling over into March. */
   parseDate(v) {
     if (v == null || v === '') return null;
     if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
-    if (typeof v === 'number') {
-      // Excel serial date (since 1899-12-30)
-      const d = new Date(Date.UTC(1899, 11, 30) + v * 86400000);
-      return isNaN(d.getTime()) ? null : d;
-    }
+    if (typeof v === 'number') return U._excelSerialToDate(v);
     const s = String(v).trim();
     if (!s) return null;
-    // try ISO yyyy-mm-dd
+    // Excel serial kept as text (XLSX upload → versioned CSV): 1954..2119
+    if (/^\d{5}(\.\d+)?$/.test(s)) {
+      const n = parseFloat(s);
+      if (n > 20000 && n < 80000) return U._excelSerialToDate(n);
+    }
+    // ISO yyyy-mm-dd (optionally followed by a time)
     let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-    if (m) { const d = new Date(+m[1], +m[2]-1, +m[3]); return isNaN(d.getTime()) ? null : d; }
-    // dd/mm/yyyy or dd-mm-yyyy
+    if (m) return U._mkDate(+m[1], +m[2], +m[3]);
+    // dd/mm/yyyy, dd-mm-yy, dd.mm.yyyy — host convention is day first
     m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
     if (m) {
       let y = +m[3]; if (y < 100) y += 2000;
-      const d = new Date(y, +m[2]-1, +m[1]);
-      return isNaN(d.getTime()) ? null : d;
+      return U._mkDate(y, +m[2], +m[1]) || U._mkDate(y, +m[1], +m[2]);
+    }
+    // dd-MMM-yy / dd MMM yyyy (what DATE_FORMAT/ADD_DAYS produce)
+    m = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[A-Za-z]*\.?[\s\-\/,]+(\d{2,4})$/);
+    if (m) {
+      const mi = U.monthNames.findIndex(x => x.toLowerCase() === m[2].toLowerCase());
+      if (mi >= 0) { let y = +m[3]; if (y < 100) y += 2000; return U._mkDate(y, mi + 1, +m[1]); }
     }
     const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  },
+  _mkDate(y, mo, d) {
+    if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
+    const dt = new Date(y, mo - 1, d);
+    return (dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d) ? dt : null;
+  },
+  /* Excel serial (days since 1899-12-30) → local-midnight Date. */
+  _excelSerialToDate(n) {
+    if (!isFinite(n)) return null;
+    const d = new Date(1899, 11, 30);
+    d.setDate(d.getDate() + Math.floor(n));
     return isNaN(d.getTime()) ? null : d;
   },
   monthNames: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
@@ -922,6 +1013,7 @@ const FMT = {
      TEXT_BEFORE(s,sep)    TEXT_AFTER(s,sep)       TEXT_BETWEEN(s,a,b)
 
    NUMBER / MATH:
+     NUM(s)  — "1,234.50" / "(10)" / "5-" → number (use for amounts kept as text)
      ABS(n)                ROUND(n,d)              ROUNDUP(n,d)
      ROUNDDOWN(n,d)        FLOOR(n,sig)            CEILING(n,sig)
      INT(n)                MOD(n,d)                SIGN(n)
@@ -1023,6 +1115,8 @@ const Formula = {
     },
 
     // ── Number / Math ─────────────────────────────────────────────────────
+    // NUM: amount text → number ("1,234.50" → 1234.5, "(10)" → -10, "5-" → -5)
+    NUM(v)                { return U.num(v); },
     ABS(n)                { return Math.abs(+n||0); },
     ROUND(n, d)           { const f = Math.pow(10, d|0); return Math.round((+n||0) * f) / f; },
     ROUNDUP(n, d)         { const f = Math.pow(10, d|0); return Math.ceil((+n||0) * f) / f; },
@@ -1111,9 +1205,50 @@ const Formula = {
     },
   },
 
+  /* Compile a formula once: {Col} tokens become __t[i] slots filled per row.
+     Formulas that put a {Col} token inside a string literal keep the old
+     text-substitution path, so their behaviour is unchanged. */
+  _cache: new Map(),
+  _compile(formula) {
+    const f = String(formula);
+    if (Formula._cache.has(f)) return Formula._cache.get(f);
+    let entry = null;
+    const all = (f.match(/\{[^}]+\}/g) || []).length;
+    const outside = (f.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '').match(/\{[^}]+\}/g) || []).length;
+    if (all === outside) {
+      const tokens = [];
+      const code = f.replace(/\{([^}]+)\}/g, (m, k) => { tokens.push(k); return '__t[' + (tokens.length - 1) + ']'; });
+      try {
+        const names = Object.keys(Formula._helpers);
+        const fn = new Function('__t', ...names, 'return (' + code + ');');
+        entry = { fn, tokens, helpers: names.map(n => Formula._helpers[n]) };
+      } catch (e) { entry = null; }
+    }
+    if (Formula._cache.size > 2000) Formula._cache.clear();
+    Formula._cache.set(f, entry);
+    return entry;
+  },
+  /* Same value the text substitution would have inserted: a number for plain
+     numerics, otherwise the string. */
+  _tokenValue(row, k) {
+    const v = row && row[k] != null ? row[k] : '';
+    const sv = String(v);
+    if (/^-?\d+(\.\d+)?$/.test(sv.trim())) { const n = parseFloat(sv); if (!isNaN(n)) return n; }
+    return sv;
+  },
+
   /* Evaluate a formula string against a row */
   evaluate(formula, row) {
     if (!formula) return '';
+    const c = Formula._compile(formula);
+    if (c) {
+      try {
+        const out = c.fn(c.tokens.map(k => Formula._tokenValue(row, k)), ...c.helpers);
+        return out == null ? '' : out;
+      } catch (e) {
+        return '#ERR';
+      }
+    }
     try {
       const subbed = Formula.substituteTokens(formula, row);
       const scope = Formula._helpers;
@@ -1169,12 +1304,12 @@ const FilterOps = {
       case 'not_starts_with':return !lv.startsWith(lqv);
       case 'ends_with':      return lv.endsWith(lqv);
       case 'not_ends_with':  return !lv.endsWith(lqv);
-      case 'greater':        return parseFloat(v) > parseFloat(val);
-      case 'greater_eq':     return parseFloat(v) >= parseFloat(val);
-      case 'less':           return parseFloat(v) < parseFloat(val);
-      case 'less_eq':        return parseFloat(v) <= parseFloat(val);
-      case 'between':        return parseFloat(v) >= parseFloat(val) && parseFloat(v) <= parseFloat(val2);
-      case 'not_between':    return !(parseFloat(v) >= parseFloat(val) && parseFloat(v) <= parseFloat(val2));
+      case 'greater':        return FilterOps._n(v) > FilterOps._n(val);
+      case 'greater_eq':     return FilterOps._n(v) >= FilterOps._n(val);
+      case 'less':           return FilterOps._n(v) < FilterOps._n(val);
+      case 'less_eq':        return FilterOps._n(v) <= FilterOps._n(val);
+      case 'between':        return FilterOps._n(v) >= FilterOps._n(val) && FilterOps._n(v) <= FilterOps._n(val2);
+      case 'not_between':    return !(FilterOps._n(v) >= FilterOps._n(val) && FilterOps._n(v) <= FilterOps._n(val2));
       case 'before':         { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() < b.getTime() : false; }
       case 'after':          { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() > b.getTime() : false; }
       case 'on_or_before':   { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() <= b.getTime() : false; }
@@ -1185,6 +1320,12 @@ const FilterOps = {
       case 'not_in_list':    { const list = String(val||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean); return !list.includes(lv); }
     }
     return true;
+  },
+  /* Number for comparisons: understands 1,234.50 / (1,234.50) / 1,234.50-;
+     blanks stay NaN so they never match a numeric condition. */
+  _n(x) {
+    if (x == null || String(x).trim() === '') return NaN;
+    return U.isNumeric(x) ? U.num(x) : parseFloat(x);
   },
   needsValue(op) { return !['empty','not_empty'].includes(op); },
   needsSecondValue(op) { return ['between','not_between'].includes(op); }
@@ -1200,6 +1341,12 @@ const FilterOps = {
    ================================================================ */
 const Store = {
   _localPrefix: 'reco_',
+  _queues: {},            // key -> { tail: Promise, pendingJob: fn|null, scheduled: bool }
+  _inflight: 0,
+  _tplCache: null,        // AEG template id -> JSON text last read/written
+  readOnlyKeys: {},       // keys whose file could not be read: never overwrite them
+  loadProblems: [],       // human-readable problems found while loading
+  lastError: null,
   _hasApi() { return !!(window.pywebview && window.pywebview.api); },
 
   _localGet(key, def) {
@@ -1207,58 +1354,113 @@ const Store = {
     catch(e) { return def; }
   },
   _localSet(key, val) {
-    try { localStorage.setItem(Store._localPrefix + key, JSON.stringify(val)); } catch(e) {}
+    try { localStorage.setItem(Store._localPrefix + key, typeof val === 'string' ? val : JSON.stringify(val)); return true; }
+    catch(e) { console.error('localStorage write failed for ' + key, e); return false; }
   },
 
-  /* fire-and-forget save dispatcher */
-  save(key, data) {
-    if (!Store._hasApi()) { Store._localSet(key, data); return; }
+  /* Serialised form of a state key. AppState compares this with the last
+     saved text so unchanged keys are never rewritten (cheap, and it stops one
+     user's stale copy of a key from overwriting a colleague's newer file). */
+  serialize(key, data) {
+    if (key === 'recoSessions') {
+      // Compact: this is the big one. Drop transient drag state.
+      return JSON.stringify(data, (k, v) => (k === '_fillDrag' ? undefined : v));
+    }
+    return JSON.stringify(data, null, 2);
+  },
+
+  /* Run write jobs for one key strictly one after another; if several saves
+     queue up while a write is running, only the latest one is written. */
+  _enqueue(key, job) {
+    const q = Store._queues[key] || (Store._queues[key] = { tail: Promise.resolve(), pendingJob: null, scheduled: false });
+    q.pendingJob = job;
+    if (!q.scheduled) {
+      q.scheduled = true;
+      q.tail = q.tail.then(async () => {
+        q.scheduled = false;
+        const j = q.pendingJob; q.pendingJob = null;
+        if (!j) return;
+        Store._inflight++;
+        try { await j(); Store.lastError = null; }
+        catch (e) { Store._reportError(key, e); }
+        finally { Store._inflight--; }
+      });
+    }
+    return q.tail;
+  },
+  idle() { return Promise.all(Object.values(Store._queues).map(q => q.tail)); },
+  pendingCount() {
+    return Store._inflight + Object.values(Store._queues).filter(q => q.scheduled).length;
+  },
+  _reportError(key, e) {
+    console.error('Save failed for ' + key, e);
+    // Forget the "already saved" snapshot so the next save retries this key.
+    if (typeof AppState !== 'undefined' && AppState._snap && key in AppState._snap) AppState._snap[key] = null;
+    Store.lastError = { key, message: String((e && e.message) || e), at: new Date().toISOString() };
+    const now = Date.now();
+    if (!Store._lastToast || now - Store._lastToast > 4000) {
+      Store._lastToast = now;
+      U.toast('⚠ Could not save "' + key + '" to the shared folder: ' + Store.lastError.message, 'error');
+    }
+  },
+
+  /* Persist one key. `text` is Store.serialize(key, data) when the caller has it. */
+  save(key, data, text) {
+    if (Store.readOnlyKeys[key]) return Promise.resolve();
+    if (text == null) text = Store.serialize(key, data);
+    if (!Store._hasApi()) {
+      if (!Store._localSet(key, text)) Store._reportError(key, new Error('browser storage is full'));
+      return Promise.resolve();
+    }
     const api = window.pywebview.api;
 
     if (key === 'aegMaster') {
-      try {
-        const arr = Array.isArray(data) ? data : [];
-        const csv = arr.length
-          ? Papa.unparse(arr)
-          : 'Reference,RC,Nominal,SubNominal,AnalysisKey,LOB';
-        api.save_master(csv).catch(e => console.error('save_master failed', e));
-      } catch(e) { console.error('aegMaster save error', e); }
-      return;
+      const arr = Array.isArray(data) ? data : [];
+      const base = ['Reference','RC','Nominal','SubNominal','AnalysisKey','LOB'];
+      const fields = base.concat(Array.from(new Set(arr.flatMap(r => Object.keys(r || {})))).filter(k => !base.includes(k)));
+      const csv = arr.length ? Papa.unparse({ fields, data: arr }) : base.join(',');
+      return Store._enqueue(key, () => api.save_master(csv));
     }
 
     if (key === 'aegTemplates') {
-      Store._syncAegTemplates(data || []);
-      return;
+      const snapshot = (data || []).map(t => t && t.id ? { id: t.id, json: JSON.stringify(t, null, 2) } : null).filter(Boolean);
+      return Store._enqueue(key, () => Store._syncAegTemplates(snapshot));
     }
 
-    // generic JSON file
-    const path = 'reco/' + key + '.json';
-    try {
-      api.write_file(path, JSON.stringify(data, null, 2))
-         .catch(e => console.error('write_file failed for ' + key, e));
-    } catch(e) { console.error('save error for ' + key, e); }
+    return Store._enqueue(key, () => api.write_file('reco/' + key + '.json', text));
   },
 
-  /* keep aegtemplates folder in sync: delete removed, write current */
-  async _syncAegTemplates(templates) {
+  /* Write changed AEG templates and delete the ones removed in this app.
+     Only templates this session has seen are ever deleted, so a template a
+     colleague created after we loaded is left alone. */
+  async _syncAegTemplates(snapshot) {
     const api = window.pywebview.api;
-    try {
-      const existing = await api.load_templates();
-      const existingIds = new Set((existing || []).map(t => t && t.id).filter(Boolean));
-      const newIds = new Set(templates.map(t => t.id));
+    const cache = Store._tplCache || (Store._tplCache = {});
+    const ids = new Set(snapshot.map(s => s.id));
+    for (const id of Object.keys(cache)) {
+      if (!ids.has(id)) { await api.delete_template(id); delete cache[id]; }
+    }
+    for (const s of snapshot) {
+      if (cache[s.id] === s.json) continue;
+      await api.save_template(s.id, s.json);
+      cache[s.id] = s.json;
+    }
+  },
 
-      for (const id of existingIds) {
-        if (!newIds.has(id)) {
-          try { await api.delete_template(id); }
-          catch(e) { console.error('delete_template failed for ' + id, e); }
-        }
-      }
-      for (const t of templates) {
-        if (!t || !t.id) continue;
-        try { await api.save_template(t.id, JSON.stringify(t, null, 2)); }
-        catch(e) { console.error('save_template failed for ' + t.id, e); }
-      }
-    } catch(e) { console.error('aegTemplates sync error', e); }
+  /* list_files() returns a list; older launchers only have list_folder_files()
+     which returns the same list as a JSON string. Accept both. */
+  async listFiles(rel) {
+    const api = window.pywebview.api;
+    let res;
+    if (typeof api.list_files === 'function') res = await api.list_files(rel);
+    else res = await api.list_folder_files(rel);
+    if (typeof res === 'string') { try { res = JSON.parse(res || '[]'); } catch (e) { res = []; } }
+    return Array.isArray(res) ? res : [];
+  },
+  async listDirs(rel) {
+    let res = await window.pywebview.api.list_directories(rel);
+    if (typeof res === 'string') { try { res = JSON.parse(res || '[]'); } catch (e) { res = []; } }
+    return Array.isArray(res) ? res : [];
   },
 
   async loadAll() {
@@ -1272,7 +1474,7 @@ const Store = {
         entryHistory:        Store._localGet('entryHistory', {}),
         docNumberMaster:     Store._localGet('docNumberMaster', {}),
         manualOffsetMaster:  Store._localGet('manualOffsetMaster', {}),
-        pendingSpecialJV: Store._localGet('pendingSpecialJV', {}),
+        pendingSpecialJV:    Store._localGet('pendingSpecialJV', {}),
         correctionMaster:    Store._localGet('correctionMaster', {}),
         groupMaster:         Store._localGet('groupMaster', {}),
         attachmentMaster:    Store._localGet('attachmentMaster', {}),
@@ -1287,6 +1489,7 @@ const Store = {
       recoSessions: {}, entryHistory: {}, docNumberMaster: {},
       manualOffsetMaster: {}, correctionMaster: {}
     };
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
     // 1. accounts master (CSV)
     try {
@@ -1295,28 +1498,51 @@ const Store = {
         const parsed = Papa.parse(csv, { header: true, skipEmptyLines: true });
         out.aegMaster = parsed.data || [];
       }
-    } catch(e) { console.error('load_master failed', e); }
+    } catch(e) {
+      console.error('load_master failed', e);
+      Store.readOnlyKeys.aegMaster = true;
+      Store.loadProblems.push('Accounts Master could not be read (' + (e && e.message || e) + '). It will not be saved in this session.');
+    }
 
     // 2. AEG templates (folder of JSONs)
     try {
       const tpls = await api.load_templates();
       out.aegTemplates = Array.isArray(tpls) ? tpls : [];
-    } catch(e) { console.error('load_templates failed', e); }
+      Store._tplCache = {};
+      out.aegTemplates.forEach(t => { if (t && t.id) Store._tplCache[t.id] = JSON.stringify(t, null, 2); });
+    } catch(e) {
+      console.error('load_templates failed', e);
+      Store.readOnlyKeys.aegTemplates = true;
+      Store.loadProblems.push('AEG templates could not be read (' + (e && e.message || e) + '). They will not be saved in this session.');
+    }
 
     // 3. everything else (JSON files under reco/)
     const readJson = async (key, def) => {
-      try {
-        const txt = await api.read_file('reco/' + key + '.json');
-        if (!txt || typeof txt !== 'string' || !txt.trim()) return def;
-        return JSON.parse(txt);
-      } catch(e) { console.error('read_file failed for ' + key, e); return def; }
+      let txt;
+      try { txt = await api.read_file('reco/' + key + '.json'); }
+      catch(e) {
+        // Unreadable (network, permissions): never overwrite it with defaults.
+        console.error('read_file failed for ' + key, e);
+        Store.readOnlyKeys[key] = true;
+        Store.loadProblems.push(key + '.json could not be read (' + (e && e.message || e) + '). It will not be saved in this session.');
+        return def;
+      }
+      if (!txt || typeof txt !== 'string' || !txt.trim()) return def;
+      try { return JSON.parse(txt); }
+      catch(e) {
+        // Corrupt (e.g. a half-written file): keep a copy before anything overwrites it.
+        const backup = 'reco/_corrupt/' + key + '_' + stamp + '.json';
+        try { await api.write_file(backup, txt); } catch(_) {}
+        Store.loadProblems.push(key + '.json was damaged and could not be parsed. A copy was kept at ' + backup + '; starting it empty.');
+        return def;
+      }
     };
 
     out.recoTemplates       = await readJson('recoTemplates', []);
     out.aegSettings         = await readJson('aegSettings', {});
     out.recoSessions        = await readJson('recoSessions', {});
     out.entryHistory        = await readJson('entryHistory', {});
-    out.pendingSpecialJV = await readJson('pendingSpecialJV', {});
+    out.pendingSpecialJV    = await readJson('pendingSpecialJV', {});
     out.docNumberMaster     = await readJson('docNumberMaster', {});
     out.manualOffsetMaster  = await readJson('manualOffsetMaster', {});
     out.correctionMaster    = await readJson('correctionMaster', {});
@@ -1442,7 +1668,22 @@ Masters._extraDropdownOptions = function(tpl, ac) {
    The "active" view = highest Cn for each PK, falling back to upload row.
    ================================================================ */
 const Versioning = {
+  _locks: {},           // path -> promise tail; serialises read-modify-write per file
+  _cnCache: {},         // path -> { pk: highest Cn number }
+  _active: 0,
+  _pending: null,       // batched single-cell edits: tplId -> { tpl, rows: Map(pk -> row), resolvers }
+  _pendingTimer: null,
+  _flushing: null,
+
   _safe(s) { return String(s || '').replace(/[^A-Za-z0-9_\-]/g, '_').slice(0, 60); },
+
+  /* Folder under reco_data/ for a template. Templates remember the folder
+     they were created with (tpl.dataFolder) so renaming a template does not
+     orphan its history. Accepts a template object or a plain name. */
+  folderFor(tplOrName) {
+    if (tplOrName && typeof tplOrName === 'object') return Versioning._safe(tplOrName.dataFolder || tplOrName.name);
+    return Versioning._safe(tplOrName);
+  },
 
   monthFolder(d) {
     d = d || new Date();
@@ -1456,49 +1697,52 @@ const Versioning = {
   },
 
   /* Build the CSV path for today (or a specific date). */
-  pathFor(tplName, date) {
-    return 'reco_data/' + Versioning._safe(tplName) + '/' + Versioning.monthFolder(date) + '/' + Versioning.dayFile(date);
+  pathFor(tplOrName, date) {
+    return 'reco_data/' + Versioning.folderFor(tplOrName) + '/' + Versioning.monthFolder(date) + '/' + Versioning.dayFile(date);
   },
+
+  _withLock(path, fn) {
+    const prev = Versioning._locks[path] || Promise.resolve();
+    const run = prev.catch(() => {}).then(async () => {
+      Versioning._active++;
+      try { return await fn(); } finally { Versioning._active--; }
+    });
+    Versioning._locks[path] = run.catch(() => {});
+    return run;
+  },
+  async idle() {
+    await Versioning.flushQueue();
+    await Promise.all(Object.values(Versioning._locks));
+  },
+  pendingCount() { return Versioning._active + (Versioning._pending ? 1 : 0); },
 
   /* List all versioned files for a template, newest first.
      Returns array of {monthFolder, file, fullPath, label}. */
-  async listFiles(tplName) {
-    if (!Store._hasApi()) {
-      // browser fallback - no listing
-      const arr = Store._localGet('versionFiles_' + tplName, []);
-      return arr;
-    }
-    const api = window.pywebview.api;
+  async listFiles(tplOrName) {
+    const folder = Versioning.folderFor(tplOrName);
+    if (!Store._hasApi()) return Store._localGet('versionFiles_' + folder, []);
     const out = [];
     try {
-      // list month folders
-      const monthsRaw = await api.list_directories('reco_data/' + Versioning._safe(tplName));
-      const months = Array.isArray(monthsRaw) ? monthsRaw : [];
+      // Only MMM-YY month folders (skips _archive/ and anything else)
+      const months = (await Store.listDirs('reco_data/' + folder)).filter(m => /^[A-Za-z]{3}-\d{2}$/.test(m));
       for (const mf of months) {
         try {
-          const filesJson = await api.list_folder_files('reco_data/' + Versioning._safe(tplName) + '/' + mf);
-          const files = JSON.parse(filesJson || '[]');
-          if (Array.isArray(files)) {
-            files.forEach(f => {
-              if (f && f.name && f.name.toLowerCase().endsWith('.csv')) {
-                out.push({
-                  monthFolder: mf,
-                  file: f.name,
-                  fullPath: 'reco_data/' + Versioning._safe(tplName) + '/' + mf + '/' + f.name,
-                  label: mf + ' / ' + f.name.replace('.csv','')
-                });
-              }
-            });
-          }
+          const files = await Store.listFiles('reco_data/' + folder + '/' + mf);
+          files.forEach(f => {
+            if (f && f.name && /\.csv$/i.test(f.name) && f.name[0] !== '.') {
+              out.push({
+                monthFolder: mf,
+                file: f.name,
+                fullPath: 'reco_data/' + folder + '/' + mf + '/' + f.name,
+                label: mf + ' / ' + f.name.replace(/\.csv$/i, ''),
+                sizeKb: f.size_kb
+              });
+            }
+          });
         } catch(e) { /* skip month */ }
       }
     } catch(e) { console.error('listFiles failed', e); }
-    // sort newest-first by path string is good enough since MMM-YY orders chronologically by year, then month text — improve:
-    out.sort((a, b) => {
-      const pa = Versioning._sortKey(a);
-      const pb = Versioning._sortKey(b);
-      return pb - pa;
-    });
+    out.sort((a, b) => Versioning._sortKey(b) - Versioning._sortKey(a));
     return out;
   },
   _sortKey(item) {
@@ -1511,108 +1755,181 @@ const Versioning = {
     return yr * 10000 + mo * 100 + d;
   },
 
-  /* Read a specific CSV file, return parsed rows. */
-  async readFile(fullPath) {
-    if (!Store._hasApi()) return [];
-    try {
-      const txt = await window.pywebview.api.read_file(fullPath);
-      if (!txt) return [];
-      const p = Papa.parse(txt, { header: true, skipEmptyLines: true });
-      return p.data || [];
-    } catch(e) { console.error('Versioning.readFile', e); return []; }
+  _noteMaxCn(path, rows) {
+    const max = {};
+    rows.forEach(r => {
+      const m = r && r._pk && String(r._ver || '').match(/^C(\d+)$/);
+      if (m) { const n = parseInt(m[1], 10); if (n > (max[r._pk] || 0)) max[r._pk] = n; }
+    });
+    Versioning._cnCache[path] = max;
+    return max;
   },
 
-  /* Write rows back to a CSV file. */
-  async writeFile(fullPath, rows) {
+  /* Read a specific CSV file, return parsed rows. With strict=true a read
+     error is thrown instead of returning [] — used before rewriting a file,
+     so a network hiccup can never turn into "rewrite it with only the new rows". */
+  async readFile(fullPath, strict) {
+    if (!Store._hasApi()) {
+      const rows = Store._localGet('verfile_' + fullPath, []);
+      Versioning._noteMaxCn(fullPath, rows);
+      return rows;
+    }
+    try {
+      const txt = await window.pywebview.api.read_file(fullPath);
+      if (!txt) { Versioning._cnCache[fullPath] = {}; return []; }
+      const p = Papa.parse(txt, { header: true, skipEmptyLines: true });
+      const rows = p.data || [];
+      Versioning._noteMaxCn(fullPath, rows);
+      return rows;
+    } catch(e) {
+      console.error('Versioning.readFile', e);
+      if (strict) throw e;
+      return [];
+    }
+  },
+
+  /* Header for a version file: control columns first, then every column
+     that appears in any row (Papa.unparse would otherwise only use the first
+     row's keys and silently drop columns added later). */
+  _fields(rows, tpl) {
+    const seen = new Set(['_pk', '_ver', '_ts']);
+    const out = ['_pk', '_ver', '_ts'];
+    (tpl ? tpl.columns.map(c => c.name) : []).forEach(n => { if (!seen.has(n)) { seen.add(n); out.push(n); } });
+    rows.forEach(r => Object.keys(r || {}).forEach(k => { if (!seen.has(k)) { seen.add(k); out.push(k); } }));
+    return out;
+  },
+
+  /* Write rows back to a CSV file (full rewrite). */
+  async writeFile(fullPath, rows, tpl) {
     if (!Store._hasApi()) {
       Store._localSet('verfile_' + fullPath, rows);
+      const folder = fullPath.split('/')[1];
+      const list = Store._localGet('versionFiles_' + folder, []);
+      if (!list.find(f => f.fullPath === fullPath)) {
+        const parts = fullPath.split('/');
+        list.push({ monthFolder: parts[2], file: parts[3], fullPath, label: parts[2] + ' / ' + parts[3].replace('.csv', '') });
+        list.sort((a, b) => Versioning._sortKey(b) - Versioning._sortKey(a));
+        Store._localSet('versionFiles_' + folder, list);
+      }
       return true;
     }
     try {
-      const csv = rows && rows.length ? Papa.unparse(rows) : '';
+      const csv = rows && rows.length ? Papa.unparse({ fields: Versioning._fields(rows, tpl), data: rows }) : '';
       await window.pywebview.api.write_file(fullPath, csv);
       return true;
-    } catch(e) { console.error('Versioning.writeFile', e); return false; }
+    } catch(e) { console.error('Versioning.writeFile', e); Store._reportError('version history', e); return false; }
+  },
+
+  /* Append records. Uses the launcher's append_csv_rows (no rewrite of the
+     growing file) when available, else read + rewrite. Call inside _withLock. */
+  async _appendRows(path, tpl, recs) {
+    if (!recs.length) return;
+    const api = Store._hasApi() ? window.pywebview.api : null;
+    if (api && typeof api.append_csv_rows === 'function') {
+      await api.append_csv_rows(path, Versioning._fields(recs, tpl), recs);
+      return;
+    }
+    const existing = await Versioning.readFile(path, true);
+    const ok = await Versioning.writeFile(path, existing.concat(recs), tpl);
+    if (!ok && api) throw new Error('could not write ' + path);
+  },
+  async _maxCn(path) {
+    if (!Versioning._cnCache[path]) await Versioning.readFile(path);
+    return Versioning._cnCache[path] || (Versioning._cnCache[path] = {});
   },
 
   /* Append upload-rows for the data the user just loaded.
-     Each new raw row gets _ver="upload", _pk=computedPK, _ts=ISO date. */
+     Each row keeps the _pk it already has in the session (so later edits
+     match), _ver="upload", _ts=ISO date. */
   async appendUpload(tpl, rawRows) {
-    const path = Versioning.pathFor(tpl.name);
-    const existing = await Versioning.readFile(path);
+    const path = Versioning.pathFor(tpl);
     const stamp = new Date().toISOString();
-    const out = existing.slice();
-    rawRows.forEach(r => {
-      const pk = Reco.getRowPK(tpl, r) || ('_auto_' + U.uid());
+    const recs = rawRows.map(r => {
+      const pk = r._pk || Reco.getRowPK(tpl, r) || ('_auto_' + U.uid());
+      if (!r._pk) r._pk = pk;
       const rec = { _pk: pk, _ver: 'upload', _ts: stamp };
       tpl.columns.forEach(c => { rec[c.name] = r[c.name] != null ? r[c.name] : ''; });
-      out.push(rec);
+      return rec;
     });
-    await Versioning.writeFile(path, out);
+    await Versioning._withLock(path, () => Versioning._appendRows(path, tpl, recs));
     return path;
   },
 
   /* Append a "Cn" change row for a single PK with the new column values.
      Returns the version label written (e.g. "C3"). */
   async appendChange(tpl, pk, changedRow) {
-    const path = Versioning.pathFor(tpl.name);
-    const existing = await Versioning.readFile(path);
-    // figure out next Cn for this PK
-    let max = 0;
-    existing.forEach(r => {
-      if (r._pk === pk && r._ver && r._ver.match(/^C(\d+)$/)) {
-        const n = parseInt(r._ver.slice(1), 10);
-        if (n > max) max = n;
-      }
-    });
-    const nextVer = 'C' + (max + 1);
-    const rec = { _pk: pk, _ver: nextVer, _ts: new Date().toISOString() };
-    tpl.columns.forEach(c => { rec[c.name] = changedRow[c.name] != null ? changedRow[c.name] : ''; });
-    existing.push(rec);
-    await Versioning.writeFile(path, existing);
-    return nextVer;
+    const v = await Versioning.appendChangesBatch(tpl, [{ pk, row: changedRow }]);
+    return v[pk];
   },
+
   /* Append change rows for many PKs at once. Each unique PK gets exactly
      one new Cn version row reflecting the latest values across all the
      column changes batched in. `pkRows` is an array of { pk, row } pairs.
      Returns a map { pk: 'Cn' } of version labels written. */
   async appendChangesBatch(tpl, pkRows) {
     if (!pkRows || !pkRows.length) return {};
-    const path = Versioning.pathFor(tpl.name);
-    const existing = await Versioning.readFile(path);
-
-    // Compute current max Cn per PK from existing file
-    const maxByPk = {};
-    existing.forEach(r => {
-      const pk = r._pk;
-      if (!pk || !r._ver) return;
-      const m = r._ver.match(/^C(\d+)$/);
-      if (m) {
-        const n = parseInt(m[1], 10);
-        if (n > (maxByPk[pk]||0)) maxByPk[pk] = n;
-      }
+    const path = Versioning.pathFor(tpl);
+    return Versioning._withLock(path, async () => {
+      const maxByPk = await Versioning._maxCn(path);
+      const latestByPk = {};
+      pkRows.forEach(p => { if (p && p.pk) latestByPk[p.pk] = p.row; });
+      const stamp = new Date().toISOString();
+      const versionsOut = {};
+      const recs = [];
+      Object.keys(latestByPk).forEach(pk => {
+        const n = (maxByPk[pk] || 0) + 1;
+        const verLabel = 'C' + n;
+        const rec = { _pk: pk, _ver: verLabel, _ts: stamp };
+        tpl.columns.forEach(c => { const v = latestByPk[pk][c.name]; rec[c.name] = v != null ? v : ''; });
+        recs.push(rec);
+        versionsOut[pk] = verLabel;
+      });
+      await Versioning._appendRows(path, tpl, recs);
+      // Only advance the counters once the rows are on disk.
+      Object.keys(versionsOut).forEach(pk => { maxByPk[pk] = parseInt(versionsOut[pk].slice(1), 10); });
+      return versionsOut;
     });
-
-    // De-dupe by PK — keep the latest row sent for each PK
-    const latestByPk = {};
-    pkRows.forEach(p => { if (p && p.pk) latestByPk[p.pk] = p.row; });
-
-    const stamp = new Date().toISOString();
-    const versionsOut = {};
-    Object.keys(latestByPk).forEach(pk => {
-      const nextN = (maxByPk[pk] || 0) + 1;
-      const verLabel = 'C' + nextN;
-      versionsOut[pk] = verLabel;
-      const rec = { _pk: pk, _ver: verLabel, _ts: stamp };
-      tpl.columns.forEach(c => { rec[c.name] = latestByPk[pk][c.name] != null ? latestByPk[pk][c.name] : ''; });
-      existing.push(rec);
-    });
-
-    await Versioning.writeFile(path, existing);
-    return versionsOut;
   },
 
-  /* Reduce a versioned-row list to "active" rows: highest Cn per PK, else upload row. */
+  /* Single-cell edits arrive one by one (typing, paste into the Excel view,
+     fill-down). Queue them briefly and write one Cn per PK per burst.
+     Resolves with the version label written for this PK. */
+  queueChange(tpl, pk, row) {
+    if (!tpl || !pk) return Promise.resolve(null);
+    const q = Versioning._pending || (Versioning._pending = {});
+    const e = q[tpl.id] || (q[tpl.id] = { tpl, rows: new Map(), resolvers: [] });
+    e.tpl = tpl;
+    e.rows.set(pk, row);
+    const p = new Promise(res => e.resolvers.push({ pk, res }));
+    clearTimeout(Versioning._pendingTimer);
+    Versioning._pendingTimer = setTimeout(() => { Versioning.flushQueue(); }, 150);
+    return p;
+  },
+  async flushQueue() {
+    clearTimeout(Versioning._pendingTimer);
+    Versioning._pendingTimer = null;
+    const q = Versioning._pending;
+    Versioning._pending = null;
+    if (!q) return Versioning._flushing;
+    const run = (async () => {
+      for (const id of Object.keys(q)) {
+        const e = q[id];
+        let versions = {};
+        try {
+          versions = await Versioning.appendChangesBatch(e.tpl, Array.from(e.rows, ([pk, row]) => ({ pk, row })));
+        } catch (err) {
+          console.error('version history write failed', err);
+          Store._reportError('version history', err);
+        }
+        e.resolvers.forEach(r => r.res(versions[r.pk] || null));
+      }
+    })();
+    Versioning._flushing = run;
+    return run;
+  },
+
+  /* Reduce a versioned-row list to "active" rows: highest Cn per PK, else
+     upload row. On a tie the row written later wins. */
   collapseToActive(versionedRows) {
     const byPk = new Map();
     versionedRows.forEach(r => {
@@ -1620,7 +1937,7 @@ const Versioning = {
       if (!pk) return;
       const cur = byPk.get(pk);
       const score = Versioning._verScore(r._ver);
-      if (!cur || score > Versioning._verScore(cur._ver)) byPk.set(pk, r);
+      if (!cur || score >= Versioning._verScore(cur._ver)) byPk.set(pk, r);
     });
     return Array.from(byPk.values());
   },
@@ -1629,42 +1946,112 @@ const Versioning = {
     if (v === 'upload') return 0;
     const m = String(v).match(/^C(\d+)$/);
     return m ? parseInt(m[1], 10) : -1;
+  },
+
+  /* Active rows of a file *including edits saved later*. Edits always go to
+     the day's file, so changes made after the upload day live in newer files;
+     apply their latest Cn per PK on top. */
+  async loadActive(tpl, fullPath, files) {
+    files = files || await Versioning.listFiles(tpl);
+    const base = await Versioning.readFile(fullPath);
+    const active = Versioning.collapseToActive(base);
+    const idx = files.findIndex(f => f.fullPath === fullPath);
+    let applied = 0;
+    if (idx > 0) {
+      const byPk = new Map(active.map((r, i) => [r._pk, i]));
+      for (let i = idx - 1; i >= 0; i--) {     // older → newer
+        const rows = await Versioning.readFile(files[i].fullPath);
+        const changes = Versioning.collapseToActive(rows.filter(r => /^C\d+$/.test(r._ver || '') && byPk.has(r._pk)));
+        changes.forEach(r => { active[byPk.get(r._pk)] = r; applied++; });
+      }
+    }
+    return { active, total: base.length, applied };
+  },
+
+  /* Newest file that actually contains an upload (a file holding only edits
+     is not a data set on its own). */
+  async latestDataFile(tpl, files) {
+    files = files || await Versioning.listFiles(tpl);
+    for (const f of files) {
+      const rows = await Versioning.readFile(f.fullPath);
+      if (rows.some(r => r._ver === 'upload')) return f;
+    }
+    return files[0] || null;
+  },
+
+  /* Compact a version file: keep each PK's upload row and its latest Cn.
+     The full history can be archived to reco_data/<tpl>/_archive/ first. */
+  async compactFile(tpl, fullPath, keepArchive) {
+    return Versioning._withLock(fullPath, async () => {
+      const rows = await Versioning.readFile(fullPath, true);
+      const latest = new Map();
+      rows.forEach((r, i) => {
+        const s = Versioning._verScore(r._ver);
+        if (s > 0) { const cur = latest.get(r._pk); if (!cur || s >= cur.s) latest.set(r._pk, { s, i }); }
+      });
+      const keepIdx = new Set();
+      rows.forEach((r, i) => {
+        // keep every upload row (duplicate PKs in one upload stay intact)
+        if (r._ver === 'upload' || Versioning._verScore(r._ver) < 0) keepIdx.add(i);
+      });
+      latest.forEach(v => keepIdx.add(v.i));
+      const kept = rows.filter((r, i) => keepIdx.has(i));
+      const result = { before: rows.length, after: kept.length, archived: '' };
+      if (kept.length === rows.length) return result;
+      if (keepArchive && Store._hasApi()) {
+        const parts = fullPath.split('/');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const archive = parts.slice(0, 2).join('/') + '/_archive/' + parts[2] + '_' + parts[3].replace(/\.csv$/i, '') + '_' + stamp + '.csv';
+        const raw = await window.pywebview.api.read_file(fullPath);
+        await window.pywebview.api.write_file(archive, raw);
+        result.archived = archive;
+      }
+      const ok = await Versioning.writeFile(fullPath, kept, tpl);
+      if (!ok) throw new Error('could not rewrite ' + fullPath);
+      Versioning._noteMaxCn(fullPath, kept);
+      return result;
+    });
   }
 };
 
 /* ================================================================
-   MODULE 3c — SPECIAL JV REGISTRY
-   Loads JV definitions from special_jv_mapping/*.json
-   ================================================================ */
-
-/* ================================================================
    MODULE 3c — SPECIAL JV REGISTRY  (iframe modal, no popups)
+   Loads JV definitions from special_jv_mapping/*.json. The calculator page
+   is special_jv_templates/<ref>.html (ROOT-relative; ROOT/apps/ also works).
    ================================================================ */
 const SpecialJV = {
   registry: {},
   _loaded: false,
   _activeHandler: null,
+  _activeFrame: null,
+  _onCancel: null,
 
   async load() {
     SpecialJV.registry = {};
     if (!Store._hasApi()) { SpecialJV._loaded = true; return; }
+    const problems = [];
     try {
-      const filesJson = await window.pywebview.api.list_folder_files('special_jv_mapping');
-      let files;
-      try { files = JSON.parse(filesJson || '[]'); } catch(e) { files = []; }
-      if (!Array.isArray(files)) { SpecialJV._loaded = true; return; }
+      const files = await Store.listFiles('special_jv_mapping');
       for (const f of files) {
-        if (!f.name || !f.name.toLowerCase().endsWith('.json')) continue;
+        if (!f || !f.name || !/\.json$/i.test(f.name)) continue;
         try {
           const txt = await window.pywebview.api.read_file('special_jv_mapping/' + f.name);
           const def = JSON.parse(txt);
-          if (def && def.ref) {
-            def.htmlPath = 'special_jv_templates/' + def.ref + '.html';
-            SpecialJV.registry[def.ref] = def;
-          }
-        } catch(e) { console.error('SpecialJV mapping parse fail', f.name, e); }
+          if (!def || !def.ref) { problems.push(f.name + ' has no "ref" — skipped.'); continue; }
+          def.ref = String(def.ref).trim();
+          def.inputColumns = (Array.isArray(def.inputColumns) ? def.inputColumns : [])
+            .map(c => (typeof c === 'string' ? { name: c } : c)).filter(c => c && c.name);
+          def.htmlPath = 'special_jv_templates/' + def.ref + '.html';
+          def._file = f.name;
+          if (SpecialJV.registry[def.ref]) problems.push('Two mapping files use ref "' + def.ref + '"; ' + f.name + ' wins.');
+          SpecialJV.registry[def.ref] = def;
+        } catch(e) {
+          console.error('SpecialJV mapping parse fail', f.name, e);
+          problems.push(f.name + ' could not be read: ' + (e && e.message || e));
+        }
       }
     } catch(e) { console.error('SpecialJV.load failed', e); }
+    problems.forEach(p => Store.loadProblems.push('Special JV: ' + p));
     SpecialJV._loaded = true;
     console.log('SpecialJV loaded:', Object.keys(SpecialJV.registry));
   },
@@ -1673,8 +2060,16 @@ const SpecialJV = {
   get(ref) { return SpecialJV.registry[ref] || null; },
   isJvRef(ref) { return !!SpecialJV.get(ref); },
 
-  /* Build "To Account" dropdown options: master Refs + JV refs */
+  /* Build "To Account" dropdown options: master Refs + JV refs.
+     The grid asks for this on every row; renders reset the memo once
+     (resetOptions) so each render builds the list a single time. */
+  _optsMemo: null,
+  resetOptions() { SpecialJV._optsMemo = null; },
   buildToAccountOptions() {
+    if (!SpecialJV._optsMemo) SpecialJV._optsMemo = SpecialJV._buildToAccountOptions();
+    return SpecialJV._optsMemo;
+  },
+  _buildToAccountOptions() {
     const seen = new Set();
     const masterRefs = [];
     (AppState.aegMaster || []).forEach(m => {
@@ -1691,21 +2086,51 @@ const SpecialJV = {
     return masterRefs.concat(jvRefs);
   },
 
+  /* Value of a JV input column on a row: exact name first, then the same
+     name ignoring case / spaces / underscores ("Txn Type" ~ "TxnType"). */
+  pick(row, name) {
+    if (row[name] != null && row[name] !== '') return row[name];
+    const norm = s => String(s).toLowerCase().replace(/[\s_]/g, '');
+    const want = norm(name);
+    const k = Object.keys(row).find(k => norm(k) === want);
+    return k != null && row[k] != null ? row[k] : '';
+  },
+
+  /* Where the JV page is. New launchers resolve it (ROOT/special_jv_templates
+     or ROOT/apps/special_jv_templates); older ones get a best guess. */
+  async _resolveSrc(def) {
+    const api = Store._hasApi() ? window.pywebview.api : null;
+    if (api && typeof api.resolve_url === 'function') {
+      try { const u = await api.resolve_url(def.htmlPath); if (u) return u; } catch (e) {}
+    }
+    if (api && typeof api.path_exists === 'function' && /\/apps\/[^\/]*$/i.test(location.pathname)) {
+      try {
+        const atRoot = await api.path_exists(def.htmlPath);
+        if (atRoot === true || atRoot === 'true') return '../' + def.htmlPath;
+      } catch (e) {}
+    }
+    return def.htmlPath;
+  },
+
   /* Open the JV inside an iframe modal — NO window.open, NO popup blocker.
-     Inputs are exposed on window globals so the iframe can read them
-     via window.parent._specialJvInputs / .._specialJvDef / .._specialJvRef. */
-  open(ref, prefilledInputs, onComplete) {
+     Inputs are exposed on window globals (window.parent._specialJvInputs …)
+     and, for pages that cannot reach window.parent (file:// isolation), sent
+     by postMessage when the page announces {type:'specialJV.ready'}.
+     onComplete(result) runs only when the JV returns accounting lines;
+     onCancel() runs when it is cancelled or returns nothing. */
+  async open(ref, prefilledInputs, onComplete, onCancel) {
     const def = SpecialJV.get(ref);
     if (!def) { U.toast('Special JV "' + ref + '" not registered', 'error'); return; }
+    SpecialJV._detach();
 
     // Expose inputs to the iframe
     window._specialJvInputs = prefilledInputs || [];
     window._specialJvRef = ref;
     window._specialJvDef = def;
 
-    // Build modal body with iframe
     // Cache-bust the iframe src so changes to the JV HTML reload immediately
-    const src = def.htmlPath + '?t=' + Date.now();
+    const base = await SpecialJV._resolveSrc(def);
+    const src = base + (base.indexOf('?') === -1 ? '?' : '&') + 't=' + Date.now();
     const body = ''
       + '<div style="height:72vh; display:flex; flex-direction:column;">'
       + '  <div class="text-muted" style="margin-bottom:6px;">'
@@ -1725,28 +2150,51 @@ const SpecialJV = {
     const modalEl = document.querySelector('#appModal .modal');
     if (modalEl) { modalEl.style.maxWidth = '1180px'; modalEl.dataset._jvWidened = '1'; }
 
-    // One-shot postMessage listener
+    const frame = document.getElementById('specialJvFrame');
+    SpecialJV._activeFrame = frame;
+    SpecialJV._onCancel = onCancel || null;
+
     const handler = (ev) => {
-      if (!ev.data || ev.data.type !== 'specialJV.complete') return;
-      if (ev.data.ref !== ref) return;
-      window.removeEventListener('message', handler);
-      SpecialJV._activeHandler = null;
+      const d = ev.data;
+      if (!d || typeof d !== 'object' || d.ref !== ref) return;
+      // Only listen to our own iframe (file:// pages all post with origin "null").
+      if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
+      if (d.type === 'specialJV.ready') {
+        frame.contentWindow.postMessage({ type: 'specialJV.init', ref, def, inputs: window._specialJvInputs }, '*');
+        return;
+      }
+      if (d.type !== 'specialJV.complete' && d.type !== 'specialJV.cancel') return;
+      const lines = Array.isArray(d.lines) ? d.lines : [];
+      const cancelled = d.type === 'specialJV.cancel' || !lines.length;
+      const cancelCb = SpecialJV._onCancel;
+      SpecialJV._detach();
       SpecialJV._restoreModal();
       App.closeModal();
-      try { onComplete && onComplete(ev.data); } catch(e) { console.error(e); }
+      if (cancelled) {
+        U.toast('Special JV cancelled — nothing was recorded', 'error');
+        try { cancelCb && cancelCb(); } catch(e) { console.error(e); }
+        return;
+      }
+      try { onComplete && onComplete(d); } catch(e) { console.error(e); }
     };
     window.addEventListener('message', handler);
     SpecialJV._activeHandler = handler;
   },
 
+  _detach() {
+    if (SpecialJV._activeHandler) window.removeEventListener('message', SpecialJV._activeHandler);
+    SpecialJV._activeHandler = null;
+    SpecialJV._activeFrame = null;
+    SpecialJV._onCancel = null;
+  },
+
   _cancel() {
-    if (SpecialJV._activeHandler) {
-      window.removeEventListener('message', SpecialJV._activeHandler);
-      SpecialJV._activeHandler = null;
-    }
+    const cancelCb = SpecialJV._onCancel;
+    SpecialJV._detach();
     SpecialJV._restoreModal();
     App.closeModal();
     U.toast('Special JV cancelled', 'error');
+    try { cancelCb && cancelCb(); } catch(e) { console.error(e); }
   },
 
   _restoreModal() {
@@ -1755,6 +2203,16 @@ const SpecialJV = {
       modalEl.style.maxWidth = '';
       delete modalEl.dataset._jvWidened;
     }
+  },
+
+  /* Does a completed (pending) JV belong to exactly this set of rows? */
+  matchesRows(pending, rows) {
+    const sent = (pending.sentPks && pending.sentPks.length) ? pending.sentPks
+      : (pending.inputData || []).map(x => x && x._pk).filter(Boolean);
+    const want = (rows || []).map(r => r._pk).filter(Boolean);
+    if (!sent.length || sent.length !== want.length) return false;
+    const set = new Set(sent);
+    return want.every(pk => set.has(pk));
   }
 };
 
@@ -1848,20 +2306,25 @@ const Groups = {
   // === Cross-file PK resolver ===
   // Resolve a PK to its latest row. Tries session first, then versioned files newest-first.
   // Returns { row, source: 'session'|'versionFile', filePath?: string } or null.
-  async resolvePk(tpl, pk) {
+  async resolvePk(tpl, pk, cache) {
     if (!pk) return null;
     const sess = AppState.recoSessions[tpl.id];
     if (sess) {
       const found = (sess.data||[]).find(r => Reco.getRowPK(tpl, r) === pk);
       if (found) return { row: found, source: 'session' };
     }
-    // Scan versioned files newest first
+    // Scan versioned files newest first (each file read once per resolveGroup)
+    cache = cache || {};
     try {
-      const files = await Versioning.listFiles(tpl.name);
+      const files = cache.files || (cache.files = await Versioning.listFiles(tpl));
+      cache.active = cache.active || {};
       for (const f of files) {
-        const all = await Versioning.readFile(f.fullPath);
-        const active = Versioning.collapseToActive(all);
-        const hit = active.find(r => r._pk === pk);
+        let byPk = cache.active[f.fullPath];
+        if (!byPk) {
+          byPk = new Map(Versioning.collapseToActive(await Versioning.readFile(f.fullPath)).map(r => [r._pk, r]));
+          cache.active[f.fullPath] = byPk;
+        }
+        const hit = byPk.get(pk);
         if (hit) {
           // hydrate into tpl shape
           const row = { _id: 'hist_' + U.uid(), _pk: pk, _ver: hit._ver, _historic: true };
@@ -1880,8 +2343,9 @@ const Groups = {
     if (!g) return { resolved: [], unresolved: [] };
     const resolved = [];
     const unresolved = [];
+    const cache = {};
     for (const pk of g.members) {
-      const r = await Groups.resolvePk(tpl, pk);
+      const r = await Groups.resolvePk(tpl, pk, cache);
       if (r) resolved.push(Object.assign({ pk }, r));
       else unresolved.push(pk);
     }
@@ -1939,14 +2403,23 @@ const Attachments = {
 
     let saved;
     if (Store._hasApi()) {
+      // Inside the launcher the file must reach the shared folder; never fall
+      // back silently to browser storage (it would look saved but not be).
       try {
         saved = await window.pywebview.api.save_attachment(tplId, file.name, b64);
-      } catch(e) { console.error('save_attachment failed', e); }
-    }
-    if (!saved || saved.error) {
-      // Browser fallback: keep base64 in localStorage (small files only)
+      } catch(e) {
+        console.error('save_attachment failed', e);
+        U.toast('Could not save "' + file.name + '" to the shared folder: ' + (e && e.message || e), 'error');
+        return null;
+      }
+      if (!saved || saved.error || !saved.storedPath) {
+        U.toast('Could not save "' + file.name + '": ' + ((saved && saved.error) || 'no path returned'), 'error');
+        return null;
+      }
+    } else {
+      // Plain browser (testing): keep base64 in localStorage (small files only)
       const id = 'A' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,5);
-      Store._localSet('attBlob_' + id, b64);
+      if (!Store._localSet('attBlob_' + id, b64)) { U.toast('File too large for browser storage', 'error'); return null; }
       saved = { id, storedPath: 'localStorage:attBlob_' + id, size: file.size };
     }
 
@@ -1990,14 +2463,9 @@ const Attachments = {
     const b64 = await Attachments.fetchBase64(tplId, aid);
     if (!b64) { U.toast('Attachment data missing on disk', 'error'); return; }
     const byteChars = atob(b64);
-    const byteNums = new Array(byteChars.length);
-    for (let i = 0; i < byteChars.length; i++) byteNums[i] = byteChars.charCodeAt(i);
-    const blob = new Blob([new Uint8Array(byteNums)], { type: rec.mime || 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = rec.filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const bytes = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+    U.download(rec.filename, bytes, rec.mime || 'application/octet-stream');
   },
 
   // === Delete ===
@@ -2035,14 +2503,14 @@ const Attachments = {
   },
 
   _currentUser() {
-    return (AppState.aegSettings && AppState.aegSettings.currentUser) || 'unknown';
+    return AppState.currentUser || 'unknown';
   },
 
   formatSize(bytes) {
     if (!bytes) return '0 B';
     const k = 1024;
-    const units = ['B','KB','MB','GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const units = ['B','KB','MB','GB','TB'];
+    const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
     return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + units[i];
   },
 
@@ -2138,9 +2606,9 @@ const Timeline = {
     h += '</div>';
 
     h += '<div class="tl-actions">';
-    h += '<button class="small primary" onclick="Timeline._chooseAddAttachment(\''+U.escAttr(tplId)+'\',\''+U.escAttr(pk)+'\')">📎 Add Attachment</button>';
+    h += '<button class="small primary" onclick="Timeline._chooseAddAttachment(\''+U.jsq(tplId)+'\',\''+U.jsq(pk)+'\')">📎 Add Attachment</button>';
     if (typeof Comments !== 'undefined' && Comments && Comments.openAddDialog) {
-      h += '<button class="small" onclick="Comments.openAddDialog(\''+U.escAttr(tplId)+'\',\''+U.escAttr(pk)+'\')">💬 Add Comment</button>';
+      h += '<button class="small" onclick="Comments.openAddDialog(\''+U.jsq(tplId)+'\',\''+U.jsq(pk)+'\')">💬 Add Comment</button>';
     }
     h += '</div>';
 
@@ -2179,14 +2647,14 @@ const Timeline = {
       h += '<span class="text-muted">'+U.esc(Attachments.formatSize(p.size))+(p.comments ? ' · '+U.esc(p.comments) : '')+'</span>';
       h += '</div>';
       h += '<div class="tl-event-actions">';
-      h += '<button class="small primary" onclick="Attachments.download(\''+U.escAttr(tplId)+'\',\''+U.escAttr(p.id)+'\')">Download</button>';
-      h += '<button class="small danger" onclick="Timeline._deleteAttachment(\''+U.escAttr(tplId)+'\',\''+U.escAttr(p.id)+'\',\''+U.escAttr(pk)+'\')">Delete</button>';
+      h += '<button class="small primary" onclick="Attachments.download(\''+U.jsq(tplId)+'\',\''+U.jsq(p.id)+'\')">Download</button>';
+      h += '<button class="small danger" onclick="Timeline._deleteAttachment(\''+U.jsq(tplId)+'\',\''+U.jsq(p.id)+'\',\''+U.jsq(pk)+'\')">Delete</button>';
       h += '</div>';
     } else {
       h += '<div class="tl-event-body" style="white-space:pre-wrap;">'+U.esc(p.text||'')+'</div>';
       if (typeof Comments !== 'undefined' && Comments && Comments.removeForRow) {
         h += '<div class="tl-event-actions">';
-        h += '<button class="small danger" onclick="Comments.removeForRow(\''+U.escAttr(tplId)+'\',\''+U.escAttr(p.id)+'\',\''+U.escAttr(pk)+'\')">Delete</button>';
+        h += '<button class="small danger" onclick="Comments.removeForRow(\''+U.jsq(tplId)+'\',\''+U.jsq(p.id)+'\',\''+U.jsq(pk)+'\')">Delete</button>';
         h += '</div>';
       }
     }
@@ -2257,14 +2725,12 @@ const Timeline = {
 
     U.toast('Uploading…');
     const rec = await Attachments.upload(p.tplId, p.file, meta);
-    Timeline._pendingUpload = null;
     if (rec) {
+      Timeline._pendingUpload = null;
       U.toast('Uploaded: ' + rec.filename, 'success');
       App.closeModal();
       Timeline.open(p.tplId, p.pk);
-    } else {
-      U.toast('Upload failed', 'error');
-    }
+    }   // on failure Attachments.upload already explained why; the dialog stays open to retry
   }
 };
 
@@ -2436,7 +2902,7 @@ const Comments = {
 
   // === Helpers ===
   _currentUser() {
-    return (AppState.aegSettings && AppState.aegSettings.currentUser) || 'unknown';
+    return AppState.currentUser || 'unknown';
   }
 };
 
@@ -2661,6 +3127,13 @@ const FindReplace = {
     return new RegExp(pattern, s.matchCase ? 'g' : 'gi');
   },
 
+  /* Plain-text mode replaces literally ($& / $1 have no special meaning);
+     regex mode keeps JavaScript's $1 group references. */
+  _replacement() {
+    const s = FindReplace._state;
+    return s.regex ? s.replace : () => s.replace;
+  },
+
   _columnsToSearch(tpl) {
     const s = FindReplace._state;
     if (s.column === '__all__') return tpl.columns.map(c => ({ name: c.name, isExtra: false }));
@@ -2691,6 +3164,7 @@ const FindReplace = {
         if (c.isExtra) val = Reco._extraValueForRow(tpl, sess, row, c.def);
         else val = row[c.name];
         if (val == null || val === '') return;
+        rx.lastIndex = 0;
         if (rx.test(String(val))) {
           matches.push({ rowIdx: ri, col: c.name, value: String(val), isExtra: !!c.isExtra });
         }
@@ -2725,14 +3199,13 @@ const FindReplace = {
     matches.slice(0, showLimit).forEach((m, mi) => {
       const row = sess.data[m.rowIdx];
       // Preview with highlight
-      let preview = m.value;
+      // Cap length before escaping/highlighting so a cut never splits a tag or entity
+      let preview = m.value.length > 200 ? m.value.substring(0, 200) + '…' : m.value;
       if (rx) {
         rx.lastIndex = 0;
         preview = preview.replace(rx, m0 => '\u0001'+m0+'\u0002');
       }
       preview = U.esc(preview).replace(/\u0001/g, '<mark>').replace(/\u0002/g, '</mark>');
-      // Cap preview length
-      if (preview.length > 200) preview = preview.substring(0, 200) + '…';
 
       h += '<tr>';
       h += '<td><span class="text-muted">#'+m.rowIdx+'</span></td>';
@@ -2765,7 +3238,7 @@ const FindReplace = {
     const row = sess.data[m.rowIdx];
     const oldVal = row[m.col] == null ? '' : String(row[m.col]);
     rx.lastIndex = 0;
-    const newVal = oldVal.replace(rx, s.replace);
+    const newVal = oldVal.replace(rx, FindReplace._replacement());
     if (newVal === oldVal) {
       U.toast('No change', 'error');
       return;
@@ -2808,7 +3281,7 @@ const FindReplace = {
         rx.lastIndex = 0;
         if (!rx.test(oldVal)) return;
         rx.lastIndex = 0;
-        const newVal = oldVal.replace(rx, s.replace);
+        const newVal = oldVal.replace(rx, FindReplace._replacement());
         if (newVal === oldVal) return;
         row[c.name] = newVal;
         cellChanges++;
@@ -2864,23 +3337,53 @@ const AppState = {
   _activeReport: null,
   _correctionCol: null,
 
-  save() {
-    Store.save('recoTemplates', AppState.recoTemplates);
-    Store.save('aegTemplates', AppState.aegTemplates);
-    Store.save('aegMaster', AppState.aegMaster);
-    Store.save('aegSettings', AppState.aegSettings);
-    Store.save('recoSessions', AppState.recoSessions);
-    Store.save('entryHistory', AppState.entryHistory);
-    Store.save('docNumberMaster', AppState.docNumberMaster);
-    Store.save('manualOffsetMaster', AppState.manualOffsetMaster);
-    Store.save('correctionMaster', AppState.correctionMaster);
-    Store.save('pendingSpecialJV', AppState.pendingSpecialJV);
-    Store.save('groupMaster', AppState.groupMaster);
-    Store.save('attachmentMaster', AppState.attachmentMaster);
-    Store.save('commentMaster', AppState.commentMaster);
-    Store.save('customMasters', AppState.customMasters);
+  /* Who is using the app. Comes from the launcher (current_username) and is
+     kept per session — NOT in aegSettings.json, which is shared by everyone
+     on the network folder. */
+  currentUser: '',
 
+  PERSIST_KEYS: ['recoTemplates','aegTemplates','aegMaster','aegSettings','recoSessions','entryHistory',
+                 'docNumberMaster','manualOffsetMaster','correctionMaster','pendingSpecialJV',
+                 'groupMaster','attachmentMaster','commentMaster','customMasters'],
+  SAVE_DELAY: 250,
+  _snap: {},             // key -> serialised text last loaded/saved
+  _saveTimer: null,
+  _saveWaiters: [],
+
+  /* Debounced save. Many UI handlers call this on every change; bursts are
+     coalesced and only keys whose content actually changed are written.
+     Returns a promise that resolves once the data has reached the disk. */
+  save() {
+    clearTimeout(AppState._saveTimer);
+    AppState._saveTimer = setTimeout(() => { AppState.flush(); }, AppState.SAVE_DELAY);
+    return new Promise(res => AppState._saveWaiters.push(res));
   },
+
+  /* Write every changed key now and wait for all pending writes. */
+  async flush() {
+    clearTimeout(AppState._saveTimer);
+    AppState._saveTimer = null;
+    const waiters = AppState._saveWaiters.splice(0);
+    try {
+      AppState.PERSIST_KEYS.forEach(key => {
+        if (Store.readOnlyKeys[key]) return;
+        let text;
+        try { text = Store.serialize(key, AppState[key]); }
+        catch (e) { console.error('serialize failed for ' + key, e); return; }
+        if (text === AppState._snap[key]) return;
+        AppState._snap[key] = text;
+        Store.save(key, AppState[key], text);
+      });
+      await Promise.all([Store.idle(), Versioning.idle()]);
+    } finally {
+      waiters.forEach(w => { try { w(); } catch (e) {} });
+    }
+  },
+
+  pendingCount() {
+    return (AppState._saveTimer ? 1 : 0) + Store.pendingCount() + Versioning.pendingCount();
+  },
+
   async load() {
     const d = await Store.loadAll();
 
@@ -2899,9 +3402,22 @@ const AppState = {
     AppState.commentMaster    = d.commentMaster || {};
     AppState.customMasters    = d.customMasters || [];
 
+    // Snapshot what is on disk so the first save only writes real changes.
+    AppState.PERSIST_KEYS.forEach(k => {
+      try { AppState._snap[k] = Store.serialize(k, AppState[k]); } catch (e) { AppState._snap[k] = null; }
+    });
+
     if (!AppState.aegTemplates.length) {
       AppState.aegTemplates = [AEG.makeDefaultTemplate('Default DR/CR')];
     }
+
+    // Identity for attachments / comments
+    let who = '';
+    if (Store._hasApi() && typeof window.pywebview.api.current_username === 'function') {
+      try { who = await window.pywebview.api.current_username(); } catch (e) {}
+    }
+    if (!who) { try { who = localStorage.getItem('reco_user') || ''; } catch (e) {} }
+    AppState.currentUser = String(who || '').trim();
   }
   
 };
@@ -2910,10 +3426,14 @@ const AppState = {
    MODULE 5 — APP CONTROLLER
    ================================================================ */
 const App = {
-  init() {
-    AppState.load();
-    populateThemeSelect();
-    App.navigate('home');
+  /* Back to the Automation Hub — flush pending saves first so nothing is lost. */
+  async returnToHub() {
+    try { await AppState.flush(); } catch (e) { console.error('flush before hub failed', e); }
+    if (Store._hasApi() && typeof window.pywebview.api.return_to_hub === 'function') {
+      window.pywebview.api.return_to_hub();
+    } else {
+      U.toast('Not running inside the Automation Hub launcher', 'error');
+    }
   },
   navigate(page, param) {
     AppState.currentPage = page;
@@ -2932,22 +3452,24 @@ const App = {
     document.getElementById('appModal').classList.add('show');
   },
   async ensureCurrentUser() {
-    if (AppState.aegSettings.currentUser) return AppState.aegSettings.currentUser;
+    if (AppState.currentUser) return AppState.currentUser;
     let osUser = '';
     if (Store._hasApi() && window.pywebview.api.current_username) {
       try { osUser = await window.pywebview.api.current_username(); } catch(e) {}
     }
-    const name = prompt('Enter your name (used for attachments/comments):', osUser || '');
-    if (name && name.trim()) {
-      AppState.aegSettings.currentUser = name.trim();
-      AppState.save();
-    } else {
-      AppState.aegSettings.currentUser = osUser || 'unknown';
-    }
-    return AppState.aegSettings.currentUser;
+    if (osUser) { AppState.currentUser = osUser; return osUser; }
+    // Plain browser / old launcher: ask once and remember on this machine only.
+    const name = prompt('Enter your name (used for attachments/comments):', '');
+    AppState.currentUser = (name && name.trim()) || 'unknown';
+    try { localStorage.setItem('reco_user', AppState.currentUser); } catch(e) {}
+    return AppState.currentUser;
   },
 
-  closeModal() { document.getElementById('appModal').classList.remove('show'); },
+  closeModal() {
+    // A Special JV iframe may still be listening; drop its handler with the modal.
+    if (typeof SpecialJV !== 'undefined' && SpecialJV._activeHandler) SpecialJV._detach();
+    document.getElementById('appModal').classList.remove('show');
+  },
   exportBackup() {
     const data = {
       version: 4,
@@ -2967,7 +3489,7 @@ const App = {
       customMasters: AppState.customMasters,
       commentMaster: AppState.commentMaster
     };
-    U.download('reco_suite_backup_'+Date.now()+'.json', JSON.stringify(data,null,2), 'application/json');
+    return U.download('reco_suite_backup_'+U.todayStr()+'.json', JSON.stringify(data,null,2), 'application/json');
   },
 
   _wireRecoHotkeys() {
@@ -2989,6 +3511,11 @@ const App = {
     r.onload = e => {
       try {
         const d = JSON.parse(e.target.result);
+        if (!d || typeof d !== 'object' || !(d.recoTemplates || d.aegTemplates || d.recoSessions || d.templates)) {
+          U.toast('This file is not a Reco backup', 'error'); return;
+        }
+        const when = d.exportedAt ? ' taken ' + String(d.exportedAt).replace('T', ' ').substring(0, 16) : '';
+        if (!confirm('Restore this backup' + when + '?\n\nIt REPLACES the templates, sessions, masters and entry history shared by everyone using this folder.')) return;
         if (d.recoTemplates) AppState.recoTemplates = d.recoTemplates;
         if (d.aegTemplates) AppState.aegTemplates = d.aegTemplates;
         if (d.aegMaster) AppState.aegMaster = d.aegMaster;
@@ -3005,9 +3532,8 @@ const App = {
         if (d.commentMaster) AppState.commentMaster = d.commentMaster;
         if (d.version === 2 && d.templates) AppState.aegTemplates = d.templates;
         if (d.version === 2 && d.master) AppState.aegMaster = d.master;
-        AppState.save();
+        AppState.flush().then(() => U.toast('Restore complete','success'));
         App.navigate('home');
-        U.toast('Restore complete','success');
       } catch(er) { U.toast('Invalid backup','error'); }
     };
     r.readAsText(file);
@@ -3044,7 +3570,7 @@ const Home = {
     h += '<div class="card-grid">';
     AppState.recoTemplates.forEach(t => {
       const pendCnt = (AppState.pendingSpecialJV[t.id]||[]).length;
-      h += '<div class="card" onclick="RecoTemplate.open(\'' + U.escAttr(t.id) + '\')">';
+      h += '<div class="card" onclick="RecoTemplate.open(\'' + U.jsq(t.id) + '\')">';
       h += '<h3>' + U.esc(t.name) + (pendCnt ? ' <span class="badge fc">⚡ ' + pendCnt + '</span>' : '') + '</h3>';
       h += '<p>' + U.esc(t.description || 'No description') + '</p>';
       h += '<div class="card-badges" style="margin-top:8px;">';
@@ -3054,9 +3580,9 @@ const Home = {
       if (t.aegIntegration && t.aegIntegration.enabled) h += '<span class="badge exch">AEG</span>';
       h += '</div>';
       h += '<div style="margin-top:8px;">';
-      h += '<button class="small" onclick="event.stopPropagation(); RecoTemplate.edit(\'' + U.escAttr(t.id) + '\')">Edit</button>';
-      h += '<button class="small" onclick="event.stopPropagation(); RecoTemplate.duplicate(\'' + U.escAttr(t.id) + '\')">Duplicate</button>';
-      h += '<button class="small danger" onclick="event.stopPropagation(); RecoTemplate.remove(\'' + U.escAttr(t.id) + '\')">Delete</button>';
+      h += '<button class="small" onclick="event.stopPropagation(); RecoTemplate.edit(\'' + U.jsq(t.id) + '\')">Edit</button>';
+      h += '<button class="small" onclick="event.stopPropagation(); RecoTemplate.duplicate(\'' + U.jsq(t.id) + '\')">Duplicate</button>';
+      h += '<button class="small danger" onclick="event.stopPropagation(); RecoTemplate.remove(\'' + U.jsq(t.id) + '\')">Delete</button>';
       h += '</div>';
       h += '</div>';
     });
@@ -3124,7 +3650,7 @@ const Home = {
         if (dn.toLowerCase().includes(q.toLowerCase())) {
           const accountingId = dnMap[dn];
           const tpl = AppState.recoTemplates.find(t => t.id === tplId);
-          h += '<div class="card" onclick="Home.openEntryForDoc(\''+U.escAttr(tplId)+'\',\''+U.escAttr(accountingId)+'\')">';
+          h += '<div class="card" onclick="Home.openEntryForDoc(\''+U.jsq(tplId)+'\',\''+U.jsq(accountingId)+'\')">';
           h += '<h3>Doc# ' + U.esc(dn) + '</h3>';
           h += '<p>Template: ' + U.esc(tpl ? tpl.name : '?') + '</p>';
           h += '<p>Accounting ID: <b>' + U.esc(accountingId) + '</b></p>';
@@ -3169,7 +3695,7 @@ const Home = {
     (cm.rows||[]).forEach((r, ri) => {
       h += '<tr>';
       cm.columns.forEach(c => {
-        h += '<td><input type="text" value="'+U.escAttr(r[c]||'')+'" oninput="AppState.customMasters['+idx+'].rows['+ri+'][\''+U.escAttr(c)+'\']=this.value" /></td>';
+        h += '<td><input type="text" value="'+U.escAttr(r[c]||'')+'" oninput="AppState.customMasters['+idx+'].rows['+ri+'][\''+U.jsq(c)+'\']=this.value" /></td>';
       });
       h += '<td><button class="small danger" onclick="AppState.customMasters['+idx+'].rows.splice('+ri+',1); AppState.save(); Home.editCustomMaster('+idx+')">×</button></td></tr>';
     });
@@ -3252,6 +3778,7 @@ defaultTemplate() {
   create() {
     RecoTemplate._editing = RecoTemplate.defaultTemplate();
     RecoTemplate._isNew = true;
+    RecoTemplate._isQuickEdit = false;
     RecoTemplate._step = 1;
     RecoTemplate._sampleHeaders = [];
     RecoTemplate._sampleData = [];
@@ -3299,7 +3826,7 @@ defaultTemplate() {
 
   _renderEditTypeSelect(t, colName) {
     const cfg = RecoTemplate._editCfg(t, colName);
-    const safe = U.escAttr(colName);
+    const safe = U.jsq(colName);
     let h = '<select onchange="RecoTemplate._setEditType(\''+safe+'\',this.value)">';
     [
       ['free',     'Free text'],
@@ -3327,7 +3854,7 @@ defaultTemplate() {
     if (cfg.editType !== 'dropdown' && cfg.editType !== 'datalist') {
       return '<span class="text-muted">—</span>';
     }
-    const safe = U.escAttr(colName);
+    const safe = U.jsq(colName);
     const masters = Masters.catalog(t.id);
     let h = '';
     h += '<label class="inline">Source: <select onchange="RecoTemplate._editing.editableColumnConfig[\''+safe+'\'].optionsSource=this.value; RecoTemplate.renderEditor()">';
@@ -3463,6 +3990,7 @@ defaultTemplate() {
     if (!RecoTemplate._editing.docNumberColumn) RecoTemplate._editing.docNumberColumn = '';
     if (!RecoTemplate._editing.savedFilterSets) RecoTemplate._editing.savedFilterSets = [];
     RecoTemplate._isNew = false;
+    RecoTemplate._isQuickEdit = false;   // callers that want quick-edit set it after edit()
     RecoTemplate._step = 1;
     RecoTemplate._sampleHeaders = t.columns.map(c => c.name);
     RecoTemplate.renderEditor();
@@ -3473,19 +4001,31 @@ defaultTemplate() {
     const c = JSON.parse(JSON.stringify(t));
     c.id = U.uid();
     c.name = t.name + ' (copy)';
+    c.dataFolder = RecoTemplate._uniqueDataFolder(c.name, c.id);   // never share the original's history
     AppState.recoTemplates.push(c);
     AppState.save();
     App.navigate('home');
     U.toast('Template duplicated','success');
   },
   remove(id) {
-    if (!confirm('Delete this reconciliation template?')) return;
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    if (!t) return;
+    const nAtt = Object.keys((AppState.attachmentMaster || {})[id] || {}).length;
+    if (!confirm('Delete the reconciliation template "' + t.name + '"?\n\nIts session, entry history, masters, groups, comments and pending Special JVs are deleted' + (nAtt ? ', together with ' + nAtt + ' attachment file(s)' : '') + '. The version history in reco_data/ is kept on disk.')) return;
+    const atts = Object.values((AppState.attachmentMaster || {})[id] || {});
     AppState.recoTemplates = AppState.recoTemplates.filter(x => x.id !== id);
-    delete AppState.recoSessions[id];
-    delete AppState.entryHistory[id];
-    delete AppState.docNumberMaster[id];
-    delete AppState.manualOffsetMaster[id];
-    delete AppState.correctionMaster[id];
+    ['recoSessions','entryHistory','docNumberMaster','manualOffsetMaster','correctionMaster',
+     'pendingSpecialJV','groupMaster','attachmentMaster','commentMaster'].forEach(k => {
+      if (AppState[k]) delete AppState[k][id];
+    });
+    if (Store._hasApi()) {
+      atts.forEach(a => {
+        if (a.storedPath && a.storedPath.indexOf('localStorage:') !== 0) {
+          window.pywebview.api.delete_attachment(a.storedPath).catch(e => console.error('delete_attachment', e));
+        }
+      });
+    }
+    if (AppState.activeRecoId === id) AppState.activeRecoId = null;
     AppState.save();
     App.navigate('home');
   },
@@ -3614,7 +4154,7 @@ defaultTemplate() {
     h += '<div style="margin-top:6px;">';
     cols.forEach(c => {
       const checked = (t.primaryKeys||[]).includes(c.name);
-      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.togglePK(\''+U.escAttr(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
+      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.togglePK(\''+U.jsq(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
     });
     h += '</div></div>';
 
@@ -3661,12 +4201,12 @@ defaultTemplate() {
       h += '<div style="margin-top:6px;">';
       cols.forEach(c => {
         const checked = (t.aggregateBy||[]).includes(c.name);
-        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleAggBy(\''+U.escAttr(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
+        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleAggBy(\''+U.jsq(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
       });
       // Aggregation can also include additional columns (declared above)
       (t.additionalColumns||[]).forEach(ac => {
         const checked = (t.aggregateBy||[]).includes(ac.name);
-        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleAggBy(\''+U.escAttr(ac.name)+'\',this.checked)"><span class="badge specific">extra</span> '+U.esc(ac.name)+'</label>';
+        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleAggBy(\''+U.jsq(ac.name)+'\',this.checked)"><span class="badge specific">extra</span> '+U.esc(ac.name)+'</label>';
       });
       h += '</div>';
     }
@@ -3703,7 +4243,7 @@ defaultTemplate() {
     h += '<div style="margin-top:6px;">';
     cols.forEach(c => {
       const checked = (t.displayColumns||[]).includes(c.name);
-      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleDisplay(\''+U.escAttr(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
+      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleDisplay(\''+U.jsq(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
     });
     h += '</div></div>';
 
@@ -3715,7 +4255,7 @@ defaultTemplate() {
     h += '<div style="margin-top:6px;">';
     cols.forEach(c => {
       const checked = (t.editableColumns||[]).includes(c.name);
-      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleEditable(\''+U.escAttr(c.name)+'\',this.checked); RecoTemplate.renderEditor()"> '+U.esc(c.label||c.name)+'</label>';
+      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleEditable(\''+U.jsq(c.name)+'\',this.checked); RecoTemplate.renderEditor()"> '+U.esc(c.label||c.name)+'</label>';
     });
     h += '</div>';
 
@@ -3734,41 +4274,7 @@ defaultTemplate() {
     h += '</div>';
 
 
-    if ((t.additionalColumns||[]).length) {
-      h += '<table><thead><tr><th>Name</th><th>Type</th><th>Configuration</th><th></th></tr></thead><tbody>';
-      (t.additionalColumns||[]).forEach((ac,i) => {
-        h += '<tr>';
-        h += '<td><input type="text" value="'+U.escAttr(ac.name)+'" oninput="RecoTemplate._editing.additionalColumns['+i+'].name=this.value" /></td>';
-        h += '<td><select onchange="RecoTemplate._editing.additionalColumns['+i+'].type=this.value; RecoTemplate.renderEditor()">';
-        h += '<option value="dropdown"'+(ac.type==='dropdown'?' selected':'')+'>Dropdown</option>';
-        h += '<option value="custom"'+(ac.type==='custom'?' selected':'')+'>Free text</option>';
-        h += '<option value="formula"'+(ac.type==='formula'?' selected':'')+'>Formula</option>';
-        h += '<option value="master"'+(ac.type==='master'?' selected':'')+'>Master lookup</option>';
-        h += '</select></td>';
-        h += '<td>';
-        if (ac.type==='dropdown') {
-          h += '<input type="text" placeholder="opt1, opt2, opt3" value="'+U.escAttr((ac.options||[]).join(', '))+'" oninput="RecoTemplate._editing.additionalColumns['+i+'].options=this.value.split(\',\').map(s=>s.trim()).filter(Boolean)" />';
-        } else if (ac.type==='formula') {
-          h += '<input type="text" placeholder="e.g. {Col1} - {Col2} or LEFT({Desc},5)" value="'+U.escAttr(ac.formula||'')+'" oninput="RecoTemplate._editing.additionalColumns['+i+'].formula=this.value" />';
-        } else if (ac.type==='master') {
-          h += '<div style="display:flex; gap:4px; flex-wrap:wrap;">';
-          h += '<select onchange="RecoTemplate._editing.additionalColumns['+i+'].masterRefColumn=this.value" style="flex:1;min-width:100px;"><option value="">Match column…</option>';
-          cols.forEach(c2 => { h += '<option value="'+U.escAttr(c2.name)+'"'+(ac.masterRefColumn===c2.name?' selected':'')+'>'+U.esc(c2.label||c2.name)+'</option>'; });
-          h += '</select>';
-          h += '<select onchange="RecoTemplate._editing.additionalColumns['+i+'].masterValueColumn=this.value" style="flex:1;min-width:100px;"><option value="">Master field…</option>';
-          ['Reference','RC','Nominal','SubNominal','AnalysisKey','LOB'].forEach(f => { h += '<option value="'+f+'"'+(ac.masterValueColumn===f?' selected':'')+'>'+f+'</option>'; });
-          h += '</select>';
-          h += '</div>';
-        } else {
-          h += '<span class="text-muted">Free text input per row</span>';
-        }
-        h += '</td>';
-        h += '<td><button class="small danger" onclick="RecoTemplate._editing.additionalColumns.splice('+i+',1); RecoTemplate.renderEditor()">×</button></td>';
-        h += '</tr>';
-      });
-      h += '</tbody></table>';
-    }
-    h += '</div>';
+    // Additional columns are edited in step 2 (Keys & Rules).
 
     // Pivot (Now includes Additional Columns)
     const allPivotCols = cols.map(c => c.name).concat((t.additionalColumns||[]).map(a => a.name));
@@ -3782,14 +4288,14 @@ defaultTemplate() {
       h += '<div>';
       allPivotCols.forEach(c => {
         const checked = (t.pivotRowCols||[]).includes(c);
-        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleArr(\'pivotRowCols\',\''+U.escAttr(c)+'\',this.checked)"> '+U.esc(c)+'</label>';
+        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleArr(\'pivotRowCols\',\''+U.jsq(c)+'\',this.checked)"> '+U.esc(c)+'</label>';
       });
       h += '</div></label>';
       h += '<label class="field"><span class="label-text">Column Columns</span>';
       h += '<div>';
       allPivotCols.forEach(c => {
         const checked = (t.pivotColCols||[]).includes(c);
-        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleArr(\'pivotColCols\',\''+U.escAttr(c)+'\',this.checked)"> '+U.esc(c)+'</label>';
+        h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.toggleArr(\'pivotColCols\',\''+U.jsq(c)+'\',this.checked)"> '+U.esc(c)+'</label>';
       });
       h += '</div></label>';
       h += '</div>';
@@ -3873,7 +4379,7 @@ defaultTemplate() {
             const totCols = rpt.totalColumns || [];
             (rpt.columns||[]).forEach(c => {
                 const isChecked = totCols.includes(c);
-                const safeC = U.escAttr(c).replace(/'/g, "\\'");
+                const safeC = U.jsq(c);
                 // Inline logic to add/remove from array
                 const onchg = "let r=RecoTemplate._editing.reports["+ri+"]; r.totalColumns=r.totalColumns||[]; if(this.checked){ if(!r.totalColumns.includes('"+safeC+"')) r.totalColumns.push('"+safeC+"'); } else { r.totalColumns=r.totalColumns.filter(x=>x!=='"+safeC+"'); }";
                 h += '<label class="inline" style="margin:0; font-size:0.9em;"><input type="checkbox" '+(isChecked?'checked':'')+' onchange="'+onchg+'"> '+U.esc(c)+'</label>';
@@ -3913,8 +4419,8 @@ defaultTemplate() {
           h += '<button class="small" onclick="RecoTemplate.moveReportCol('+ri+','+ci+',-1)">↑</button>';
           h += '<button class="small" onclick="RecoTemplate.moveReportCol('+ri+','+ci+',1)">↓</button>';
           h += '<span style="font-weight:600; width:120px; overflow:hidden; text-overflow:ellipsis;">'+U.esc(c)+'</span>';
-          h += '<input type="text" placeholder="Format (e.g. DD/MM/YYYY)" value="'+U.escAttr(rpt.dateFormats?.[c]||'')+'" oninput="RecoTemplate.updateReportDateFormat('+ri+',\''+U.escAttr(c)+'\',this.value)" style="flex:1; min-width:140px;" title="Leave blank for default" />';
-          h += '<button class="small danger" onclick="RecoTemplate.toggleReportCol('+ri+',\''+U.escAttr(c)+'\',false); RecoTemplate.renderEditor()">×</button>';
+          h += '<input type="text" placeholder="Format (e.g. DD/MM/YYYY)" value="'+U.escAttr(rpt.dateFormats?.[c]||'')+'" oninput="RecoTemplate.updateReportDateFormat('+ri+',\''+U.jsq(c)+'\',this.value)" style="flex:1; min-width:140px;" title="Leave blank for default" />';
+          h += '<button class="small danger" onclick="RecoTemplate.toggleReportCol('+ri+',\''+U.jsq(c)+'\',false); RecoTemplate.renderEditor()">×</button>';
           h += '</div>';
         });
         h += '<div style="display:flex; gap:4px; margin-top:8px;">';
@@ -4126,18 +4632,41 @@ defaultTemplate() {
     RecoTemplate.renderEditor();
     U.toast('Detected '+fields.length+' columns','success');
   },
+  /* reco_data/<folder> for a new template: from its name, never shared with another template. */
+  _uniqueDataFolder(name, exceptId) {
+    const taken = new Set(AppState.recoTemplates.filter(x => x.id !== exceptId).map(x => Versioning.folderFor(x)));
+    const base = Versioning._safe(name) || 'template';
+    let f = base, n = 2;
+    while (taken.has(f)) f = (base.slice(0, 55) + '_' + n++);
+    return f;
+  },
+
   saveTemplate() {
     const t = RecoTemplate._editing;
     if (!t.name?.trim()) { U.toast('Name is required','error'); return; }
     if (!t.columns.length) { U.toast('Define at least one column','error'); return; }
+    t.columns.forEach(c => { c.name = String(c.name || '').trim(); });
+    if (t.columns.some(c => !c.name)) { U.toast('Every column needs a name','error'); return; }
+    const names = t.columns.map(c => c.name);
+    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    if (dup) { U.toast('Column "' + dup + '" is defined twice','error'); return; }
+    // Drop references to columns that no longer exist
+    t.primaryKeys = (t.primaryKeys || []).filter(k => names.includes(k));
     
     // Ensure display columns exist
     if (!t.displayColumns.length) t.displayColumns = t.columns.map(c=>c.name);
 
     if (RecoTemplate._isNew) {
+      t.dataFolder = RecoTemplate._uniqueDataFolder(t.name, t.id);
       AppState.recoTemplates.push(t);
     } else {
       const i = AppState.recoTemplates.findIndex(x=>x.id===t.id);
+      const orig = i !== -1 ? AppState.recoTemplates[i] : null;
+      // Keep the history folder the template already uses, even when it is renamed.
+      if (!t.dataFolder) t.dataFolder = Versioning.folderFor(orig || t);
+      if (orig && (orig.primaryKeys || []).length && JSON.stringify(orig.primaryKeys) !== JSON.stringify(t.primaryKeys || [])) {
+        if (!confirm('You changed the primary key columns.\n\nRows saved before this change will no longer match their version history, manual offsets, corrections, groups and comments (they are keyed by the old primary key). Continue?')) return;
+      }
       if (i!==-1) AppState.recoTemplates[i] = t;
     }
 
@@ -4343,7 +4872,10 @@ _xlNumFmt(fmt) {
       // Get current raw value, apply format, set back as displayed value via setValue
       const raw = row[col];
       const formatted = (Reco._ssApplyNumFmt ? Reco._ssApplyNumFmt(raw, fmt) : raw);
+      // Display only: the stored value stays numeric (no edit / version row).
+      Reco._xlSuppressChange = true;
       try { ws.setValue([x, y], formatted, true); } catch(e) {}
+      finally { Reco._xlSuppressChange = false; }
       // Cell-level alignment hint based on type
       if (['number','number0','currency','accounting','percent'].indexOf(fmt) !== -1) {
         try { ws.setStyle([x, y], 'text-align: right; font-variant-numeric: tabular-nums;'); } catch(e) {}
@@ -4529,6 +5061,7 @@ renderExcelView(tpl, sess) {
 },
 
 _xlBuildColumns(tpl, sess, allCols) {
+  SpecialJV.resetOptions();
   return allCols.map(name => {
     // Status pseudo-column (first column injected by _xlInit)
     if (name === '_status_') {
@@ -4595,25 +5128,23 @@ _xlInit(tpl, sess) {
   const filtered = Reco.applyTableFiltersSort(tpl, sess);
 
   // Build rows in same order as columns
-  const data = filtered.map(row => allCols.map(col => {
+  const data = filtered.map(row => {
+    // Additional-column values computed exactly as in the grid (cascading)
+    const full = extra.length ? Reco._rowWithExtras(tpl, sess, row) : row;
+    return allCols.map(col => {
     if (col === '_status_') {
       const isOff = sess.offsets && sess.offsets[row._id];
       return isOff ? (row._manualOffset ? 'Offset ✋' : 'Offset') : 'Open';
     }
-    // Additional-column computed values (formula / master) — pre-compute so JSS shows them
     const acDef = extra.find(a => a.name === col);
-    if (acDef) {
-      if (acDef.type === 'master' || acDef.type === 'master_lookup') {
-        try { return Masters.evalLookup(tpl, acDef, row) || ''; } catch(e) { return ''; }
-      }
-      if (acDef.type === 'formula') {
-        try { return Formula.evaluate(acDef.formula, row); } catch(e) { return '#ERR'; }
-      }
+    if (acDef && (acDef.type === 'master' || acDef.type === 'master_lookup' || acDef.type === 'formula')) {
+      return full[col] != null ? full[col] : '';
     }
     let v = row[col];
     if (col.toLowerCase().includes('date')) v = U.formatExcelDate(v);
     return v != null ? v : '';
-  }));
+    });
+  });
 
   Reco._xlRows = filtered;
   Reco._xlCols = allCols;
@@ -4666,6 +5197,7 @@ _xlAfterLoad() {
 },
 
 _xlOnChange(worksheet, cell, x, y, newVal /*, oldVal */) {
+  if (Reco._xlSuppressChange) return;
   const row = Reco._xlRows && Reco._xlRows[y];
   if (!row) return;
   const col = Reco._xlCols[x];
@@ -4685,11 +5217,7 @@ _xlOnChange(worksheet, cell, x, y, newVal /*, oldVal */) {
   delete row['_corrected_' + col]; // user has overwritten the corrected state
 
   const pk = row._pk || Reco.getRowPK(tpl, row);
-  if (pk) {
-    Versioning.appendChange(tpl, pk, row)
-      .then(v => { row._ver = v; })
-      .catch(e => console.error('appendChange (excel)', e));
-  }
+  if (pk) Versioning.queueChange(tpl, pk, row).then(v => { if (v) row._ver = v; });
   AppState.save();
 },
 
@@ -4731,7 +5259,9 @@ _xlOnSelection(worksheet, x1, y1, x2, y2) {
   if (!cellCount && !selectedRowIds.size) { bar.classList.remove('show'); bar.innerHTML = ''; return; }
 
   const tol = tpl.toleranceValue || 0;
-  const within = Math.abs(valueColSum) <= tol;
+  const selRows = Array.from(selectedRowIds).map(rid => sess.data.find(r => r._id === rid)).filter(Boolean);
+  const within = Reco.isWithinTolerance(tpl, valueColSum, selRows);
+  const tolLabel = tpl.toleranceMode === 'percentage' ? tol + '%' : tol;
 
   let h = '<span>Rows: <b>' + selectedRowIds.size + '</b></span>';
   h += '<span>Cells: <b>' + cellCount + '</b></span>';
@@ -4742,10 +5272,10 @@ _xlOnSelection(worksheet, x1, y1, x2, y2) {
   if (valueCol) {
     h += '<span>Σ ' + valueCol + ': <b>' + U.fmtNum(valueColSum) + '</b></span>';
     h += within ? '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;">Within tolerance ✓</span>'
-                : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±' + tol + ')</span>';
+                : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±' + tolLabel + ')</span>';
     if (within && selectedRowIds.size) {
       const ids = Array.from(selectedRowIds);
-      h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco._xlOffsetSelectedRows(' + JSON.stringify(ids).replace(/"/g, '&quot;') + ')">Offset Selected</button>';
+      h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco._xlOffsetSelectedRows(' + U.esc(JSON.stringify(ids)) + ')">Offset Selected</button>';
     }
   }
   bar.innerHTML = h;
@@ -4872,11 +5402,7 @@ _jssOnChange(instance, cell, x, y, newVal) {
   const id  = AppState.activeRecoId;
   const tpl = AppState.recoTemplates.find(t => t.id === id);
   const pk  = row._pk || Reco.getRowPK(tpl, row);
-  if (pk) {
-    Versioning.appendChange(tpl, pk, row)
-      .then(v => { row._ver = v; })
-      .catch(e => console.error('appendChange (jss)', e));
-  }
+  if (pk) Versioning.queueChange(tpl, pk, row).then(v => { if (v) row._ver = v; });
   AppState.save();
 },
 
@@ -5456,11 +5982,7 @@ _ssCommit(fillColumn, moveDir) {
     } else {
       delete sess.cellFormulas[rk][ac.col];
       row[ac.col] = raw;
-      if (row._pk) {
-        Versioning.appendChange(tpl, row._pk, row)
-          .then(v => row._ver = v)
-          .catch(err => console.error('appendChange', err));
-      }
+      if (row._pk) Versioning.queueChange(tpl, row._pk, row).then(v => { if (v) row._ver = v; });
     }
   }
 
@@ -5489,11 +6011,7 @@ _ssClearActive() {
   const rk = Reco._ssRowKey(row);
   if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][sess.activeCell.col];
   row[sess.activeCell.col] = '';
-  if (row._pk) {
-    Versioning.appendChange(tpl, row._pk, row)
-      .then(v => row._ver = v)
-      .catch(err => console.error('appendChange', err));
-  }
+  if (row._pk) Versioning.queueChange(tpl, row._pk, row).then(v => { if (v) row._ver = v; });
   AppState.save();
   App.navigate('reco');
 },
@@ -5506,7 +6024,8 @@ _ssShowFormulaHelp() {
   h += '<div class="editor-section"><strong>Arithmetic</strong><br>';
   h += '<code>=Amount + Tax</code><br><code>=Total - Discount</code><br>';
   h += '<code>=Qty * Price</code><br><code>=Total / Count</code><br>';
-  h += '<code>=ABS(Variance)</code><br><code>=ROUND(Value, 2)</code></div>';
+  h += '<code>=ABS(Variance)</code><br><code>=ROUND(Value, 2)</code><br>';
+  h += '<code>=NUM(Amount) * 2</code> (amounts like 1,234.50 or (10))</div>';
 
   h += '<div class="editor-section"><strong>Aggregation (same row)</strong><br>';
   h += '<code>=SUM(A, B, C)</code><br><code>=MIN(A, B)</code> / <code>=MAX(A, B)</code><br>';
@@ -5822,8 +6341,8 @@ _ssCommitFill(fd) {
         h += '<td>'+U.esc((a.uploadedAt||'').replace('T',' ').substring(0,16))+'</td>';
         h += '<td>'+U.esc(a.uploadedBy||'')+'</td>';
         h += '<td>'+(links.join(' ') || '<span class="text-muted">orphan</span>')+'</td>';
-        h += '<td><button class="small primary" onclick="Attachments.download(\''+U.escAttr(tpl.id)+'\',\''+U.escAttr(a.id)+'\')">Download</button>';
-        h += '<button class="small danger" onclick="Reco._deleteAttachmentFromMaster(\''+U.escAttr(a.id)+'\')">Delete</button></td></tr>';
+        h += '<td><button class="small primary" onclick="Attachments.download(\''+U.jsq(tpl.id)+'\',\''+U.jsq(a.id)+'\')">Download</button>';
+        h += '<button class="small danger" onclick="Reco._deleteAttachmentFromMaster(\''+U.jsq(a.id)+'\')">Delete</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -6180,8 +6699,8 @@ _ssAttachHandlers() {
         h += '<td>'+U.esc(c.createdBy||'')+'</td>';
         h += '<td>'+(links.join(' ') || '<span class="text-muted">orphan</span>')+'</td>';
         h += '<td style="white-space:pre-wrap; max-width:400px;">'+U.esc(c.text)+'</td>';
-        h += '<td><button class="small" onclick="Comments.openEditDialog(\''+U.escAttr(tpl.id)+'\',\''+U.escAttr(c.id)+'\')">Edit</button>';
-        h += '<button class="small danger" onclick="Reco._deleteCommentFromMaster(\''+U.escAttr(c.id)+'\')">Delete</button></td>';
+        h += '<td><button class="small" onclick="Comments.openEditDialog(\''+U.jsq(tpl.id)+'\',\''+U.jsq(c.id)+'\')">Edit</button>';
+        h += '<button class="small danger" onclick="Reco._deleteCommentFromMaster(\''+U.jsq(c.id)+'\')">Delete</button></td>';
         h += '</tr>';
       });
       h += '</tbody></table>';
@@ -6198,7 +6717,7 @@ _ssAttachHandlers() {
 
 _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   const cfg = ((tpl.editableColumnConfig || {})[col]) || { editType: 'free' };
-     const onchange = 'Reco.editCell(' + i + ',\'' + U.escAttr(col) + '\',this.value)';
+     const onchange = 'Reco.editCell(' + i + ',\'' + U.jsq(col) + '\',this.value)';
      const dataAttr = ' data-col="' + U.escAttr(col) + '"';
      const styleAttr = fmtStyle ? ' style="' + fmtStyle + '"' : '';
 
@@ -6240,14 +6759,14 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     const id = AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     if (!tpl) return;
-    const files = await Versioning.listFiles(tpl.name);
-    let h = '<div class="help">Each upload is saved with version markers. Open any past file to load it back into the session.</div>';
+    const files = await Versioning.listFiles(tpl);
+    let h = '<div class="help">Each upload is saved with version markers. Open any past file to load it back into the session (edits saved on later days are applied on top).</div>';
     if (!files.length) { h += '<div class="empty">No saved files yet for this template.</div>'; }
     else {
       h += '<table><thead><tr><th>File</th><th>Path</th><th></th></tr></thead><tbody>';
       files.forEach(f => {
         h += '<tr><td><b>'+U.esc(f.label)+'</b></td><td><code>'+U.esc(f.fullPath)+'</code></td>';
-        h += '<td><button class="small primary" onclick="App.closeModal(); Reco.loadVersionedFile(\''+U.escAttr(f.fullPath)+'\')">Load</button></td></tr>';
+        h += '<td><button class="small primary" onclick="App.closeModal(); Reco.loadVersionedFile(\''+U.jsq(f.fullPath)+'\')">Load</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -6298,26 +6817,26 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
 
     let h = '';
     h += '<div style="font-weight:600; font-size:11px; margin-bottom:6px;">Row actions</div>';
-    h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.openRowTimeline(\''+U.escAttr(rowId)+'\')" '+(hasPk?'':'disabled')+'>👁 View details (timeline)</button>';
-    h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.addAttachmentToRow(\''+U.escAttr(rowId)+'\')" '+(hasPk?'':'disabled')+'>📎 Add attachment</button>';
+    h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.openRowTimeline(\''+U.jsq(rowId)+'\')" '+(hasPk?'':'disabled')+'>👁 View details (timeline)</button>';
+    h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.addAttachmentToRow(\''+U.jsq(rowId)+'\')" '+(hasPk?'':'disabled')+'>📎 Add attachment</button>';
     if (typeof Comments !== 'undefined' && Comments && Comments.openAddDialog) {
-      h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Comments.openAddDialog(\''+U.escAttr(ctx.tpl.id)+'\',\''+U.escAttr(ctx.pk||'')+'\')" '+(hasPk?'':'disabled')+'>💬 Add comment</button>';
+      h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Comments.openAddDialog(\''+U.jsq(ctx.tpl.id)+'\',\''+U.jsq(ctx.pk||'')+'\')" '+(hasPk?'':'disabled')+'>💬 Add comment</button>';
     }
     if (ctx.tpl.groupsEnabled) {
       const memberships = ctx.pk ? Groups.groupsForPk(ctx.tpl.id, ctx.pk) : [];
       if (memberships.length) {
-        h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.showRowGroups(\''+U.escAttr(ctx.pk)+'\')">📁 View groups ('+memberships.length+')</button>';
+        h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.showRowGroups(\''+U.jsq(ctx.pk)+'\')">📁 View groups ('+memberships.length+')</button>';
       }
     }
 
 
     // Phase 5: added-row actions
-    const ctxRow = sess.data.find(r => r._id === rowId);
+    const ctxRow = ctx.row;
     if (ctxRow && ctxRow._ssAdded) {
       const singleNow = !!ctxRow._ssSingleUse;
       h += '<div class="divider" style="margin:6px 0;"></div>';
-      h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.ssToggleRowSingleUse(\''+U.escAttr(rowId)+'\')">'+(singleNow?'✓ Unmark single-use':'⏱ Mark single-use')+'</button>';
-      h += '<button class="small danger" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.ssDeleteRow(\''+U.escAttr(rowId)+'\')">🗑 Delete row</button>';
+      h += '<button class="small" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.ssToggleRowSingleUse(\''+U.jsq(rowId)+'\')">'+(singleNow?'✓ Unmark single-use':'⏱ Mark single-use')+'</button>';
+      h += '<button class="small danger" style="width:100%; text-align:left;" onclick="document.querySelectorAll(\'.row-ctx-menu\').forEach(d=>d.remove()); Reco.ssDeleteRow(\''+U.jsq(rowId)+'\')">🗑 Delete row</button>';
     }
 
     if (!hasPk) h += '<div class="text-muted" style="font-size:10px; margin-top:6px;">Row has no primary key</div>';
@@ -6364,43 +6883,48 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
 
   async _bulkUploadToRow(tplId, pk, files) {
     U.toast('Uploading ' + files.length + ' files…');
+    let ok = 0;
     for (const f of files) {
-      await Attachments.upload(tplId, f, { linkedPks: [pk] });
+      if (await Attachments.upload(tplId, f, { linkedPks: [pk] })) ok++;
     }
-    U.toast('Uploaded ' + files.length + ' files', 'success');
+    U.toast('Uploaded ' + ok + ' of ' + files.length + ' files', ok === files.length ? 'success' : 'error');
     Timeline.open(tplId, pk);
   },
 
-  async loadVersionedFile(fullPath) {
-    const id = AppState.activeRecoId;
+  /* Load a versioned file into a template's session. `tplId` defaults to
+     the open template; auto-load passes it explicitly so a slow read cannot
+     land in whichever template the user switched to meanwhile. */
+  async loadVersionedFile(fullPath, tplId, files) {
+    const id = tplId || AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) return;
-    const all = await Versioning.readFile(fullPath);
-    if (!all.length) { U.toast('File empty', 'error'); return; }
-    const active = Versioning.collapseToActive(all);
+    const { active, total, applied } = await Versioning.loadActive(tpl, fullPath, files);
+    if (!total) { U.toast('File empty', 'error'); return; }
     // hydrate session.data from active rows
     sess.data = active.map(r => {
       const row = { _id: U.uid(), _pk: r._pk, _ver: r._ver };
-      tpl.columns.forEach(c => row[c.name] = r[c.name] || '');
+      tpl.columns.forEach(c => row[c.name] = r[c.name] != null ? r[c.name] : '');
       return row;
     });
     sess.activeVersionFile = fullPath;
     sess.offsets = {};
+    sess.selectedRows = {};
     Reco.runAutoOffset(tpl, sess);
     AppState.save();
-    App.navigate('reco');
-    U.toast('Loaded '+active.length+' active rows ('+all.length+' total versioned rows)','success');
+    if (AppState.currentPage === 'reco' && AppState.activeRecoId === id) App.navigate('reco');
+    U.toast('Loaded '+active.length+' active rows ('+total+' versioned rows'+(applied ? ', '+applied+' later edit(s) applied' : '')+')','success');
   },
 
-  /* Auto-load the most recent versioned file when entering a template */
+  /* Auto-load the most recent data file when entering a template with an empty session */
   async autoLoadLatest(tpl) {
     if (!tpl) return;
     const sess = AppState.recoSessions[tpl.id];
     if (!sess || sess.data.length || sess._autoLoadAttempted) return;
     sess._autoLoadAttempted = true;
-    const files = await Versioning.listFiles(tpl.name);
-    if (files.length) await Reco.loadVersionedFile(files[0].fullPath);
+    const files = await Versioning.listFiles(tpl);
+    const f = await Versioning.latestDataFile(tpl, files);
+    if (f) await Reco.loadVersionedFile(f.fullPath, tpl.id, files);
   },
 
 
@@ -6883,22 +7407,58 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     AppState.save();
     App.navigate('reco');
     U.toast('Loaded '+mapped.length+' rows','success');
+
+    // Rows that share a primary key collapse into one when the data is
+    // reopened from history — tell the user now rather than after a reload.
+    if ((tpl.primaryKeys || []).length) {
+      const counts = new Map();
+      sess.data.forEach(r => counts.set(r._pk, (counts.get(r._pk) || 0) + 1));
+      const dupKeys = Array.from(counts).filter(([, n]) => n > 1);
+      if (dupKeys.length) {
+        const extra = dupKeys.reduce((s, [, n]) => s + n - 1, 0);
+        App.openModal('Duplicate primary keys',
+          '<div class="help"><b>' + extra + '</b> row(s) share a primary key (' + U.esc(tpl.primaryKeys.join(' + ')) + ') with another row. '
+          + 'Edits, offsets, corrections and comments are tracked per key, and reopening this data from history keeps only one row per key.</div>'
+          + '<div class="help">Consider adding more primary-key columns in the template. Examples:</div><ul>'
+          + dupKeys.slice(0, 8).map(([k, n]) => '<li><code>' + U.esc(k) + '</code> × ' + n + '</li>').join('') + '</ul>',
+          '<button class="primary" onclick="App.closeModal()">OK</button>');
+      }
+    }
   },
 
   // Compute the effective value of an extra (additional) column for a row.
   // For non-extra columns, callers should just use row[col] directly.
   _extraValueForRow(tpl, sess, row, ac) {
     if (!ac) return '';
+    // Formulas / lookups may reference additional columns declared above this one.
+    const accum = Reco._rowWithExtras(tpl, sess, row, ac.name);
+    return Reco._extraOwnValue(tpl, sess, accum, row, ac);
+  },
+
+  /* Value of one additional column given the row enriched with the columns
+     declared before it (`accum`). Same rules as the grid. */
+  _extraOwnValue(tpl, sess, accum, row, ac) {
     if (ac.type === 'master' || ac.type === 'master_lookup') {
-      try { return Masters.evalLookup(tpl, ac, row); } catch(e) { return ''; }
+      try { return Masters.evalLookup(tpl, ac, accum); } catch(e) { return ''; }
     }
     if (ac.type === 'formula') {
-      try { return Formula.evaluate(ac.formula, row); } catch(e) { return ''; }
+      try { return Formula.evaluate(ac.formula, accum); } catch(e) { return '#ERR'; }
     }
-    // dropdown / custom
-    const tagKey = row._id + '||' + ac.name;
+    // dropdown / custom: a value on the row wins, else the manual tag
     if (row[ac.name] != null && row[ac.name] !== '') return row[ac.name];
-    return (sess.manualTags || {})[tagKey] || '';
+    return ((sess && sess.manualTags) || {})[row._id + '||' + ac.name] || '';
+  },
+
+  /* Copy of a row with every additional column (template + session) filled
+     in, in declaration order. Stops before `uptoName` when given. */
+  _rowWithExtras(tpl, sess, row, uptoName) {
+    const out = Object.assign({}, row);
+    const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
+    for (const ac of extras) {
+      if (uptoName != null && ac.name === uptoName) break;
+      out[ac.name] = Reco._extraOwnValue(tpl, sess, out, row, ac);
+    }
+    return out;
   },
 
   // Returns the additionalColumn definition for a given column name, or null
@@ -7015,7 +7575,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '<table><thead><tr><th>Doc Number</th><th>Accounting ID</th><th>Action</th></tr></thead><tbody>';
     sess._docMatches.forEach(m => {
       h += '<tr><td>'+U.esc(m.docNumber)+'</td><td>'+U.esc(m.accountingId)+'</td>';
-      h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.escAttr(m.accountingId)+'\')">View Entry Lines</button></td></tr>';
+      h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.jsq(m.accountingId)+'\')">View Entry Lines</button></td></tr>';
     });
     h += '</tbody></table>';
     App.openModal('Document Matches', h, '<button onclick="App.closeModal()">Close</button>');
@@ -7099,11 +7659,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       h += '<div style="max-height:240px; overflow-y:auto;">';
       sets.forEach(fs => {
         h += '<div style="display:flex; gap:4px; margin-bottom:3px; align-items:center;">';
-        h += '<button class="small primary" style="flex:1; text-align:left;" onclick="Reco.applyFilterSet(\''+U.escAttr(fs.id)+'\')" title="'+U.escAttr(FilterSets.describe(fs.state))+'">';
+        h += '<button class="small primary" style="flex:1; text-align:left;" onclick="Reco.applyFilterSet(\''+U.jsq(fs.id)+'\')" title="'+U.escAttr(FilterSets.describe(fs.state))+'">';
         h += U.esc(fs.name);
         h += '</button>';
-        h += '<button class="small" onclick="Reco.overwriteFilterSet(\''+U.escAttr(fs.id)+'\')" title="Overwrite with current filters" '+(hasActive?'':'disabled')+'>↻</button>';
-        h += '<button class="small danger" onclick="Reco.deleteFilterSet(\''+U.escAttr(fs.id)+'\')" title="Delete">×</button>';
+        h += '<button class="small" onclick="Reco.overwriteFilterSet(\''+U.jsq(fs.id)+'\')" title="Overwrite with current filters" '+(hasActive?'':'disabled')+'>↻</button>';
+        h += '<button class="small danger" onclick="Reco.deleteFilterSet(\''+U.jsq(fs.id)+'\')" title="Delete">×</button>';
         h += '</div>';
       });
       h += '</div>';
@@ -7191,9 +7751,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
         h += '<td class="text-muted" style="font-size:10px;">'+U.esc(FilterSets.describe(fs.state))+'</td>';
         h += '<td style="white-space:nowrap;">'+U.esc((fs.createdAt||'').substring(0,10))+'</td>';
         h += '<td>';
-        h += '<button class="small primary" onclick="App.closeModal(); Reco.applyFilterSet(\''+U.escAttr(fs.id)+'\')">Apply</button>';
-        h += '<button class="small" onclick="Reco._renameFilterSet(\''+U.escAttr(fs.id)+'\')">Rename</button>';
-        h += '<button class="small danger" onclick="Reco._deleteFilterSetFromManage(\''+U.escAttr(fs.id)+'\')">Delete</button>';
+        h += '<button class="small primary" onclick="App.closeModal(); Reco.applyFilterSet(\''+U.jsq(fs.id)+'\')">Apply</button>';
+        h += '<button class="small" onclick="Reco._renameFilterSet(\''+U.jsq(fs.id)+'\')">Rename</button>';
+        h += '<button class="small danger" onclick="Reco._deleteFilterSetFromManage(\''+U.jsq(fs.id)+'\')">Delete</button>';
         h += '</td></tr>';
       });
       h += '</tbody></table>';
@@ -7326,19 +7886,26 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
         const colDef = tpl.columns.find(c => c.name === col);
         const extraDef = Reco._extraDef(tpl, col);
         const isDate = colDef && colDef.isDate;
-        const getVal = (r) => extraDef ? Reco._extraValueForRow(tpl, sess, r, extraDef) : (r[col]||'');
-        filtered = filtered.slice().sort((a,b) => {
-          const va = getVal(a), vb = getVal(b);
-          if (isDate) {
-            const da = U.parseDate(va), db = U.parseDate(vb);
-            if (da && db) return (da - db) * (dir==='desc'?-1:1);
-          }
-          const na = parseFloat(va), nb = parseFloat(vb);
-          if (!isNaN(na) && !isNaN(nb)) return (na - nb) * (dir==='desc'?-1:1);
-          return String(va).localeCompare(String(vb)) * (dir==='desc'?-1:1);
-        });
+        const getVal = (r) => extraDef ? Reco._extraValueForRow(tpl, sess, r, extraDef) : r[col];
+        const keyed = filtered.map(r => ({ r, v: getVal(r) }));   // compute each value once
+        keyed.sort((a, b) => Reco._compareValues(a.v, b.v, isDate, dir === 'desc' ? -1 : 1));
+        filtered = keyed.map(k => k.r);
       }
     return filtered;
+  },
+
+  /* Sort comparator: dates (for date columns), then numbers (1,234.50 aware),
+     then text. dir = 1 ascending / -1 descending; blanks always sort last. */
+  _compareValues(va, vb, isDate, dir) {
+    dir = dir || 1;
+    const ea = va == null || va === '', eb = vb == null || vb === '';
+    if (ea || eb) return ea === eb ? 0 : (ea ? 1 : -1);
+    if (isDate) {
+      const da = U.parseDate(va), db = U.parseDate(vb);
+      if (da && db) return (da - db) * dir;
+    }
+    if (U.isNumeric(va) && U.isNumeric(vb)) return (U.num(va) - U.num(vb)) * dir;
+    return String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' }) * dir;
   },
 
   renderSlicers(tpl, sess) {
@@ -7352,7 +7919,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       const vals = slicers[col];
       h += '<div style="margin-top:6px;"><b style="font-size:11px;">'+U.esc(col)+':</b> ';
       vals.forEach(v => {
-        h += '<span class="tag">'+U.esc(v)+' <span class="x" onclick="Reco.toggleSlicer(\''+U.escAttr(col)+'\',\''+U.escAttr(v)+'\')">×</span></span>';
+        h += '<span class="tag">'+U.esc(v)+' <span class="x" onclick="Reco.toggleSlicer(\''+U.jsq(col)+'\',\''+U.jsq(v)+'\')">×</span></span>';
       });
       h += '</div>';
     });
@@ -7472,6 +8039,7 @@ _refreshVirtBody() {
   const start = sess.page * pageSize;
   const slice = filtered.slice(start, start + pageSize);
   if (!slice.length) return;
+  SpecialJV.resetOptions();
 
   const displayCols = Reco.effectiveDisplayCols(tpl, sess);
   const extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
@@ -7518,14 +8086,14 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
   h += '<tr class="' + rowClass + selClass + addedCls + '" '
      + 'data-pk="' + rowPkAttr + '" '
      + 'data-frow="' + filteredIdx + '" '
-     + 'onmousedown="Reco.startDragSelect(event, \'' + U.escAttr(row._id) + '\')" '
-     + 'onmouseenter="Reco.dragOver(event, \'' + U.escAttr(row._id) + '\')" '
-     + 'oncontextmenu="Reco.openRowContextMenu(event, \'' + U.escAttr(row._id) + '\'); return false;" '
-     + 'ondblclick="Reco.openRowTimeline(\'' + U.escAttr(row._id) + '\')" '
+     + 'onmousedown="Reco.startDragSelect(event, \'' + U.jsq(row._id) + '\')" '
+     + 'onmouseenter="Reco.dragOver(event, \'' + U.jsq(row._id) + '\')" '
+     + 'oncontextmenu="Reco.openRowContextMenu(event, \'' + U.jsq(row._id) + '\'); return false;" '
+     + 'ondblclick="Reco.openRowTimeline(\'' + U.jsq(row._id) + '\')" '
      + 'ondragover="Reco.onRowDragOver(event)" '
-     + 'ondrop="Reco.onRowDrop(event, \'' + U.escAttr(row._id) + '\')">';
+     + 'ondrop="Reco.onRowDrop(event, \'' + U.jsq(row._id) + '\')">';
 
-  h += '<td style="text-align:center;"><input type="checkbox" ' + (isSelected ? 'checked' : '') + ' onchange="Reco.toggleRowSelect(\'' + U.escAttr(row._id) + '\',this.checked)" /></td>';
+  h += '<td style="text-align:center;"><input type="checkbox" ' + (isSelected ? 'checked' : '') + ' onchange="Reco.toggleRowSelect(\'' + U.jsq(row._id) + '\',this.checked)" /></td>';
 
   let statusHtml = (isOffset ? '<span class="badge offset">Offset' + (row._manualOffset ? ' ✋' : '') + '</span>' : '<span class="badge open">Open</span>');
     if (row._ssAdded)      statusHtml += ' <span class="badge ss-added" title="Added row">✚</span>';
@@ -7536,14 +8104,14 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
     const memberships = rowPkForBadges ? Groups.groupsForPk(tpl.id, rowPkForBadges) : [];
     if (memberships.length) {
       const titles = memberships.map(g => g.name).join(' · ');
-      statusHtml += ' <span class="badge general" style="cursor:pointer;" title="In groups: ' + U.escAttr(titles) + '" onclick="event.stopPropagation(); Reco.showRowGroups(\'' + U.escAttr(rowPkForBadges) + '\')">📁 ' + memberships.length + '</span>';
+      statusHtml += ' <span class="badge general" style="cursor:pointer;" title="In groups: ' + U.escAttr(titles) + '" onclick="event.stopPropagation(); Reco.showRowGroups(\'' + U.jsq(rowPkForBadges) + '\')">📁 ' + memberships.length + '</span>';
     }
   }
   if (rowPkForBadges) {
     const attCount = Attachments.forPk(tpl.id, rowPkForBadges).length;
     const comCount = Comments.forPk(tpl.id, rowPkForBadges).length;
-    if (attCount) statusHtml += ' <span class="badge fc" style="cursor:pointer;" title="'+attCount+' attachment(s)" onclick="event.stopPropagation(); Reco.openRowTimeline(\''+U.escAttr(row._id)+'\')">📎 '+attCount+'</span>';
-    if (comCount) statusHtml += ' <span class="badge specific" style="cursor:pointer;" title="'+comCount+' comment(s)" onclick="event.stopPropagation(); Reco.openRowTimeline(\''+U.escAttr(row._id)+'\')">💬 '+comCount+'</span>';
+    if (attCount) statusHtml += ' <span class="badge fc" style="cursor:pointer;" title="'+attCount+' attachment(s)" onclick="event.stopPropagation(); Reco.openRowTimeline(\''+U.jsq(row._id)+'\')">📎 '+attCount+'</span>';
+    if (comCount) statusHtml += ' <span class="badge specific" style="cursor:pointer;" title="'+comCount+' comment(s)" onclick="event.stopPropagation(); Reco.openRowTimeline(\''+U.jsq(row._id)+'\')">💬 '+comCount+'</span>';
   }
   h += '<td class="status-cell">' + statusHtml + '</td>';
 
@@ -7578,7 +8146,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
 
     if (isToAcctCol) {
       const opts = SpecialJV.buildToAccountOptions();
-      h += '<td' + dataAttr + ' class="' + cls + fmtCls + '" style="' + fmtStyle + '"><select onchange="Reco.editCell(' + i + ',\'' + U.escAttr(col) + '\',this.value)" style="min-width:140px;">';
+      h += '<td' + dataAttr + ' class="' + cls + fmtCls + '" style="' + fmtStyle + '"><select onchange="Reco.editCell(' + i + ',\'' + U.jsq(col) + '\',this.value)" style="min-width:140px;">';
       h += '<option value="">— select —</option>';
       const masters = opts.filter(o => o.kind === 'master');
       const jvs = opts.filter(o => o.kind === 'jv');
@@ -7616,7 +8184,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
     if (isToAcctExtra) {
       const curVal = row[ac.name] != null ? String(row[ac.name]) : '';
       const opts = SpecialJV.buildToAccountOptions();
-      h += '<td' + dataAttr + '><select onchange="Reco.editCell('+i+',\''+U.escAttr(ac.name)+'\',this.value)" style="min-width:140px;">';
+      h += '<td' + dataAttr + '><select onchange="Reco.editCell('+i+',\''+U.jsq(ac.name)+'\',this.value)" style="min-width:140px;">';
       h += '<option value="">— select —</option>';
       const masters = opts.filter(o => o.kind === 'master');
       const jvs     = opts.filter(o => o.kind === 'jv');
@@ -7645,13 +8213,13 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
       accum[ac.name] = tagVal;
       if (ac.type === 'dropdown') {
         const dropOpts = Masters._extraDropdownOptions(tpl, ac);
-        h += '<td' + dataAttr + '><select onchange="Reco.setTag(\''+U.escAttr(row._id)+'\',\''+U.escAttr(ac.name)+'\',this.value)">';
+        h += '<td' + dataAttr + '><select onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)">';
         h += '<option value="">—</option>';
         dropOpts.forEach(o => { h += '<option value="'+U.escAttr(o)+'"'+(tagVal===o?' selected':'')+'>'+U.esc(o)+'</option>'; });
         if (tagVal && dropOpts.indexOf(tagVal) === -1) h += '<option value="'+U.escAttr(tagVal)+'" selected>'+U.esc(tagVal)+' (custom)</option>';
         h += '</select></td>';
       } else {
-        h += '<td' + dataAttr + '><input type="text" value="'+U.escAttr(tagVal)+'" onchange="Reco.setTag(\''+U.escAttr(row._id)+'\',\''+U.escAttr(ac.name)+'\',this.value)" /></td>';
+        h += '<td' + dataAttr + '><input type="text" value="'+U.escAttr(tagVal)+'" onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)" /></td>';
       }
     }
   });
@@ -7664,6 +8232,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
 
 /* Render the main reco table with pagination, column filters, slicers, row selection */
 renderRecoTable(tpl, sess) {
+    SpecialJV.resetOptions();
     // 1. Effective display order (honours saved sess.columnOrder + AEG To Account injection)
     const displayCols = Reco.effectiveDisplayCols(tpl, sess);
     const extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
@@ -7731,15 +8300,15 @@ renderRecoTable(tpl, sess) {
          + 'draggable="true" '
          + 'data-col="'+U.escAttr(col)+'" '
          + 'style="'+w+'min-width:60px;" '
-         + 'ondragstart="Reco.onColDragStart(event, \''+U.escAttr(col)+'\')" '
-         + 'ondragover="Reco.onColDragOver(event, \''+U.escAttr(col)+'\')" '
+         + 'ondragstart="Reco.onColDragStart(event, \''+U.jsq(col)+'\')" '
+         + 'ondragover="Reco.onColDragOver(event, \''+U.jsq(col)+'\')" '
          + 'ondragleave="Reco.onColDragLeave(event)" '
-         + 'ondrop="Reco.onColDrop(event, \''+U.escAttr(col)+'\')" '
+         + 'ondrop="Reco.onColDrop(event, \''+U.jsq(col)+'\')" '
          + 'ondragend="Reco.onColDragEnd(event)">';
       h += '<span class="col-grip" title="Drag to reorder">⋮⋮</span> ';
       h += U.esc(col);
       if (isSorted) h += ' <span class="text-muted">'+(sess.columnSorts.dir==='asc'?'▲':'▼')+'</span>';
-      h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.escAttr(col)+'\', this, event)">▼</span>';
+      h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.jsq(col)+'\', this, event)">▼</span>';
                h += '<span class="col-resize-handle" draggable="false" data-col="'+U.escAttr(col)+'" ondragstart="event.preventDefault(); event.stopPropagation();"></span>';
       h += '</th>';
     });
@@ -7757,7 +8326,7 @@ renderRecoTable(tpl, sess) {
         h += U.esc(ac.name);
         if (ac._ssSingleUse) h += ' <span class="badge ss-single" title="Single-use">⏱</span>';
       if (isSorted) h += ' <span class="text-muted">'+(sess.columnSorts.dir==='asc'?'▲':'▼')+'</span>';
-      h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.escAttr(ac.name)+'\', this, event)">▼</span>';
+      h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.jsq(ac.name)+'\', this, event)">▼</span>';
       h += '</th>';
     });
 
@@ -7991,28 +8560,28 @@ renderRecoTable(tpl, sess) {
     // Sort
     const isSorted = sess.columnSorts && sess.columnSorts.col === col;
     h += '<div style="display:flex; gap:3px; margin-bottom:6px;">';
-    h += '<button class="small" onclick="Reco.applySort(\''+U.escAttr(col)+'\',\'asc\')">Sort A→Z</button>';
-    h += '<button class="small" onclick="Reco.applySort(\''+U.escAttr(col)+'\',\'desc\')">Sort Z→A</button>';
+    h += '<button class="small" onclick="Reco.applySort(\''+U.jsq(col)+'\',\'asc\')">Sort A→Z</button>';
+    h += '<button class="small" onclick="Reco.applySort(\''+U.jsq(col)+'\',\'desc\')">Sort Z→A</button>';
     if (isSorted) h += '<button class="small" onclick="Reco.clearSort()">Clear Sort</button>';
     h += '</div>';
     // Slicer button
-    h += '<div style="margin-bottom:6px;"><button class="small primary" onclick="Reco.openSlicer(\''+U.escAttr(col)+'\')">🔍 Slicer (pick values)</button></div>';
+    h += '<div style="margin-bottom:6px;"><button class="small primary" onclick="Reco.openSlicer(\''+U.jsq(col)+'\')">🔍 Slicer (pick values)</button></div>';
     // Filters: list each condition
     h += '<div style="font-size:10px; font-weight:600; margin-bottom:3px;">Filters (combined as AND):</div>';
     if (conds.length === 0) h += '<div class="text-muted" style="margin-bottom:4px;">no filter conditions</div>';
     conds.forEach((c, ci) => {
       h += '<div style="display:flex; gap:3px; margin-bottom:3px; flex-wrap:wrap;">';
-      h += '<select onchange="Reco.updateColFilter(\''+U.escAttr(col)+'\','+ci+',\'op\',this.value)" style="flex:1; min-width:80px;">';
+      h += '<select onchange="Reco.updateColFilter(\''+U.jsq(col)+'\','+ci+',\'op\',this.value)" style="flex:1; min-width:80px;">';
       FilterOps.list.forEach(o => { h += '<option value="'+o.op+'"'+(c.op===o.op?' selected':'')+'>'+o.label+'</option>'; });
       h += '</select>';
-      if (FilterOps.needsValue(c.op)) h += '<input type="text" value="'+U.escAttr(c.val||'')+'" placeholder="value" oninput="Reco.updateColFilter(\''+U.escAttr(col)+'\','+ci+',\'val\',this.value)" style="flex:1; min-width:60px;" />';
-      if (FilterOps.needsSecondValue(c.op)) h += '<input type="text" value="'+U.escAttr(c.val2||'')+'" placeholder="and" oninput="Reco.updateColFilter(\''+U.escAttr(col)+'\','+ci+',\'val2\',this.value)" style="flex:1; min-width:60px;" />';
-      h += '<button class="small danger" onclick="Reco.removeColFilter(\''+U.escAttr(col)+'\','+ci+')">×</button>';
+      if (FilterOps.needsValue(c.op)) h += '<input type="text" value="'+U.escAttr(c.val||'')+'" placeholder="value" oninput="Reco.updateColFilter(\''+U.jsq(col)+'\','+ci+',\'val\',this.value)" style="flex:1; min-width:60px;" />';
+      if (FilterOps.needsSecondValue(c.op)) h += '<input type="text" value="'+U.escAttr(c.val2||'')+'" placeholder="and" oninput="Reco.updateColFilter(\''+U.jsq(col)+'\','+ci+',\'val2\',this.value)" style="flex:1; min-width:60px;" />';
+      h += '<button class="small danger" onclick="Reco.removeColFilter(\''+U.jsq(col)+'\','+ci+')">×</button>';
       h += '</div>';
     });
     h += '<div style="display:flex; gap:3px; margin-top:5px;">';
-    h += '<button class="small" onclick="Reco.addColFilter(\''+U.escAttr(col)+'\')">+ Add Filter</button>';
-    if (conds.length) h += '<button class="small" onclick="Reco.clearColFilters(\''+U.escAttr(col)+'\')">Clear All</button>';
+    h += '<button class="small" onclick="Reco.addColFilter(\''+U.jsq(col)+'\')">+ Add Filter</button>';
+    if (conds.length) h += '<button class="small" onclick="Reco.clearColFilters(\''+U.jsq(col)+'\')">Clear All</button>';
     h += '<button class="small primary" onclick="Reco.applyColFilters()">Apply</button>';
     h += '<div class="divider" style="margin:6px 0;"></div>';
     // Phase 5: added-column actions
@@ -8023,11 +8592,11 @@ renderRecoTable(tpl, sess) {
     if (addedCol) {
       h += '<div class="divider" style="margin:6px 0;"></div>';
       const singleNow = !!addedCol._ssSingleUse;
-      h += '<button class="small" onclick="Reco.ssToggleColSingleUse(\''+U.escAttr(col)+'\')">'+(singleNow?'✓ Unmark single-use':'⏱ Mark single-use')+'</button>';
-      if (sessExtra) h += '<button class="small" onclick="Reco.ssPromoteCol(\''+U.escAttr(col)+'\')">⬆ Promote to template</button>';
-      h += '<button class="small danger" onclick="Reco.ssDeleteCol(\''+U.escAttr(col)+'\')">🗑 Delete column</button>';
+      h += '<button class="small" onclick="Reco.ssToggleColSingleUse(\''+U.jsq(col)+'\')">'+(singleNow?'✓ Unmark single-use':'⏱ Mark single-use')+'</button>';
+      if (sessExtra) h += '<button class="small" onclick="Reco.ssPromoteCol(\''+U.jsq(col)+'\')">⬆ Promote to template</button>';
+      h += '<button class="small danger" onclick="Reco.ssDeleteCol(\''+U.jsq(col)+'\')">🗑 Delete column</button>';
     }
-    h += '<button class="small danger" onclick="Reco.hideCol(\''+U.escAttr(col)+'\')">Hide this column</button>';
+    h += '<button class="small danger" onclick="Reco.hideCol(\''+U.jsq(col)+'\')">Hide this column</button>';
     h += '</div>';
 
     const dd = document.createElement('div');
@@ -8181,12 +8750,14 @@ renderRecoTable(tpl, sess) {
     const ids = Object.keys(sess.selectedRows || {});
     if (!ids.length) { bar.classList.remove('show'); bar.innerHTML=''; return; }
     let sum = 0; let count = 0;
-    sess.data.forEach(r => { if (sess.selectedRows[r._id]) { sum += U.num(r[tpl.valueColumn]); count++; } });
+    const selRows = [];
+    sess.data.forEach(r => { if (sess.selectedRows[r._id]) { sum += U.num(r[tpl.valueColumn]); count++; selRows.push(r); } });
     const tol = tpl.toleranceValue || 0;
-    const within = Math.abs(sum) <= tol;
+    const within = Reco.isWithinTolerance(tpl, sum, selRows);
+    const tolLabel = tpl.toleranceMode === 'percentage' ? tol + '%' : tol;
     let h = '<span>Selected: <b>'+count+'</b></span>';
-    h += '<span>Σ '+(tpl.valueColumn||'value')+': <b>'+U.fmtNum(sum)+'</b></span>';
-    h += within ? '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;">Within tolerance ✓</span>' : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±'+tol+')</span>';
+    h += '<span>Σ '+U.esc(tpl.valueColumn||'value')+': <b>'+U.fmtNum(sum)+'</b></span>';
+    h += within ? '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;">Within tolerance ✓</span>' : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±'+tolLabel+')</span>';
     if (count > 0 && within) h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco.offsetSelected()">Offset Selected</button>';
     if (tpl.aegIntegration && tpl.aegIntegration.enabled) h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco.previewEntryFromSelection()">Preview Entry</button>';
     h += '<button class="small" style="background:transparent;color:#fff;border-color:#fff;" onclick="Reco.clearSelection()">Clear</button>';
@@ -8244,13 +8815,9 @@ renderRecoTable(tpl, sess) {
       if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][col];
     }
 
-    // record change in versioned file
+    // record change in versioned file (batched with other quick edits)
     const pk = row._pk || Reco.getRowPK(tpl, row);
-    if (pk) {
-      Versioning.appendChange(tpl, pk, row).then(verLabel => {
-        row._ver = verLabel;
-      }).catch(e => console.error('append change failed', e));
-    }
+    if (pk) Versioning.queueChange(tpl, pk, row).then(v => { if (v) row._ver = v; });
     AppState.save();
   },
 
@@ -8300,19 +8867,8 @@ renderRecoTable(tpl, sess) {
     const colValues = new Set();
     
     sess.data.forEach(row => {
-      // Create a virtual mapped row to compute Extra Columns for the pivot on-the-fly
-      let valMap = { ...row };
-      (tpl.additionalColumns||[]).forEach(ac => {
-         if (ac.type === 'master') {
-           const matchKey = ac.masterRefColumn ? row[ac.masterRefColumn] : '';
-           const m = AppState.aegMaster.find(mr => String(mr.Reference||'') === String(matchKey||''));
-           valMap[ac.name] = m ? (m[ac.masterValueColumn]||'') : '';
-         } else if (ac.type === 'formula') {
-           try { valMap[ac.name] = Formula.evaluate(ac.formula, row); } catch(e) { valMap[ac.name] = ''; }
-         } else {
-           valMap[ac.name] = (sess.manualTags||{})[row._id + '||' + ac.name] || '';
-         }
-      });
+      // Row with Extra Columns computed the same way as the grid
+      const valMap = Reco._rowWithExtras(tpl, sess, row);
 
       const rowKey = tpl.pivotRowCols.map(k => String(valMap[k]||'')).join(' | ');
       const colKey = pivotColCols.length ? pivotColCols.map(k => String(valMap[k]||'')).join(' | ') : 'Value';
@@ -8323,7 +8879,7 @@ renderRecoTable(tpl, sess) {
     
     const colArr = Array.from(colValues).sort();
     let h = '<div style="overflow-x:auto"><table><thead><tr>';
-    h += '<th>'+tpl.pivotRowCols.join(' / ')+'</th>';
+    h += '<th>'+U.esc(tpl.pivotRowCols.join(' / '))+'</th>';
     colArr.forEach(c => { h += '<th>'+U.esc(c)+'</th>'; });
     h += '<th>Total</th></tr></thead><tbody>';
     Object.keys(pivotData).sort().forEach(rk => {
@@ -8347,31 +8903,22 @@ renderRecoTable(tpl, sess) {
     if (!tpl || !sess) return;
     const filtered = Reco.applyTableFiltersSort(tpl, sess);
     const cols = tpl.columns.map(c => c.name);
-    const extraCols = tpl.additionalColumns || [];
+    const extraCols = (tpl.additionalColumns || []).concat(sess.extraColumns || []);
+    const header = ['Status', 'RecoId'].concat(cols, extraCols.map(ac => ac.name).filter(n => !cols.includes(n)));
     const rows = filtered.map(r => {
+      const full = Reco._rowWithExtras(tpl, sess, r);
       const o = { Status: sess.offsets?.[r._id] ? 'Offset' : 'Open', RecoId: r._recoId || '' };
-      cols.forEach(c => o[c] = r[c] || '');
-      extraCols.forEach(ac => {
-        if (ac.type === 'master') {
-          const matchKey = ac.masterRefColumn ? r[ac.masterRefColumn] : '';
-          const m = AppState.aegMaster.find(mr => String(mr.Reference||'') === String(matchKey||''));
-          o[ac.name] = m ? (m[ac.masterValueColumn]||'') : '';
-        } else if (ac.type === 'formula') {
-          try { o[ac.name] = Formula.evaluate(ac.formula, r); } catch(e) { o[ac.name] = ''; }
-        } else {
-          o[ac.name] = (sess.manualTags||{})[r._id + '||' + ac.name] || '';
-        }
-      });
+      header.slice(2).forEach(c => { o[c] = full[c] != null ? full[c] : ''; });
       return o;
     });
+    const name = Versioning._safe(tpl.name) + '_' + U.todayStr();
     if (kind === 'csv') {
-      U.download('reco_'+Date.now()+'.csv', Papa.unparse(rows), 'text/csv');
-    } else {
-      const ws = XLSX.utils.json_to_sheet(rows);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Reco');
-      XLSX.writeFile(wb, 'reco_'+Date.now()+'.xlsx');
+      return U.download(name + '.csv', Papa.unparse({ fields: header, data: rows }), 'text/csv');
     }
+    const ws = XLSX.utils.json_to_sheet(rows, { header });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Reco');
+    return U.downloadWorkbook(wb, name + '.xlsx');
   },
   /* ============== CORRECTION SECTION ============== */
   renderCorrection(tpl, sess) {
@@ -8388,7 +8935,7 @@ renderRecoTable(tpl, sess) {
     formatCols.forEach(col => {
       const errors = sess.data.filter(r => !FMT.validate(r[col.name], col.formats) && !r['_corrected_'+col.name]).length;
       const cls = errors > 0 ? 'has-errors' : 'all-good';
-      h += '<div class="section-tab '+(activeCol===col.name?'active ':'')+cls+'" onclick="AppState._correctionCol=\''+U.escAttr(col.name)+'\'; App.navigate(\'reco\')">'+U.esc(col.label||col.name)+' ('+errors+')</div>';
+      h += '<div class="section-tab '+(activeCol===col.name?'active ':'')+cls+'" onclick="AppState._correctionCol=\''+U.jsq(col.name)+'\'; App.navigate(\'reco\')">'+U.esc(col.label||col.name)+' ('+errors+')</div>';
     });
     h += '</div>';
     const col = formatCols.find(c => c.name === activeCol) || formatCols[0];
@@ -8411,7 +8958,7 @@ renderRecoTable(tpl, sess) {
         if (tpl.primaryKeys.length) tpl.primaryKeys.forEach(pk => { h += '<td>'+U.esc(row[pk])+'</td>'; });
         h += '<td class="cell-error">'+U.esc(row[col.name])+'</td>';
         h += '<td><input type="text" id="'+inputId+'" placeholder="Enter corrected value" /></td>';
-        h += '<td><button class="small primary" onclick="Reco.applyCorrection('+idx+',\''+U.escAttr(col.name)+'\',document.getElementById(\''+inputId+'\').value)">Apply</button></td>';
+        h += '<td><button class="small primary" onclick="Reco.applyCorrection('+idx+',\''+U.jsq(col.name)+'\',document.getElementById(\''+inputId+'\').value)">Apply</button></td>';
         h += '</tr>';
       });
       h += '</tbody></table>';
@@ -8442,7 +8989,7 @@ renderRecoTable(tpl, sess) {
       allMasterRows.forEach(r => {
         h += '<tr><td><code>'+U.esc(r.pk)+'</code></td><td>'+U.esc(r.col)+'</td><td>'+U.esc(r.oldVal)+'</td><td>'+U.esc(r.newVal)+'</td>';
         h += '<td>'+(r.sessionOnly?'<span class="badge fc">session</span>':'<span class="badge aed">master</span>')+'</td>';
-        h += '<td><button class="small danger" onclick="Reco.removeCorrection(\''+U.escAttr(r.pk)+'\',\''+U.escAttr(r.col)+'\','+(r.sessionOnly?'true':'false')+')">Remove</button></td></tr>';
+        h += '<td><button class="small danger" onclick="Reco.removeCorrection(\''+U.jsq(r.pk)+'\',\''+U.jsq(r.col)+'\','+(r.sessionOnly?'true':'false')+')">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
       h += '<div class="help">Removing from master also removes the auto-application on future data loads. Session-only corrections only affect the current data.</div>';
@@ -8591,7 +9138,12 @@ renderRecoTable(tpl, sess) {
     const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
     if(tpl) { 
       tpl.reports.splice(idx, 1); 
-      if(AppState._activeReport === 'custom_'+idx) AppState._activeReport = null;
+      // Indexes after the deleted report shift down by one.
+      const m = /^custom_(\d+)$/.exec(AppState._activeReport || '');
+      if (m) {
+        const cur = +m[1];
+        AppState._activeReport = cur === idx ? null : (cur > idx ? 'custom_' + (cur - 1) : AppState._activeReport);
+      }
       AppState.save(); 
       App.navigate('reco'); 
     }
@@ -8631,7 +9183,7 @@ renderRecoTable(tpl, sess) {
     if (!openRows.length) return '<div class="empty" style="color:var(--success, #059669);">All items are offset!</div>';
     const cols = tpl.columns.map(c => c.name);
     let h = '<h3>Open Items ('+openRows.length+')</h3>';
-    h += '<button class="success small" onclick="Reco.exportRowsCsv(\'open_items\','+JSON.stringify(cols).replace(/"/g,'&quot;')+')">Export CSV</button>';
+    h += '<button class="success small" onclick="Reco.exportRowsCsv(\'open_items\','+U.esc(JSON.stringify(cols))+')">Export CSV</button>';
     h += '<div style="overflow-x:auto; max-height:400px; overflow-y:auto"><table><thead><tr>';
     cols.forEach(c => { h += '<th>'+U.esc(c)+'</th>'; });
     h += '</tr></thead><tbody>';
@@ -8663,12 +9215,22 @@ renderCustomReport(tpl, sess, rpt, idx) {
     if (rpt.summaryCards && rpt.summaryCards.length > 0) {
         h += '<div class="report-cards" style="display:flex; gap:10px; margin-bottom:15px;">';
         rpt.summaryCards.forEach(card => {
-            let cardTitle = card.displayName ? card.displayName : card.sourceColumn;
-            let cardValue = rows.reduce((acc, row) => acc + (parseFloat(row[card.col]) || 0), 0);
+            if (!card.col) return;
+            const func = card.func || 'Sum';
+            const cardTitle = card.displayName || (func + ' of ' + card.col);
+            const filled = rows.map(r => r[card.col]).filter(v => v != null && v !== '');
+            const nums = filled.filter(v => U.isNumeric(v)).map(v => U.num(v));
+            let cardValue;
+            if (func === 'Count') cardValue = filled.length.toLocaleString();
+            else if (!nums.length) cardValue = '—';
+            else if (func === 'Avg') cardValue = U.fmtNum(nums.reduce((a, b) => a + b, 0) / nums.length);
+            else if (func === 'Min') cardValue = U.fmtNum(Math.min(...nums));
+            else if (func === 'Max') cardValue = U.fmtNum(Math.max(...nums));
+            else cardValue = U.fmtNum(nums.reduce((a, b) => a + b, 0));
             
-            h += `<div class="card" style="padding:10px; border:1px solid #ccc; border-radius:5px;">
+            h += `<div class="card" style="padding:10px; border:1px solid var(--border, #ccc); border-radius:5px;">
                     <div class="card-title text-muted">${U.esc(cardTitle)}</div>
-                    <div class="card-value"><strong>${cardValue.toLocaleString()}</strong></div>
+                    <div class="card-value"><strong>${U.esc(cardValue)}</strong></div>
                   </div>`;
         });
         h += '</div>';
@@ -8694,12 +9256,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         
         // Date format override
         if (rpt.dateFormats && rpt.dateFormats[c] && val !== '') {
-            let parsedDate = null;
-            if (!isNaN(val) && Number(val) > 10000) { 
-                parsedDate = new Date(Math.round((Number(val) - 25569) * 86400 * 1000));
-            } else {
-                parsedDate = U.parseDate(val);
-            }
+            const parsedDate = (!isNaN(val) && Number(val) > 10000) ? U._excelSerialToDate(Number(val)) : U.parseDate(val);
             if (parsedDate) val = U.fmtDate(parsedDate, rpt.dateFormats[c]);
         } 
         // Fallback to standard date formatting
@@ -8755,22 +9312,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     // 1. Calculate Extra Columns & Computed Columns First (so they can be filtered/sorted)
     rows = rows.map(r => {
-      const out = Object.assign({}, r);
-      // Extra Cols
-      (tpl.additionalColumns||[]).forEach(ac => {
-        if (ac.type === 'master') {
-          const matchKey = ac.masterRefColumn ? r[ac.masterRefColumn] : '';
-          const m = AppState.aegMaster.find(mr => String(mr.Reference||'') === String(matchKey||''));
-          out[ac.name] = m ? (m[ac.masterValueColumn]||'') : '';
-        } else if (ac.type === 'formula') {
-          try { out[ac.name] = Formula.evaluate(ac.formula, r); } catch(e) { out[ac.name] = ''; }
-        } else {
-          out[ac.name] = (sess.manualTags||{})[r._id + '||' + ac.name] || '';
-        }
-      });
-      // Computed Cols
+      // Extra Cols (same values as the grid), then computed columns, which
+      // may reference extras and computed columns defined before them.
+      const out = Reco._rowWithExtras(tpl, sess, r);
       (rpt.computedCols||[]).forEach(cc => {
-        try { out[cc.name] = Formula.evaluate(cc.formula, r); } catch(e) { out[cc.name] = '#ERR'; }
+        try { out[cc.name] = Formula.evaluate(cc.formula, out); } catch(e) { out[cc.name] = '#ERR'; }
       });
       return out;
     });
@@ -8793,12 +9339,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
     // 3. Apply Sort
     if (rpt.sortCol) {
       const sc = rpt.sortCol, dir = rpt.sortDir === 'desc' ? -1 : 1;
-      rows = rows.slice().sort((a,b) => {
-        const va = a[sc]||'', vb = b[sc]||'';
-        const na = parseFloat(va), nb = parseFloat(vb);
-        if (!isNaN(na) && !isNaN(nb)) return (na - nb) * dir;
-        return String(va).localeCompare(String(vb)) * dir;
-      });
+      const colDef = tpl.columns.find(c => c.name === sc);
+      rows = rows.slice().sort((a,b) => Reco._compareValues(a[sc], b[sc], colDef && colDef.isDate, dir));
     }
     return rows;
   },
@@ -8813,10 +9355,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
     (rpt.computedCols||[]).forEach(cc => { if (!cols.includes(cc.name)) cols.push(cc.name); });
     const rows = Reco.runReport(tpl, sess, rpt).map(r => {
       const o = {};
-      cols.forEach(c => o[c] = r[c] || '');
+      cols.forEach(c => o[c] = r[c] != null ? r[c] : '');
       return o;
     });
-    U.download((rpt.name||'report')+'_'+Date.now()+'.csv', Papa.unparse(rows), 'text/csv');
+    U.download(Versioning._safe(rpt.name||'report')+'_'+U.todayStr()+'.csv', Papa.unparse({ fields: cols, data: rows }), 'text/csv');
   },
   exportRowsCsv(name, cols) {
     const id = AppState.activeRecoId;
@@ -8824,10 +9366,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
     if (!sess) return;
     const rows = sess.data.filter(r => !sess.offsets?.[r._id]).map(r => {
       const o = {};
-      cols.forEach(c => o[c] = r[c] || '');
+      cols.forEach(c => o[c] = r[c] != null ? r[c] : '');
       return o;
     });
-    U.download(name+'_'+Date.now()+'.csv', Papa.unparse(rows), 'text/csv');
+    U.download(name+'_'+U.todayStr()+'.csv', Papa.unparse({ fields: cols, data: rows }), 'text/csv');
   },
   /* ============== ENTRIES SECTION (AEG integration) ============== */
   renderEntries(tpl, sess) {
@@ -8850,8 +9392,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
         h += '<td>'+(entry.lines||[]).length+'</td>';
         h += '<td>'+(entry.sourceRowIds||[]).length+'</td>';
         h += '<td>'+dnSummary+'</td>';
-        h += '<td><button class="small primary" onclick="Reco.openEntryDetail(\''+U.escAttr(entry.accountingId)+'\')">View</button>';
-        h += '<button class="small" onclick="Reco.openAllocateModal(\''+U.escAttr(entry.accountingId)+'\')">Allocate Doc#</button></td>';
+        h += '<td><button class="small primary" onclick="Reco.openEntryDetail(\''+U.jsq(entry.accountingId)+'\')">View</button>';
+        h += '<button class="small" onclick="Reco.openAllocateModal(\''+U.jsq(entry.accountingId)+'\')">Allocate Doc#</button></td>';
         h += '</tr>';
       });
       h += '</tbody></table>';
@@ -8876,12 +9418,15 @@ renderCustomReport(tpl, sess, rpt, idx) {
     if (!q) return;
     const id = AppState.activeRecoId;
     const dnMap = AppState.docNumberMaster[id] || {};
+    const ql = q.toLowerCase();
+    // Exact document number first, then the first partial match
     let found = null;
-    Object.keys(dnMap).forEach(dn => {
-      if (dn.toLowerCase().includes(q.toLowerCase())) {
-        found = dnMap[dn];
-      }
-    });
+    const exact = Object.keys(dnMap).find(dn => dn.toLowerCase() === ql);
+    if (exact) found = dnMap[exact];
+    else {
+      const partial = Object.keys(dnMap).find(dn => dn.toLowerCase().includes(ql));
+      if (partial) found = dnMap[partial];
+    }
     if (found) {
       AppState._activeEntryId = found;
       App.navigate('reco');
@@ -8906,9 +9451,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
     let h = '<div id="entryDetail_'+U.escAttr(entry.accountingId)+'">';
     h += '<h3>Entry '+U.esc(entry.accountingId)+' — '+(entry.lines||[]).length+' lines</h3>';
     h += '<div class="toolbar">';
-    h += '<button class="success small" onclick="Reco.exportEntryCsv(\''+U.escAttr(entry.accountingId)+'\')">Export CSV</button>';
-    h += '<button class="small" onclick="Reco.openAllocateModal(\''+U.escAttr(entry.accountingId)+'\')">Allocate Doc#</button>';
-    h += '<button class="small" onclick="Reco.viewSourceRows(\''+U.escAttr(entry.accountingId)+'\')">View Source Rows</button>';
+    h += '<button class="success small" onclick="Reco.exportEntryCsv(\''+U.jsq(entry.accountingId)+'\')">Export CSV</button>';
+    h += '<button class="small" onclick="Reco.openAllocateModal(\''+U.jsq(entry.accountingId)+'\')">Allocate Doc#</button>';
+    h += '<button class="small" onclick="Reco.viewSourceRows(\''+U.jsq(entry.accountingId)+'\')">View Source Rows</button>';
     h += '<button class="small" onclick="AppState._activeEntryId=null; App.navigate(\'reco\')">Close</button>';
     h += '</div>';
     h += '<div style="overflow-x:auto; max-height:400px; overflow-y:auto;"><table><thead><tr>';
@@ -8970,7 +9515,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       const row = sess.data.find(r => r._id === rid);
       if (!row) return;
       h += '<tr>';
-      cols.forEach(c => { h += '<td>'+U.esc(row[c]||'')+'</td>'; });
+      cols.forEach(c => { h += '<td>'+U.esc(row[c] != null ? row[c] : '')+'</td>'; });
       h += '</tr>';
     });
     h += '</tbody></table>';
@@ -9021,11 +9566,17 @@ renderCustomReport(tpl, sess, rpt, idx) {
     if (!entry) return;
     entry.docNumbers = entry.docNumbers || {};
     AppState.docNumberMaster[id] = AppState.docNumberMaster[id] || {};
+    const dnm = AppState.docNumberMaster[id];
     currencies.forEach(cur => {
       const v = (document.getElementById('alloc_'+cur)?.value || '').trim();
+      const old = entry.docNumbers[cur];
+      // A corrected doc number must not leave the old one pointing at this entry.
+      if (old && old !== v && dnm[old] === accountingId) delete dnm[old];
       if (v) {
         entry.docNumbers[cur] = v;
-        AppState.docNumberMaster[id][v] = accountingId;
+        dnm[v] = accountingId;
+      } else {
+        delete entry.docNumbers[cur];
       }
     });
     AppState.save();
@@ -9046,29 +9597,35 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const aegTpl = AppState.aegTemplates.find(t => t.id === aeg.aegTemplateId);
     if (!aegTpl) { U.toast('Linked AEG template not found','error'); return; }
 
+    // Selected rows when there is a selection; otherwise every visible open row.
     const selectedIds = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]);
-    let sourceRows;
-    if (forceAll || !selectedIds.length) {
-      // Use all visible (filtered) rows, excluding already-offset by default
-      sourceRows = Reco.applyTableFiltersSort(tpl, sess).filter(r => !sess.offsets[r._id]);
-      if (!sourceRows.length) { U.toast('No open rows to preview','error'); return; }
+    let originals;
+    if (!selectedIds.length) {
+      originals = Reco.applyTableFiltersSort(tpl, sess).filter(r => !sess.offsets[r._id]);
+      if (!originals.length) { U.toast('No open rows to preview','error'); return; }
     } else {
-      sourceRows = sess.data.filter(r => selectedIds.includes(r._id));
+      const sel = new Set(selectedIds);
+      originals = sess.data.filter(r => sel.has(r._id));
     }
 
+    // Work on copies: the preview computes extra-column values and must not
+    // write them (or stale master lookups) back into the session rows.
+    let sourceRows = originals.map(r => Object.assign({}, r));
+
     // Inject dynamic AEG column for additionalColumns evaluation
+    const toCol = aegTpl.toAccount && aegTpl.toAccount.inputColumn;
     const extraCols = [...(tpl.additionalColumns || [])];
     if (aegTpl.toAccount && (aegTpl.toAccount.mode === 'input' || aegTpl.toAccount.mode === 'inputOrSelect')) {
-      const reqCol = aegTpl.toAccount.inputColumn;
-      if (reqCol && !tpl.columns.find(c => c.name === reqCol) && !extraCols.find(c => c.name === reqCol)) {
-        extraCols.push({ name: reqCol, type: 'custom' });
+      if (toCol && !tpl.columns.find(c => c.name === toCol) && !extraCols.find(c => c.name === toCol)) {
+        extraCols.push({ name: toCol, type: 'custom' });
       }
     }
     extraCols.forEach(ac => {
       sourceRows.forEach(r => {
         if (ac.type === 'master' || ac.type === 'master_lookup') {
-          // Skip if user has already set a value (e.g. picked a JV ref via dropdown)
-          if (r[ac.name] != null && r[ac.name] !== '') return;
+          // The To Account column keeps what the user picked (e.g. a JV ref);
+          // every other lookup is recomputed from the current master.
+          if (ac.name === toCol && r[ac.name] != null && r[ac.name] !== '') return;
           r[ac.name] = Masters.evalLookup(tpl, ac, r);
         } else if (ac.type === 'formula') {
           try { r[ac.name] = Formula.evaluate(ac.formula, r); } catch(e) { r[ac.name] = ''; }
@@ -9087,7 +9644,6 @@ renderCustomReport(tpl, sess, rpt, idx) {
     }
 
     // ====== SPLIT: standard rows vs Special JV rows ======
-    const toCol = aegTpl.toAccount && aegTpl.toAccount.inputColumn;
     const standardRows = [];
     const jvBuckets = {};   // { jvRef: [rows] }
     sourceRows.forEach(r => {
@@ -9109,7 +9665,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         else o[ic.name] = '';
       });
       if (o[aegTpl.valueColumn] === '' || o[aegTpl.valueColumn] == null) {
-        o[aegTpl.valueColumn] = r[tpl.valueColumn] || 0;
+        o[aegTpl.valueColumn] = r[tpl.valueColumn] != null && r[tpl.valueColumn] !== '' ? r[tpl.valueColumn] : 0;
       }
       return o;
     });
@@ -9117,14 +9673,15 @@ renderCustomReport(tpl, sess, rpt, idx) {
       ? Reco._buildEntryLines(aegTpl, aegInputs, aeg.fromAccountOverride, aeg.toAccountOverride)
       : [];
 
-    // Pull already-completed pending JV lines for this template
-    const pendings = (AppState.pendingSpecialJV[id] || []);
+    // Completed JVs waiting for an entry. One completed for exactly these rows
+    // satisfies the requirement; others are "carried forward" (shown with Discard).
+    const pendings = (AppState.pendingSpecialJV[id] || []).map(p =>
+      Object.assign({}, p, { _fromCurrentSelection: !!jvBuckets[p.ref] && SpecialJV.matchesRows(p, jvBuckets[p.ref]) }));
 
-    // Build preview
     Reco._pendingEntry = {
-      aegTpl, sourceRows, aegInputs,
+      tplId: id, aegTpl, sourceRows, standardRows, aegInputs,
       lines: standardLines,
-      jvBuckets, jvCompleted: pendings.slice()
+      jvBuckets, jvCompleted: pendings
     };
 
     Reco._renderPreviewModal(tpl, sess);
@@ -9143,8 +9700,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const drCol = aegTpl.outputColumns.find(c => c.mapping && c.mapping.type==='value' && c.mapping.side==='Dr');
     const crCol = aegTpl.outputColumns.find(c => c.mapping && c.mapping.type==='value' && c.mapping.side==='Cr');
     allLines.forEach(l => {
-      if (drCol) totalDr += U.num(typeof l[drCol.name]==='object' ? l[drCol.name].value : l[drCol.name]);
-      if (crCol) totalCr += U.num(typeof l[crCol.name]==='object' ? l[crCol.name].value : l[crCol.name]);
+      if (drCol) totalDr += U.num(l[drCol.name] && typeof l[drCol.name]==='object' ? l[drCol.name].value : l[drCol.name]);
+      if (crCol) totalCr += U.num(l[crCol.name] && typeof l[crCol.name]==='object' ? l[crCol.name].value : l[crCol.name]);
     });
 
     let h = '<div class="help">Review the lines before generating. Special JV references in the To Account column require completion via their dedicated UI.</div>';
@@ -9161,17 +9718,19 @@ renderCustomReport(tpl, sess, rpt, idx) {
         h += '<b>⚡ ' + U.esc(def?.displayName || ref) + '</b>';
         h += '<span>'+rows.length+' selected row(s) target this JV.</span>';
         if (alreadyDone) {
-          h += '<span class="badge offset">✓ Completed (JV '+U.esc(alreadyDone.jvId)+')</span>';
+          h += '<span class="badge offset">✓ Completed (JV '+U.esc(alreadyDone.jvId)+' · '+(alreadyDone.lines||[]).length+' lines)</span>';
+          h += '<button class="small danger" onclick="Reco._removePendingJv(\''+U.jsq(alreadyDone.jvId)+'\')" title="Discard and redo this JV">Redo</button>';
         } else {
-          h += '<button class="small primary" onclick="Reco.openSpecialJv(\''+U.escAttr(ref)+'\')">Complete '+U.esc(def?.displayName || ref)+' →</button>';
+          h += '<button class="small primary" onclick="Reco.openSpecialJv(\''+U.jsq(ref)+'\')">Complete '+U.esc(def?.displayName || ref)+' →</button>';
         }
         h += '</div>';
       });
-      // Completed but not from current selection (carried forward)
+      // Completed but not for the current selection (carried forward into this entry)
       ctx.jvCompleted.filter(p => !p._fromCurrentSelection).forEach(p => {
         h += '<div class="doc-banner" style="margin-bottom:6px; background:var(--success-bg); color:var(--success);">';
         h += '<b>✓ Carried forward:</b> JV '+U.esc(p.jvId)+' ('+U.esc(p.ref)+') — '+(p.lines||[]).length+' lines';
-        h += '<button class="small danger" onclick="Reco._removePendingJv(\''+U.escAttr(p.jvId)+'\')">Discard</button>';
+        if (p.ts) h += ' <span class="text-muted">· completed '+U.esc(String(p.ts).replace('T',' ').substring(0,16))+'</span>';
+        h += '<button class="small danger" onclick="Reco._removePendingJv(\''+U.jsq(p.jvId)+'\')">Discard</button>';
         h += '</div>';
       });
       h += '</div>';
@@ -9184,22 +9743,26 @@ renderCustomReport(tpl, sess, rpt, idx) {
       h += '<tr>';
       cols.forEach(c => {
         const cell = l[c];
-        const val = cell && typeof cell==='object' ? (cell.value||'') : (cell||'');
+        const val = cell && typeof cell==='object' ? (cell.value != null ? cell.value : '') : (cell != null ? cell : '');
         const cls = (cell && (cell._missingRC || cell._missingInfo)) ? 'cell-error' : '';
         h += '<td class="'+cls+'">'+U.esc(val)+'</td>';
       });
       h += '</tr>';
     });
     h += '</tbody></table></div>';
-    h += '<div class="summary-bar"><div class="item">Standard rows: <b>'+ctx.sourceRows.length+'</b></div>';
+    const jvRowCount = pendingRefs.reduce((n, r) => n + ctx.jvBuckets[r].length, 0);
+    h += '<div class="summary-bar"><div class="item">Standard rows: <b>'+ctx.standardRows.length+'</b></div>';
+    if (jvRowCount) h += '<div class="item">Special JV rows: <b>'+jvRowCount+'</b></div>';
     h += '<div class="item">Lines: <b>'+allLines.length+'</b></div>';
     h += '<div class="item">Dr: <b>'+U.fmtNum(totalDr)+'</b></div>';
     h += '<div class="item">Cr: <b>'+U.fmtNum(totalCr)+'</b></div>';
-    h += '<div class="item">Diff: <b>'+U.fmtNum(totalDr-totalCr)+'</b></div></div>';
+    const diff = totalDr - totalCr;
+    h += '<div class="item"'+(Math.abs(diff) > 0.005 ? ' style="color:var(--danger);"' : '')+'>Diff: <b>'+U.fmtNum(diff)+'</b></div></div>';
 
-    const canGenerate = pendingRefs.every(ref => ctx.jvCompleted.find(p => p.ref === ref && p._fromCurrentSelection));
+    const canGenerate = allLines.length > 0
+      && pendingRefs.every(ref => ctx.jvCompleted.find(p => p.ref === ref && p._fromCurrentSelection));
     let footer = '<button onclick="App.closeModal()">Cancel</button>';
-    if (!canGenerate) footer += '<button disabled title="Complete all required Special JVs first">Generate (blocked)</button>';
+    if (!canGenerate) footer += '<button disabled title="'+(allLines.length ? 'Complete all required Special JVs first' : 'Nothing to post')+'">Generate (blocked)</button>';
     else footer += '<button class="success" onclick="Reco.commitEntryFromPreview()">Generate</button>';
 
     App.openModal('Entry Preview', h, footer);
@@ -9214,51 +9777,55 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const rows = ctx.jvBuckets[ref] || [];
     if (!rows.length) { U.toast('No rows to send','error'); return; }
 
-    // Build payload: project tpl columns onto JV input columns by name match
+    // Payload = only the mapping's inputColumns (+ _pk/_id). Names are matched
+    // exactly first, then ignoring case/spaces so "TxnType" feeds "Txn Type".
     const payload = rows.map(r => {
       const o = { _pk: r._pk, _id: r._id };
-      (def.inputColumns||[]).forEach(ic => {
-        o[ic.name] = r[ic.name] != null ? r[ic.name] : '';
-      });
+      (def.inputColumns||[]).forEach(ic => { o[ic.name] = SpecialJV.pick(r, ic.name); });
       return o;
     });
+    const missing = (def.inputColumns||[]).filter(ic => payload.every(o => o[ic.name] === '' || o[ic.name] == null)).map(ic => ic.name);
+    if (missing.length) U.toast('No values found for JV input(s): ' + missing.join(', ') + ' — check the column names', 'error');
+
+    const tplId = ctx.tplId;
+    const rerender = () => {
+      if (Reco._pendingEntry !== ctx) return;
+      Reco._renderPreviewModal(AppState.recoTemplates.find(x => x.id === tplId), AppState.recoSessions[tplId]);
+    };
 
     SpecialJV.open(ref, payload, (result) => {
-      // result = {type, ref, jvId, lines, primaryKeys, inputData}
-      const id = AppState.activeRecoId;
-      AppState.pendingSpecialJV[id] = AppState.pendingSpecialJV[id] || [];
+      // result = {type, ref, jvId, lines, primaryKeys, inputData, meta?}
+      AppState.pendingSpecialJV[tplId] = AppState.pendingSpecialJV[tplId] || [];
       const entry = {
         jvId: result.jvId || ('JV_' + Date.now().toString(36)),
         ref: result.ref,
         lines: result.lines || [],
-        primaryKeys: result.primaryKeys || rows.map(r => r._pk),
+        primaryKeys: Array.isArray(result.primaryKeys) ? result.primaryKeys : rows.map(r => r._pk),
+        sentPks: rows.map(r => r._pk),
         inputData: result.inputData || payload,
-        ts: new Date().toISOString(),
-        _fromCurrentSelection: true
+        meta: result.meta || null,
+        ts: new Date().toISOString()
       };
-      AppState.pendingSpecialJV[id].push(entry);
-      Reco._pendingEntry.jvCompleted.push(entry);
+      // Replace an earlier JV for exactly these rows (a redo), keep the rest.
+      AppState.pendingSpecialJV[tplId] = AppState.pendingSpecialJV[tplId]
+        .filter(p => !(p.ref === entry.ref && SpecialJV.matchesRows(p, rows)));
+      AppState.pendingSpecialJV[tplId].push(entry);
+      ctx.jvCompleted = ctx.jvCompleted.filter(p => !(p.ref === entry.ref && p._fromCurrentSelection));
+      ctx.jvCompleted.push(Object.assign({}, entry, { _fromCurrentSelection: true }));
       AppState.save();
       U.toast('Special JV "'+ref+'" completed','success');
-      Reco._renderPreviewModal(AppState.recoTemplates.find(x => x.id === id),
-                               AppState.recoSessions[id]);
-    });
+      rerender();
+    }, rerender);
   },
 
   _removePendingJv(jvId) {
-    const id = AppState.activeRecoId;
+    const ctx = Reco._pendingEntry;
+    const id = (ctx && ctx.tplId) || AppState.activeRecoId;
     AppState.pendingSpecialJV[id] = (AppState.pendingSpecialJV[id]||[]).filter(p => p.jvId !== jvId);
-    if (Reco._pendingEntry) {
-      Reco._pendingEntry.jvCompleted = Reco._pendingEntry.jvCompleted.filter(p => p.jvId !== jvId);
-    }
+    if (ctx) ctx.jvCompleted = ctx.jvCompleted.filter(p => p.jvId !== jvId);
     AppState.save();
-    Reco._renderPreviewModal(AppState.recoTemplates.find(x => x.id === id), AppState.recoSessions[id]);
+    if (ctx) Reco._renderPreviewModal(AppState.recoTemplates.find(x => x.id === id), AppState.recoSessions[id]);
   },
-
-
-
-
-
 
 
   _buildEntryLines(aegTpl, aegInputs, fromOverride, toOverride) {
@@ -9306,16 +9873,19 @@ renderCustomReport(tpl, sess, rpt, idx) {
   commitEntryFromPreview() {
     const pending = Reco._pendingEntry;
     if (!pending) { App.closeModal(); return; }
-    const id = AppState.activeRecoId;
+    const id = pending.tplId || AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) { App.closeModal(); return; }
     const accountingId = 'AE'+Date.now().toString(36).toUpperCase();
 
     // Combine standard + JV lines
     const allLines = pending.lines.slice();
     pending.jvCompleted.forEach(p => { (p.lines||[]).forEach(l => allLines.push(l)); });
+    if (!allLines.length) { U.toast('Nothing to post', 'error'); return; }
 
-    // Combine source row IDs (standard rows + JV-consumed PKs back-mapped)
+    const byId = new Map(sess.data.map(r => [r._id, r]));
+    const byPk = new Map(sess.data.filter(r => r._pk).map(r => [r._pk, r]));
     const sourceRowIds = pending.sourceRows.map(r => r._id);
 
     const entry = {
@@ -9323,7 +9893,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
       lines: allLines,
       sourceRowIds: sourceRowIds,
       specialJvIds: pending.jvCompleted.map(p => p.jvId),
+      specialJvs: pending.jvCompleted.map(p => ({ jvId: p.jvId, ref: p.ref, primaryKeys: p.primaryKeys || [], meta: p.meta || null })),
       createdAt: new Date().toLocaleString(),
+      createdBy: AppState.currentUser || '',
       docNumbers: {}
     };
     AppState.entryHistory[id] = AppState.entryHistory[id] || [];
@@ -9337,16 +9909,21 @@ renderCustomReport(tpl, sess, rpt, idx) {
       });
     }
 
-    // Apply post-entry classification to all source rows including JV-consumed
+    // Post-entry classification: the standard rows that produced lines and the
+    // rows each Special JV actually consumed (rows sent to a JV but left
+    // unassigned there are NOT marked as posted).
     const aeg = tpl.aegIntegration || {};
     if (aeg.postEntryColumn && aeg.postEntryValue) {
-      pending.sourceRows.forEach(r => { r[aeg.postEntryColumn] = aeg.postEntryValue; });
-      // Also apply to JV-consumed rows by PK
+      const targets = new Map();
+      (pending.standardRows || []).forEach(r => { const o = byId.get(r._id); if (o) targets.set(o._id, o); });
       pending.jvCompleted.forEach(p => {
-        (p.primaryKeys||[]).forEach(pk => {
-          const target = sess.data.find(d => d._pk === pk);
-          if (target) target[aeg.postEntryColumn] = aeg.postEntryValue;
-        });
+        (p.primaryKeys||[]).forEach(pk => { const o = byPk.get(pk); if (o) targets.set(o._id, o); });
+      });
+      const isStdCol = tpl.columns.some(c => c.name === aeg.postEntryColumn);
+      targets.forEach(o => {
+        o[aeg.postEntryColumn] = aeg.postEntryValue;
+        // Template columns are versioned: record the change so a reload keeps it.
+        if (isStdCol && o._pk) Versioning.queueChange(tpl, o._pk, o).then(v => { if (v) o._ver = v; });
       });
     }
 
@@ -9356,15 +9933,13 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     sess.selectedRows = {};
     Reco._pendingEntry = null;
-    AppState.save();
     App.closeModal();
-    sess.activeSection = 'entries';
-    AppState._activeEntryId = accountingId;
     // Phase 5: drop single-use rows / columns that were part of this entry
-    const cleanup = Reco._ssCleanupSingleUseAfterEntry(pending.sourceRows);
+    const cleanup = Reco._ssCleanupSingleUseAfterEntry(sourceRowIds.map(rid => byId.get(rid)).filter(Boolean));
     if (cleanup.rows || cleanup.cols) {
       U.toast('Cleaned up '+cleanup.rows+' single-use row(s) and '+cleanup.cols+' column(s)', 'success');
     }
+    AppState.save();
 
     sess.activeSection = 'entries';
     AppState._activeEntryId = accountingId;
@@ -9402,9 +9977,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
         h += '<div style="display:flex; gap:4px; margin-bottom:3px; align-items:center;">';
         h += '<span class="badge general" style="background:'+U.escAttr(g.color)+';color:#fff;">●</span>';
         h += '<span style="flex:1; font-size:11px;">'+U.esc(g.name)+' <span class="text-muted">('+g.members.length+')</span></span>';
-        h += '<button class="small" onclick="Reco.addSelectionToGroup(\''+U.escAttr(g.id)+'\')" '+(selectedIds.length?'':'disabled')+' title="Add selected">+</button>';
-        h += '<button class="small danger" onclick="Reco.removeSelectionFromGroup(\''+U.escAttr(g.id)+'\')" '+(selectedIds.length?'':'disabled')+' title="Remove selected">−</button>';
-        h += '<button class="small" onclick="Reco.openGroupDetails(\''+U.escAttr(g.id)+'\')" title="View">👁</button>';
+        h += '<button class="small" onclick="Reco.addSelectionToGroup(\''+U.jsq(g.id)+'\')" '+(selectedIds.length?'':'disabled')+' title="Add selected">+</button>';
+        h += '<button class="small danger" onclick="Reco.removeSelectionFromGroup(\''+U.jsq(g.id)+'\')" '+(selectedIds.length?'':'disabled')+' title="Remove selected">−</button>';
+        h += '<button class="small" onclick="Reco.openGroupDetails(\''+U.jsq(g.id)+'\')" title="View">👁</button>';
         h += '</div>';
       });
       h += '</div>';
@@ -9487,8 +10062,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
     groups.forEach(g => {
       h += '<tr><td><span class="badge general" style="background:'+U.escAttr(g.color)+';color:#fff;">●</span> <b>'+U.esc(g.name)+'</b><br><span class="text-muted" style="font-size:10px;">'+U.esc(g.description||'')+'</span></td>';
       h += '<td>'+g.members.length+'</td>';
-      h += '<td><button class="small primary" onclick="Reco.openGroupDetails(\''+U.escAttr(g.id)+'\')">View Timeline</button>';
-      h += '<button class="small danger" onclick="Reco.removeMemberFromGroup(\''+U.escAttr(g.id)+'\',\''+U.escAttr(pk)+'\')">Remove from group</button></td></tr>';
+      h += '<td><button class="small primary" onclick="Reco.openGroupDetails(\''+U.jsq(g.id)+'\')">View Timeline</button>';
+      h += '<button class="small danger" onclick="Reco.removeMemberFromGroup(\''+U.jsq(g.id)+'\',\''+U.jsq(pk)+'\')">Remove from group</button></td></tr>';
     });
     h += '</tbody></table>';
     App.openModal('Groups containing this row', h, '<button onclick="App.closeModal()">Close</button>');
@@ -9520,8 +10095,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
     h += '<b>'+U.esc(g.name)+'</b>';
     h += '<span class="text-muted">'+U.esc(g.description||'')+'</span>';
     h += '<div style="flex:1"></div>';
-    h += '<button class="small" onclick="Reco.renameGroup(\''+U.escAttr(gid)+'\')">Rename</button>';
-    h += '<button class="small danger" onclick="Reco.deleteGroup(\''+U.escAttr(gid)+'\')">Delete Group</button>';
+    h += '<button class="small" onclick="Reco.renameGroup(\''+U.jsq(gid)+'\')">Rename</button>';
+    h += '<button class="small danger" onclick="Reco.deleteGroup(\''+U.jsq(gid)+'\')">Delete Group</button>';
     h += '</div>';
 
     h += '<div class="summary-bar"><div class="item">Total members: <b>'+g.members.length+'</b></div>';
@@ -9544,14 +10119,14 @@ renderCustomReport(tpl, sess, rpt, idx) {
         if (c.toLowerCase().includes('date')) v = U.formatExcelDate(v);
         h += '<td>'+U.esc(v||'')+'</td>';
       });
-      h += '<td><button class="small danger" onclick="Reco.removeMemberFromGroup(\''+U.escAttr(gid)+'\',\''+U.escAttr(r.pk)+'\')">−</button></td>';
+      h += '<td><button class="small danger" onclick="Reco.removeMemberFromGroup(\''+U.jsq(gid)+'\',\''+U.jsq(r.pk)+'\')">−</button></td>';
       h += '</tr>';
     });
     unresolved.forEach(pk => {
       h += '<tr><td><span class="badge" style="background:var(--danger-bg);color:var(--danger);">missing</span></td>';
       h += '<td><code style="font-size:10px;">'+U.esc(pk)+'</code></td>';
       h += '<td colspan="'+displayCols.length+'" class="text-muted">PK not found in any version file</td>';
-      h += '<td><button class="small danger" onclick="Reco.removeMemberFromGroup(\''+U.escAttr(gid)+'\',\''+U.escAttr(pk)+'\')">−</button></td></tr>';
+      h += '<td><button class="small danger" onclick="Reco.removeMemberFromGroup(\''+U.jsq(gid)+'\',\''+U.jsq(pk)+'\')">−</button></td></tr>';
     });
     h += '</tbody></table></div>';
 
@@ -9591,8 +10166,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
         h += '<td>'+U.esc(g.description||'')+'</td>';
         h += '<td>'+g.members.length+'</td>';
         h += '<td>'+U.esc((g.createdAt||'').substring(0,10))+'</td>';
-        h += '<td><button class="small primary" onclick="Reco.openGroupDetails(\''+U.escAttr(g.id)+'\')">View</button>';
-        h += '<button class="small danger" onclick="Reco.deleteGroup(\''+U.escAttr(g.id)+'\')">Delete</button></td></tr>';
+        h += '<td><button class="small primary" onclick="Reco.openGroupDetails(\''+U.jsq(g.id)+'\')">View</button>';
+        h += '<button class="small danger" onclick="Reco.deleteGroup(\''+U.jsq(g.id)+'\')">Delete</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -9620,7 +10195,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     let h = '<div class="panel"><h2>Manage — '+U.esc(tpl.name)+'</h2>';
     h += '<div class="card-grid">';
-    h += '<div class="card" onclick="RecoTemplate.edit(\''+U.escAttr(tpl.id)+'\')">';
+    h += '<div class="card" onclick="RecoTemplate.edit(\''+U.jsq(tpl.id)+'\')">';
     h += '<h3>Edit Template</h3><p>Modify columns, rules, AEG integration, reports, and other settings.</p></div>';
     h += '<div class="card" onclick="Reco.backupSession()">';
     h += '<h3>Backup Session</h3><p>Export this template\'s data, corrections, and entries to JSON.</p></div>';
@@ -9649,12 +10224,72 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
 
 
+    h += '<div class="card" onclick="Reco.openVersionHistoryModal()">';
+    h += '<h3>Version History</h3><p>Upload / edit files in <code>reco_data/'+U.esc(Versioning.folderFor(tpl))+'/</code>. Compact long edit histories.</p></div>';
+
     h += '<div class="card" onclick="if(confirm(\'Clear all loaded data for this template? Manual offsets, corrections, and entries are kept.\')) { Reco.clearSession(); }">';
     h += '<h3 style="color:var(--danger, #b91c1c);">Clear Loaded Data</h3><p>Remove rows but keep template, masters, and entry history.</p></div>';
     h += '</div>';
     h += '<input type="file" id="sessionRestoreFile" accept=".json" style="display:none" onchange="Reco.restoreSession(event)" />';
     h += '</div>';
     return h;
+  },
+
+  /* ---- Version history: list files, compact long edit histories ---- */
+  async openVersionHistoryModal() {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    if (!tpl) return;
+    App.openModal('Version History — ' + tpl.name, '<div class="empty">Reading version files…</div>', '<button onclick="App.closeModal()">Close</button>');
+    await AppState.flush();   // make sure queued edits are on disk before counting
+    const files = await Versioning.listFiles(tpl);
+    const stats = [];
+    for (const f of files) {
+      const rows = await Versioning.readFile(f.fullPath);
+      const uploads = rows.filter(r => r._ver === 'upload' || Versioning._verScore(r._ver) < 0).length;
+      const edited = new Set(rows.filter(r => Versioning._verScore(r._ver) > 0).map(r => r._pk));
+      stats.push({ f, rows: rows.length, uploads, edits: rows.length - uploads, removable: rows.length - uploads - edited.size });
+    }
+    Reco._versionStats = stats;
+    let h = '<div class="help">Edits are append-only: every change adds a row (C1, C2, …) to the day\'s file. Compacting keeps each key\'s upload row and its <b>latest</b> edit and drops the intermediate ones, which makes large files faster to open. The full file can be archived to <code>_archive/</code> first.</div>';
+    if (!stats.length) h += '<div class="empty">No version files yet.</div>';
+    else {
+      h += '<table><thead><tr><th>File</th><th>Rows</th><th>Uploads</th><th>Edits</th><th>Removable</th><th></th></tr></thead><tbody>';
+      stats.forEach((st, i) => {
+        h += '<tr><td><b>' + U.esc(st.f.label) + '</b><br><code style="font-size:10px;">' + U.esc(st.f.fullPath) + '</code></td>';
+        h += '<td>' + st.rows + '</td><td>' + st.uploads + '</td><td>' + st.edits + '</td><td>' + st.removable + '</td>';
+        h += '<td>' + (st.removable ? '<button class="small" onclick="Reco._compactVersions([' + i + '])">Compact</button>' : '<span class="text-muted">—</span>') + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      h += '<label class="inline" style="margin-top:8px;"><input type="checkbox" id="vhArchive" checked> Keep an archived copy of the full history</label>';
+    }
+    const total = stats.reduce((n, st) => n + st.removable, 0);
+    let foot = '<button onclick="App.closeModal()">Close</button>';
+    if (total) foot += '<button class="primary" onclick="Reco._compactVersions(null)">Compact all (' + total + ' rows)</button>';
+    App.openModal('Version History — ' + tpl.name, h, foot);
+  },
+
+  async _compactVersions(indexes) {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const stats = Reco._versionStats || [];
+    const keep = !!(document.getElementById('vhArchive') || {}).checked;
+    const targets = (indexes ? indexes.map(i => stats[i]) : stats).filter(st => st && st.removable);
+    if (!targets.length) return;
+    if (!keep && !confirm('Compact without keeping an archive? The intermediate edit rows are deleted permanently.')) return;
+    await AppState.flush();
+    let removed = 0;
+    for (const st of targets) {
+      try {
+        const r = await Versioning.compactFile(tpl, st.f.fullPath, keep);
+        removed += r.before - r.after;
+      } catch (e) {
+        console.error('compact failed', e);
+        U.toast('Could not compact ' + st.f.label + ': ' + (e && e.message || e), 'error');
+      }
+    }
+    U.toast('Removed ' + removed + ' intermediate version row(s)', 'success');
+    Reco.openVersionHistoryModal();
   },
 
   viewManualOffsetMaster() {
@@ -9668,7 +10303,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       h += '<table><thead><tr><th>Primary Key</th><th>Reco ID</th><th></th></tr></thead><tbody>';
       keys.forEach(k => {
         h += '<tr><td><code>'+U.esc(k)+'</code></td><td>'+U.esc(mm[k].recoId||'')+'</td>';
-        h += '<td><button class="small danger" onclick="Reco.removeManualOffset(\''+U.escAttr(k)+'\')">Remove</button></td></tr>';
+        h += '<td><button class="small danger" onclick="Reco.removeManualOffset(\''+U.jsq(k)+'\')">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -9710,7 +10345,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       h += '<table><thead><tr><th>Primary Key</th><th>Column</th><th>Old Value</th><th>New Value</th><th></th></tr></thead><tbody>';
       rows.forEach(r => {
         h += '<tr><td><code>'+U.esc(r.pk)+'</code></td><td>'+U.esc(r.col)+'</td><td>'+U.esc(r.oldVal)+'</td><td>'+U.esc(r.newVal)+'</td>';
-        h += '<td><button class="small danger" onclick="Reco.removeCorrection(\''+U.escAttr(r.pk)+'\',\''+U.escAttr(r.col)+'\',false); App.closeModal();">Remove</button></td></tr>';
+        h += '<td><button class="small danger" onclick="Reco.removeCorrection(\''+U.jsq(r.pk)+'\',\''+U.jsq(r.col)+'\',false); App.closeModal();">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -9727,8 +10362,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
       h += '<table><thead><tr><th>Document Number</th><th>Accounting ID</th><th></th></tr></thead><tbody>';
       keys.sort().forEach(k => {
         h += '<tr><td><b>'+U.esc(k)+'</b></td><td>'+U.esc(dn[k])+'</td>';
-        h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.escAttr(dn[k])+'\')">View Entry</button>';
-        h += '<button class="small danger" onclick="delete AppState.docNumberMaster[\''+U.escAttr(id)+'\'][\''+U.escAttr(k)+'\']; AppState.save(); App.closeModal(); Reco.viewDocNumberMaster()">Remove</button></td></tr>';
+        h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.jsq(dn[k])+'\')">View Entry</button>';
+        h += '<button class="small danger" onclick="delete AppState.docNumberMaster[\''+U.jsq(id)+'\'][\''+U.jsq(k)+'\']; AppState.save(); App.closeModal(); Reco.viewDocNumberMaster()">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -9758,6 +10393,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
       try {
         const d = JSON.parse(e.target.result);
         const id = AppState.activeRecoId;
+        const cur = AppState.recoTemplates.find(x => x.id === id);
+        if (!d || !d.session) { U.toast('This file is not a session backup','error'); return; }
+        if (d.template && d.template.id && d.template.id !== id) {
+          if (!confirm('This backup was taken from template "' + (d.template.name || d.template.id) + '", not "' + (cur ? cur.name : id) + '". Restore it into the current template anyway?')) return;
+        } else if (!confirm('Replace the loaded data, manual offsets, corrections, document numbers and entries of this template with the backup?')) return;
         if (d.session) AppState.recoSessions[id] = d.session;
         if (d.manualOffsetMaster) AppState.manualOffsetMaster[id] = d.manualOffsetMaster;
         if (d.correctionMaster) AppState.correctionMaster[id] = d.correctionMaster;
@@ -9774,7 +10414,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
   clearSession() {
     const id = AppState.activeRecoId;
     if (AppState.recoSessions[id]) {
-      AppState.recoSessions[id] = Reco.makeSession();
+      const fresh = Reco.makeSession();
+      fresh._autoLoadAttempted = true;   // don't pull the latest file straight back in
+      AppState.recoSessions[id] = fresh;
       AppState.save();
       App.navigate('reco');
       U.toast('Loaded data cleared','success');
@@ -9869,71 +10511,9 @@ const AEG = {
 
   currentTemplate() { return AppState.aegTemplates.find(t => t.id === AEG.currentTemplateId) || null; },
 
-  lookupMaster(ref) {
-    if (!ref) return null;
-    const r = String(ref).trim().toLowerCase();
-    return AppState.aegMaster.find(m => String(m.Reference||'').trim().toLowerCase()===r) || null;
-  },
+  // lookupMaster / resolveVariables / resolveFromRef / resolveToRef / buildLine
+  // are defined once, further down (an earlier duplicate set was dead code).
 
-  resolveVariables(str, template, inputRow) {
-    if (str==null) return '';
-    if (typeof str!=='string') return String(str);
-    if (str.indexOf('<')===-1) return str;
-    return str.replace(/<([A-Za-z0-9_]+)>/g, (match, varName) => {
-      const v = (template.variables||[]).find(x => x.name===varName);
-      if (!v) return match;
-      if (v.source==='today') return U.todayStr();
-      if (v.source==='month') return String(new Date().getMonth()+1).padStart(2,'0');
-      if (v.source==='year') return String(new Date().getFullYear());
-      if (v.source==='fixed') return v.value||'';
-      if (v.source==='column') return inputRow ? String(inputRow[v.column]||'') : '';
-      return match;
-    });
-  },
-
-  resolveFromRef(t, row) {
-    if (t.fromAccount.mode==='select') return AEG.fromSelection||(t.fromAccount.options[0]||'');
-    return String(row[t.fromAccount.inputColumn]||'');
-  },
-  resolveToRef(t, row) {
-    if (t.toAccount.mode==='input') return String(row[t.toAccount.inputColumn]||'');
-    if (t.toAccount.mode==='select') return AEG.toSelection||(t.toAccount.options[0]||'');
-    const v = String(row[t.toAccount.inputColumn]||'').trim();
-    return v || AEG.toSelection || (t.toAccount.options[0]||'');
-  },
-
-  buildLine(t, inputRow, group, accountRef, drAmt, crAmt, side) {
-    const masterRow = AEG.lookupMaster(accountRef);
-    const line = {};
-    const userRcVal = (t.rcMode==='any'&&t.rcColumn) ? String(inputRow[t.rcColumn]||'') : '';
-    const resolvedCurrency = t.currencyMode==='AED' ? 'AED' : String(inputRow[t.currencyColumn]||'');
-    t.outputColumns.forEach(col => {
-      const m = col.mapping||{};
-      let val = '', flag = null;
-      if (m.type==='value') { const v = m.side==='Dr'?drAmt:crAmt; val = (v&&v!==0)?Number(v).toFixed(2):''; }
-      else if (m.type==='currency') { val = resolvedCurrency; }
-      else if (m.type==='input') { val = AEG.resolveVariables(String(inputRow[m.inputColumn]==null?'':inputRow[m.inputColumn]), t, inputRow); }
-      else if (m.type==='master') {
-        const mc = m.masterColumn;
-        if (mc==='RC') {
-          const mrc = masterRow?String(masterRow.RC||''):'';
-          if (mrc) val=mrc; else if (userRcVal) val=userRcVal; else { val=''; flag='missing-rc'; }
-        } else {
-          val = masterRow?String(masterRow[mc]||''):'';
-          if (!val&&masterRow==null) flag='missing-info';
-        }
-        val = AEG.resolveVariables(val, t, inputRow);
-      }
-      else if (m.type==='custom') { val = AEG.resolveVariables(m.value||'', t, inputRow); }
-      else if (m.type==='side') { val = (side||'').toUpperCase(); }
-      else if (m.type==='accountRef') { val = accountRef; }
-      if (flag) line[col.name] = { value:val, _missingRC:flag==='missing-rc', _missingInfo:flag==='missing-info' };
-      else line[col.name] = val;
-    });
-    return line;
-  },
-
-  
 /* ---- AEG Render functions ---- */
   renderProcess() {
     const el = document.getElementById('aegContent');
@@ -10027,7 +10607,7 @@ const AEG = {
       AEG.inputData.forEach((row, i) => {
         h += '<tr><td><button class="small danger" onclick="AEG.inputData.splice(' + i + ',1); AEG.renderProcess()">×</button></td>';
         t.inputColumns.forEach(c => {
-          h += '<td><input type="text" value="' + U.escAttr(row[c.name] || '') + '" oninput="AEG.inputData[' + i + '][\'' + U.escAttr(c.name) + '\']=this.value" /></td>';
+          h += '<td><input type="text" value="' + U.escAttr(row[c.name] || '') + '" oninput="AEG.inputData[' + i + '][\'' + U.jsq(c.name) + '\']=this.value" /></td>';
         });
         h += '</tr>';
       });
@@ -10147,11 +10727,11 @@ const AEG = {
     });
 
     let totDr = 0, totCr = 0;
-    const drCol = t.outputColumns.find(c => c.mapping.type === 'value' && c.mapping.side === 'Dr');
-    const crCol = t.outputColumns.find(c => c.mapping.type === 'value' && c.mapping.side === 'Cr');
+    const drCol = t.outputColumns.find(c => c.mapping && c.mapping.type === 'value' && c.mapping.side === 'Dr');
+    const crCol = t.outputColumns.find(c => c.mapping && c.mapping.type === 'value' && c.mapping.side === 'Cr');
     lines.forEach(l => {
-      if (drCol) { const v = l[drCol.name]; totDr += U.num(typeof v === 'object' ? v.value : v); }
-      if (crCol) { const v = l[crCol.name]; totCr += U.num(typeof v === 'object' ? v.value : v); }
+      if (drCol) { const v = l[drCol.name]; totDr += U.num(v && typeof v === 'object' ? v.value : v); }
+      if (crCol) { const v = l[crCol.name]; totCr += U.num(v && typeof v === 'object' ? v.value : v); }
     });
 
     AEG.output = { lines, totals: { dr: totDr, cr: totCr }, generatedAt: new Date().toLocaleString() };
@@ -10216,7 +10796,7 @@ const AEG = {
     if (!ref) return null;
     const r = String(ref).trim().toLowerCase();
     // Assuming accounts master lives in AppState.aegMaster. Adjust if named differently in Reco app.
-    const masterList = AppState.aegMaster || AEG.master || []; 
+    const masterList = AppState.aegMaster || [];
     return masterList.find(m => String(m.Reference || '').trim().toLowerCase() === r) || null;
   },
 
@@ -10237,8 +10817,8 @@ const AEG = {
       } else if (m.type === 'currency') {
         val = resolvedCurrency;
       } else if (m.type === 'input') {
-        val = String(inputRow[m.inputColumn] || '');
-        val = AEG.resolveVariables(val, t, inputRow);
+        const raw = inputRow[m.inputColumn];
+        val = AEG.resolveVariables(raw == null ? '' : String(raw), t, inputRow);   // keep a real 0
       } else if (m.type === 'master') {
         const mc = m.masterColumn;
         if (mc === 'RC') {
@@ -10284,10 +10864,10 @@ const AEG = {
       h += '<td>'+U.esc(t.currencyMode)+'</td>';
       h += '<td>'+(t.aggregate?(t.aggregateBy||[]).join(', '):'—')+'</td>';
       h += '<td>';
-      h += '<button class="small primary" onclick="AEG.editTemplate(\''+U.escAttr(t.id)+'\')">Edit</button>';
-      h += '<button class="small" onclick="AEG.duplicateTemplate(\''+U.escAttr(t.id)+'\')">Dup</button>';
-      h += '<button class="small" onclick="AEG.exportTemplate(\''+U.escAttr(t.id)+'\')">Json</button>';
-      h += '<button class="small danger" onclick="AEG.deleteTemplate(\''+U.escAttr(t.id)+'\')">Del</button>';
+      h += '<button class="small primary" onclick="AEG.editTemplate(\''+U.jsq(t.id)+'\')">Edit</button>';
+      h += '<button class="small" onclick="AEG.duplicateTemplate(\''+U.jsq(t.id)+'\')">Dup</button>';
+      h += '<button class="small" onclick="AEG.exportTemplate(\''+U.jsq(t.id)+'\')">Json</button>';
+      h += '<button class="small danger" onclick="AEG.deleteTemplate(\''+U.jsq(t.id)+'\')">Del</button>';
       h += '</td></tr>';
     });
     h += '</tbody></table></div>';
@@ -10381,7 +10961,7 @@ const AEG = {
       });
       AEG.inputData = data.map(r => {
         const o = {};
-        t.inputColumns.forEach(c => { o[c.name] = map[c.name] ? (r[map[c.name]]||'') : ''; });
+        t.inputColumns.forEach(c => { const v = map[c.name] ? r[map[c.name]] : ''; o[c.name] = v == null ? '' : v; });
         return o;
       });
       AEG.output = { lines:[], generatedAt:null };
@@ -10403,7 +10983,7 @@ const AEG = {
     });
     AEG.inputData = AEG.inputData.concat(data.map(r => {
       const o = {};
-      t.inputColumns.forEach(c => { o[c.name] = map[c.name] ? (r[map[c.name]]||'') : ''; });
+      t.inputColumns.forEach(c => { const v = map[c.name] ? r[map[c.name]] : ''; o[c.name] = v == null ? '' : v; });
       return o;
     }));
     AEG.output = { lines:[], generatedAt:null };
@@ -10435,12 +11015,13 @@ const AEG = {
     const t = AEG.currentTemplate(); if (!t) return;
     const cols = t.outputColumns.map(c=>c.name);
     const rows = AEG.output.lines.map(l => { const r={}; cols.forEach(c => { const cell=l[c]; r[c]=cell&&typeof cell==='object'?(cell.value||''):(cell||''); }); return r; });
-    if (kind==='csv') U.download('entries_'+Date.now()+'.csv', Papa.unparse(rows,{columns:cols}), 'text/csv');
+    const name = 'entries_' + Versioning._safe(t.name) + '_' + U.todayStr();
+    if (kind==='csv') U.download(name+'.csv', Papa.unparse(rows,{columns:cols}), 'text/csv');
     else {
       const ws = XLSX.utils.json_to_sheet(rows,{header:cols});
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Entries');
-      XLSX.writeFile(wb, 'entries_'+Date.now()+'.xlsx');
+      U.downloadWorkbook(wb, name+'.xlsx');
     }
   },
 
@@ -10493,24 +11074,7 @@ const AEG = {
     const t = AppState.aegTemplates.find(x => x.id === id);
     if (!t) return;
 
-    // 1. Prepare the data
-    const fileName = (t.name || 'template') + '.json';
-    const content = JSON.stringify(t, null, 2);
-    const blob = new Blob([content], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-
-    // 2. Create a temporary link and trigger it
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-
-    // 3. Cleanup
-    a.remove();
-    // We use a slight delay before revoking the URL to ensure 
-    // the browser has processed the download request.
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    U.download(Versioning._safe(t.name || 'template') + '.json', JSON.stringify(t, null, 2), 'application/json');
   },
 
   importTemplate(ev) {
@@ -10639,7 +11203,7 @@ const AEG = {
       (t.inputColumns || []).forEach(c => {
         const checked = (t.aggregateBy || []).indexOf(c.name) !== -1;
         h += '<label class="inline"><input type="checkbox" ' + (checked ? 'checked' : '') +
-          ' onchange="AEG.toggleAggregateBy(\'' + U.escAttr(c.name) + '\',this.checked)"> ' + U.esc(c.label) + '</label>';
+          ' onchange="AEG.toggleAggregateBy(\'' + U.jsq(c.name) + '\',this.checked)"> ' + U.esc(c.label) + '</label>';
       });
       h += '</div>';
     }
@@ -10836,7 +11400,10 @@ const AEG = {
 /* ================================================================
    BOOT
    ================================================================ */
+let _bootStarted = false;
 async function bootApp() {
+  if (_bootStarted) return;          // pywebviewready and the fallback timer can both fire
+  _bootStarted = true;
   try { await AppState.load(); }
   catch(e) { console.error('AppState.load failed', e); }
   try { await SpecialJV.load(); }
@@ -10844,18 +11411,34 @@ async function bootApp() {
   populateThemeSelect();
   App._wireRecoHotkeys();
   App.navigate('home');
+  if (Store.loadProblems.length) {
+    App.openModal('Some files could not be loaded',
+      '<div class="help">Reco started, but:</div><ul>' + Store.loadProblems.map(p => '<li>' + U.esc(p) + '</li>').join('') + '</ul>',
+      '<button class="primary" onclick="App.closeModal()">OK</button>');
+  }
 }
+
+// Give the launcher a way to flush before the window closes, and flush on unload.
+window.__hubPendingWrites = () => (typeof AppState !== 'undefined' ? AppState.pendingCount() : 0);
+window.__hubFlush = () => AppState.flush();
+window.addEventListener('pagehide', () => { if (_bootStarted) AppState.flush(); });
 
 // Inside pywebview
 window.addEventListener('pywebviewready', bootApp);
 
-// Browser fallback
-setTimeout(() => {
-  if (!window.pywebview) {
+// pywebview may finish injecting the bridge before this listener exists, so
+// also poll for it; with no pywebview at all, boot in browser mode (localStorage).
+(function waitForBridge(n) {
+  if (_bootStarted) return;
+  const api = window.pywebview && window.pywebview.api;
+  if (api && typeof api.read_file === 'function') return bootApp();
+  if (!window.pywebview && n <= 90) {
     console.warn('Pywebview not detected. Booting in local browser mode.');
-    bootApp();
+    return bootApp();
   }
-}, 1000);
+  if (n <= 0) return bootApp();
+  setTimeout(() => waitForBridge(n - 1), 100);
+})(100);
 
 </script>
 </body>

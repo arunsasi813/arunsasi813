@@ -62,14 +62,20 @@
 </head>
 <body>
 
+
 <h2>TCH JV — Cross Currency Adjustment &amp; TCH Charges</h2>
 <div id="summary" class="summary"></div>
 
 <div id="tchContainer"></div>
 <button class="add-tch" onclick="addTchSection()">+ Add TCH Section</button>
 
-<h3 style="margin-top:14px;">Source Rows · assign each to a TCH section</h3>
-<div style="background:#fff; border:1px solid #e5e7eb; border-radius:6px; overflow:auto; max-height:340px;">
+<div style="display:flex; align-items:center; gap:8px; margin-top:14px; flex-wrap:wrap;">
+  <h3 style="margin:0;">Source Rows · assign each to a TCH section</h3>
+  <div style="flex:1"></div>
+  <button class="small" onclick="autoAssignByPeriod()" title="Put every row into the section whose period contains the row's date">Auto-assign by period</button>
+  <select id="assignAllSel" onchange="assignAll(this.value); this.value='';" style="min-width:140px;"></select>
+</div>
+<div style="background:#fff; border:1px solid #e5e7eb; border-radius:6px; overflow:auto; max-height:340px; margin-top:6px;">
   <table class="rows-table" id="rowsTable"><thead></thead><tbody></tbody></table>
 </div>
 
@@ -79,79 +85,150 @@
   <button onclick="onCancel()">Cancel</button>
   <button class="small" onclick="togglePreview()" id="previewBtn">Show Preview</button>
   <div style="flex:1"></div>
+  <span id="assignInfo" style="align-self:center; font-size:12px; color:#6b7280;"></span>
   <button class="primary" onclick="onSubmit()">Generate Lines &amp; Return</button>
 </div>
 
 <script>
 (function () {
   // ───────────────────────────────────────────────────────────────────────────
-  // 0. Read inputs from the parent (Reco app) — see the spec doc
+  // 0. Inputs from the parent (Reco app)
+  //    Same-origin parents expose window.parent._specialJvInputs/_Ref/_Def.
+  //    When the browser isolates file:// pages (parent not readable), we ask
+  //    Reco with {type:'specialJV.ready'} and it answers {type:'specialJV.init'}.
   // ───────────────────────────────────────────────────────────────────────────
-  const parentWin = window.parent;
-  const inputs = (parentWin && parentWin._specialJvInputs) || [];
-  const ref    = (parentWin && parentWin._specialJvRef)    || 'TCH';
-  const def    = (parentWin && parentWin._specialJvDef)    || { inputColumns: [] };
+  const PAGE_REF = (decodeURIComponent((location.pathname.split('/').pop() || '')).replace(/\.html?$/i, '')) || 'TCH';
+  let inputs = [];
+  let ref = PAGE_REF;
+  let def = { inputColumns: [] };
+
+  function readParentGlobals() {
+    try {
+      const pw = window.parent;
+      if (!pw || pw === window || !pw._specialJvRef) return false;
+      inputs = pw._specialJvInputs || [];
+      ref = pw._specialJvRef || PAGE_REF;
+      def = pw._specialJvDef || def;
+      return true;
+    } catch (e) {
+      return false;   // SecurityError: file:// isolation → use postMessage
+    }
+  }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 1. Helpers
+  // 1. Configuration — account codes come from special_jv_mapping/TCH.json
+  //    ("accounts"); these defaults are the values the JV always used.
+  // ───────────────────────────────────────────────────────────────────────────
+  const DEFAULT_ACCOUNTS = {
+    clearing:    { nominal: '17036', rc: '78061' },   // TCH clearing
+    crossCcy:    { nominal: '85001', rc: '78061' },   // cross-currency adjustment
+    charges:     { nominal: '35008', rc: '50000' },   // BSP TCH charges (expense)
+    subNominal:  '0',
+    analysisKey: '0',
+    lob:         '51',
+    reference:   '',
+    doc:         ''
+  };
+  let ACC = DEFAULT_ACCOUNTS;
+  function loadAccounts() {
+    const a = (def && def.accounts) || {};
+    const pick = (k) => Object.assign({}, DEFAULT_ACCOUNTS[k], a[k] || {});
+    ACC = Object.assign({}, DEFAULT_ACCOUNTS, a, { clearing: pick('clearing'), crossCcy: pick('crossCcy'), charges: pick('charges') });
+    ['subNominal', 'analysisKey', 'lob', 'reference', 'doc'].forEach(k => { ACC[k] = String(ACC[k] == null ? '' : ACC[k]); });
+  }
+
+  // One list of accepted column names per field, used everywhere (the totals
+  // and the row colouring used to disagree on "TxnType").
+  const FIELDS = {
+    date:     ['Date', 'Posting Date', 'Txn Date', 'Transaction Date', 'Value Date'],
+    txnType:  ['Txn Type', 'Transaction Type', 'Type'],
+    currency: ['Currency', 'Cur', 'CCY'],
+    amount:   ['FC Amount', 'Amount', 'Amt', 'Value']
+  };
+  const RAPID_CCY = ['RUB', 'USD', 'EUR'];
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 2. Helpers
   // ───────────────────────────────────────────────────────────────────────────
   const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
+  // 1,234.50 · (1,234.50) · 1,234.50- · spaces as thousands separators
   function num(v) {
     if (v == null || v === '') return 0;
-    const n = parseFloat(String(v).replace(/,/g, ''));
-    return isNaN(n) ? 0 : n;
+    if (typeof v === 'number') return isFinite(v) ? v : 0;
+    let s = String(v).trim(), neg = false;
+    if (s.length > 2 && s[0] === '(' && s[s.length - 1] === ')') { neg = true; s = s.slice(1, -1).trim(); }
+    if (s.length > 1 && s[s.length - 1] === '-' && s[0] !== '-') { neg = !neg; s = s.slice(0, -1).trim(); }
+    const n = parseFloat(s.replace(/[,\s  ]/g, ''));
+    return isNaN(n) ? 0 : (neg ? -n : n);
   }
-  function fmtNum(n) { return (Number(n) || 0).toFixed(2); }
+  function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function fmtNum(n) { return (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
-  // Pick a field from a row, trying multiple name variants case-insensitively
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  const normKey = s => String(s).toLowerCase().replace(/[\s_\-]/g, '');
+  // A field from a row: exact name first, then names that differ only in case/spaces/underscores.
   function pickField(row, candidates) {
     for (const cand of candidates) {
       if (row[cand] != null && row[cand] !== '') return row[cand];
     }
     const keys = Object.keys(row);
     for (const cand of candidates) {
-      const k = keys.find(k => k.toLowerCase().replace(/[\s_]/g,'') === cand.toLowerCase().replace(/[\s_]/g,''));
+      const k = keys.find(k => normKey(k) === normKey(cand));
       if (k && row[k] != null && row[k] !== '') return row[k];
     }
     return '';
   }
 
-  // Parse common date formats: yyyy-mm-dd, dd/mm/yy, dd/mm/yyyy, mm/dd/yy, Excel serial
-  function parseDate(v) {
+  function mkDate(y, m, d) {
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+    const dt = new Date(y, m - 1, d);
+    return (dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d) ? dt : null;
+  }
+  function excelSerial(n) { const d = new Date(1899, 11, 30); d.setDate(d.getDate() + Math.floor(n)); return d; }
+
+  // Dates in the source rows: day-first like Reco (DD/MM/YY), falling back to
+  // MM/DD when the first part cannot be a day; ISO; DD-MMM-YY; Excel serials.
+  function parseRowDate(v) {
     if (v == null || v === '') return null;
     if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
-    if (typeof v === 'number') {
-      const d = new Date(Date.UTC(1899, 11, 30) + v * 86400000);
-      return isNaN(d.getTime()) ? null : d;
-    }
+    if (typeof v === 'number') return excelSerial(v);
     const s = String(v).trim();
-    let m;
-    m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-    if (m) { const d = new Date(+m[1], +m[2]-1, +m[3]); return isNaN(d.getTime()) ? null : d; }
+    if (/^\d{5}(\.\d+)?$/.test(s)) { const n = parseFloat(s); if (n > 20000 && n < 80000) return excelSerial(n); }
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return mkDate(+m[1], +m[2], +m[3]);
     m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
+    if (m) { let y = +m[3]; if (y < 100) y += 2000; return mkDate(y, +m[2], +m[1]) || mkDate(y, +m[1], +m[2]); }
+    m = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[A-Za-z]*\.?[\s\-\/,]+(\d{2,4})$/);
     if (m) {
-      // Assume DD/MM/YY (host convention) — ambiguous with MM/DD; we go with DD/MM
-      let y = +m[3]; if (y < 100) y += 2000;
-      const d = new Date(y, +m[2]-1, +m[1]);
-      return isNaN(d.getTime()) ? null : d;
+      const mi = MONTH_NAMES.findIndex(x => x.toLowerCase() === m[2].toLowerCase());
+      if (mi >= 0) { let y = +m[3]; if (y < 100) y += 2000; return mkDate(y, mi + 1, +m[1]); }
     }
-    const d = new Date(s);
-    return isNaN(d.getTime()) ? null : d;
+    return null;
   }
 
-  // Format MM/DD/YY (per user request) for the period inputs
+  // Period inputs are MM/DD/YY (what the presets produce). Also accepts ISO.
+  function parsePeriod(v) {
+    const s = String(v || '').trim();
+    if (!s) return null;
+    let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return mkDate(+m[1], +m[2], +m[3]);
+    m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2}|\d{4})$/);
+    if (m) { let y = +m[3]; if (y < 100) y += 2000; return mkDate(y, +m[1], +m[2]); }
+    return null;
+  }
+
   function fmtMMDDYY(d) {
     if (!d) return '';
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const yy = String(d.getFullYear()).slice(-2);
-    return mm + '/' + dd + '/' + yy;
+    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') + '/' + String(d.getFullYear()).slice(-2);
   }
 
-  // Format the date-range string for the Remarks field: "DD MMM - DD MMM YY"
+  // Remarks: "DD MMM - DD MMM YY"
   function fmtRangeRemark(fromStr, toStr) {
-    const f = parseDate(fromStr), t = parseDate(toStr);
+    const f = parsePeriod(fromStr), t = parsePeriod(toStr);
     if (!f || !t) return '<period>';
     const dd = (d) => String(d.getDate()).padStart(2, '0');
     const mm = (d) => MONTH_NAMES[d.getMonth()];
@@ -159,21 +236,39 @@
     return dd(f) + ' ' + mm(f) + ' - ' + dd(t) + ' ' + mm(t) + ' ' + yy(t);
   }
 
-  // Last day of a month
   function lastDayOfMonth(y, mIdx) { return new Date(y, mIdx + 1, 0).getDate(); }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // 2. State
-  // ───────────────────────────────────────────────────────────────────────────
-  let tchSections = [];       // array of {id, periodFrom, periodTo, recoCode, sale: {...}}
-  let nextTchId = 1;
-  let rowAssignments = {};    // rowIndex -> tchId (or 0 for unassigned)
+  // RAPID / OF / skip — the single rule used by totals and the row colouring.
+  function classify(row) {
+    const txn = String(pickField(row, FIELDS.txnType)).trim().toUpperCase();
+    const cur = String(pickField(row, FIELDS.currency)).trim().toUpperCase();
+    const amt = num(pickField(row, FIELDS.amount));
+    if (!txn) return { kind: 'skip', why: 'no Txn Type', cur, amt };
+    if (txn === 'RAPID') {
+      if (RAPID_CCY.indexOf(cur) === -1) return { kind: 'skip', why: 'RAPID in ' + (cur || 'no currency'), cur, amt };
+      return { kind: 'rapid', cur, amt };
+    }
+    if (txn.indexOf('OF') === 0) {
+      if (cur !== 'RUB') return { kind: 'skip', why: 'OF in ' + (cur || 'no currency') + ' (only RUB is used)', cur, amt };
+      return { kind: 'of', cur, amt };
+    }
+    return { kind: 'skip', why: 'Txn Type ' + txn, cur, amt };
+  }
 
-  // Build preset options from input dates ─ for each unique YYYY-MM, three slots
+  // ───────────────────────────────────────────────────────────────────────────
+  // 3. State
+  // ───────────────────────────────────────────────────────────────────────────
+  let tchSections = [];       // {id, periodFrom, periodTo, preset, recoCode, sale: {...}}
+  let nextTchId = 1;
+  let rowAssignments = {};    // rowIndex -> tchId (0 = unassigned)
+  let PRESETS = [];
+  let CLASS = [];             // classify() per input row
+
+  // Three slots per month present in the data: 1-10, 11-20, 21-EOM
   function buildPresetRanges() {
     const monthSet = new Set();
     inputs.forEach(r => {
-      const d = parseDate(pickField(r, ['Date','date','PostingDate','Posting Date']));
+      const d = parseRowDate(pickField(r, FIELDS.date));
       if (d) monthSet.add(d.getFullYear() + '-' + d.getMonth());
     });
     const months = Array.from(monthSet).map(s => {
@@ -196,63 +291,61 @@
     });
     return presets;
   }
-  const PRESETS = buildPresetRanges();
 
   function makeTch() {
     return {
       id: nextTchId++,
       periodFrom: '',
       periodTo: '',
+      preset: '',
       recoCode: '',
-      sale: {
-        rubEqUsd:   '',
-        rubEqEur:   '',
-        rubNo21:    '',
-        rubTotal:   '',
-        tchCharges: ''
-      }
+      sale: { rubEqUsd: '', rubEqEur: '', rubNo21: '', rubTotal: '', tchCharges: '' }
     };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 3. Compute Rapid (net Dr) + OF (net Cr) for each TCH from row assignments
+  // 4. Rapid (net Dr) + OF (net Cr) per section from the row assignments
   // ───────────────────────────────────────────────────────────────────────────
   function computeTotalsFor(tchId) {
-    const totals = { rapid: { RUB: 0, USD: 0, EUR: 0 }, of: { RUB: 0 } };
+    const totals = { rapid: { RUB: 0, USD: 0, EUR: 0 }, of: { RUB: 0 }, rows: 0 };
     inputs.forEach((row, i) => {
       if (rowAssignments[i] !== tchId) return;
-      const txn = String(pickField(row, ['Txn Type','Txn Type','Type','TransactionType'])).trim();
-      const cur = String(pickField(row, ['Currency','Cur','CCY'])).trim().toUpperCase();
-      const amt = num(pickField(row, ['FC Amount','Amt','Value']));
-      if (!txn || !amt) return;
-      if (txn.toUpperCase() === 'RAPID') {
-        if (totals.rapid[cur] != null) totals.rapid[cur] += amt;
-      } else if (txn.toUpperCase().startsWith('OF')) {
-        if (cur === 'RUB') totals.of.RUB += amt;
-      }
+      const c = CLASS[i];
+      if (!c || c.kind === 'skip' || !c.amt) return;
+      totals.rows++;
+      if (c.kind === 'rapid') totals.rapid[c.cur] += c.amt;
+      else if (c.kind === 'of') totals.of.RUB += c.amt;
     });
     return totals;
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 4. UI rendering
+  // 5. Rendering. Structural changes rebuild the DOM; typing only refreshes
+  //    the computed cells (rebuilding on every keystroke lost the focus).
   // ───────────────────────────────────────────────────────────────────────────
   function renderSummary() {
     const el = document.getElementById('summary');
+    const counts = { rapid: 0, of: 0, skip: 0 };
+    CLASS.forEach(c => counts[c.kind]++);
     el.innerHTML =
-      '<div><b>JV:</b> ' + ref + '</div>' +
-      '<div><b>Inputs:</b> ' + inputs.length + ' row(s)</div>' +
+      '<div><b>JV:</b> ' + escapeHtml(ref) + '</div>' +
+      '<div><b>Inputs:</b> ' + inputs.length + ' row(s) · ' + counts.rapid + ' RAPID · ' + counts.of + ' OF' + (counts.skip ? ' · ' + counts.skip + ' ignored' : '') + '</div>' +
       '<div><b>Months detected:</b> ' + (PRESETS.length / 3) + '</div>' +
-      (inputs.length ? '' : '<div class="err">No rows received from host — check the To-Account dropdown wiring.</div>');
+      '<div><b>Accounts:</b> clearing ' + escapeHtml(ACC.clearing.nominal) + '/' + escapeHtml(ACC.clearing.rc) +
+        ' · cross-ccy ' + escapeHtml(ACC.crossCcy.nominal) + '/' + escapeHtml(ACC.crossCcy.rc) +
+        ' · charges ' + escapeHtml(ACC.charges.nominal) + '/' + escapeHtml(ACC.charges.rc) + ' · LOB ' + escapeHtml(ACC.lob) + '</div>' +
+      (inputs.length ? '' : '<div class="err">No rows received from Reco — check the To Account column and the mapping\'s inputColumns.</div>');
   }
+
+  function periodBad(v) { return v && !parsePeriod(v); }
 
   function renderTchSections() {
     const wrap = document.getElementById('tchContainer');
     wrap.innerHTML = '';
     tchSections.forEach((tch, idx) => {
-      const totals = computeTotalsFor(tch.id);
       const card = document.createElement('div');
       card.className = 'tch-card';
+      const saleInput = (k) => '<td class="input"><input type="number" step="0.01" placeholder="0.00" value="' + escapeHtml(tch.sale[k]) + '" oninput="setSale(' + tch.id + ',\'' + k + '\',this.value)" /></td>';
       card.innerHTML = `
         <div class="head">
           <div class="title">TCH ${idx + 1} <span style="color:#9ca3af;font-weight:400;font-size:11px;">(token: T${idx + 1})</span></div>
@@ -263,23 +356,24 @@
         <div class="top-row">
           <label>
             <span class="lbl">Period From (MM/DD/YY)</span>
-            <input type="text" placeholder="MM/DD/YY" value="${tch.periodFrom}" oninput="setTchField(${tch.id},'periodFrom',this.value)" />
+            <input type="text" placeholder="MM/DD/YY" value="${escapeHtml(tch.periodFrom)}" style="${periodBad(tch.periodFrom) ? 'border-color:#dc2626' : ''}" oninput="setTchField(${tch.id},'periodFrom',this.value,this)" />
           </label>
           <label>
             <span class="lbl">Period To (MM/DD/YY)</span>
-            <input type="text" placeholder="MM/DD/YY" value="${tch.periodTo}" oninput="setTchField(${tch.id},'periodTo',this.value)" />
+            <input type="text" placeholder="MM/DD/YY" value="${escapeHtml(tch.periodTo)}" style="${periodBad(tch.periodTo) ? 'border-color:#dc2626' : ''}" oninput="setTchField(${tch.id},'periodTo',this.value,this)" />
           </label>
           <label>
             <span class="lbl">Range Preset</span>
             <select onchange="applyPreset(${tch.id}, this.value)">
               <option value="">— pick a slot —</option>
-              ${PRESETS.map((p, pi) => `<option value="${pi}">${p.label} (${p.from} → ${p.to})</option>`).join('')}
+              ${PRESETS.map((p, pi) => `<option value="${pi}"${String(tch.preset) === String(pi) ? ' selected' : ''}>${escapeHtml(p.label)} (${p.from} → ${p.to})</option>`).join('')}
             </select>
           </label>
           <label>
             <span class="lbl">Reco Code</span>
-            <input type="text" placeholder="reco code" value="${tch.recoCode}" oninput="setTchField(${tch.id},'recoCode',this.value)" />
+            <input type="text" placeholder="TCH${idx + 1}" value="${escapeHtml(tch.recoCode)}" oninput="setTchField(${tch.id},'recoCode',this.value,this)" />
           </label>
+          <span class="rows-badge" data-rows="${tch.id}" style="font-size:11px;color:#6b7280;"></span>
         </div>
 
         <table class="tch-data-table">
@@ -301,15 +395,15 @@
           </thead>
           <tbody>
             <tr>
-              <td class="computed">${fmtNum(totals.rapid.RUB)}</td>
-              <td class="computed">${fmtNum(totals.rapid.USD)}</td>
-              <td class="computed">${fmtNum(totals.rapid.EUR)}</td>
-              <td class="computed">${fmtNum(totals.of.RUB)}</td>
-              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubEqUsd}" oninput="setSale(${tch.id},'rubEqUsd',this.value)" /></td>
-              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubEqEur}" oninput="setSale(${tch.id},'rubEqEur',this.value)" /></td>
-              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubNo21}" oninput="setSale(${tch.id},'rubNo21',this.value)" /></td>
-              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.rubTotal}" oninput="setSale(${tch.id},'rubTotal',this.value)" /></td>
-              <td class="input"><input type="number" step="0.01" placeholder="0.00" value="${tch.sale.tchCharges}" oninput="setSale(${tch.id},'tchCharges',this.value)" /></td>
+              <td class="computed" data-t="${tch.id}" data-k="rapid.RUB"></td>
+              <td class="computed" data-t="${tch.id}" data-k="rapid.USD"></td>
+              <td class="computed" data-t="${tch.id}" data-k="rapid.EUR"></td>
+              <td class="computed" data-t="${tch.id}" data-k="of.RUB"></td>
+              ${saleInput('rubEqUsd')}
+              ${saleInput('rubEqEur')}
+              ${saleInput('rubNo21')}
+              ${saleInput('rubTotal')}
+              ${saleInput('tchCharges')}
             </tr>
           </tbody>
         </table>
@@ -323,54 +417,64 @@
     const thead = tbl.querySelector('thead');
     const tbody = tbl.querySelector('tbody');
 
-    // Build header
     const cols = (def.inputColumns || []).map(c => c.name);
     let head = '<tr><th style="width:70px;">TCH</th>';
-    cols.forEach(c => head += '<th>' + c + '</th>');
-    head += '</tr>';
+    cols.forEach(c => head += '<th>' + escapeHtml(c) + '</th>');
+    head += '<th>Note</th></tr>';
     thead.innerHTML = head;
 
-    // Build body
     let body = '';
     inputs.forEach((row, i) => {
-      const txn = String(pickField(row, ['TxnType','Txn Type','Type'])).trim().toUpperCase();
-      const isRapid = txn === 'RAPID';
-      const isOf    = txn.startsWith('OF');
-      const cls = isRapid ? 'row-rapid' : (isOf ? 'row-of' : 'row-skip');
+      const c = CLASS[i];
+      const cls = c.kind === 'rapid' ? 'row-rapid' : (c.kind === 'of' ? 'row-of' : 'row-skip');
       body += '<tr class="' + cls + '">';
-      // TCH dropdown
-      body += '<td class="tch-cell"><select onchange="assignRow(' + i + ', +this.value)">';
+      body += '<td class="tch-cell"><select data-row="' + i + '" onchange="assignRow(' + i + ', +this.value)">';
       body += '<option value="0">—</option>';
       tchSections.forEach((tch, idx) => {
         const sel = (rowAssignments[i] === tch.id) ? ' selected' : '';
         body += '<option value="' + tch.id + '"' + sel + '>T' + (idx + 1) + '</option>';
       });
       body += '</select></td>';
-      // Data cells
-      cols.forEach(c => {
-        const v = row[c] != null ? row[c] : '';
-        body += '<td>' + (typeof v === 'string' ? escapeHtml(v) : v) + '</td>';
+      cols.forEach(col => {
+        const v = row[col] != null && row[col] !== '' ? row[col] : pickField(row, [col]);
+        body += '<td>' + escapeHtml(v) + '</td>';
       });
+      body += '<td style="font-size:11px;">' + (c.kind === 'skip' ? 'ignored: ' + escapeHtml(c.why) : '') + '</td>';
       body += '</tr>';
     });
     if (!inputs.length) {
-      body = '<tr><td colspan="' + (cols.length + 1) + '" class="err" style="text-align:center; padding:14px;">No input rows received from host.</td></tr>';
+      body = '<tr><td colspan="' + (cols.length + 2) + '" class="err" style="text-align:center; padding:14px;">No input rows received from host.</td></tr>';
     }
     tbody.innerHTML = body;
+
+    const all = document.getElementById('assignAllSel');
+    all.innerHTML = '<option value="">Assign all rows to…</option><option value="0">— (clear)</option>' +
+      tchSections.map((t, idx) => '<option value="' + t.id + '">T' + (idx + 1) + '</option>').join('');
   }
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function refreshComputed() {
+    tchSections.forEach(tch => {
+      const totals = computeTotalsFor(tch.id);
+      document.querySelectorAll('td.computed[data-t="' + tch.id + '"]').forEach(td => {
+        const [grp, cur] = td.dataset.k.split('.');
+        td.textContent = fmtNum(totals[grp][cur]);
+      });
+      const badge = document.querySelector('[data-rows="' + tch.id + '"]');
+      if (badge) badge.textContent = totals.rows + ' row(s) assigned';
+    });
+    const unassigned = inputs.filter((r, i) => CLASS[i].kind !== 'skip' && !rowAssignments[i]).length;
+    document.getElementById('assignInfo').textContent = unassigned ? unassigned + ' RAPID/OF row(s) not assigned' : '';
+    if (document.getElementById('previewPane').style.display !== 'none') renderPreview();
   }
 
   function renderAll() {
     renderTchSections();
     renderRowsTable();
-    if (document.getElementById('previewPane').style.display !== 'none') renderPreview();
+    refreshComputed();
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 5. Wire up handlers (exposed to inline onclicks via window)
+  // 6. Handlers (exposed for the inline on* attributes)
   // ───────────────────────────────────────────────────────────────────────────
   window.addTchSection = function () { tchSections.push(makeTch()); renderAll(); };
   window.removeTch = function (id) {
@@ -379,36 +483,63 @@
     Object.keys(rowAssignments).forEach(k => { if (rowAssignments[k] === id) rowAssignments[k] = 0; });
     renderAll();
   };
-  window.setTchField = function (id, field, value) {
+  window.setTchField = function (id, field, value, el) {
     const t = tchSections.find(x => x.id === id);
-    if (t) { t[field] = value; renderAll(); }
+    if (!t) return;
+    t[field] = value;
+    if (field === 'periodFrom' || field === 'periodTo') {
+      t.preset = '';
+      if (el) el.style.borderColor = periodBad(value) ? '#dc2626' : '';
+    }
+    refreshComputed();
   };
   window.setSale = function (id, field, value) {
     const t = tchSections.find(x => x.id === id);
-    if (t) { t.sale[field] = value; renderAll(); }
+    if (t) { t.sale[field] = value; refreshComputed(); }
   };
   window.applyPreset = function (id, pi) {
     if (pi === '') return;
     const p = PRESETS[+pi];
     if (!p) return;
     const t = tchSections.find(x => x.id === id);
-    if (t) { t.periodFrom = p.from; t.periodTo = p.to; renderAll(); }
+    if (t) { t.periodFrom = p.from; t.periodTo = p.to; t.preset = pi; renderAll(); }
   };
-  window.assignRow = function (rowIdx, tchId) { rowAssignments[rowIdx] = tchId || 0; renderAll(); };
+  window.assignRow = function (rowIdx, tchId) { rowAssignments[rowIdx] = tchId || 0; refreshComputed(); };
+  window.assignAll = function (val) {
+    if (val === '') return;
+    inputs.forEach((r, i) => { if (CLASS[i].kind !== 'skip') rowAssignments[i] = +val || 0; });
+    renderRowsTable(); refreshComputed();
+  };
+  window.autoAssignByPeriod = function () {
+    const ranges = tchSections.map(t => ({ id: t.id, f: parsePeriod(t.periodFrom), to: parsePeriod(t.periodTo) }))
+      .filter(r => r.f && r.to);
+    if (!ranges.length) { alert('Set a valid period (or pick a Range Preset) on at least one TCH section first.'); return; }
+    let assigned = 0, nodate = 0;
+    inputs.forEach((row, i) => {
+      if (CLASS[i].kind === 'skip') return;
+      const d = parseRowDate(pickField(row, FIELDS.date));
+      if (!d) { nodate++; return; }
+      const hit = ranges.find(r => d >= r.f && d <= r.to);
+      rowAssignments[i] = hit ? hit.id : 0;
+      if (hit) assigned++;
+    });
+    renderRowsTable(); refreshComputed();
+    if (nodate) alert(nodate + ' row(s) have no readable date and were left as they were.');
+  };
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 6. Build accounting lines and post
+  // 7. Accounting lines
   //    Per TCH section, four entries (each = one Dr line + one Cr line):
-  //      Entry 1  Cross Currency Adj (RUB)  Dr 17036/RC 78061   Cr 85001/RC 78061
+  //      Entry 1  Cross Currency Adj (RUB)  Dr clearing        Cr cross-ccy
   //               Amount = sale.rubEqUsd + sale.rubEqEur
-  //      Entry 2  Cross Currency Adj USD    Dr 85001/RC 78061   Cr 17036/RC 78061
+  //      Entry 2  Cross Currency Adj USD    Dr cross-ccy       Cr clearing
   //               Amount = rapid.USD
-  //      Entry 3  Cross Currency Adj EUR    Dr 85001/RC 78061   Cr 17036/RC 78061
+  //      Entry 3  Cross Currency Adj EUR    Dr cross-ccy       Cr clearing
   //               Amount = rapid.EUR
-  //      Entry 4  BSP TCH Charges           Dr 35008/RC 50000   Cr 17036/RC 78061
+  //      Entry 4  BSP TCH Charges           Dr charges         Cr clearing
   //               Amount = -(of.RUB + sale.rubEqUsd + sale.rubEqEur + rapid.RUB)
-  //               If amount < 0, swap sides (Dr 17036/RC 78061  Cr 35008/RC 50000)
-  //    All entries with zero amount are skipped.
+  //    A negative amount swaps the sides; zero amounts are skipped.
+  //    Defaults: clearing 17036/78061, cross-ccy 85001/78061, charges 35008/50000.
   // ───────────────────────────────────────────────────────────────────────────
   function buildLinesForTch(tch, idx) {
     const out = [];
@@ -419,109 +550,73 @@
 
     const totals = computeTotalsFor(tch.id);
     const reco = tch.recoCode || ('TCH' + (idx + 1));
-    const remarkCcAdj = 'Cross Currency Adjustment Entry for ' + fmtRangeRemark(tch.periodFrom, tch.periodTo);
-    const remarkBsp  = 'BSP TCH Charges for '             + fmtRangeRemark(tch.periodFrom, tch.periodTo);
+    const range = fmtRangeRemark(tch.periodFrom, tch.periodTo);
+    const remarkCcAdj = 'Cross Currency Adjustment Entry for ' + range;
+    const remarkBsp   = 'BSP TCH Charges for ' + range;
 
-    function lineDr(nominal, rc, cur, amt, desc) {
-      return { Reference: '', RC: rc, Nominal: nominal, SubNominal: '0', 'Analysis Key': '0', LOB: '51',
-               Cur: cur, Reco: reco, Dr: amt, Cr: '', Doc: '', Desc: desc };
+    function line(acct, cur, dr, cr, desc) {
+      return { Reference: ACC.reference, RC: acct.rc, Nominal: acct.nominal, SubNominal: ACC.subNominal,
+               'Analysis Key': ACC.analysisKey, LOB: ACC.lob, Cur: cur, Reco: reco,
+               Dr: dr, Cr: cr, Doc: ACC.doc, Desc: desc };
     }
-    function lineCr(nominal, rc, cur, amt, desc) {
-      return { Reference: '', RC: rc, Nominal: nominal, SubNominal: '0', 'Analysis Key': '0', LOB: '51',
-               Cur: cur, Reco: reco, Dr: '', Cr: amt, Doc: '', Desc: desc };
-    }
-
-    // Entry 1 — Cross Currency Adj (RUB), amount = rubEqUsd + rubEqEur
-    const e1amt = num(tch.sale.rubEqUsd) + num(tch.sale.rubEqEur);
-    if (Math.abs(e1amt) > 0.001) {
-      const a = Math.abs(e1amt);
-      // user spec: Dr 17036, Cr 85001
-      // If e1amt is negative (unusual), swap
-      if (e1amt > 0) {
-        out.push(lineDr('17036', '78061', 'RUB', a, remarkCcAdj));
-        out.push(lineCr('85001', '78061', 'RUB', a, remarkCcAdj));
-      } else {
-        out.push(lineDr('85001', '78061', 'RUB', a, remarkCcAdj));
-        out.push(lineCr('17036', '78061', 'RUB', a, remarkCcAdj));
-      }
+    // amount > 0: Dr `drAcct`, Cr `crAcct`; amount < 0: sides swap.
+    function entry(amount, drAcct, crAcct, cur, desc) {
+      const a = round2(Math.abs(amount));
+      if (!(a >= 0.01)) return;
+      const txt = a.toFixed(2);
+      const [d, c] = amount > 0 ? [drAcct, crAcct] : [crAcct, drAcct];
+      out.push(line(d, cur, txt, '', desc));
+      out.push(line(c, cur, '', txt, desc));
     }
 
-    // Entry 2 — Cross Currency Adj USD, amount = rapid.USD
-    const e2amt = totals.rapid.USD;
-    if (Math.abs(e2amt) > 0.001) {
-      const a = Math.abs(e2amt);
-      if (e2amt > 0) {
-        out.push(lineDr('85001', '78061', 'USD', a, remarkCcAdj));
-        out.push(lineCr('17036', '78061', 'USD', a, remarkCcAdj));
-      } else {
-        out.push(lineDr('17036', '78061', 'USD', a, remarkCcAdj));
-        out.push(lineCr('85001', '78061', 'USD', a, remarkCcAdj));
-      }
-    }
+    entry(num(tch.sale.rubEqUsd) + num(tch.sale.rubEqEur), ACC.clearing, ACC.crossCcy, 'RUB', remarkCcAdj);
+    entry(totals.rapid.USD, ACC.crossCcy, ACC.clearing, 'USD', remarkCcAdj);
+    entry(totals.rapid.EUR, ACC.crossCcy, ACC.clearing, 'EUR', remarkCcAdj);
+    entry(-1 * (totals.of.RUB + num(tch.sale.rubEqUsd) + num(tch.sale.rubEqEur) + totals.rapid.RUB),
+          ACC.charges, ACC.clearing, 'RUB', remarkBsp);
 
-    // Entry 3 — Cross Currency Adj EUR, amount = rapid.EUR
-    const e3amt = totals.rapid.EUR;
-    if (Math.abs(e3amt) > 0.001) {
-      const a = Math.abs(e3amt);
-      if (e3amt > 0) {
-        out.push(lineDr('85001', '78061', 'EUR', a, remarkCcAdj));
-        out.push(lineCr('17036', '78061', 'EUR', a, remarkCcAdj));
-      } else {
-        out.push(lineDr('17036', '78061', 'EUR', a, remarkCcAdj));
-        out.push(lineCr('85001', '78061', 'EUR', a, remarkCcAdj));
-      }
-    }
-
-    // Entry 4 — BSP TCH Charges, amount = -(of.RUB + rubEqUsd + rubEqEur + rapid.RUB)
-    const e4raw = -1 * (totals.of.RUB + num(tch.sale.rubEqUsd) + num(tch.sale.rubEqEur) + totals.rapid.RUB);
-    if (Math.abs(e4raw) > 0.001) {
-      const a = Math.abs(e4raw);
-      if (e4raw > 0) {
-        // user spec: Dr 35008/RC 50000, Cr 17036/RC 78061
-        out.push(lineDr('35008', '50000', 'RUB', a, remarkBsp));
-        out.push(lineCr('17036', '78061', 'RUB', a, remarkBsp));
-      } else {
-        // negative → swap to keep books balanced
-        out.push(lineDr('17036', '78061', 'RUB', a, remarkBsp));
-        out.push(lineCr('35008', '50000', 'RUB', a, remarkBsp));
-      }
-    }
-
-    return { lines: out, primaryKeys: Array.from(consumedPks) };
+    return { lines: out, primaryKeys: Array.from(consumedPks), totals, reco };
   }
 
   function buildAll() {
     const allLines = [];
     const allPks = new Set();
+    const sections = [];
     tchSections.forEach((t, idx) => {
       const r = buildLinesForTch(t, idx);
       r.lines.forEach(l => allLines.push(l));
       r.primaryKeys.forEach(pk => allPks.add(pk));
+      sections.push({ section: 'T' + (idx + 1), reco: r.reco, periodFrom: t.periodFrom, periodTo: t.periodTo,
+                      sale: Object.assign({}, t.sale), totals: r.totals, primaryKeys: r.primaryKeys });
     });
-    return { lines: allLines, primaryKeys: Array.from(allPks) };
+    return { lines: allLines, primaryKeys: Array.from(allPks), sections };
+  }
+
+  function balances(lines) {
+    const bal = {};
+    lines.forEach(l => {
+      const c = l.Cur || '?';
+      bal[c] = bal[c] || { dr: 0, cr: 0 };
+      bal[c].dr += num(l.Dr);
+      bal[c].cr += num(l.Cr);
+    });
+    return bal;
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 7. Preview pane (optional)
+  // 8. Preview pane
   // ───────────────────────────────────────────────────────────────────────────
   function renderPreview() {
     const built = buildAll();
     const el = document.getElementById('previewPane');
     if (!built.lines.length) { el.innerHTML = '<div class="err">No lines yet — assign rows to a TCH and/or fill Sale Data.</div>'; return; }
 
-    // Per-currency balance check
-    const bal = {};
-    built.lines.forEach(l => {
-      const c = l.Cur || '?';
-      bal[c] = bal[c] || { dr: 0, cr: 0 };
-      bal[c].dr += num(l.Dr);
-      bal[c].cr += num(l.Cr);
-    });
+    const bal = balances(built.lines);
     let balHtml = '';
     Object.keys(bal).forEach(c => {
       const okBal = Math.abs(bal[c].dr - bal[c].cr) < 0.01;
       balHtml += '<span class="' + (okBal ? 'balanced' : 'unbalanced') + '" style="margin-right:14px;">'
-              + c + ': Dr ' + fmtNum(bal[c].dr) + ' / Cr ' + fmtNum(bal[c].cr)
+              + escapeHtml(c) + ': Dr ' + fmtNum(bal[c].dr) + ' / Cr ' + fmtNum(bal[c].cr)
               + (okBal ? ' ✓' : ' ✗') + '</span>';
     });
 
@@ -560,65 +655,85 @@
   };
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 8. Submit / Cancel
+  // 9. Submit / Cancel
   // ───────────────────────────────────────────────────────────────────────────
+  function post(msg) { window.parent.postMessage(msg, '*'); }
+
   window.onSubmit = function () {
-    // Validate periods are set on each TCH
-    for (const t of tchSections) {
-      if (!parseDate(t.periodFrom) || !parseDate(t.periodTo)) {
-        alert('TCH section: Period From / To is missing or invalid for one or more sections.\nUse a Range Preset or type MM/DD/YY.');
+    // Every section needs a valid period (checked for ALL sections — the old
+    // loop stopped at the first section without a Reco Code).
+    for (let i = 0; i < tchSections.length; i++) {
+      const t = tchSections[i];
+      const f = parsePeriod(t.periodFrom), to = parsePeriod(t.periodTo);
+      if (!f || !to) {
+        alert('TCH ' + (i + 1) + ': Period From / To is missing or invalid.\nUse a Range Preset or type MM/DD/YY.');
         return;
       }
-      if (!t.recoCode) {
-        if (!confirm('Reco Code is empty for at least one TCH section. Continue anyway? (Reco field will default to "TCH<n>")')) return;
-        break;
-      }
+      if (f > to) { alert('TCH ' + (i + 1) + ': Period From is after Period To.'); return; }
     }
+    const noCode = tchSections.map((t, i) => t.recoCode ? null : 'TCH' + (i + 1)).filter(Boolean);
+    if (noCode.length && !confirm('Reco Code is empty for ' + noCode.join(', ') + '. Continue? (the Reco field defaults to "TCH<n>")')) return;
+
+    const unassigned = inputs.filter((r, i) => CLASS[i].kind !== 'skip' && !rowAssignments[i]).length;
+    if (unassigned && !confirm(unassigned + ' RAPID/OF row(s) are not assigned to any TCH section. They are not included in this JV and stay open in Reco. Continue?')) return;
+
     const built = buildAll();
     if (!built.lines.length) {
       alert('No accounting lines to post — every entry computes to zero. Did you forget to assign rows or enter Sale Data?');
       return;
     }
-    // Final per-currency balance check
-    const bal = {};
-    built.lines.forEach(l => {
-      const c = l.Cur || '?';
-      bal[c] = bal[c] || { dr: 0, cr: 0 };
-      bal[c].dr += num(l.Dr); bal[c].cr += num(l.Cr);
-    });
+    const bal = balances(built.lines);
     for (const c of Object.keys(bal)) {
       if (Math.abs(bal[c].dr - bal[c].cr) > 0.01) {
         alert('Currency ' + c + ' is not balanced: Dr ' + fmtNum(bal[c].dr) + ' vs Cr ' + fmtNum(bal[c].cr) + '. Aborting.');
         return;
       }
     }
-    parent.postMessage({
+    post({
       type: 'specialJV.complete',
       ref: ref,
-      jvId: 'JV_TCH_' + Date.now().toString(36),
+      jvId: 'JV_' + String(ref).replace(/[^A-Za-z0-9]/g, '') + '_' + Date.now().toString(36),
       lines: built.lines,
       primaryKeys: built.primaryKeys,
-      inputData: inputs
-    }, '*');
+      inputData: inputs,
+      meta: { sections: built.sections, accounts: ACC }
+    });
   };
 
   window.onCancel = function () {
-    parent.postMessage({
-      type: 'specialJV.complete',
-      ref: ref,
-      jvId: 'JV_TCH_cancel_' + Date.now().toString(36),
-      lines: [],
-      primaryKeys: [],
-      inputData: inputs
-    }, '*');
+    post({ type: 'specialJV.cancel', ref: ref, lines: [], primaryKeys: [] });
   };
 
   // ───────────────────────────────────────────────────────────────────────────
-  // 9. Boot
+  // 10. Boot
   // ───────────────────────────────────────────────────────────────────────────
-  renderSummary();
-  tchSections.push(makeTch()); // start with one TCH section
-  renderAll();
+  let started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    loadAccounts();
+    CLASS = inputs.map(classify);
+    PRESETS = buildPresetRanges();
+    renderSummary();
+    tchSections.push(makeTch()); // start with one TCH section
+    renderAll();
+  }
+
+  if (readParentGlobals()) {
+    start();
+  } else {
+    window.addEventListener('message', (ev) => {
+      const d = ev.data;
+      if (ev.source !== window.parent || !d || d.type !== 'specialJV.init') return;
+      inputs = Array.isArray(d.inputs) ? d.inputs : [];
+      ref = d.ref || PAGE_REF;
+      def = d.def || def;
+      start();
+    });
+    post({ type: 'specialJV.ready', ref: PAGE_REF });
+    // Opened outside Reco (or Reco too old to answer): show the empty form.
+    setTimeout(start, 2500);
+  }
 })();
 </script>
 </body>

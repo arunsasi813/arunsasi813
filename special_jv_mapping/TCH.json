@@ -1,0 +1,19 @@
+{
+  "ref": "TCH",
+  "displayName": "TCH JV — Cross Currency & Charges",
+  "inputColumns": [
+    { "name": "Date" },
+    { "name": "Txn Type" },
+    { "name": "Currency" },
+    { "name": "FC Amount" }
+  ],
+  "accounts": {
+    "_comment": "Codes used by special_jv_templates/TCH.html. Change them here when the chart of accounts changes; no HTML edit needed.",
+    "clearing": { "nominal": "17036", "rc": "78061" },
+    "crossCcy": { "nominal": "85001", "rc": "78061" },
+    "charges":  { "nominal": "35008", "rc": "50000" },
+    "subNominal": "0",
+    "analysisKey": "0",
+    "lob": "51"
+  }
+}
