@@ -1,117 +1,112 @@
 # Reco Suite — Architecture & Handover
 
-**Status as of the attached build** · `Reco.html` (≈504 KB, 10,861 lines) · `TCH.html` (≈31 KB, 625 lines) · `main.py` (Automation Hub launcher)
+**Status as of this build (v2)** · `apps/Reco.html` (≈11,400 lines) · `special_jv_templates/TCH.html` (≈740 lines) · `main.py` + `folder_manager.py` (Automation Hub launcher)
 
-This document is the cold-start brief. Read it before touching code in a new session.
+This document is the cold-start brief. Read it before touching code in a new session. §7 lists every issue from the previous handover and how it was resolved; §10 covers the new base-folder set/switch/migrate feature.
 
 ---
 
 ## 1. What this system is
 
-Three cooperating pieces:
-
 | Piece | File | Role |
 |---|---|---|
-| **Launcher / Hub** | `main.py` (`LauncherAPI` + `HUB_HTML`) | pywebview shell. Auth, folder resolution, filesystem bridge. Lists and launches `.html` tools. |
+| **Launcher / Hub** | `main.py` (`LauncherAPI` + `HUB_HTML`), `folder_manager.py` | pywebview shell. Sign-in, base-folder resolution, **set / switch / migrate the base folder**, filesystem bridge. Lists and launches `.html` tools. |
 | **Reco** | `apps/Reco.html` | The main app. Reconciliation workbench + AEG (Accounting Entry Generator) + Special JV orchestration. Single-file HTML/JS, no build step. |
 | **Special JV** | `special_jv_templates/TCH.html` + `special_jv_mapping/TCH.json` | Pluggable bespoke JV calculators. Opened in an iframe modal by Reco, return accounting lines via `postMessage`. |
 
 **Purpose:** reconcile large finance extracts, carry corrections/offsets forward across uploads, and generate balanced double-entry accounting lines — including JVs whose maths is too bespoke for the generic AEG template engine.
 
-**Deployment reality:** everything runs from a network/shared folder, offline, inside a single WebView2 window. There is no server. All persistence is files on disk, written through the Python bridge.
+**Deployment reality:** everything runs from a network/shared folder, offline, inside a single WebView2 window. There is no server. All persistence is files on disk, written through the Python bridge. Nothing is loaded from the internet any more (PapaParse and SheetJS are vendored).
+
+> `main.py` in this repository was **rebuilt from this document's bridge contract** (the original was not available). It implements every method listed in §3. The semantics of the "project" helpers (`list_projects`, `load_project`, …) were never documented and are a best guess — check them against any other hub app that uses them.
 
 ---
 
 ## 2. Folder structure
 
-The launcher asks for one **root folder** once (admin-password gated), persists it to `launcher_config.json` next to `main.py`, and resolves every relative path against it.
+The launcher asks for one **base folder** once, persists it to `launcher_config.json` next to `main.py` (key `folder_path`; the older keys `folder`, `base_folder`, `root`, `path` are still read), and resolves every relative path against it. Changing it later is admin-password gated (§10).
 
 ```
-<ROOT>/                                 ← the folder chosen at login; LauncherAPI.folder_path
-├── pwd.txt                             admin password for the folder-change gate (default "admin123" if absent)
+<ROOT>/                                 ← LauncherAPI.folder_path (alias: data_root)
+├── pwd.txt                             admin password for folder changes (default "admin123" if absent)
+├── MIGRATED_TO.txt                     only in an OLD root after a migration: points launchers at the new one
 ├── master/
-│   ├── user.csv                        login table: col0=ID, col1=Name, col2=Email, then one column per app key (1/0)
+│   ├── user.csv                        sign-in table: col0=ID, col1=Name, col2=Email, then one column per app key (1/0)
 │   └── accounts_master.csv             AEG Accounts Master — Reference,RC,Nominal,SubNominal,AnalysisKey,LOB
 ├── apps/
 │   ├── Reco.html                       the app (filename stem must match a user.csv column, lowercased)
-│   ├── lib/                            jspreadsheet.js, jsuites.js, jspreadsheet.css, jsuites.css
-│   └── icon/<appkey>.png               optional tile icon (also looked up at <ROOT>/icon/)
-├── icon/<appkey>.png                   alternative icon location
+│   ├── lib/                            jspreadsheet.js, jsuites.js, *.css  +  papaparse.min.js, xlsx.full.min.js (vendored)
+│   └── icon/<appkey>.png               optional tile icon (also looked up at <ROOT>/icon/; .svg/.jpg/.ico accepted)
 ├── aegtemplates/<templateId>.json      one JSON per AEG template
-├── reco/                               all app state, one JSON per key
-│   ├── recoTemplates.json
-│   ├── recoSessions.json
-│   ├── entryHistory.json
-│   ├── docNumberMaster.json
-│   ├── manualOffsetMaster.json
-│   ├── correctionMaster.json
-│   ├── pendingSpecialJV.json
-│   ├── groupMaster.json
-│   ├── attachmentMaster.json
-│   ├── commentMaster.json
-│   ├── customMasters.json
-│   └── aegSettings.json
-├── reco_data/<TemplateName>/<MMM-YY>/<DD>.csv      versioned row store (see §5)
-├── reco_attachments/<templateId>/<id>_<filename>   uploaded files
-├── special_jv_mapping/<REF>.json       JV definition (ref, displayName, inputColumns)
-└── special_jv_templates/<REF>.html     JV calculator UI
+├── reco/                               all app state, one JSON per key (recoSessions.json is written compact)
+│   ├── recoTemplates.json … customMasters.json
+│   └── _corrupt/<key>_<timestamp>.json copy of a JSON file that could not be parsed at load (never overwritten)
+├── reco_data/<dataFolder>/<MMM-YY>/<DD>.csv        versioned row store (see §5)
+├── reco_data/<dataFolder>/_archive/…               full copies kept by "Compact" (Manage → Version History)
+├── reco_attachments/<templateId>/<id>_<filename>   uploaded files; storedPath is RELATIVE to ROOT
+├── special_jv_mapping/<REF>.json       JV definition (ref, displayName, inputColumns, accounts)
+└── special_jv_templates/<REF>.html     JV calculator UI (ROOT/apps/special_jv_templates/ also works)
 ```
 
-Folder names are **load-bearing** — `Store`, `Versioning`, `SpecialJV`, and `Attachments` all hardcode these prefixes.
+Folder names are **load-bearing** — `Store`, `Versioning`, `SpecialJV`, and `Attachments` hardcode these prefixes.
 
 ---
 
 ## 3. The pywebview connection
 
-`LauncherAPI` is passed as `js_api`. Reco reaches it as `window.pywebview.api.*`. Every path argument is **relative to `folder_path`**.
+`LauncherAPI` is passed as `js_api`. Reco reaches it as `window.pywebview.api.*` (every call returns a Promise; a Python exception rejects it). Every path argument is **relative to `folder_path`** and cannot escape it (`../x`, `C:/x` and UNC paths outside ROOT raise `ValueError`; an absolute path that is inside ROOT is accepted for legacy attachment records; a leading `/` is treated as ROOT-relative).
 
-### Bridge methods Reco actually uses
+### Bridge methods Reco uses
 
-| Method | Returns | Used by |
+| Method | Returns | Notes |
 |---|---|---|
-| `read_file(rel)` | `str` (`""` if missing) | `Store.loadAll`, `Versioning.readFile`, `SpecialJV.load` |
-| `write_file(rel, data)` | `True` | `Store.save`, `Versioning.writeFile` |
-| `load_master()` | CSV `str` | `Store.loadAll` → parsed by PapaParse into `aegMaster` |
-| `save_master(csv)` | `True` | `Store.save('aegMaster')` |
-| `load_templates()` | `list[dict]` | `Store.loadAll`, `_syncAegTemplates` |
-| `save_template(id, json)` | `True` | `_syncAegTemplates` |
-| `delete_template(id)` | `True` | `_syncAegTemplates` (removes orphans) |
-| `list_directories(rel)` | `list[str]` ⚠️ **a list** | `Versioning.listFiles` (month folders) |
-| `list_folder_files(rel)` | **JSON string** ⚠️ | `Versioning.listFiles`, `SpecialJV.load` |
-| `save_attachment(tplId, name, b64)` | `{id, storedPath, size}` | `Attachments.upload` |
-| `read_attachment(storedPath)` | base64 `str` or `None` | `Attachments.fetchBase64` |
-| `delete_attachment(storedPath)` | `bool` | `Attachments.remove` |
-| `current_username()` | `str` | `AppState.load` → `aegSettings.currentUser` |
-| `return_to_hub()` | — | the ← Hub button in the header |
+| `read_file(rel)` | `str` | `""` if the file does not exist. **Raises** if it exists but cannot be read, or the base folder is unreachable — Reco then refuses to overwrite that key (§4). |
+| `write_file(rel, data)` | `True` | Atomic (temp file + `os.replace`, retried on Windows sharing violations), serialised per path. |
+| `append_csv_rows(rel, fields, rows)` *(new)* | `int` | Appends version rows without rewriting the file; adds missing header columns with a single rewrite. |
+| `load_master()` / `save_master(csv)` | `str` / `True` | `master/accounts_master.csv` |
+| `load_templates()` / `save_template(id, json)` / `delete_template(id)` | list / `True` | `aegtemplates/*.json` |
+| `list_directories(rel)` | `list[str]` | |
+| `list_files(rel)` *(new)* | `list[{name, ext, size_kb, modified}]` | Use this in new code. |
+| `list_folder_files(rel)` | JSON **string** of the same list | Kept unchanged for older apps. Reco accepts either (`Store.listFiles`). |
+| `save_attachment(tplId, name, b64)` | `{id, storedPath, size}` | storedPath is relative → survives a folder migration. |
+| `read_attachment(storedPath)` / `delete_attachment(storedPath)` | base64 / `bool` | |
+| `resolve_url(rel)` *(new)* | `file://` URL or `""` | Locates `special_jv_templates/<REF>.html` under ROOT or ROOT/apps. |
+| `show_save_dialog(name)` + `write_file_abs(path, text)` / `write_file_b64_abs(path, b64)` *(new)* | | All exports (CSV, XLSX, backups, attachments, AEG template JSON) go through a native **Save as** dialog. |
+| `current_username()` | `str` | Signed-in user's name (resolves the OS user from `user.csv` if the hub has not run). |
+| `return_to_hub()` | — | Reco's 🏠 Hub button calls `App.returnToHub()`, which flushes pending saves first. |
+| `path_exists(rel)` | `bool` | Used to find JV pages with older launchers. |
 
-### Bridge methods available but **unused** by Reco
+### Other bridge methods (for other hub apps)
 
-`write_csv`, `write_json`, `read_file_json`, `read_csv_json`, `read_excel_json`, `excel_sheet_names`, `list_projects`, `load_project`, `load_projects_pair`, `list_project_files`, `project_metadata`, `path_exists`, `path_exists_json`, `read_xlsx`, `write_xlsx`, `show_save_dialog`, `write_file_abs`, `launch_file`, `verify_admin_password`.
+`write_csv`, `write_json`, `read_file_json`, `read_csv_json`, `read_excel_json`, `excel_sheet_names`, `read_xlsx`, `write_xlsx` (openpyxl), `path_exists_json`, `launch_file` (open with the OS default program), `list_projects`, `load_project`, `load_projects_pair`, `list_project_files`, `project_metadata` (over `ROOT/projects/<name>/`), `verify_admin_password`.
 
-`show_save_dialog` + `write_file_abs` are the clean path for "export to a user-chosen location" — currently exports go through a Blob download instead.
+### Hub-only methods
+
+`init_app`, `login`, `logout`, `list_apps`, `open_app`, `close_window`, and the base-folder methods in §10.
 
 ### Store routing (Module 3)
 
-`Store.save(key, data)` dispatches by key:
+`AppState.save()` is now **debounced (250 ms)** and **change-detected**: `AppState.flush()` serialises each of the 14 keys, compares it with the text last loaded/saved (`AppState._snap`) and calls `Store.save(key, data, text)` only for keys that changed. `Store.save` dispatches by key:
 
-- `aegMaster` → `Papa.unparse` → `save_master`
-- `aegTemplates` → `_syncAegTemplates` (diff existing IDs, delete removed, write all)
-- everything else → `write_file('reco/<key>.json', JSON.stringify(data, null, 2))`
+- `aegMaster` → `Papa.unparse({fields, data})` (union of columns) → `save_master`
+- `aegTemplates` → `_syncAegTemplates`: writes only templates whose JSON changed and deletes only templates this session loaded or wrote (a colleague's new template is never deleted)
+- everything else → `write_file('reco/<key>.json', …)` (`recoSessions` compact, others pretty-printed)
 
-`Store._hasApi()` gates everything. In a plain browser it silently falls back to `localStorage` with prefix `reco_`. This fallback is why the app opens standalone for testing, and why localStorage data never reaches disk.
+Writes for a key go through a per-key queue (one in flight; a newer save replaces a queued one). A failed write is toasted and retried on the next save. Keys whose file could not be **read** at load are in `Store.readOnlyKeys` and are never written in that session. `Store._hasApi()` false → localStorage (`reco_` prefix) for browser testing.
+
+`App.returnToHub()`, `pagehide` and `window.__hubFlush()` flush pending writes; `window.__hubPendingWrites()` reports how many are outstanding.
 
 ### Boot sequence
 
 ```js
 window.addEventListener('pywebviewready', bootApp);
-setTimeout(() => { if (!window.pywebview) bootApp(); }, 1000);   // browser fallback
-
+// + poll for window.pywebview.api (pywebview can inject before the listener exists);
+//   no pywebview after 1 s → browser mode. bootApp() runs once (guard).
 async function bootApp() {
-  await AppState.load();        // Store.loadAll → all the reads above
-  await SpecialJV.load();       // scans special_jv_mapping/*.json
-  populateThemeSelect();
-  App._wireRecoHotkeys();
-  App.navigate('home');
+  await AppState.load();        // Store.loadAll; snapshots for change detection; current user
+  await SpecialJV.load();       // special_jv_mapping/*.json
+  populateThemeSelect(); App._wireRecoHotkeys(); App.navigate('home');
+  // Store.loadProblems → one dialog listing unreadable / damaged files and bad JV mappings
 }
 ```
 
@@ -119,69 +114,50 @@ async function bootApp() {
 
 ## 4. Module map of `Reco.html`
 
-| Module | Approx. line | Contents |
+| Module | Line | Contents |
 |---|---|---|
-| 0a / 0b | 18 / 507 | Themes (single Default, CSS-variable driven) + 7 colour palettes, separate dropdowns |
-| 1 | 762 | `U` — uid, esc, num, date parsing/format, file & paste parsing |
-| 2 | 867 | `FMT` — format-pattern validation (D/N/A/T/S) with regex cache |
-| 2b | 907 | `Formula` — LEFT/RIGHT/MID/TEXT_BEFORE/AFTER/BETWEEN/MONTH/YEAR/DAY/AGEING/TODAY/IF, `{Col}` tokens |
-| 2c | 1129 | `FilterOps` — 21 operators, shared by column filters, slicers, reports |
-| 3 | 1193 | `Store` — the bridge router described above |
-| 3aa | 1332 | `Masters` — uniform read over Accounts / Doc Numbers / Corrections / Custom masters |
-| 3b | 1438 | `Versioning` — the `reco_data/` CSV store |
-| 3c | 1640 | `SpecialJV` — registry + iframe modal |
-| 3d | 1761 | `Groups` — PK-set grouping per template |
-| 3e | 1898 | `Attachments` — disk-backed files linked to PKs/groups |
-| 3f | 2062 | `Timeline` — merged attachments + comments per row |
-| 3g | 2271 | `Comments` |
-| 3h | 2443 | `FilterSets` — saved filter combinations |
-| 3i | 2562 | `FindReplace` — Ctrl+F |
-| 4 | 2842 | `AppState` — the in-memory shape; `save()` / `load()` |
-| 5 | 2909 | `App` — navigation, modal, backup/restore (`version: 4`) |
-| 6 | 3018 | `Home` — template cards, Masters grid, Special JV registry card, doc# lookup |
-| 7 | 3196 | `RecoTemplate` — 5-step wizard |
-| 8 | 4155 | `Reco` — the engine. Also hosts the Excel/jspreadsheet view (4514+), spreadsheet phases 2–5 (4920–5600), DOM virtualization (7411) |
-| 9 | 9785 | `AEG` — generic double-entry template engine |
+| 0a / 0b | 25 / 514 | Themes (single Default, CSS-variable driven) + 7 colour palettes |
+| 1 | 769 | `U` — uid, esc, **jsq** (safe JS string in an attribute), **num** (`(1,234.50)`, `1,234.50-`), isNumeric, **parseDate** (validates, MM/DD fallback, serial-as-text, DD-MMM-YY), fmtDate, **download** (save dialog), downloadWorkbook |
+| 2 | 959 | `FMT` — format-pattern validation (D/N/A/T/S) |
+| 2b | 999 | `Formula` — helpers + `{Col}` tokens, **compiled once per formula**; new `NUM()` helper |
+| 2c | 1265 | `FilterOps` — 21 operators; numeric ops understand `1,234.50` |
+| 3 | 1335 | `Store` — bridge router, write queue, load-problem tracking |
+| 3aa | 1559 | `Masters` — Accounts / Doc Numbers / Corrections / Custom masters |
+| 3b | 1665 | `Versioning` — the `reco_data/` CSV store (§5) |
+| 3c | 2018 | `SpecialJV` — registry, src resolution, iframe modal + handshake (§6) |
+| 3d–3i | 2220–3029 | Groups, Attachments, Timeline, Comments, FilterSets, Find & Replace |
+| 4 | 3316 | `AppState` — state, debounced `save()`, `flush()`, `load()`, `currentUser` |
+| 5 | 3426 | `App` — navigation, modal, backup/restore (`version: 4`), `returnToHub` |
+| 6 | 3545 | `Home` |
+| 7 | 3723 | `RecoTemplate` — 5-step wizard; `dataFolder`; validation |
+| 8 | 4685 | `Reco` — the engine, Excel view (jspreadsheet), sheet mode, virtualised grid, reports, entries, preview/commit, groups, manage (+ Version History) |
+| 9 | 10428 | `AEG` — generic double-entry template engine |
 
-`AppState` keys that persist: `recoTemplates, recoSessions, aegTemplates, aegMaster, aegSettings, entryHistory, docNumberMaster, manualOffsetMaster, correctionMaster, pendingSpecialJV, groupMaster, attachmentMaster, commentMaster, customMasters`.
-
-Reco sections: **Action** (grid / Excel view / pivot), **Correction**, **Reports**, **Entries**, **Manage**.
+Additional-column values (master lookups, formulas, tags) are computed in one place: `Reco._rowWithExtras(tpl, sess, row)` (cascading, declaration order). The grid, Excel view, filters, sort, slicers, pivot, custom reports and exports all use it.
 
 ---
 
 ## 5. Versioned data store (`reco_data/`)
 
-Path: `reco_data/<safeTemplateName>/<MMM-YY>/<DD>.csv`, e.g. `reco_data/BSP_RUB/Oct-26/06.csv`.
+Path: `reco_data/<dataFolder>/<MMM-YY>/<DD>.csv`. `dataFolder` is fixed when the template is created (from its name, made unique) and stored on the template, so **renaming a template keeps its history**. Old templates without `dataFolder` keep using `_safe(name)`.
 
-Every stored row carries three control columns:
+Control columns: `_pk` (PK columns joined with `||`, or `_auto_<uid>`), `_ver` (`upload`, `C1`, `C2`, …), `_ts`. The `_pk` written at upload is the row's session `_pk` (previously a second random `_auto_` key was generated, so edits on PK-less templates never matched their upload row).
 
-- `_pk` — the template's primary-key columns joined with `||` (or `_auto_<uid>` if no PKs defined)
-- `_ver` — `upload` for the originally loaded row, then `C1`, `C2`, … for each edit
-- `_ts` — ISO timestamp
-
-`Versioning.collapseToActive()` reduces a file to one row per `_pk`: highest `Cn`, falling back to the `upload` row. `autoLoadLatest()` opens the newest file automatically when a template is opened with an empty session.
-
-**Implication:** edits are append-only. The CSV grows; nothing is ever overwritten in place. `appendChangesBatch` exists so a multi-cell edit produces one `Cn` per PK rather than one per cell.
+- Header = control columns + template columns + every key present (Papa's default would drop columns added later).
+- Writes are serialised per file. With the new launcher, rows are **appended** (`append_csv_rows`); with an older one the file is read strictly and rewritten (a failed read aborts instead of rewriting with only the new rows).
+- Single-cell edits (grid, Excel view, sheet mode, fill) are queued for 150 ms and written as **one `Cn` per PK per burst** (`Versioning.queueChange`).
+- `collapseToActive()` — highest `Cn` per PK, else `upload`; ties go to the row written later.
+- Opening a file (`Reco.loadVersionedFile` → `Versioning.loadActive`) applies the latest `Cn` from **newer** files, because edits always go to the day's file. Auto-load picks the newest file that contains `upload` rows.
+- **Compaction** (Manage → Version History): keeps every upload row and the latest `Cn` per PK; optionally archives the full file to `_archive/` first.
+- Ingesting data warns when rows share a primary key (they collapse to one when reopened from history).
 
 ---
 
 ## 6. Special JV — the whole mechanism
 
-This is the part that trips people up. Read it fully.
-
 ### 6.1 Registration
 
-On boot, `SpecialJV.load()`:
-
-1. `list_folder_files('special_jv_mapping')` → JSON string → parse → array of `{name, ext, size_kb}`
-2. For each `*.json`: `read_file('special_jv_mapping/<name>')` → parse
-3. If the object has a `ref`, it is registered as `registry[ref]`, and `def.htmlPath` is **derived**, not read from the JSON:
-
-```js
-def.htmlPath = 'special_jv_templates/' + def.ref + '.html';
-```
-
-So **`ref` must exactly equal the HTML filename stem.** `ref: "TCH"` ⟹ `special_jv_templates/TCH.html`.
+`SpecialJV.load()` lists `special_jv_mapping/*.json` (`list_files`, or `list_folder_files` on older launchers), parses each, and registers `registry[ref]` with `def.htmlPath = 'special_jv_templates/<ref>.html'` (derived — `ref` must equal the HTML filename stem). Mapping files without `ref`, unreadable files and duplicate refs are reported in the load-problems dialog.
 
 ### 6.2 Mapping JSON shape
 
@@ -189,145 +165,136 @@ So **`ref` must exactly equal the HTML filename stem.** `ref: "TCH"` ⟹ `specia
 {
   "ref": "TCH",
   "displayName": "TCH JV — Cross Currency & Charges",
-  "inputColumns": [
-    { "name": "Date" },
-    { "name": "Txn Type" },
-    { "name": "Currency" },
-    { "name": "FC Amount" }
-  ]
+  "inputColumns": [ { "name": "Date" }, { "name": "Txn Type" }, { "name": "Currency" }, { "name": "FC Amount" } ],
+  "accounts": {
+    "clearing": { "nominal": "17036", "rc": "78061" },
+    "crossCcy": { "nominal": "85001", "rc": "78061" },
+    "charges":  { "nominal": "35008", "rc": "50000" },
+    "subNominal": "0", "analysisKey": "0", "lob": "51"
+  }
 }
 ```
 
-`inputColumns` is the **projection contract**. `Reco.openSpecialJv` copies *only* these column names (plus `_pk` and `_id`) out of each selected row into the payload. A field absent from `inputColumns` does not reach the JV, no matter what is on screen. This is the #1 cause of "the JV shows blanks".
+`inputColumns` is the **projection contract**: `Reco.openSpecialJv` copies only these columns (plus `_pk`, `_id`). Names match exactly first, then ignoring case/spaces/underscores (`TxnType` feeds `Txn Type`); Reco toasts any input column with no values at all. `accounts` is optional and read by TCH (defaults = the codes above).
 
 ### 6.3 Trigger path
 
 1. A template has `aegIntegration.enabled` and a linked AEG template.
-2. The AEG template's **To Account** input column is rendered as a dropdown whose options come from `SpecialJV.buildToAccountOptions()` — every `Reference` in the Accounts Master, **plus** every registered JV ref, labelled `⚡ <displayName> (Special JV)`.
-3. User selects rows → *Preview Entry from Selection*.
-4. `Reco.previewEntryFromSelection` splits the selection on the To-Account value:
-   - `SpecialJV.isJvRef(ref)` true → into `jvBuckets[ref]`
-   - otherwise → `standardRows`, which go through `AEG.buildLine` as normal.
-5. The preview modal shows a **Special JV Requirements** banner per bucket with a *Complete →* button. **Generate is disabled** until every bucket in the current selection has a completed JV.
+2. The AEG **To Account** input column is a dropdown of Accounts Master references **plus** JV refs (`⚡ <displayName> (Special JV)`).
+3. **Preview Entry** uses the selected rows, or every visible open row when nothing is selected (both buttons).
+4. The preview works on **copies** of the rows (computed values are not written back into the session) and splits them: JV refs → `jvBuckets[ref]`, the rest → standard AEG lines.
+5. One banner per bucket with **Complete →**; **Generate** stays disabled until each bucket has a completed JV for exactly those rows.
 
 ### 6.4 The iframe handshake
 
-`SpecialJV.open(ref, payload, onComplete)`:
+`SpecialJV.open(ref, payload, onComplete, onCancel)`:
+
+- sets `window._specialJvInputs / _specialJvRef / _specialJvDef`;
+- resolves the page: `resolve_url()` (new launcher) → else `../special_jv_templates/…` when Reco runs from `ROOT/apps/` and `path_exists` finds it at ROOT → else the old relative path; adds `?t=<now>` cache-buster;
+- listens for messages **from that iframe only** (`ev.source === iframe.contentWindow`), any stale listener is removed first and when the modal closes.
+
+The JV page reads the globals from `window.parent` when it can. Chromium isolates `file://` documents unless the browser runs with `--allow-file-access-from-files`, so when that read throws the page posts `{type:'specialJV.ready', ref}` and Reco answers `{type:'specialJV.init', ref, def, inputs}`. Both paths are tested.
+
+The JV returns:
 
 ```js
-window._specialJvInputs = payload;   // array of projected rows
-window._specialJvRef    = ref;
-window._specialJvDef    = def;       // the mapping JSON
-
-// modal body contains:
-<iframe src="special_jv_templates/TCH.html?t=<Date.now()>"></iframe>
+parent.postMessage({ type: 'specialJV.complete', ref, jvId, lines, primaryKeys, inputData, meta }, '*');
+parent.postMessage({ type: 'specialJV.cancel',   ref }, '*');   // cancel
 ```
 
-The cache-buster means edits to the JV HTML take effect on next open without restarting the app.
-
-The JV page reads the globals off its parent:
-
-```js
-const inputs = window.parent._specialJvInputs || [];
-const ref    = window.parent._specialJvRef    || 'TCH';
-const def    = window.parent._specialJvDef    || { inputColumns: [] };
-```
-
-This works because both documents are same-origin under `file://`. It is deliberately *not* `postMessage` inbound — only outbound.
-
-The JV returns via one message:
-
-```js
-parent.postMessage({
-  type: 'specialJV.complete',
-  ref:  'TCH',
-  jvId: 'JV_TCH_<base36 timestamp>',
-  lines: [ /* accounting line objects */ ],
-  primaryKeys: [ /* _pk values consumed */ ],
-  inputData: inputs
-}, '*');
-```
-
-Reco's listener is **one-shot** and filters on `ev.data.ref === ref`. Cancel posts the same message with empty arrays.
-
-Line objects must use the AEG output column names: `Reference, RC, Nominal, SubNominal, Analysis Key, LOB, Cur, Reco, Dr, Cr, Doc, Desc`.
+A `complete` with no lines is treated as a cancel (it used to unblock Generate with zero lines). Line objects use the AEG output column names: `Reference, RC, Nominal, SubNominal, Analysis Key, LOB, Cur, Reco, Dr, Cr, Doc, Desc`.
 
 ### 6.5 Pending JV lifecycle
 
-On completion the result is pushed to `AppState.pendingSpecialJV[templateId]` with `_fromCurrentSelection: true` and persisted immediately. This means:
+A completed JV is stored in `AppState.pendingSpecialJV[templateId]` with `sentPks` (rows sent), `primaryKeys` (rows consumed), `lines`, `meta`, `ts`. On every preview, `_fromCurrentSelection` is **recomputed**: a pending JV satisfies a bucket only if it was computed for exactly those rows. Others appear as *Carried forward* (with Discard) and are included in the entry. A completed one can be redone (**Redo**).
 
-- A completed JV **survives a reload** before the entry is generated.
-- On a later preview, pendings from earlier selections appear as *Carried forward* banners with a Discard button.
-- `commitEntryFromPreview` merges standard + JV lines into one `entryHistory` record (`specialJvIds` keeps the trail), applies the post-entry classification to both the standard source rows *and* the JV-consumed rows (matched by `_pk`), then removes the consumed pendings.
-- Home shows a `⚡ Pending Special JV: N` counter; template cards show a per-template badge.
+`commitEntryFromPreview` merges standard + JV lines into one `entryHistory` record (`specialJvIds`, `specialJvs[{jvId, ref, primaryKeys, meta}]`, `createdBy`), applies the post-entry classification to the standard rows and to the rows each JV **consumed** (rows sent to a JV but left unassigned there are not marked), versions that change when the column is a template column, and removes the consumed pendings.
 
 ### 6.6 TCH specifics
 
-`TCH.html` is the one implemented JV. Its logic:
+**Inputs:** `Date`, `Txn Type` (`RAPID` or `OF*`), `Currency` (RUB/USD/EUR), `FC Amount`. One field-name list per field is used everywhere (`FIELDS`), and one `classify(row)` decides RAPID / OF / ignored for both the totals and the row colouring. Ignored rows show why.
 
-**Inputs it expects:** `Date`, `Txn Type` (`RAPID` or `OF*`), `Currency` (RUB/USD/EUR), `FC Amount`.
+**UI:** N sections, each with a period (MM/DD/YY), Range Preset (three slots per month in the data), Reco code, auto-computed Rapid (RUB/USD/EUR) and OF (RUB) totals, five Sale Data fields. **Auto-assign by period** and **Assign all rows to…** fill the row assignments. Typing no longer rebuilds the form (it used to lose focus after every keystroke).
 
-**UI:** N "TCH sections", each with a period range, a Reco code, auto-computed Rapid (RUB/USD/EUR) and OF (RUB) totals, and five manually entered Sale Data fields. Period presets are generated from the months present in the data, three slots per month (1–10, 11–20, 21–EOM), formatted `MM/DD/YY`. Each source row is assigned to a section via a dropdown.
-
-**Lines produced per section** (zero amounts skipped, sides swapped if the amount is negative):
+**Lines per section** (zero amounts skipped, sides swapped when negative, amounts rounded to 2 dp):
 
 | # | Description | Amount | Dr | Cr |
 |---|---|---|---|---|
-| 1 | Cross Currency Adjustment (RUB) | `rubEqUsd + rubEqEur` | 17036 / RC 78061 | 85001 / RC 78061 |
-| 2 | Cross Currency Adjustment USD | `rapid.USD` | 85001 / RC 78061 | 17036 / RC 78061 |
-| 3 | Cross Currency Adjustment EUR | `rapid.EUR` | 85001 / RC 78061 | 17036 / RC 78061 |
-| 4 | BSP TCH Charges | `-(of.RUB + rubEqUsd + rubEqEur + rapid.RUB)` | 35008 / RC 50000 | 17036 / RC 78061 |
+| 1 | Cross Currency Adjustment (RUB) | `rubEqUsd + rubEqEur` | clearing 17036 / 78061 | crossCcy 85001 / 78061 |
+| 2 | Cross Currency Adjustment USD | `rapid.USD` | crossCcy | clearing |
+| 3 | Cross Currency Adjustment EUR | `rapid.EUR` | crossCcy | clearing |
+| 4 | BSP TCH Charges | `-(of.RUB + rubEqUsd + rubEqEur + rapid.RUB)` | charges 35008 / 50000 | clearing |
 
-Fixed on every line: `SubNominal "0"`, `Analysis Key "0"`, `LOB "51"`, `Reference ""`, `Doc ""`. `Reco` = the section's Reco Code, defaulting to `TCH<n>`.
+Remarks: `Cross Currency Adjustment Entry for DD MMM - DD MMM YY` / `BSP TCH Charges for …` — the period is now parsed as MM/DD/YY (it was parsed day-first, so "10/01/26 → 10/10/26" read as January–October).
 
-Remarks: `Cross Currency Adjustment Entry for DD MMM - DD MMM YY` / `BSP TCH Charges for …`.
-
-Submit refuses to post unless every section has valid dates **and** each currency balances to within 0.01.
+Submit validates **every** section's period (and From ≤ To), asks once about empty Reco codes and about unassigned RAPID/OF rows, and checks each currency balances within 0.01. `meta.sections` carries each section's period, sale data, totals and consumed PKs for audit. `RUB (no 2.1)`, `RUB Total (no 2)` and `TCH Charges` are recorded in `meta` but, as before, not used in the postings.
 
 ---
 
-## 7. Known issues and gaps
+## 7. Issues from the previous handover — resolution
 
-### Blocking
+| # | Issue | Resolution |
+|---|---|---|
+| 1 | `self.data_root` did not exist → attachments silently went to localStorage | `data_root` is an alias of `folder_path`; attachments are stored with relative paths; Reco no longer falls back to localStorage when the bridge exists (failures are shown). |
+| 2 | CDN dependency | PapaParse 5.4.1 and SheetJS 0.18.5 vendored in `apps/lib/` (same versions; CDN only as fallback if lib/ lacks them). |
+| 3 | Dead `App.init()` | Removed. Boot is `bootApp()` with a run-once guard. |
+| 4 | Asymmetric list return types | `list_files()` and `list_directories()` return lists; `list_folder_files()` keeps its JSON string for older apps; Reco accepts both. |
+| 5 | TCH field-name candidates inconsistent | One `FIELDS` list + one `classify()` used by totals and colouring. |
+| 6 | TCH account codes hardcoded | `accounts` in `special_jv_mapping/TCH.json` (defaults unchanged). |
+| 7 | All 14 keys rewritten on every save | Only changed keys are written; `recoSessions.json` compact. |
+| 8 | No write debouncing | 250 ms debounce + per-key serial queue + flush on hub/close. |
+| 9 | Version files never compact | Manage → Version History → Compact (optional archive). Edits appended instead of rewriting. |
+| 10 | `postMessage('*')` | Messages are accepted only from the JV's own iframe; the parent→iframe handshake also uses the iframe's window. (`'*'` remains the target because `file://` origins are `"null"`.) |
+| 11 | Backup format | Unchanged (`version: 4`, v2 accepted); restore now asks for confirmation; session restore warns on template mismatch. |
+| 12 | Lightly exercised modules | Covered by the end-to-end tests (`tests/e2e`). |
 
-1. **`self.data_root` does not exist.** `save_attachment`, `read_attachment`, and `delete_attachment` all reference `self.data_root`, but `LauncherAPI.__init__` only sets `_window`, `current_user`, `folder_path`. Every attachment call raises `AttributeError`. The JS catches it and silently falls back to base64-in-localStorage, so **attachments appear to work but never reach disk**. Fix: set `self.data_root = folder_path` in `login()` (and in `init_app()` when restoring a saved folder), or replace the references with `self.folder_path`.
+### Other defects found and fixed in this build
 
-### Correctness
+- **Data integrity:** concurrent edits overwrote each other's version rows (read-modify-write race); `Papa.unparse` dropped columns not in the first row; corrupt `reco/*.json` was silently replaced by an empty file on the next save (now preserved in `reco/_corrupt/`); an unreachable share at load could lead to empty data being saved over the real file; renaming a template orphaned its history; PK-less templates duplicated rows on reload; edits saved on a later day were invisible when reopening the upload file; Excel-view "number format" wrote formatted text (`(1,234.56)`, `AED 1,234.56`) into the data; the preview wrote computed/stale lookup values into session rows.
+- **Special JV / entries:** cancelling the JV recorded an empty JV and unblocked Generate; a stale listener from a closed JV modal could fire on the next JV; `_fromCurrentSelection` was persisted as `true`, so an old JV for different rows could satisfy a new preview; rows sent to a JV but not consumed were marked as posted; the top **Preview Entry** button ignored the selection.
+- **Crashes / wrong results:** right-click row menu crashed (`sess` undefined); Find & Replace missed matches (global regex `lastIndex`) and treated `$&` in plain-text replacements as a pattern; **Clear Loaded Data** immediately re-loaded the latest file; a slow auto-load could land in another template; selection bar/Excel view ignored *percentage* tolerance; custom report cards showed "undefined" and always summed; report computed columns could not use extra columns; export/pivot/report ignored `master_lookup` columns and values typed into extra columns; exports turned `0` into blank; numbers like `(1,234.50)` and `1,234.50-` counted as 0; `{A}-{B}` with negative `B` gave `#ERR`; numeric sort/filters read `1,234` as 1; `31/02/2026` rolled into March; Excel serials stored as text were not dates; Excel dates shifted a day west of UTC; values containing `'` broke buttons (103 handlers now use `U.jsq`); quick-edit mode leaked into the next template edit (could lose a new template); deleting a template left its groups, comments, attachments and pending JVs behind; step 3 of the wizard had a duplicate, lossy copy of the additional-columns editor; AEG had five duplicate method definitions (dead code removed); `aegSettings.currentUser` was shared by everyone on the folder (identity is now per session from the launcher).
 
-2. **CDN dependency.** `Reco.html` loads SheetJS and PapaParse from `cdnjs.cloudflare.com`. On a locked-down or offline machine both are `undefined` and every CSV/XLSX path fails. `jspreadsheet`/`jsuites` are already vendored under `lib/` — do the same for these two.
-3. **`App.init()` is dead code** that still calls `AppState.load()` without `await`. Boot goes through `bootApp()`. Remove `App.init` to avoid someone wiring it back up and getting an empty-state race.
-4. **Asymmetric return types.** `list_directories` returns a Python list; `list_folder_files` returns a JSON *string*. Both are consumed correctly today, but the next call site will get it wrong. Normalise one way.
-5. **TCH field-name candidates are inconsistent.** `computeTotalsFor` looks for `['Txn Type','Txn Type','Type','TransactionType']` (duplicate entry) while `renderRowsTable` looks for `['TxnType','Txn Type','Type']`. A column named `TxnType` colours rows correctly but contributes nothing to the totals. Unify into one constant.
-6. **TCH account codes are hardcoded.** 17036 / 85001 / 35008, RC 78061 / 50000, LOB 51 — none of it reads the Accounts Master. A chart-of-accounts change means editing the JV HTML. Consider moving these into the mapping JSON.
+### Known limitations (not changed)
 
-### Scaling
-
-7. **`recoSessions.json` is written whole on every `AppState.save()`** — and `save()` writes all 14 keys every time. With large sessions this is a full serialise-and-rewrite per edit. The versioned CSV store was meant to carry the row data; the session JSON duplicating it is the pressure point.
-8. **No write debouncing.** `AppState.save()` fires synchronously from many UI handlers.
-9. **Append-only version files never compact.** A heavily edited template accumulates a long CSV with one row per change.
-
-### Minor
-
-10. `postMessage(..., '*')` — harmless under `file://`, but tighten if this ever moves to a server.
-11. Backup format is `version: 4` and includes every master; restore accepts v2 AEG-only backups.
-12. The `Masters` module, Groups, Attachments, Comments, Timeline, FilterSets, and Find&Replace are all wired but lightly exercised — expect rough edges before any of them is relied on.
+- Multi-user: two people saving the same `reco/<key>.json` — last writer wins (change detection only reduces the overlap). Version CSV appends are safe.
+- Formula tokens are numbers only for plain numerics; use `NUM({Amount})` for `1,234.50` / `(10)`.
+- jspreadsheet/jsuites are not in this repository; keep the copies already in `apps/lib/`.
 
 ---
 
 ## 8. Adding a new Special JV — checklist
 
-1. Write `special_jv_templates/<REF>.html`. Read `window.parent._specialJvInputs` / `._specialJvDef`. Post `{type:'specialJV.complete', ref, jvId, lines, primaryKeys, inputData}` on submit **and** on cancel.
-2. Write `special_jv_mapping/<REF>.json` with `ref` exactly matching the HTML stem, a `displayName`, and an `inputColumns` array listing every field the calculator needs.
-3. Restart Reco (or just reopen — the registry loads at boot only).
-4. The ref appears in the To Account dropdown as `⚡ <displayName> (Special JV)` and on the Home page's *Available Special JVs* card.
-5. Emit lines using the AEG output column names. Balance per currency before posting — Reco does not re-validate.
+1. Write `special_jv_templates/<REF>.html`. Read `window.parent._specialJvInputs / _specialJvDef / _specialJvRef` inside `try`; if that throws, post `{type:'specialJV.ready', ref:'<REF>'}` and wait for `{type:'specialJV.init', inputs, def, ref}` (copy the pattern from TCH.html §0 and §10).
+2. On submit post `{type:'specialJV.complete', ref, jvId, lines, primaryKeys, inputData, meta?}`; on cancel post `{type:'specialJV.cancel', ref}`.
+3. Write `special_jv_mapping/<REF>.json` with `ref` exactly matching the HTML stem, a `displayName`, and every input column the calculator needs.
+4. Reopen Reco (the registry loads at boot). The ref appears in the To Account dropdown and on Home.
+5. Emit lines with the AEG output column names, amounts as 2-dp strings, balanced per currency — Reco does not re-validate.
 
 ---
 
 ## 9. Quick orientation for a fresh session
 
-- **"Where does X get saved?"** → `Store.save` in Module 3, line ~1213.
-- **"Why is the JV empty?"** → `inputColumns` in the mapping JSON, consumed at `Reco.openSpecialJv` (~line 9212).
-- **"Why can't I click Generate?"** → `canGenerate` in `_renderPreviewModal` (~line 9200): every `jvBucket` needs a matching `jvCompleted` entry with `_fromCurrentSelection`.
-- **"Where is the row data on disk?"** → `reco_data/<TemplateName>/<MMM-YY>/<DD>.csv`, collapsed by `Versioning.collapseToActive`.
-- **"How do I test without the launcher?"** → open `Reco.html` directly; `Store._hasApi()` is false and everything routes to `localStorage`. Special JVs still work (same-origin iframe), but the registry will be empty because `list_folder_files` is unavailable.
+- **"Where does X get saved?"** → `AppState.flush` → `Store.save` (Module 3).
+- **"Why is the JV empty?"** → `inputColumns` in the mapping JSON (`Reco.openSpecialJv`); Reco toasts input columns with no values.
+- **"Why can't I click Generate?"** → `canGenerate` in `_renderPreviewModal`: every bucket needs a completed JV for exactly those rows (`SpecialJV.matchesRows`).
+- **"Where is the row data on disk?"** → `reco_data/<tpl.dataFolder>/<MMM-YY>/<DD>.csv`; active view = `Versioning.loadActive`.
+- **"How do I test without the launcher?"** → open `Reco.html` directly (localStorage mode), or run the e2e suite which drives the real bridge.
+- **Tests:** `python -m pytest tests/` (launcher + migration engine) and `node tests/e2e/run_e2e.mjs` (Reco, TCH and the hub in Chromium against the real `LauncherAPI`, including an "older launcher" mode).
+
+---
+
+## 10. Base folder: set, switch, migrate
+
+All in the hub (📁 **Base folder…**, admin password from `ROOT/pwd.txt`, default `admin123`; when the share is offline the last verified password, cached as a hash in `launcher_config.json`, is accepted).
+
+- **First run** — choose the folder; if it has no `apps/`, `master/` or `reco/`, the hub offers to create the standard structure (`folder_manager.init_skeleton`, never overwrites) including `master/user.csv` with the current Windows user and access to every app found.
+- **Switch to an existing folder** — points the hub at another folder that already holds the data (no copy). Recent folders are listed.
+- **Migrate all files to a new folder** — `folder_manager.MigrationJob`:
+  1. preflight: refuses the same folder or nested folders, checks the destination is writable and has space, counts conflicts (policy: *stop*, *keep existing*, *overwrite*);
+  2. copies every file (temp file + rename, timestamps kept, Windows long paths), with progress and Cancel;
+  3. verifies sizes (and SHA-256 when "verify" or "move" is chosen);
+  4. switches `launcher_config.json` to the new folder only after verification;
+  5. optionally removes the originals (a *move*; requires typing MOVE; only files whose copy matched by SHA-256);
+  6. writes `MIGRATED_TO.txt` in the old folder — any launcher still pointing there offers **Switch to the new folder**.
+
+  Nothing is switched if any file fails to copy or verify. Because every stored path (attachments included) is relative to ROOT, the app works unchanged in the new folder.
