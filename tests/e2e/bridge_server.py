@@ -10,12 +10,21 @@ GET  /__shim.js            defines window.pywebview.api and fires pywebviewready
 POST /__api/<method>       {"args": [...]} -> {"ok": true, "result": ...}
 GET  /__log                JSON list of bridge calls made so far
 POST /__reset_log
+POST /__pick               {"path": "<abs path>"}: the file the next
+                           excel_link_pick_file() returns (one shot; without
+                           it the call answers {ok: false, cancelled: true})
+POST /__fault              {"append_csv_rows": true|false}: make append_csv_rows
+                           raise OSError("injected fault") (history write failure)
 
 --legacy   expose only the methods an older launcher had (no list_files,
-           append_csv_rows, resolve_url, write_file_b64_abs ...)
+           append_csv_rows, resolve_url, write_file_b64_abs, excel_link_* ...)
 --jv-port  serve <root> on a second port too; resolve_url() answers with that
            origin so the Special JV iframe is cross-origin, like file:// pages
            are in Chromium (exercises the postMessage handshake).
+
+Excel link: RECO_XL_NO_LAUNCH=1 is set, so excel_link_open() answers
+{ok: true, action: 'skipped'} instead of starting Excel, and the local work
+folder defaults to <root>/../xl_work_<port> (RECO_XL_WORK_DIR).
 """
 
 import json
@@ -43,12 +52,15 @@ jv_port = int(sys.argv[sys.argv.index("--jv-port") + 1]) if "--jv-port" in sys.a
 cfg_path = root.parent / f"cfg_{port}.json"
 if not cfg_path.exists():
     cfg_path.write_text(json.dumps({"folder_path": str(root)}))
+# Before the API exists: never start Excel, keep the local area next to the root.
+os.environ["RECO_XL_NO_LAUNCH"] = "1"
+os.environ.setdefault("RECO_XL_WORK_DIR", str(root.parent / f"xl_work_{port}"))
 api = main.LauncherAPI(config_path=cfg_path)
 downloads = root.parent / f"downloads_{port}"
 downloads.mkdir(exist_ok=True)
 calls = []
 calls_lock = threading.Lock()
-state = {"hub_returns": 0}
+state = {"hub_returns": 0, "pick": None, "faults": {}}
 
 
 def resolve_url(rel):
@@ -69,7 +81,25 @@ def return_to_hub():
     return True
 
 
-OVERRIDES = {"resolve_url": resolve_url, "show_save_dialog": show_save_dialog, "return_to_hub": return_to_hub}
+def excel_link_pick_file():
+    path, state["pick"] = state["pick"], None
+    if not path:
+        return {"ok": False, "cancelled": True}
+    import excel_link
+    try:
+        return excel_link.json_safe(api._xlink().register_pick(path))
+    except Exception as exc:
+        return {"ok": False, "code": "internal", "error": str(exc)}
+
+
+def append_csv_rows(*args):
+    if state["faults"].get("append_csv_rows"):
+        raise OSError("injected fault")
+    return api.append_csv_rows(*args)
+
+
+OVERRIDES = {"resolve_url": resolve_url, "show_save_dialog": show_save_dialog, "return_to_hub": return_to_hub,
+             "excel_link_pick_file": excel_link_pick_file, "append_csv_rows": append_csv_rows}
 
 
 def public_methods():
@@ -140,15 +170,26 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
         if self.path == "/__reset_log":
             with calls_lock:
                 calls.clear()
             return self._json({"ok": True})
+        if self.path == "/__pick":
+            state["pick"] = payload.get("path") or None
+            return self._json({"ok": True, "pick": state["pick"]})
+        if self.path == "/__fault":
+            state["faults"].update({k: bool(v) for k, v in payload.items()})
+            return self._json({"ok": True, "faults": state["faults"]})
         if not self.path.startswith("/__api/"):
             return self._json({"ok": False, "error": "not found"}, 404)
         name = self.path[len("/__api/"):]
-        length = int(self.headers.get("Content-Length") or 0)
-        payload = json.loads(self.rfile.read(length) or b"{}")
         args = payload.get("args", [])
         with calls_lock:
             calls.append({"method": name, "arg0": args[0] if args and isinstance(args[0], str) else None})

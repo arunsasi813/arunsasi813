@@ -96,13 +96,13 @@ function parseCsv(text) {
   return rows.slice(1).filter(r => r.length > 1).map(r => { const o = {}; head.forEach((h, i) => o[h] = r[i]); return o; });
 }
 
-const FIELDS = ['Doc', 'Status', 'Remarks', 'When', 'Amount'];
+const FIELDS = ['Doc', 'Status', 'Remarks', 'When', 'Amount', 'Ref'];
 function makeRows(n) {
   const whens = ['06/10/2026', '2026-10-07', '12/10/2026', '15/10/2026', '16/10/2026', '17/10/2026'];
   const amts = ['1,234.50', '(10)', '20', '30', '40', '50'];
   const out = [];
   for (let i = 1; i <= n; i++) {
-    out.push({ Doc: 'D' + i, Status: 'Open', Remarks: i >= 7 ? 'init' : '', When: whens[(i - 1) % whens.length], Amount: amts[(i - 1) % amts.length] });
+    out.push({ Doc: 'D' + i, Status: 'Open', Remarks: i >= 7 ? 'init' : '', When: whens[(i - 1) % whens.length], Amount: amts[(i - 1) % amts.length], Ref: 'R' + i });
   }
   return out;
 }
@@ -135,7 +135,12 @@ const rowOf = (page, tplId, doc) => page.evaluate(([id, doc]) => { const r = App
 async function exportViaDialog(page, root, tplId, before) {
   const prev = await page.evaluate((id) => ExcelLink._active[id] ? ExcelLink._active[id].exportId : '', tplId);
   await page.click('#xlEditInExcelBtn');
-  await page.waitForSelector('#xlCreateBtn', { timeout: 10000 });
+  // An open link with unloaded saves asks first: "Load it back first / Open it again / Create a new one"
+  await page.waitForSelector('#xlCreateBtn, #appModalFooter button:has-text("Create a new one")', { timeout: 10000 });
+  if (await page.$('#appModalFooter button:has-text("Create a new one")')) {
+    await page.click('#appModalFooter button:has-text("Create a new one")');
+    await page.waitForSelector('#xlCreateBtn', { timeout: 10000 });
+  }
   if (before) await before();
   await page.click('#xlCreateBtn');
   await page.waitForFunction(([id, prev]) => ExcelLink._active[id] && ExcelLink._active[id].exportId !== prev && !ExcelLink._busy, [tplId, prev], { timeout: 30000 });
@@ -279,7 +284,7 @@ try {
   // E5 — a colleague's history row is pulled in, not reverted
   const hdr = fs.readFileSync(vf, 'utf8').split(/\r?\n/)[0].split(',');
   const d5 = await rowOf(page, tpl.id, 'D5');
-  const rec = { _pk: 'D5', _ver: 'C9', _ts: new Date(Date.now() + 1000).toISOString(), Doc: 'D5', Status: 'Open', Remarks: 'colleague', When: d5.When, Amount: d5.Amount };
+  const rec = { _pk: 'D5', _ver: 'C9', _ts: new Date(Date.now() + 1000).toISOString(), Doc: 'D5', Status: 'Open', Remarks: 'colleague', When: d5.When, Amount: d5.Amount, Ref: d5.Ref };
   fs.appendFileSync(vf, hdr.map(h => { const v = rec[h] == null ? '' : String(rec[h]); return /[",]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(',') + '\r\n');
   xlEdit(X.file, [{ op: 'set', rid: rid.D5, col: 'Status', value: 'Cleared' }]);
   P = await loadBack(page, { exportId: X.exportId });
@@ -291,11 +296,17 @@ try {
   check((await rowOf(page, tpl.id, 'D5')).Remarks === 'colleague', 'E5 session row refreshed from history');
 
   // E6 + E7 — invalid dropdown value, read-only edit
-  xlEdit(X.file, [{ op: 'set', rid: rid.D6, col: 'Status', value: 'Bogus' }, { op: 'set', rid: rid.D6, col: 'Amount', value: 999, type: 'number' }]);
+  xlEdit(X.file, [{ op: 'set', rid: rid.D6, col: 'Status', value: 'Bogus' }, { op: 'set', rid: rid.D6, col: 'Ref', value: 'changed' }]);
   P = await loadBack(page, { exportId: X.exportId });
   check(P.problems.some(p => p.code === 'notInList' && p.col === 'Status'), 'E6 value outside the dropdown is a problem', P.problems);
-  check(P.info.readOnly.Amount === 1 && !P.changes.some(c => c.col === 'Amount'), 'E7 read-only edit ignored and counted', P.info.readOnly);
+  check(P.info.readOnly.Ref === 1 && !P.changes.some(c => c.col === 'Ref'), 'E7 read-only edit ignored and counted', P.info.readOnly);
   await page.evaluate(() => ExcelLink.closeReview());
+  // A changed identity column (the value column) means the row was pasted over / sorted apart
+  xlEdit(X.file, [{ op: 'set', rid: rid.D6, col: 'Amount', value: 999, type: 'number' }]);
+  P = await loadBack(page, { exportId: X.exportId });
+  check(P.problems.some(p => p.code === 'rowMisaligned' && p.rid === rid.D6), 'E7b changed identity column → rowMisaligned, row skipped', P.problems);
+  await page.evaluate(() => ExcelLink.closeReview());
+  xlEdit(X.file, [{ op: 'set', rid: rid.D6, col: 'Amount', value: 50, type: 'number' }, { op: 'set', rid: rid.D6, col: 'Ref', value: 'R6' }]);
 
   // E11 — bulk clear guard
   const clearRids = [];
@@ -378,7 +389,8 @@ try {
   await page.evaluate((x) => ExcelLink.closeLink(x, true), X2.exportId);
   check(JSON.parse(fs.readFileSync(X2.headPath, 'utf8')).status === 'closed', 'Close link marks the manifest closed');
 
-  check(errors.length === 0, 'no page errors (new launcher)', errors);
+  const unexpected = errors.filter(e => !/injected fault/.test(e));   // E13 logs its injected failure on purpose
+  check(unexpected.length === 0, 'no page errors (new launcher)', unexpected);
 
   // ════════════════════════════════════════════════════════════════════════
   console.log('\n[S] Excel link on an older launcher (SheetJS fallback)');

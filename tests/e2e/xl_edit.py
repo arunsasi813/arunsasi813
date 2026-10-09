@@ -14,7 +14,8 @@ Excel row number (``row``) or by the hidden row id (``rid``).
 Operations (a JSON list of objects with an ``op`` key):
 
   set              {row|rid, col, value, type?: date|number|text|formula, sheet?}
-                   date "YYYY-MM-DD" becomes a real date; formula writes "=…"
+                   date "YYYY-MM-DD" becomes a real date; formula writes "=…";
+                   without type, a cell formatted as Text (@) gets text, as in Excel
   set_many         {col, value, rids: [...], type?}
   sort             {col, reverse?}        sort the data rows (all columns)
   reverse_rows     {}                     reverse the data rows (all columns)
@@ -152,6 +153,8 @@ def _typed(value, kind: str | None):
 
 def _set(sh: Sheet, r: int, col, value, kind=None) -> None:
     cell = sh.ws.cell(r, sh.col(col))
+    if kind is None and value is not None and not isinstance(value, bool) and cell.number_format == "@":
+        kind = "text"                         # typing into a Text-formatted cell keeps text, as in Excel
     v, dtype = _typed(value, kind)
     cell.value = v
     if dtype:

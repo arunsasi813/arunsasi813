@@ -169,7 +169,13 @@ th.col-ss-added .col-marker {
 }
 .excel-view-toolbar .xl-btn:hover { background: var(--summary-bar-bg, #f3f4f6); }
 .excel-view-toolbar .xl-btn.active { background: var(--primary, #2563eb); color: #fff; border-color: var(--primary, #2563eb); }
+.excel-view-toolbar .xl-btn:disabled { opacity: 0.45; cursor: default; }
+.excel-view-toolbar .xl-btn:disabled:hover { background: var(--panel-bg, #fff); }
+/* the button itself must be the click target (it carries jss_object, which keeps the sheet selection) */
+.excel-view-toolbar .xl-btn * { pointer-events: none; }
 .excel-view-toolbar select.xl-sel { padding: 4px 8px; border: 1px solid var(--border, #e5e7eb); border-radius: 3px; font-size: 12px; min-width: 90px; }
+.excel-view-toolbar select.xl-sel.xl-sel-sm { min-width: 0; padding: 3px 4px; }
+.excel-view-toolbar .xl-lbl { display: inline-flex; align-items: center; gap: 4px; margin: 0 2px; font-size: 12px; color: var(--text-muted, #6b7280); }
 .excel-view-toolbar .xl-sep { width: 1px; height: 20px; background: var(--border, #e5e7eb); margin: 0 4px; }
 
 /* Color palette popover (re-used from Phase 4 if loaded; safe to add either way) */
@@ -436,20 +442,38 @@ th.col-ss-added .col-marker {
   flex: 1;
   overflow: hidden;
   min-height: 0;
+  position: relative;
 }
+.excel-view-wrap.xl-fullscreen { position: fixed; inset: 0; z-index: 900; background: var(--panel-bg, #fff); }
 .excel-view-host {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
   background: var(--panel-bg, #fff);
 }
-.excel-view-host .jss_container,
-.excel-view-host .jspreadsheet,
-.excel-view-host table.jss { width: 100%; height: 100%; }
+.excel-view-host .jss_container { width: 100%; }
+.excel-view-host .jss_worksheet > tbody > tr > td.readonly { color: var(--text-muted, #6b7280); }
+.excel-view-host .jss_worksheet > thead > tr > td.xl-h-ro { color: var(--text-muted, #6b7280); }
+.excel-view-host .jss_worksheet > thead > tr > td.xl-h-edit { font-weight: 600; }
+.excel-view-host td.xl-status { white-space: nowrap; color: inherit; }
+.excel-view-host td.xl-status .badge { font-size: 9px; padding: 1px 5px; margin-right: 1px; line-height: 1.3; }
+.excel-view-host td.neg { color: var(--danger, #b91c1c); }
+.excel-view-host td.editor > input.xl-editor { border: 0; outline: 0; margin: 0; padding: 0 4px; box-sizing: border-box; font: inherit; background: var(--panel-bg, #fff); color: inherit; }
 
-/* Light-touch coloring for JSS cells via inline class (set on init) */
+/* Light-touch coloring for JSS cells via inline class (set by the column render) */
 .excel-view-host td.jss-err  { background: var(--danger-bg, #fee2e2) !important; color: var(--danger, #b91c1c); font-weight: 600; }
 .excel-view-host td.jss-corr { background: var(--success-bg, #d1fae5) !important; color: var(--success, #065f46); }
 .excel-view-host td.jss-row-offset { opacity: 0.7; }
+.xl-loading { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; min-height: 120px; color: var(--text-muted, #6b7280); font-size: 13px; }
+.xl-loading.xl-overlay { position: absolute; inset: 0; z-index: 30; background: rgba(255,255,255,0.75); }
+.xl-spin { width: 16px; height: 16px; border: 2px solid var(--border, #e5e7eb); border-top-color: var(--primary, #2563eb); border-radius: 50%; animation: xl-spin 0.8s linear infinite; }
+@keyframes xl-spin { to { transform: rotate(360deg); } }
+.xl-empty { padding: 24px; text-align: center; color: var(--text-muted, #6b7280); }
+/* ⚙ View options modal */
+.xl-opts fieldset.xl-opt-group { border: 1px solid var(--border, #e5e7eb); border-radius: 6px; margin: 0 0 10px; padding: 6px 12px 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 16px; align-items: end; }
+.xl-opts fieldset.xl-opt-group legend { font-weight: 600; font-size: 12px; padding: 0 4px; }
+.xl-opts .xl-opt { margin: 0; }
 
 
   /* Row drop hover */
@@ -3820,6 +3844,11 @@ const ExcelLink = {
     unsupported_format: 'Save the file as Excel Workbook (*.xlsx) and try again.',
     busy_saving: 'Excel is still saving the file — try again in a moment.',
     ambiguous_sheet: 'More than one sheet has Reco row ids — pick the sheet to read.',
+    bad_sheet: 'That sheet is not in the workbook — pick one of the listed sheets.',
+    busy: 'Several Excel tasks are already running — wait for them to finish.',
+    unreadable: 'The workbook could not be read (damaged, password-protected or not a real .xlsx). Open it in Excel and save it again as .xlsx.',
+    no_window: 'The launcher window is not ready — try again.',
+    dialog_failed: 'The file dialog could not be opened.',
     bad_token: 'The picked file is no longer available — pick it again.',
     unknown_job: 'The background task was lost — try again.',
     not_done: 'The background task has not finished yet.',
@@ -4581,7 +4610,7 @@ const ExcelLink = {
       ExcelLink.renderReview(plan);
     } catch (e) {
       if (e.code === 'cancelled') return;
-      if (e.code === 'ambiguous_sheet') {
+      if (e.code === 'ambiguous_sheet' || e.code === 'bad_sheet') {
         const cands = (e.detail && e.detail.candidates) || (e.result && e.result.candidates) || [];
         ExcelLink._busy = false;
         const pick = prompt(e.message + '\n\nSheets: ' + cands.join(', '), cands[0] || '');
@@ -6935,40 +6964,1419 @@ const Reco = {
     // Attach global mouseup listener pointing explicitly to Reco
     document.addEventListener('mouseup', Reco.endDragSelect, { once: true });
   },
-_xlUpdateTable(worksheet, cell, col, row, value /*, label, cellName */) {
-  // col = x index, row = y index, cell = the <td> element
-  if (!Reco._xlRows || !Reco._xlCols) return;
-  const r = Reco._xlRows[row];
-  if (!r) return;
-  const id   = AppState.activeRecoId;
-  const sess = AppState.recoSessions[id];
-  const tpl  = AppState.recoTemplates.find(x => x.id === id);
-  if (!sess || !tpl) return;
+/* ============== EXCEL VIEW (jspreadsheet CE 5) ==============
+   One worksheet per view. A row is identified by the hidden last column
+   `_rid` (row._id) and a column by columns[x].name, so jss sorting and
+   column drags can never send an edit to the wrong cell. Values are checked
+   in onbeforechange and written through Reco.applyEdits once per burst
+   (onafterchanges); undo/redo replay through the same path. */
 
-  // Status column (x = 0): rich badges
-  if (col === 0) {
-    cell.innerHTML = Reco._xlStatusBadgeHtml ? Reco._xlStatusBadgeHtml(r, sess, tpl)
-      : (sess.offsets[r._id] ? 'Offset' : 'Open');
-    cell.style.whiteSpace = 'nowrap';
-    return;
-  }
-
-  // Data columns: format-error / corrected / offset coloring
-  const colName = Reco._xlCols[col];
-  if (!colName) return;
-  const colDef = tpl.columns.find(c => c.name === colName);
-  cell.classList.remove('jss-err', 'jss-corr', 'jss-row-offset');
-  if (r['_corrected_' + colName]) {
-    cell.classList.add('jss-corr');
-  } else if (colDef && colDef.formats && colDef.formats.length && !FMT.validate(r[colName], colDef.formats)) {
-    cell.classList.add('jss-err');
-  }
-  if (sess.offsets && sess.offsets[r._id]) cell.classList.add('jss-row-offset');
+/* Options: defaults (§6.3). Template defaults live in tpl.excelView,
+   personal preferences in localStorage 'reco.xlview.v1.<tplId>'. */
+XL_DEFAULTS: {
+  editScope: 'template', allowPkEdit: false,
+  showStatus: true, showExtras: 'all', showRowNumbers: true, freezeColumns: 'auto', sortMode: 'reco',
+  filters: true, search: false, columnDrag: true, columnResize: true,
+  rendering: 'lazy', pageSize: 200, maxRows: 20000, tableHeight: 'fit', fullscreen: false,
+  defaultColWidth: 120, rowHeight: 0, wordWrap: false, textOverflow: false, textAlign: 'left',
+  numberFormat: 'accounting', decimals: 2, negativeRed: true, dateDisplay: 'DD/MM/YYYY', dateWrite: 'auto',
+  pasteMode: 'validate', fillHandle: true, autoIncrement: false, undo: true, selectionBar: true,
+  dropdownAutocomplete: 'auto', formulas: false, copyWithHeaders: false
 },
 
-/* ============== PHASE 8 — EXCEL VIEW TOOLBAR & WIZARDS ============== */
+/* One entry per option, in display order. type 'select' takes one of
+   `values` ([value, label] pairs); a select with min/max (tableHeight) also
+   accepts any whole number in that range. templateOnly options are never
+   read from personal preferences. */
+XL_OPTION_META: [
+  { key: 'showStatus', label: 'Show the Reco Status column', group: 'Display', type: 'bool' },
+  { key: 'showExtras', label: 'Extra columns', group: 'Display', type: 'select',
+    values: [['all', 'All'], ['inputs', 'Input columns only (tags, To Account)'], ['none', 'None']] },
+  { key: 'showRowNumbers', label: 'Row numbers', group: 'Display', type: 'bool' },
+  { key: 'freezeColumns', label: 'Freeze columns', group: 'Display', type: 'select',
+    values: [['auto', 'Auto (status + key columns)'], [0, 'None'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [5, '5'], [6, '6']] },
+  { key: 'sortMode', label: 'Sort by clicking a header', group: 'Display', type: 'select', values: [['reco', 'On (Reco sort order)'], ['off', 'Off']] },
+  { key: 'filters', label: 'Column filters', group: 'Display', type: 'bool' },
+  { key: 'search', label: 'Search box', group: 'Display', type: 'bool' },
+  { key: 'columnDrag', label: 'Drag headers to reorder columns', group: 'Display', type: 'bool' },
+  { key: 'columnResize', label: 'Resize columns', group: 'Display', type: 'bool' },
+  { key: 'defaultColWidth', label: 'Default column width (px)', group: 'Display', type: 'number', min: 40, max: 600 },
+  { key: 'rowHeight', label: 'Row height (px, 0 = automatic)', group: 'Display', type: 'number', min: 0, max: 200 },
+  { key: 'wordWrap', label: 'Wrap text', group: 'Display', type: 'bool' },
+  { key: 'textOverflow', label: 'Long text runs into empty cells', group: 'Display', type: 'bool' },
+  { key: 'textAlign', label: 'Text alignment', group: 'Display', type: 'select', values: [['left', 'Left'], ['center', 'Center'], ['right', 'Right']] },
+  { key: 'selectionBar', label: 'Selection totals bar', group: 'Display', type: 'bool' },
+  { key: 'fullscreen', label: 'Open full screen', group: 'Display', type: 'bool' },
+  { key: 'editScope', label: 'Editable columns', group: 'Editing', type: 'select',
+    values: [['template', "The template's editable columns"], ['allStandard', 'All template columns'], ['readonly', 'None (read-only)']] },
+  { key: 'allowPkEdit', label: 'Allow editing key (PK) columns', group: 'Editing', type: 'bool', templateOnly: true },
+  { key: 'pasteMode', label: 'Paste', group: 'Editing', type: 'select', values: [['validate', 'Allowed, every cell checked'], ['off', 'Off']] },
+  { key: 'fillHandle', label: 'Fill handle (drag the corner to copy)', group: 'Editing', type: 'bool' },
+  { key: 'autoIncrement', label: 'Fill handle counts up numbers', group: 'Editing', type: 'bool' },
+  { key: 'undo', label: 'Undo / redo', group: 'Editing', type: 'bool' },
+  { key: 'dropdownAutocomplete', label: 'Search box in dropdowns', group: 'Editing', type: 'select',
+    values: [['auto', 'When there are more than 15 options'], [true, 'Always'], [false, 'Never']] },
+  { key: 'copyWithHeaders', label: 'Copy includes the column headers', group: 'Editing', type: 'bool' },
+  { key: 'formulas', label: 'Calculate =formulas (needs a formula engine)', group: 'Editing', type: 'bool' },
+  { key: 'rendering', label: 'Rows', group: 'Rendering', type: 'select', values: [['lazy', 'One scrolling list (loads as you scroll)'], ['paginate', 'Pages']] },
+  { key: 'pageSize', label: 'Rows per page', group: 'Rendering', type: 'select', values: [[100, '100'], [200, '200'], [500, '500'], [1000, '1000']] },
+  { key: 'maxRows', label: 'Most rows shown', group: 'Rendering', type: 'number', min: 1, max: 1000000 },
+  { key: 'tableHeight', label: 'Table height', group: 'Rendering', type: 'select', min: 150, max: 3000,
+    values: [['fit', 'Fit the window'], [300, '300 px'], [400, '400 px'], [500, '500 px'], [600, '600 px'], [800, '800 px']] },
+  { key: 'numberFormat', label: 'Number format', group: 'Numbers & dates', type: 'select',
+    values: [['accounting', 'Accounting (1,234.50)'], ['minus', 'Minus sign -1,234.50'], ['plain', 'Plain -1234.50'], ['int', 'Whole numbers -1,235']] },
+  { key: 'decimals', label: 'Decimal places', group: 'Numbers & dates', type: 'number', min: 0, max: 6 },
+  { key: 'negativeRed', label: 'Negative numbers in red', group: 'Numbers & dates', type: 'bool' },
+  { key: 'dateDisplay', label: 'Show dates as', group: 'Numbers & dates', type: 'select',
+    values: [['DD/MM/YYYY', 'DD/MM/YYYY'], ['DD-MMM-YY', 'DD-MMM-YY'], ['DD-MMM-YYYY', 'DD-MMM-YYYY'], ['YYYY-MM-DD', 'YYYY-MM-DD'], ['MM/DD/YYYY', 'MM/DD/YYYY']] },
+  { key: 'dateWrite', label: 'Write edited dates as', group: 'Numbers & dates', type: 'select',
+    values: [['auto', "The row's own style"], ['DD/MM/YYYY', 'DD/MM/YYYY'], ['YYYY-MM-DD', 'YYYY-MM-DD'], ['serial', 'Excel serial number']] }
+],
+XL_GROUPS: ['Display', 'Editing', 'Rendering', 'Numbers & dates'],
+/* Applied without rebuilding the sheet. */
+_XL_LIVE: ['showRowNumbers', 'tableHeight', 'fullscreen', 'undo', 'selectionBar', 'copyWithHeaders'],
+/* Options that need a jss API; hidden and ignored when it is missing. */
+_XL_FEATURE_OF: { showRowNumbers: ['showIndex', 'hideIndex'], search: ['searchInput'], sortMode: ['orderBy'], selectionBar: ['getSelection'] },
+_XL_SCOPE_RANK: { readonly: 0, template: 1, allStandard: 2 },
 
-_xlToolbarHtml() {
+_xlMeta(key) { return Reco.XL_OPTION_META.find(m => m.key === key) || null; },
+/* One option value, checked against its meta; `fb` when unusable. */
+_xlClampOpt(m, v, fb) {
+  if (!m || v === undefined || v === null || v === '') return fb;
+  if (m.type === 'bool') {
+    if (v === true || v === 'true' || v === 1 || v === '1') return true;
+    if (v === false || v === 'false' || v === 0 || v === '0') return false;
+    return fb;
+  }
+  if (m.type === 'number') {
+    const n = Number(v);
+    if (!isFinite(n)) return fb;
+    return Math.min(m.max, Math.max(m.min, Math.round(n)));
+  }
+  const hit = (m.values || []).find(p => String(p[0]) === String(v));
+  if (hit) return hit[0];
+  if (m.min != null && typeof v !== 'boolean' && String(v).trim() !== '' && isFinite(Number(v))) {
+    return Math.min(m.max, Math.max(m.min, Math.round(Number(v))));
+  }
+  return fb;
+},
+/* Known keys only, each clamped (for tpl.excelView written by the wizard). */
+xlCleanOptions(obj) {
+  const out = {};
+  if (!obj || typeof obj !== 'object') return out;
+  Reco.XL_OPTION_META.forEach(m => {
+    if (!Object.prototype.hasOwnProperty.call(obj, m.key)) return;
+    const v = Reco._xlClampOpt(m, obj[m.key], undefined);
+    if (v !== undefined) out[m.key] = v;
+  });
+  return out;
+},
+_xlPrefsKey(tplId) { return 'reco.xlview.v1.' + tplId; },
+_xlMemPrefs: {},
+_xlLoadPrefs(tpl) {
+  if (!tpl) return {};
+  try {
+    const s = localStorage.getItem(Reco._xlPrefsKey(tpl.id));
+    const p = s ? JSON.parse(s) : null;
+    return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {};
+  } catch (e) {
+    return Object.assign({}, Reco._xlMemPrefs[tpl.id] || {});
+  }
+},
+/* Returns false when localStorage is unavailable (kept in memory instead). */
+_xlSavePrefs(tpl, prefs) {
+  const clean = {};
+  Object.keys(prefs || {}).forEach(k => { const m = Reco._xlMeta(k); if (m && !m.templateOnly) clean[k] = prefs[k]; });
+  Reco._xlMemPrefs[tpl.id] = clean;
+  try {
+    if (Object.keys(clean).length) localStorage.setItem(Reco._xlPrefsKey(tpl.id), JSON.stringify(clean));
+    else localStorage.removeItem(Reco._xlPrefsKey(tpl.id));
+    return true;
+  } catch (e) { return false; }
+},
+/* Effective options: defaults ← tpl.excelView ← personal preferences.
+   A preference may only narrow editScope; allowPkEdit comes from the
+   template only; unknown keys are dropped; values are clamped.
+   Pass prefs = {} for the template-level values. */
+xlOptions(tpl, prefs) {
+  const D = Reco.XL_DEFAULTS, R = Reco._XL_SCOPE_RANK;
+  const tv = (tpl && tpl.excelView && typeof tpl.excelView === 'object') ? tpl.excelView : {};
+  const pv = prefs !== undefined ? (prefs || {}) : Reco._xlLoadPrefs(tpl);
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const o = {};
+  Reco.XL_OPTION_META.forEach(m => {
+    let v = Reco._xlClampOpt(m, has(tv, m.key) ? tv[m.key] : undefined, D[m.key]);
+    if (!m.templateOnly && m.key !== 'editScope' && has(pv, m.key)) v = Reco._xlClampOpt(m, pv[m.key], v);
+    o[m.key] = v;
+  });
+  const p = Reco._xlClampOpt(Reco._xlMeta('editScope'), pv.editScope, o.editScope);
+  if (R[p] < R[o.editScope]) o.editScope = p;
+  return o;
+},
+_xlHasFeature(key) {
+  const need = Reco._XL_FEATURE_OF[key], f = Reco._xlFeat;
+  return !need || !f || need.every(n => f[n]);
+},
+/* Feature detection by API shape (version() reports 5.0.0 for 5.0.4). */
+_xlFeatures(ret, ws) {
+  const J = typeof jspreadsheet !== 'undefined' ? jspreadsheet : null;
+  const f = {
+    arrayReturn: Array.isArray(ret),
+    orderBy: !!ws && typeof ws.orderBy === 'function',
+    getSelection: !!ws && typeof ws.getSelection === 'function',
+    showIndex: !!ws && typeof ws.showIndex === 'function',
+    hideIndex: !!ws && typeof ws.hideIndex === 'function',
+    searchInput: !!(ws && ws.searchInput),
+    fullscreen: !!ws && (typeof ws.fullscreen === 'function' || !!(ws.parent && typeof ws.parent.fullscreen === 'function')),
+    destroy: !!J && typeof J.destroy === 'function'
+  };
+  if (!Reco._xlFeatLogged) {
+    Reco._xlFeatLogged = true;
+    try { console.info('[Excel view] jspreadsheet features: ' + JSON.stringify(f)); } catch (e) {}
+  }
+  return f;
+},
+
+/* ---------- state ---------- */
+_xlInstance: null,     // spreadsheet (ws.parent)
+_xlWorksheet: null,    // the one worksheet
+_xlCtx: null,          // { tplId, tpl, sess, o, S, ws, ridX, … } of the open view
+_xlById: null,         // row._id → row
+_xlFullCache: null,    // row._id → Reco._rowWithExtras(row)
+_xlSelIds: [],         // row ids of the current selection (selection bar, offset)
+_xlFeat: null,
+
+renderExcelView(tpl, sess) {
+  const o = Reco.xlOptions(tpl);
+  let h = '<div class="excel-view-wrap' + (o.fullscreen ? ' xl-fullscreen' : '') + '" id="xlViewWrap">';
+  h += Reco._xlToolbarHtml(tpl, sess, o);
+  h += '<div class="excel-view-host" id="excelViewHost"><div class="xl-loading"><span class="xl-spin"></span>Loading the spreadsheet…</div></div>';
+  h += '<div class="sel-sum-bar" id="xlSelSumBar"></div>';
+  h += '</div>';
+  setTimeout(() => Reco._xlInit(tpl, sess), 30);
+  return h;
+},
+
+_xlToolbarHtml(tpl, sess, o) {
+  o = o || Reco.xlOptions(tpl);
+  const sep = '<span class="xl-sep"></span>';
+  let h = '';
+  h += '<button class="xl-btn" onclick="Reco.openXlViewOptions()" title="Excel view options">⚙ View</button>';
+  h += '<button class="xl-btn' + (o.fullscreen ? ' active' : '') + '" id="xlFsBtn" onclick="Reco._xlToggleFullscreen()" title="Full screen (Esc to leave)">⛶</button>';
+  h += '<button class="xl-btn' + (o.wordWrap ? ' active' : '') + '" onclick="Reco._xlSetPref(\'wordWrap\',' + (!o.wordWrap) + ')" title="Wrap text">↵ Wrap</button>';
+  h += '<label class="xl-lbl" title="Columns that stay in place when scrolling sideways">Freeze <select class="xl-sel xl-sel-sm" onchange="Reco._xlSetPref(\'freezeColumns\', this.value)">';
+  Reco._xlMeta('freezeColumns').values.forEach(p => {
+    h += '<option value="' + U.escAttr(p[0]) + '"' + (String(p[0]) === String(o.freezeColumns) ? ' selected' : '') + '>' + U.esc(p[0] === 'auto' ? 'Auto' : p[1]) + '</option>';
+  });
+  h += '</select></label>';
+  h += '<button class="xl-btn" onclick="Reco._xlOpenSearch()" title="Find (Ctrl+F)">🔍</button>';
+  h += sep;
+  h += '<button class="xl-btn" onclick="Reco._xlOpenInExcel()" title="Edit this data in Microsoft Excel and load the changes back">📗 Open in Excel</button>';
+  h += '<button class="xl-btn" onclick="Reco.exportData(\'csv\')" title="Download the current view as CSV">⬇ CSV</button>';
+  h += sep;
+  // jss_object keeps the sheet's selection when these are clicked.
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlFmt(\'bold\',\'toggle\')" title="Bold"><b>B</b></button>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlFmt(\'italic\',\'toggle\')" title="Italic"><i>I</i></button>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlFmt(\'align\',\'left\')" title="Align left">⬅</button>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlFmt(\'align\',\'center\')" title="Align center">↔</button>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlFmt(\'align\',\'right\')" title="Align right">➡</button>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlOpenPalette(event,\'bg\')" title="Fill colour">🎨</button>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlOpenPalette(event,\'fg\')" title="Text colour"><b>A</b></button>';
+  h += '<select class="xl-sel jss_object" onchange="Reco._xlNumFmt(this.value); this.selectedIndex=0;" title="Display format of the selected cells (the stored value does not change)">';
+  h += '<option value="">Format…</option>';
+  [['general', 'General'], ['number', '1,234.56'], ['number0', '1,235'], ['currency', 'AED 1,234.56'], ['accounting', '(1,234.56)'],
+   ['percent', '12.34%'], ['date_short', 'DD/MM/YY'], ['date_long', 'DD-MMM-YYYY'], ['month_year', 'MMM-YY']].forEach(p => {
+    h += '<option value="' + p[0] + '">' + U.esc(p[1]) + '</option>';
+  });
+  h += '</select>';
+  h += '<button class="xl-btn jss_object" onclick="Reco._xlClearFormat()" title="Clear formatting on the selection">⌫ fmt</button>';
+  h += sep;
+  h += '<button class="xl-btn jss_object" id="xlUndoBtn" onclick="Reco._xlAct(\'undo\')" title="Undo (Ctrl+Z)" disabled>↶</button>';
+  h += '<button class="xl-btn jss_object" id="xlRedoBtn" onclick="Reco._xlAct(\'redo\')" title="Redo (Ctrl+Y)" disabled>↷</button>';
+  return '<div class="excel-view-toolbar">' + h + '</div>';
+},
+
+_xlInit(tpl, sess) {
+  Reco._xlDestroy();
+  const host = document.getElementById('excelViewHost');
+  if (!host || !tpl) return;
+  // Work on the live objects (the render may be a few ms old).
+  tpl = AppState.recoTemplates.find(t => t.id === tpl.id) || tpl;
+  sess = AppState.recoSessions[tpl.id] || sess;
+  if (!sess) return;
+  if (typeof jspreadsheet === 'undefined') {
+    host.innerHTML = '<div class="xl-empty">The spreadsheet library (lib/jspreadsheet.js and lib/jsuites.js) is not installed in the apps folder.</div>';
+    U.toast('Jspreadsheet not loaded', 'error');
+    return;
+  }
+  const o = Reco.xlOptions(tpl);
+  if (!Reco._xlHasFeature('sortMode')) o.sortMode = 'off';
+  if (!Reco._xlHasFeature('search')) o.search = false;
+  const S = XlSchema.build(tpl, sess, { scope: o.editScope, allowPkEdit: o.allowPkEdit, showStatus: o.showStatus, showExtras: o.showExtras });
+  const cols = Reco._xlOrderCols(S.cols, sess);
+  let rows = Reco.applyTableFiltersSort(tpl, sess);
+  if (rows.length > o.maxRows) {
+    U.toast('Showing first ' + o.maxRows + ' rows — filter in Reco to narrow', 'warn');
+    rows = rows.slice(0, o.maxRows);
+  }
+  Reco._xlById = new Map(rows.map(r => [r._id, r]));
+  Reco._xlFullCache = new Map();
+  Reco._xlSelIds = [];
+  const C = Reco._xlCtx = {
+    tplId: tpl.id, tpl, sess, o, S, cols, ws: null, ridX: cols.length,
+    colStyle: new Map(), pending: new Map(), rejects: new Map(), skipped: 0, noticeTimer: null,
+    formulasOn: !!(o.formulas && typeof formula === 'function')
+  };
+  if (!rows.length || !cols.length) {
+    host.innerHTML = '<div class="xl-empty">' + (rows.length ? 'No columns to show.' : 'No rows match the current filters.') + '</div>';
+    return;
+  }
+  const data = rows.map(r => {
+    const full = Reco._xlFull(r);
+    return cols.map(d => Reco._xlSheetValue(d, r, full, sess)).concat([r._id]);
+  });
+  const columns = cols.map((d, i) => Reco._xlJssColumn(d, o, sess, data, i))
+    .concat([{ type: 'hidden', name: '_rid', title: '_rid', readOnly: true }]);
+  const paginate = o.rendering === 'paginate';
+  const cfg = {
+    worksheets: [{
+      data, columns, worksheetName: 'Reco',
+      tableOverflow: true, tableHeight: Reco._xlFitHeight(host, o) + 'px', tableWidth: '100%',
+      lazyLoading: !paginate, pagination: paginate ? o.pageSize : 0, paginationOptions: [100, 200, 500, 1000],
+      search: !!o.search, filters: !!o.filters, freezeColumns: Reco._xlFreezeCount(cols, o),
+      columnSorting: o.sortMode !== 'off', columnDrag: !!o.columnDrag, columnResize: !!o.columnResize, rowDrag: false,
+      defaultColWidth: o.defaultColWidth, defaultColAlign: o.textAlign, defaultRowHeight: o.rowHeight || undefined,
+      wordWrap: !!o.wordWrap, textOverflow: !!o.textOverflow, editable: o.editScope !== 'readonly', selectionCopy: !!o.fillHandle,
+      secureFormulas: C.formulasOn,
+      allowInsertRow: false, allowInsertColumn: false, allowDeleteRow: false, allowDeleteColumn: false,
+      allowManualInsertRow: false, allowManualInsertColumn: false, allowRenameColumn: false, allowComments: false
+    }],
+    about: false, allowExport: false, parseHTML: false, autoIncrement: !!o.autoIncrement,
+    parseFormulas: C.formulasOn,
+    sorting: Reco._xlSorting, contextMenu: Reco._xlContextMenu, onbeforepaste: Reco._xlOnBeforePaste,
+    onbeforechange: Reco._xlOnBeforeChange, onafterchanges: Reco._xlOnAfterChanges,
+    onundo: (w, r) => Reco._xlOnHistory(w, r, false), onredo: (w, r) => Reco._xlOnHistory(w, r, true),
+    onselection: Reco._xlOnSelection, onresizecolumn: Reco._xlOnResize, onmovecolumn: Reco._xlOnMoveColumn,
+    onsort: Reco._xlOnSort, oncopy: Reco._xlOnCopy, onload: Reco._xlOnLoad
+  };
+  host.innerHTML = '';
+  let ret = null;
+  try { ret = jspreadsheet(host, cfg); } catch (e) { console.error('Excel view: jspreadsheet failed', e); }
+  // CE 5 returns the worksheets as an array; older builds an instance.
+  const ws = Array.isArray(ret) ? ret[0] : (ret && ret.worksheets ? ret.worksheets[0] : null);
+  if (!ws) {
+    Reco._xlCtx = null;
+    host.innerHTML = '<div class="xl-empty">The spreadsheet could not be started.</div>';
+    U.toast('Could not start the Excel view', 'error');
+    return;
+  }
+  Reco._xlWorksheet = ws;
+  Reco._xlInstance = ws.parent || null;
+  C.ws = ws;
+  Reco._xlFeat = Reco._xlFeatures(ret, ws);
+  C.ridX = Reco._xlFindRid(ws);
+  Reco._xlWrapOrderBy(ws);
+  if (!o.undo) ws.ignoreHistory = true;
+  if (!o.showRowNumbers && Reco._xlFeat.hideIndex) ws.hideIndex();
+  Reco._xlDecorateHeaders(ws);
+  Reco._xlMarkSortHeader(ws, sess);
+  Reco._xlWireKeys();
+  if (typeof ResizeObserver === 'function') {
+    Reco._xlRO = new ResizeObserver(() => {
+      if (Reco._xlRefitRaf) return;
+      Reco._xlRefitRaf = requestAnimationFrame(() => { Reco._xlRefitRaf = 0; Reco._xlRefit(); });
+    });
+    Reco._xlRO.observe(host);
+  }
+  Reco._xlRefit();
+  Reco._xlUpdateUndoButtons();
+},
+
+/* Status first, then sess.columnOrder, then everything else in schema order. */
+_xlOrderCols(cols, sess) {
+  const order = Array.isArray(sess.columnOrder) ? sess.columnOrder : [];
+  if (!order.length) return cols.slice();
+  const pos = new Map(order.map((n, i) => [n, i]));
+  const status = cols.filter(d => d.role === 'status');
+  const rest = cols.filter(d => d.role !== 'status');
+  const placed = rest.filter(d => pos.has(d.name)).sort((a, b) => pos.get(a.name) - pos.get(b.name));
+  return status.concat(placed, rest.filter(d => !pos.has(d.name)));
+},
+/* 'auto' = the status column plus leading key columns, at most 3. */
+_xlFreezeCount(cols, o) {
+  const n = cols.length;
+  if (o.freezeColumns === 'auto') {
+    let i = 0;
+    if (cols[0] && cols[0].role === 'status') i = 1;
+    while (i < n && i < 3 && cols[i].isPk) i++;
+    return Math.min(i, n);
+  }
+  return Math.max(0, Math.min(Number(o.freezeColumns) || 0, n));
+},
+_xlFitHeight(host, o) {
+  if (o.tableHeight !== 'fit') return Math.max(150, Number(o.tableHeight) || 400);
+  return Math.max(200, ((host && host.clientHeight) || 600) - 8);
+},
+_xlRefit() {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  if (!ws) return;
+  const host = ws.parent && ws.parent.element;
+  if (!host || !host.isConnected) { Reco._xlDestroy(); return; }
+  if (!ws.content || !ws.element) return;
+  let h;
+  if (C.o.tableHeight === 'fit') {
+    const chrome = Math.max(0, ws.element.offsetHeight - ws.content.offsetHeight);
+    h = Math.max(120, host.clientHeight - chrome - 6);
+  } else h = Math.max(150, Number(C.o.tableHeight) || 400);
+  ws.content.style.maxHeight = h + 'px';
+},
+_xlFindRid(ws) {
+  const i = (ws.options.columns || []).findIndex(c => c && c.name === '_rid');
+  return i < 0 ? (ws.options.columns || []).length - 1 : i;
+},
+
+/* jss column for a ColDesc. */
+_xlJssColumn(d, o, sess, data, i) {
+  const c = {
+    name: d.name, title: d.header, readOnly: !d.editable, render: Reco._xlRender,
+    width: (sess.columnWidths && sess.columnWidths[d.name]) || (d.role === 'status' ? Math.max(100, o.defaultColWidth) : o.defaultColWidth)
+  };
+  const ed = d.editor;
+  if (ed === 'list') {
+    const src = (d.options || []).map(x => {
+      const it = { id: x.value, name: x.label || x.value };
+      if (x.group) it.group = x.group;
+      return it;
+    });
+    const known = new Set(src.map(s => String(s.id)));
+    data.forEach(r => {
+      const v = r[i];
+      if (v === '' || v == null || known.has(String(v))) return;
+      known.add(String(v));
+      src.push({ id: String(v), name: v + ' (not in list)' });
+    });
+    c.type = 'dropdown';
+    c.source = src;
+    c.autocomplete = o.dropdownAutocomplete === 'auto' ? (d.options || []).length > 15 : !!o.dropdownAutocomplete;
+    c._labels = new Map(src.map(s => [String(s.id), s.name]));
+  } else if (ed === 'combo') {
+    c.type = Reco.XL_COMBO;
+    c.recoOptions = d.options || [];
+  } else if (ed === 'number' || (ed === 'none' && d.kind === 'value')) {
+    Object.assign(c, { type: 'numeric', allowEmpty: true, align: 'right' });
+  } else if (ed === 'date' || (ed === 'none' && d.kind === 'date')) {
+    c.type = Reco.XL_DATE;
+    c.recoDisplay = o.dateDisplay;
+  } else {
+    c.type = 'text';
+  }
+  return c;
+},
+/* Value shown in the sheet (XlSchema.currentValue; numbers for value columns). */
+_xlSheetValue(d, row, full, sess) {
+  const v = XlSchema.currentValue(d, row, full, sess);
+  if (d.kind === 'value' && (d.editor === 'number' || d.editor === 'none')) {
+    if (typeof v === 'number') return isFinite(v) ? v : '';
+    if (U.isNumeric(v)) return U.num(v);
+  }
+  return v == null ? '' : v;
+},
+_xlSheetFromStore(d, store) {
+  if (d.kind === 'value' && (d.editor === 'number' || d.editor === 'none')) {
+    if (typeof store === 'number') return store;
+    if (U.isNumeric(store)) return U.num(store);
+  }
+  return store == null ? '' : store;
+},
+/* Canonical value → what Reco stores (row's style, or the dateWrite option). */
+_xlToStore(d, c, raw) {
+  const C = Reco._xlCtx;
+  const dw = C && C.o.dateWrite;
+  if (d.kind === 'date' && dw && dw !== 'auto' && typeof c === 'string' && c.startsWith('D:')) {
+    const dt = XlSchema._dateFromIso(c.slice(2));
+    if (dt) {
+      if (dw === 'serial') return Math.round((Date.UTC(dt.getFullYear(), dt.getMonth(), dt.getDate()) - Date.UTC(1899, 11, 30)) / 86400000);
+      return U.fmtDate(dt, dw);
+    }
+  }
+  return XlSchema.coerce(d, c, raw, Reco._xlColStyle(d));
+},
+_xlColStyle(d) {
+  const C = Reco._xlCtx;
+  if (!C) return null;
+  if (!C.colStyle.has(d.name)) C.colStyle.set(d.name, XlSchema.columnStyle(C.sess, d));
+  return C.colStyle.get(d.name);
+},
+_xlFull(row) {
+  const C = Reco._xlCtx;
+  if (!row || !C) return null;
+  const cache = Reco._xlFullCache || (Reco._xlFullCache = new Map());
+  let f = cache.get(row._id);
+  if (!f) {
+    const n = (C.tpl.additionalColumns || []).length + ((C.sess.extraColumns || []).length);
+    f = n ? Reco._rowWithExtras(C.tpl, C.sess, row) : row;
+    cache.set(row._id, f);
+  }
+  return f;
+},
+_xlRowAt(ws, y) {
+  const C = Reco._xlCtx, r = ws && ws.options.data[y];
+  return (r && C && Reco._xlById) ? (Reco._xlById.get(r[C.ridX]) || null) : null;
+},
+_xlColAt(ws, x) {
+  const c = ws && ws.options.columns[x];
+  return c ? c.name : null;
+},
+/* The session/template the view was built from must still be the live one. */
+_xlLive() {
+  const C = Reco._xlCtx;
+  if (!C) return null;
+  if (AppState.recoSessions[C.tplId] !== C.sess || AppState.recoTemplates.find(t => t.id === C.tplId) !== C.tpl) {
+    if (!C.staleNotified) {
+      C.staleNotified = true;
+      U.toast('The data changed — reloading the Excel view', 'warn');
+      setTimeout(() => App.navigate('reco'), 0);
+    }
+    return null;
+  }
+  return C;
+},
+
+/* ---------- display ---------- */
+_xlFmtNumber(v, o) {
+  if (v === '' || v == null) return { text: '', neg: false };
+  let n;
+  if (typeof v === 'number') n = v;
+  else if (U.isNumeric(v)) n = U.num(v);
+  else return { text: String(v), neg: false };
+  if (!isFinite(n)) return { text: String(v), neg: false };
+  const dec = o.numberFormat === 'int' ? 0 : Math.max(0, Math.min(6, Number(o.decimals) || 0));
+  const abs = Math.abs(n);
+  const body = o.numberFormat === 'plain' ? abs.toFixed(dec)
+    : abs.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  const neg = n < 0 && /[1-9]/.test(body);
+  return { text: neg ? (o.numberFormat === 'accounting' ? '(' + body + ')' : '-' + body) : body, neg };
+},
+_xlStatusHtml(row, sess, tpl) {
+  const off = sess.offsets && sess.offsets[row._id];
+  let h = off ? '<span class="badge offset">Offset' + (row._manualOffset ? ' ✋' : '') + '</span>' : '<span class="badge open">Open</span>';
+  if (row._ssAdded) h += ' <span class="badge ss-added" title="Added row">✚</span>';
+  const pk = Reco.getRowPK(tpl, row);
+  if (pk) {
+    if (tpl.groupsEnabled && typeof Groups !== 'undefined') {
+      const g = Groups.groupsForPk(tpl.id, pk);
+      if (g.length) h += ' <span class="badge general" title="In groups: ' + U.escAttr(g.map(x => x.name).join(' · ')) + '">📁 ' + g.length + '</span>';
+    }
+    const a = typeof Attachments !== 'undefined' ? Attachments.forPk(tpl.id, pk).length : 0;
+    const c = typeof Comments !== 'undefined' ? Comments.forPk(tpl.id, pk).length : 0;
+    if (a) h += ' <span class="badge fc" title="' + a + ' attachment(s)">📎 ' + a + '</span>';
+    if (c) h += ' <span class="badge specific" title="' + c + ' comment(s)">💬 ' + c + '</span>';
+  }
+  return h;
+},
+/* Column render: the cell text plus error / corrected / offset classes,
+   status badges and the sess.cellFormats styles. Runs after jss creates or
+   updates a cell, and directly for repaints. */
+_xlRender(td, value, x, y, ws, col) {
+  const C = Reco._xlCtx;
+  if (!td || !C || !col) return;
+  const d = C.S.byName.get(col.name);
+  if (!d) return;
+  const row = Reco._xlRowAt(ws, y);
+  const sess = C.sess;
+  const fmt = row ? Reco._ssFmtFor(sess, row, d.name) : null;
+  const empty = value === '' || value == null;
+  td.classList.remove('jss-err', 'jss-corr', 'jss-row-offset', 'neg', 'xl-status', 'fmt-xs', 'fmt-sm', 'fmt-md', 'fmt-lg', 'fmt-xl');
+  if (d.role === 'status') {
+    td.innerHTML = row ? Reco._xlStatusHtml(row, sess, C.tpl) : U.esc(value);
+    td.classList.add('xl-status');
+  } else if (fmt && fmt.numFmt && !empty) {
+    td.textContent = Reco._ssApplyNumFmt(value, fmt.numFmt);
+  } else if (col.type === 'numeric') {
+    const r = Reco._xlFmtNumber(value, C.o);
+    td.textContent = r.text;
+    if (r.neg && C.o.negativeRed) td.classList.add('neg');
+  } else if (col.type === Reco.XL_DATE) {
+    td.textContent = XlSchema.dateLabel(value, col.recoDisplay);
+  } else if (col.type === 'dropdown') {
+    td.textContent = empty ? '' : ((col._labels && col._labels.get(String(value))) || String(value));
+  } else if (!(C.formulasOn && String(value).charAt(0) === '=')) {
+    td.textContent = empty ? '' : String(value);
+  }
+  if (row && d.role !== 'status') {
+    if (row['_corrected_' + d.name]) td.classList.add('jss-corr');
+    else if (d.formats && !FMT.validate(row[d.name], d.formats)) td.classList.add('jss-err');
+    else if (d.kind === 'date' && !empty && !U.parseDate(value)) td.classList.add('jss-err');
+  }
+  if (row && sess.offsets && sess.offsets[row._id]) td.classList.add('jss-row-offset');
+  td.style.backgroundColor = (fmt && fmt.bg) || '';
+  td.style.color = (fmt && fmt.fg) || '';
+  td.style.fontWeight = fmt && fmt.bold ? '700' : '';
+  td.style.fontStyle = fmt && fmt.italic ? 'italic' : '';
+  td.style.textAlign = (fmt && fmt.align) || col.align || C.o.textAlign;
+  if (fmt && fmt.fontSize) td.classList.add('fmt-' + fmt.fontSize);
+},
+/* Header tooltips and read-only / editable marks. */
+_xlDecorateHeaders(ws) {
+  const C = Reco._xlCtx;
+  (ws.headers || []).forEach((th, x) => {
+    const d = C.S.byName.get(Reco._xlColAt(ws, x));
+    if (!th || !d) return;
+    const why = { pk: 'key column', computed: 'computed in Reco', status: 'status', notEditable: 'not editable' }[d.lockReason] || 'not editable';
+    th.classList.toggle('xl-h-ro', !d.editable);
+    th.classList.toggle('xl-h-edit', !!d.editable);
+    th.setAttribute('title', d.header + (d.editable ? (d.writeTo === 'tag' ? ' — editable (session tag)' : ' — editable') : ' — read-only (' + why + ')'));
+  });
+},
+_xlMarkSortHeader(ws, sess) {
+  const s = sess.columnSorts;
+  if (!s || !s.col) return;
+  const x = (ws.options.columns || []).findIndex(c => c && c.name === s.col);
+  if (x < 0 || !ws.headers[x]) return;
+  ws.headers.forEach(h => h && h.classList.remove('arrow-up', 'arrow-down'));
+  ws.headers[x].classList.add(s.dir === 'desc' ? 'arrow-up' : 'arrow-down');
+},
+
+/* ---------- custom editors ---------- */
+_xlEditorInput(td, type) {
+  const r = td.getBoundingClientRect();
+  const inp = document.createElement('input');
+  inp.type = type;
+  inp.className = 'xl-editor';
+  inp.style.width = r.width + 'px';
+  inp.style.height = Math.max(18, r.height - 2) + 'px';
+  td.classList.add('editor');
+  td.innerHTML = '';
+  td.appendChild(inp);
+  return inp;
+},
+/* Date cells: the label follows dateDisplay; the editor is <input type=date>.
+   Closing without a change returns the cell's own value so jss does nothing. */
+XL_DATE: {
+  createCell(td, value, x, y, ws, col) { td.textContent = XlSchema.dateLabel(value, col && col.recoDisplay); return td; },
+  updateCell(td, value, x, y, ws, col) { if (td) td.textContent = XlSchema.dateLabel(value, col && col.recoDisplay); return value; },
+  openEditor(td, value, x, y, ws) {
+    const d = U.parseDate(value);
+    const inp = Reco._xlEditorInput(td, 'date');
+    inp.value = d ? U.fmtDate(d, 'YYYY-MM-DD') : '';
+    inp.dataset.orig = inp.value;
+    inp.onblur = () => { if (ws.edition && ws.edition[0] === td) ws.closeEditor(td, true); };
+    inp.focus();
+  },
+  closeEditor(td, save, x, y, ws) {
+    const inp = td && td.querySelector('input');
+    if (inp) inp.onblur = null;
+    const cur = ws.options.data[y] ? ws.options.data[y][x] : '';
+    if (!save || !inp || inp.value === (inp.dataset.orig || '')) return cur;
+    return inp.value;
+  }
+},
+/* Free text with suggestions (editType 'datalist'). */
+XL_COMBO: {
+  createCell(td, value) { td.textContent = value == null ? '' : String(value); return td; },
+  updateCell(td, value) { if (td) td.textContent = value == null ? '' : String(value); return value; },
+  openEditor(td, value, x, y, ws, col, e) {
+    const inp = Reco._xlEditorInput(td, 'text');
+    const dl = document.createElement('datalist');
+    dl.id = 'xlComboList';
+    ((col && col.recoOptions) || []).forEach(o => {
+      const op = document.createElement('option');
+      op.value = o.value;
+      if (o.label && o.label !== o.value) op.label = o.label;
+      dl.appendChild(op);
+    });
+    td.appendChild(dl);
+    inp.setAttribute('list', dl.id);
+    const orig = value == null ? '' : String(value);
+    const typed = !!(e && e.type === 'keydown' && e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey);
+    inp.value = typed ? '' : orig;
+    inp.dataset.orig = orig;
+    inp.onblur = () => { if (ws.edition && ws.edition[0] === td) ws.closeEditor(td, true); };
+    inp.focus();
+  },
+  closeEditor(td, save, x, y, ws) {
+    const inp = td && td.querySelector('input');
+    if (inp) inp.onblur = null;
+    const cur = ws.options.data[y] ? ws.options.data[y][x] : '';
+    if (!save || !inp || inp.value === inp.dataset.orig) return cur;
+    return inp.value;
+  }
+},
+
+/* ---------- edits ---------- */
+/* Validate and normalise one cell; a rejected value keeps the cell as it is. */
+_xlOnBeforeChange(ws, td, x, y, v) {
+  const C = Reco._xlCtx;
+  const cur = ws.options.data[y] ? ws.options.data[y][x] : '';
+  if (!C || C.ws !== ws) return cur;
+  const name = Reco._xlColAt(ws, x);
+  const d = name && C.S.byName.get(name);
+  if (!d || !d.editable) return cur;
+  const row = Reco._xlRowAt(ws, y);
+  if (!row || v === undefined || v === null) return cur;
+  if (typeof v === 'boolean') v = v ? 'TRUE' : 'FALSE';
+  const raw = XlSchema.currentValue(d, row, Reco._xlFull(row), C.sess);
+  const r = XlSchema.validateInput(d, v, raw);
+  if (!r.ok) { Reco._xlQueueReject(d, r.reason); return cur; }
+  if (r.unchanged) return cur;
+  const store = Reco._xlToStore(d, r.c, raw);
+  C.pending.set(row._id + '\u0001' + d.name, store);
+  return Reco._xlSheetFromStore(d, store);
+},
+_xlQueueReject(d, reason) {
+  const C = Reco._xlCtx;
+  if (!C) return;
+  const e = C.rejects.get(reason) || { count: 0, cols: new Set() };
+  e.count++;
+  e.cols.add(d.header || d.name);
+  C.rejects.set(reason, e);
+  if (!C.noticeTimer) C.noticeTimer = setTimeout(() => Reco._xlFlushNotices(), 0);
+},
+/* One toast per burst for rejected and read-only cells. */
+_xlFlushNotices() {
+  const C = Reco._xlCtx;
+  if (!C) return;
+  if (C.noticeTimer) { clearTimeout(C.noticeTimer); C.noticeTimer = null; }
+  let n = 0;
+  const parts = [];
+  C.rejects.forEach((e, reason) => { n += e.count; parts.push(XlSchema.reason(reason) + ' (' + Array.from(e.cols).join(', ') + ')'); });
+  let msg = n ? n + ' cell' + (n === 1 ? '' : 's') + ' not changed — ' + parts.join('; ') : '';
+  if (C.skipped) msg += (msg ? '. ' : '') + C.skipped + ' cell' + (C.skipped === 1 ? '' : 's') + ' skipped (read-only)';
+  C.rejects.clear();
+  C.skipped = 0;
+  if (msg) U.toast(msg, 'error');
+},
+/* One applyEdits call for the whole burst (typing, paste, fill, delete). */
+_xlOnAfterChanges(ws, records) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws || !Array.isArray(records)) return;
+  if (!Reco._xlLive()) return;
+  let skipped = 0;
+  const byKey = new Map();
+  records.forEach(c => {
+    if (!c) return;
+    if (c.value === undefined) { skipped++; return; }
+    if (String(c.value) === String(c.oldValue)) return;
+    const name = Reco._xlColAt(ws, c.x);
+    const d = name && C.S.byName.get(name);
+    const row = Reco._xlRowAt(ws, c.y);
+    if (!d || !row || !d.editable) return;
+    const key = row._id + '\u0001' + name;
+    const raw = XlSchema.currentValue(d, row, Reco._xlFull(row), C.sess);
+    const store = C.pending.has(key) ? C.pending.get(key) : Reco._xlToStore(d, XlSchema.canon(d, c.value, 'reco').c, raw);
+    const prev = byKey.get(key);
+    byKey.set(key, { row, col: name, value: store, before: prev ? prev.before : raw });
+  });
+  C.pending.clear();
+  if (skipped && records.length > 1) C.skipped += skipped;
+  Reco._xlFlushNotices();
+  const items = Array.from(byKey.values());
+  if (!items.length) { Reco._xlUpdateUndoButtons(); return; }
+  // Exact raw values for undo/redo (the sheet holds display-normalised ones).
+  const h = !ws.ignoreHistory && ws.history ? ws.history[ws.historyIndex] : null;
+  if (h && h.action === 'setValue' && !h._reco) h._reco = items.map(i => ({ rid: i.row._id, col: i.col, before: i.before, after: i.value }));
+  Reco._xlApply(items.map(i => ({ row: i.row, col: i.col, value: i.value })), 'xl-view');
+},
+/* applyEdits (historyFirst:false mutates the rows at once), then bring the
+   touched rows of the sheet back in line with Reco (computed columns,
+   rejected edits, decoration). */
+_xlApply(edits, source) {
+  const C = Reco._xlCtx;
+  if (!C || !edits.length) return Promise.resolve(null);
+  const rows = Array.from(new Set(edits.map(e => e.row)));
+  let p;
+  try {
+    p = Reco.applyEdits(C.tpl, C.sess, edits, { source, historyFirst: false, scope: C.o.editScope, allowPkEdit: C.o.allowPkEdit, schema: C.S });
+  } catch (e) { p = Promise.reject(e); }
+  rows.forEach(r => Reco._xlFullCache && Reco._xlFullCache.delete(r._id));
+  return Promise.resolve(p).then(res => {
+    if (Reco._xlCtx !== C) return res;
+    Reco._xlResyncRows(rows);
+    if (res && res.rejected && res.rejected.length) {
+      U.toast(res.rejected.length + ' change(s) not saved: ' + Array.from(new Set(res.rejected.map(r => XlSchema.reason(r.reason)))).join(', '), 'error');
+    }
+    Reco._xlUpdateUndoButtons();
+    Reco._xlRefreshSelBar();
+    return res;
+  }).catch(e => {
+    console.error('Excel view: edit failed', e);
+    U.toast('Edit not saved: ' + ((e && e.message) || e), 'error');
+    if (Reco._xlCtx === C) Reco._xlResyncRows(rows);
+  });
+},
+/* Rewrite cells of these rows whose sheet value differs from Reco, without
+   events or history, then repaint every cell of the rows. */
+_xlResyncRows(rows) {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  if (!ws || !rows.length) return;
+  const want = new Set(rows.map(r => r._id));
+  const data = ws.options.data, cols = ws.options.columns;
+  const cells = [], ys = [];
+  for (let y = 0; y < data.length; y++) {
+    if (!want.has(data[y][C.ridX])) continue;
+    const row = Reco._xlById.get(data[y][C.ridX]);
+    if (!row) continue;
+    ys.push(y);
+    Reco._xlFullCache.delete(row._id);
+    const full = Reco._xlFull(row);
+    for (let x = 0; x < cols.length; x++) {
+      const d = C.S.byName.get(cols[x].name);
+      if (!d) continue;
+      const v = Reco._xlSheetValue(d, row, full, C.sess);
+      if (String(v) !== String(data[y][x] == null ? '' : data[y][x])) cells.push({ x, y, value: v });
+    }
+  }
+  if (cells.length) Reco._xlSilentSet(ws, cells);
+  ys.forEach(y => {
+    for (let x = 0; x < cols.length; x++) {
+      const rec = ws.records[y] && ws.records[y][x];
+      if (rec && rec.element && cols[x].type !== 'hidden') Reco._xlRender(rec.element, ws.options.data[y][x], x, y, ws, cols[x]);
+    }
+  });
+},
+_xlSilentSet(ws, cells) {
+  const p = ws.parent, ev = !!(p && p.ignoreEvents), hi = !!ws.ignoreHistory;
+  if (p) p.ignoreEvents = true;
+  ws.ignoreHistory = true;
+  try { ws.setValue(cells, '', true); }
+  catch (e) { console.error('Excel view: repaint failed', e); }
+  finally { if (p) p.ignoreEvents = ev; ws.ignoreHistory = hi; }
+},
+/* jss has already put the old/new sheet values back; replay them into Reco. */
+_xlOnHistory(ws, rec, redo) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws || !rec) { Reco._xlUpdateUndoButtons(); return; }
+  if (rec.action === 'setValue' && Reco._xlLive()) {
+    let edits;
+    if (Array.isArray(rec._reco)) {
+      edits = rec._reco.map(i => ({ row: Reco._xlById.get(i.rid), col: i.col, value: redo ? i.after : i.before })).filter(e => e.row);
+    } else {
+      edits = (rec.records || []).filter(r => r && 'oldValue' in r).map(r => {
+        const name = Reco._xlColAt(ws, r.x), d = name && C.S.byName.get(name), row = Reco._xlRowAt(ws, r.y);
+        if (!d || !row || !d.editable) return null;
+        const raw = XlSchema.currentValue(d, row, Reco._xlFull(row), C.sess);
+        return { row, col: name, value: Reco._xlToStore(d, XlSchema.canon(d, redo ? r.value : r.oldValue, 'reco').c, raw) };
+      }).filter(Boolean);
+    }
+    if (edits.length) Reco._xlApply(edits, redo ? 'xl-redo' : 'xl-undo');
+  } else if (rec.action === 'moveColumn') {
+    C.ridX = Reco._xlFindRid(ws);
+    Reco._xlPersistOrder(ws);
+  } else if (rec.action === 'orderBy') {
+    if ('_recoSortNew' in rec) { C.sess.columnSorts = redo ? rec._recoSortNew : rec._recoSortPrev; AppState.save(); }
+  } else if (rec.action === 'setWidth') {
+    Reco._xlPersistWidths(ws, [].concat(rec.column));
+  }
+  Reco._xlUpdateUndoButtons();
+},
+_xlOnBeforePaste() {
+  const C = Reco._xlCtx;
+  if (C && C.o.pasteMode === 'off') { U.toast('Paste is turned off for this view (⚙ View)', 'warn'); return false; }
+  return undefined;
+},
+/* Clean values: ISO dates, plain numbers, raw dropdown values; no hidden
+   columns; an optional header line. */
+_xlOnCopy(ws, range) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws || !range) return undefined;
+  const xs = [];
+  for (let x = range[0]; x <= range[2]; x++) {
+    const c = ws.options.columns[x];
+    if (c && c.type !== 'hidden' && !(ws.headers[x] && ws.headers[x].style.display === 'none')) xs.push(x);
+  }
+  if (!xs.length) return undefined;
+  const inRes = ws.results && ws.results.length ? new Set(ws.results) : null;
+  const q = s => /[\t\r\n"]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  const lines = [];
+  if (C.o.copyWithHeaders) lines.push(xs.map(x => q(String(ws.options.columns[x].title || ws.options.columns[x].name))).join('\t'));
+  for (let y = range[1]; y <= range[3]; y++) {
+    if (inRes && !inRes.has(y)) continue;
+    lines.push(xs.map(x => q(Reco._xlCopyText(ws, x, y))).join('\t'));
+  }
+  return lines.join('\r\n');
+},
+_xlCopyText(ws, x, y) {
+  const C = Reco._xlCtx, col = ws.options.columns[x];
+  const d = C.S.byName.get(col.name);
+  const v = ws.options.data[y] ? ws.options.data[y][x] : '';
+  if (v === '' || v == null) return '';
+  if (d && d.kind === 'date') { const dt = U.parseDate(v); if (dt) return U.fmtDate(dt, 'YYYY-MM-DD'); }
+  if (col.type === 'numeric' && U.isNumeric(v)) return XlSchema.NUM(U.num(v));
+  return String(v);
+},
+_xlOnLoad(sp) {
+  // Destroyed before jss finished loading: finish the job now.
+  if (sp && sp._recoDestroyed && sp.element) {
+    try { jspreadsheet.destroy(sp.element, false); } catch (e) {}
+  }
+},
+
+/* ---------- layout persistence (sess, shared with the grid) ---------- */
+_xlOnResize(ws, x) {
+  Reco._xlPersistWidths(ws, [].concat(x));
+  Reco._xlUpdateUndoButtons();
+},
+_xlPersistWidths(ws, xs) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws) return;
+  C.sess.columnWidths = C.sess.columnWidths || {};
+  xs.forEach(xi => {
+    const name = Reco._xlColAt(ws, xi);
+    const w = parseInt(ws.getWidth(parseInt(xi)), 10);
+    if (name && name !== '_rid' && w > 0) C.sess.columnWidths[name] = w;
+  });
+  AppState.save();
+},
+_xlOnMoveColumn(ws) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws) return;
+  C.ridX = Reco._xlFindRid(ws);
+  Reco._xlPersistOrder(ws);
+  Reco._xlUpdateUndoButtons();
+},
+_xlPersistOrder(ws) {
+  const C = Reco._xlCtx;
+  if (!C) return;
+  C.sess.columnOrder = ws.options.columns.map(c => c && c.name).filter(n => n && n !== '_status_' && n !== '_rid');
+  AppState.save();
+},
+_xlOnSort(ws, x, ord) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws) return;
+  const name = Reco._xlColAt(ws, x);
+  if (name && name !== '_status_' && name !== '_rid') {
+    const prev = C.sess.columnSorts ? Object.assign({}, C.sess.columnSorts) : null;
+    const next = { col: name, dir: ord ? 'desc' : 'asc' };
+    const h = !ws.ignoreHistory && ws.history ? ws.history[ws.historyIndex] : null;
+    if (h && h.action === 'orderBy') { h._recoSortPrev = prev; h._recoSortNew = next; }
+    C.sess.columnSorts = next;
+    AppState.save();
+  }
+  Reco._xlUpdateUndoButtons();
+},
+/* Sort on the sheet values with Reco's comparison (dates as dates, amounts
+   as numbers, empty cells last). */
+_xlSorting(ord) {
+  const sc = Reco._xlSortCtx, dir = ord ? -1 : 1;
+  if (!sc || !sc.desc || sc.desc.role === 'status') return (a, b) => Reco._compareValues(a[1], b[1], false, dir) || (a[0] - b[0]);
+  const data = sc.ws.options.data, x = sc.x, isDate = sc.desc.kind === 'date';
+  return (a, b) => Reco._compareValues(data[a[0]][x], data[b[0]][x], isDate, dir) || (a[0] - b[0]);
+},
+_xlWrapOrderBy(ws) {
+  if (typeof ws.orderBy !== 'function' || ws.orderBy._reco) return;
+  const orig = ws.orderBy;
+  const wrapped = function (x, ord) {
+    const C = Reco._xlCtx;
+    if (C && C.ws === ws && C.o.sortMode === 'off') return false;
+    const xi = parseInt(x, 10);
+    const col = ws.options.columns[xi];
+    Reco._xlSortCtx = { ws, x: xi, desc: (C && col) ? C.S.byName.get(col.name) || null : null };
+    try { return orig.apply(this, arguments); }
+    finally { Reco._xlSortCtx = null; }
+  };
+  wrapped._reco = true;
+  ws.orderBy = wrapped;
+},
+
+/* ---------- selection bar ---------- */
+_xlOnSelection() {
+  if (Reco._xlSelRaf) return;
+  Reco._xlSelRaf = requestAnimationFrame(() => { Reco._xlSelRaf = 0; Reco._xlRefreshSelBar(); });
+},
+/* Selected rows (by id), skipping rows hidden by a jss filter or search. */
+_xlSelectedRowIds(ws) {
+  const sel = ws && typeof ws.getSelection === 'function' ? ws.getSelection() : null;
+  if (!sel) return [];
+  const inRes = ws.results && ws.results.length ? new Set(ws.results) : null;
+  const ids = [];
+  for (let y = sel[1]; y <= sel[3]; y++) {
+    if (inRes && !inRes.has(y)) continue;
+    const row = Reco._xlRowAt(ws, y);
+    if (row) ids.push(row._id);
+  }
+  return ids;
+},
+_xlRefreshSelBar() {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  const bar = document.getElementById('xlSelSumBar');
+  const hide = () => { Reco._xlSelIds = []; if (bar) { bar.classList.remove('show'); bar.innerHTML = ''; } };
+  if (!ws || typeof ws.getSelection !== 'function') return hide();
+  const sel = ws.getSelection();
+  if (!sel) return hide();
+  const tpl = C.tpl, sess = C.sess;
+  const ids = Reco._xlSelectedRowIds(ws);
+  Reco._xlSelIds = ids;
+  if (!bar || !C.o.selectionBar) return;
+  const cols = [];
+  for (let x = sel[0]; x <= sel[2]; x++) {
+    const d = C.S.byName.get(Reco._xlColAt(ws, x));
+    if (d && d.role !== 'status') cols.push(d);
+  }
+  let cellCount = 0, numCount = 0, sum = 0, valueColSum = 0;
+  const selRows = [];
+  ids.forEach(id => {
+    const row = Reco._xlById.get(id);
+    if (!row) return;
+    selRows.push(row);
+    const full = Reco._xlFull(row);
+    cols.forEach(d => {
+      const v = XlSchema.currentValue(d, row, full, sess);
+      if (v === '' || v == null) return;
+      cellCount++;
+      if (d.kind !== 'date' && U.isNumeric(v)) { sum += U.num(v); numCount++; }
+    });
+    if (tpl.valueColumn && U.isNumeric(row[tpl.valueColumn])) valueColSum += U.num(row[tpl.valueColumn]);
+  });
+  if (!cellCount && !ids.length) return hide();
+  let h = '<span>Rows: <b>' + ids.length + '</b></span>';
+  h += '<span>Cells: <b>' + cellCount + '</b></span>';
+  if (numCount) {
+    h += '<span>Sum: <b>' + U.fmtNum(sum) + '</b></span>';
+    h += '<span>Avg: <b>' + U.fmtNum(sum / numCount) + '</b></span>';
+  }
+  if (tpl.valueColumn) {
+    const within = Reco.isWithinTolerance(tpl, valueColSum, selRows);
+    const tol = tpl.toleranceValue || 0;
+    const tolLabel = tpl.toleranceMode === 'percentage' ? tol + '%' : tol;
+    h += '<span>Σ ' + U.esc(tpl.valueColumn) + ': <b>' + U.fmtNum(valueColSum) + '</b></span>';
+    h += within ? '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;">Within tolerance ✓</span>'
+                : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±' + U.esc(tolLabel) + ')</span>';
+    if (within && ids.length) h += '<button class="small jss_object" style="background:#fff;color:var(--primary);" onclick="Reco._xlOffsetSelectedRows()">Offset Selected</button>';
+  }
+  bar.innerHTML = h;
+  bar.classList.add('show');
+},
+_xlOffsetSelectedRows(rowIds) {
+  if (!Array.isArray(rowIds)) rowIds = (Reco._xlSelIds || []).slice();
+  if (!rowIds.length) return;
+  const id = AppState.activeRecoId;
+  const tpl = AppState.recoTemplates.find(x => x.id === id);
+  const sess = AppState.recoSessions[id];
+  if (!tpl || !sess) return;
+  const chk = Reco.checkOffsetTolerance(tpl, sess, rowIds);
+  if (!chk.ok) { U.toast(chk.msg, 'error'); return; }
+  const rid = 'M' + Date.now().toString(36);
+  const mm = AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
+  let n = 0;
+  rowIds.forEach(rowId => {
+    const row = sess.data.find(r => r._id === rowId);
+    if (!row || sess.offsets[rowId]) return;
+    sess.offsets[rowId] = true;
+    row._recoId = rid;
+    row._manualOffset = true;
+    const pk = Reco.getRowPK(tpl, row);
+    if (pk) mm[pk] = { recoId: rid, byUser: true };
+    n++;
+  });
+  AppState.save();
+  App.navigate('reco');
+  U.toast('Offset ' + n + ' row(s)', 'success');
+},
+
+/* ---------- context menu ---------- */
+_xlContextMenu(ws, x, y, e, items, role) {
+  const C = Reco._xlCtx;
+  if (!C || C.ws !== ws) return false;
+  if (role !== 'cell' && role !== 'header' && role !== 'row') return false;
+  const xi = x == null || x === '' ? NaN : parseInt(x, 10);
+  const yi = y == null || y === '' ? NaN : parseInt(y, 10);
+  const name = isNaN(xi) ? null : Reco._xlColAt(ws, xi);
+  const d = name ? C.S.byName.get(name) : null;
+  const row = isNaN(yi) ? null : Reco._xlRowAt(ws, yi);
+  const m = [];
+  if (role === 'cell') {
+    m.push({ title: 'Copy', shortcut: 'Ctrl+C', onclick: () => ws.copy() });
+    if (ws.options.editable !== false && C.o.pasteMode !== 'off') m.push({ title: 'Paste', shortcut: 'Ctrl+V', onclick: () => Reco._xlPasteFromClipboard(ws, xi, yi) });
+  }
+  if (d && C.o.sortMode !== 'off' && typeof ws.orderBy === 'function') {
+    if (m.length) m.push({ type: 'line' });
+    m.push({ title: 'Sort A → Z', onclick: () => ws.orderBy(xi, 0) });
+    m.push({ title: 'Sort Z → A', onclick: () => ws.orderBy(xi, 1) });
+  }
+  if (d && d.role !== 'status') {
+    if (role === 'cell' && row) {
+      m.push({ title: 'Filter by this value', onclick: () => Reco._xlFilterByValue(d, row) });
+    }
+    m.push({ title: 'Hide column', onclick: () => Reco.hideCol(d.name) });
+  }
+  if (!isNaN(xi)) m.push({ title: 'Freeze up to here', onclick: () => Reco._xlSetPref('freezeColumns', Math.min(6, xi + 1)) });
+  if (row) {
+    const pk = Reco.getRowPK(C.tpl, row);
+    m.push({ type: 'line' });
+    if (typeof Comments !== 'undefined' && Comments.openAddDialog) {
+      m.push({ title: '💬 Comment', disabled: !pk, onclick: () => { if (pk) Comments.openAddDialog(C.tpl.id, pk); } });
+    }
+    m.push({ title: '👁 Timeline', disabled: !pk, onclick: () => { if (pk) Reco.openRowTimeline(row._id); } });
+    const sel = Reco._xlSelectedRowIds(ws);
+    const ids = sel.length ? sel : [row._id];
+    if (C.tpl.valueColumn && Reco.checkOffsetTolerance(C.tpl, C.sess, ids).ok) {
+      m.push({ title: 'Offset selected (' + ids.length + ')', onclick: () => Reco._xlOffsetSelectedRows(ids) });
+    }
+  }
+  return m.length ? m : false;
+},
+_xlPasteFromClipboard(ws, x, y) {
+  const fail = () => U.toast('Use Ctrl+V to paste', 'warn');
+  try {
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') { fail(); return; }
+    navigator.clipboard.readText().then(text => {
+      if (Reco._xlWorksheet !== ws || !text) return;
+      if (!ws.selectedCell && !isNaN(x) && !isNaN(y)) ws.updateSelectionFromCoords(x, y, x, y);
+      const sel = ws.getSelection();
+      if (sel) ws.paste(sel[0], sel[1], text);
+    }, fail);
+  } catch (e) { fail(); }
+},
+_xlFilterByValue(d, row) {
+  const C = Reco._xlCtx;
+  if (!C) return;
+  const v = XlSchema.currentValue(d, row, Reco._xlFull(row), C.sess);
+  Reco.toggleSlicer(d.name, String(v == null ? '' : v));
+},
+
+/* ---------- toolbar ---------- */
+_xlAct(name) {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  if (!ws) return;
+  try {
+    if (name === 'undo') ws.undo();
+    else if (name === 'redo') ws.redo();
+  } catch (e) { console.error('Excel view: ' + name + ' failed', e); }
+  Reco._xlUpdateUndoButtons();
+},
+_xlUpdateUndoButtons() {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  const on = !!(ws && C.o.undo && !ws.ignoreHistory && Array.isArray(ws.history));
+  const u = document.getElementById('xlUndoBtn'), r = document.getElementById('xlRedoBtn');
+  if (u) u.disabled = !(on && ws.historyIndex >= 0);
+  if (r) r.disabled = !(on && ws.historyIndex < ws.history.length - 1);
+},
+/* Selected cells as { x, y, row, col, rowKey } (rows hidden by a jss filter skipped). */
+_xlSelCells() {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  const sel = ws && typeof ws.getSelection === 'function' ? ws.getSelection() : null;
+  if (!sel) return [];
+  const inRes = ws.results && ws.results.length ? new Set(ws.results) : null;
+  const out = [];
+  for (let y = sel[1]; y <= sel[3]; y++) {
+    if (inRes && !inRes.has(y)) continue;
+    const row = Reco._xlRowAt(ws, y);
+    if (!row) continue;
+    for (let x = sel[0]; x <= sel[2]; x++) {
+      const col = Reco._xlColAt(ws, x);
+      if (!col || col === '_rid' || col === '_status_') continue;
+      out.push({ x, y, row, col, rowKey: Reco._ssFmtRowKey(row) });
+    }
+  }
+  return out;
+},
+_xlRepaintCells(cells) {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  if (!ws) return;
+  cells.forEach(c => {
+    const rec = ws.records[c.y] && ws.records[c.y][c.x];
+    if (rec && rec.element) Reco._xlRender(rec.element, ws.options.data[c.y][c.x], c.x, c.y, ws, ws.options.columns[c.x]);
+  });
+},
+/* Formatting writes sess.cellFormats (shared with the grid) and repaints;
+   it never changes a stored value. value 'toggle' flips bold / italic. */
+_xlFmt(prop, value) {
+  const C = Reco._xlCtx;
+  if (!C || !C.ws) return;
+  const cells = Reco._xlSelCells();
+  if (!cells.length) { U.toast('Select cells first', 'error'); return; }
+  const sess = C.sess;
+  sess.cellFormats = sess.cellFormats || {};
+  const f0 = Reco._ssFmtFor(sess, cells[0].row, cells[0].col) || {};
+  let target = value;
+  if (value === 'toggle') target = !f0[prop];
+  else if (prop === 'align' && f0.align === value) target = '';
+  cells.forEach(c => {
+    const byRow = sess.cellFormats[c.rowKey] = sess.cellFormats[c.rowKey] || {};
+    const f = byRow[c.col] = byRow[c.col] || {};
+    if (target === '' || target == null || target === false) delete f[prop];
+    else f[prop] = target;
+    if (!Object.keys(f).length) delete byRow[c.col];
+    if (!Object.keys(byRow).length) delete sess.cellFormats[c.rowKey];
+  });
+  AppState.save();
+  Reco._xlRepaintCells(cells);
+},
+_xlNumFmt(fmt) {
+  if (!fmt) return;
+  Reco._xlFmt('numFmt', fmt === 'general' ? '' : fmt);
+},
+_xlClearFormat() {
+  const C = Reco._xlCtx;
+  if (!C || !C.ws) return;
+  const cells = Reco._xlSelCells();
+  if (!cells.length) { U.toast('Select cells first', 'error'); return; }
+  const fm = C.sess.cellFormats || {};
+  cells.forEach(c => {
+    if (!fm[c.rowKey]) return;
+    delete fm[c.rowKey][c.col];
+    if (!Object.keys(fm[c.rowKey]).length) delete fm[c.rowKey];
+  });
+  AppState.save();
+  Reco._xlRepaintCells(cells);
+  U.toast('Cleared formatting', 'success');
+},
+_xlOpenPalette(e, prop) {
+  document.querySelectorAll('.xl-palette').forEach(p => p.remove());
+  const fillColors = ['', '#fee2e2', '#fed7aa', '#fef3c7', '#d1fae5', '#cffafe', '#dbeafe', '#ede9fe', '#fce7f3', '#f3f4f6'];
+  const textColors = ['', '#b91c1c', '#c2410c', '#a16207', '#15803d', '#0e7490', '#1d4ed8', '#6d28d9', '#be185d', '#000000'];
+  const colors = prop === 'fg' ? textColors : fillColors;
+  const btn = e.currentTarget || e.target;
+  const palette = document.createElement('div');
+  palette.className = 'xl-palette jss_object';
+  colors.forEach(c => {
+    const sw = document.createElement('div');
+    sw.className = 'sw jss_object' + (c ? '' : ' none');
+    sw.style.background = c || 'transparent';
+    sw.title = c || (prop === 'fg' ? 'Default text colour' : 'No fill');
+    sw.onclick = () => { palette.remove(); Reco._xlFmt(prop, c); };
+    palette.appendChild(sw);
+  });
+  document.body.appendChild(palette);
+  const r = btn.getBoundingClientRect();
+  palette.style.left = Math.min(r.left, window.innerWidth - 190) + 'px';
+  palette.style.top = (r.bottom + 6) + 'px';
+  setTimeout(() => {
+    const close = ev => { if (!palette.contains(ev.target) && ev.target !== btn) { palette.remove(); document.removeEventListener('click', close); } };
+    document.addEventListener('click', close);
+  }, 0);
+},
+/* The search box when it is on, otherwise a simple find-next on the cell text. */
+_xlOpenSearch() {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  if (!ws) return;
+  if (C.o.search && ws.searchInput && ws.searchInput.isConnected) { ws.searchInput.focus(); ws.searchInput.select(); return; }
+  const q = prompt('Find:');
+  if (!q) return;
+  const needle = q.toLowerCase();
+  const data = ws.options.data, cols = ws.options.columns;
+  const nCols = cols.length, total = data.length * nCols;
+  const sel = typeof ws.getSelection === 'function' ? ws.getSelection() : null;
+  const from = sel ? sel[1] * nCols + sel[0] + 1 : 0;
+  const inRes = ws.results && ws.results.length ? new Set(ws.results) : null;
+  for (let k = 0; k < total; k++) {
+    const idx = (from + k) % total, y = Math.floor(idx / nCols), x = idx % nCols;
+    if (cols[x].type === 'hidden' || (inRes && !inRes.has(y))) continue;
+    const rec = ws.records[y] && ws.records[y][x];
+    const text = rec && rec.element ? rec.element.textContent : String(data[y][x] == null ? '' : data[y][x]);
+    if (text && text.toLowerCase().indexOf(needle) !== -1) { ws.updateSelectionFromCoords(x, y, x, y); return; }
+  }
+  U.toast('No match for "' + q + '"', 'error');
+},
+_xlOpenInExcel() {
+  const id = AppState.activeRecoId;
+  if (typeof ExcelLink !== 'undefined' && ExcelLink && typeof ExcelLink.openDialog === 'function') ExcelLink.openDialog(id);
+  else U.toast('Excel link is not available in this version', 'warn');
+},
+_xlToggleFullscreen() {
+  const C = Reco._xlCtx;
+  const tpl = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
+  const cur = C ? C.o.fullscreen : Reco.xlOptions(tpl).fullscreen;
+  Reco._xlSetPref('fullscreen', !cur);
+},
+/* Ctrl+S (jss would try a blocked CSV download) and Esc to leave full screen. */
+_xlWireKeys() {
+  if (Reco._xlKeysWired) return;
+  Reco._xlKeysWired = true;
+  window.addEventListener('keydown', e => {
+    const C = Reco._xlCtx;
+    if (!C || !C.ws || AppState.currentPage !== 'reco') return;
+    const ownSheet = typeof jspreadsheet !== 'undefined' && jspreadsheet.current === C.ws;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S') && ownSheet) {
+      e.preventDefault();
+      e.stopPropagation();
+      Promise.resolve(AppState.flush()).then(() => U.toast('Saved — every change is saved as you go', 'success'));
+    } else if (e.key === 'Escape' && C.o.fullscreen && !C.ws.edition && !document.querySelector('#appModal.show')) {
+      Reco._xlSetPref('fullscreen', false);
+    }
+  }, true);
+},
+
+/* ---------- options: preferences, ⚙ modal, live changes ---------- */
+/* Personal preference for one option (toolbar toggles); rebuilds or applies live. */
+_xlSetPref(key, value) {
+  const tpl = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
+  const m = Reco._xlMeta(key);
+  if (!tpl || !m || m.templateOnly) return;
+  const before = Reco.xlOptions(tpl);
+  const prefs = Reco._xlLoadPrefs(tpl);
+  const tview = Reco.xlOptions(tpl, {});
+  const v = Reco._xlClampOpt(m, value, before[key]);
+  if (v === tview[key]) delete prefs[key];
+  else prefs[key] = v;
+  Reco._xlSavePrefs(tpl, prefs);
+  Reco._xlApplyOptionChange(before, Reco.xlOptions(tpl));
+},
+_xlApplyOptionChange(before, after) {
+  const changed = Reco.XL_OPTION_META.map(m => m.key).filter(k => before[k] !== after[k]);
+  if (!changed.length) return;
+  const C = Reco._xlCtx;
+  if (C && C.ws && changed.every(k => Reco._XL_LIVE.indexOf(k) !== -1)) {
+    const keep = { sortMode: C.o.sortMode, search: C.o.search };
+    C.o = Object.assign({}, after, keep);
+    Reco._xlApplyLive(changed);
+    return;
+  }
+  Reco._xlRebuild();
+},
+_xlApplyLive(changed) {
+  const C = Reco._xlCtx, ws = C && C.ws;
+  if (!ws) return;
+  const o = C.o;
+  if (changed.indexOf('showRowNumbers') !== -1 && Reco._xlFeat && Reco._xlFeat.showIndex) {
+    if (o.showRowNumbers) ws.showIndex(); else ws.hideIndex();
+  }
+  if (changed.indexOf('undo') !== -1) ws.ignoreHistory = !o.undo;
+  if (changed.indexOf('fullscreen') !== -1) {
+    const wrap = document.getElementById('xlViewWrap');
+    if (wrap) wrap.classList.toggle('xl-fullscreen', !!o.fullscreen);
+    const b = document.getElementById('xlFsBtn');
+    if (b) b.classList.toggle('active', !!o.fullscreen);
+  }
+  if (changed.indexOf('selectionBar') !== -1) Reco._xlRefreshSelBar();
+  Reco._xlRefit();
+  Reco._xlUpdateUndoButtons();
+},
+_xlRebuild() {
+  const host = document.getElementById('excelViewHost');
+  if (host && !host.querySelector('.xl-loading')) {
+    const ov = document.createElement('div');
+    ov.className = 'xl-loading xl-overlay';
+    ov.innerHTML = '<span class="xl-spin"></span>Rebuilding…';
+    host.appendChild(ov);
+  }
+  setTimeout(() => App.navigate('reco'), 30);
+},
+openXlViewOptions() {
+  const tpl = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
+  if (!tpl) return;
+  const o = Reco.xlOptions(tpl);
+  const tv = Reco.xlOptions(tpl, {});
+  const scopeLabel = (Reco._xlMeta('editScope').values.find(p => p[0] === tv.editScope) || [, tv.editScope])[1];
+  let h = '<div class="xl-opts">';
+  h += '<div class="help">Your choices are kept on this computer. <b>Save as template default</b> stores them in the template for everyone. ';
+  h += 'The template allows: <b>' + U.esc(scopeLabel) + '</b> — a personal setting can only narrow what is editable.</div>';
+  Reco.XL_GROUPS.forEach(g => {
+    const metas = Reco.XL_OPTION_META.filter(m => m.group === g && Reco._xlHasFeature(m.key));
+    if (!metas.length) return;
+    h += '<fieldset class="xl-opt-group"><legend>' + U.esc(g) + '</legend>';
+    metas.forEach(m => { h += Reco._xlOptField(m, o[m.key]); });
+    h += '</fieldset>';
+  });
+  h += '</div>';
+  const f = '<button onclick="Reco._xlResetOptForm()" title="Show the template defaults (Save to use them)">Reset</button>'
+    + '<button onclick="App.closeModal()">Cancel</button>'
+    + '<button onclick="Reco._xlSaveOptForm(\'template\')" title="Store these settings in the template for everyone">Save as template default</button>'
+    + '<button class="primary" onclick="Reco._xlSaveOptForm(\'personal\')">Save</button>';
+  App.openModal('Excel view options', h, f);
+},
+_xlOptField(m, v) {
+  const id = 'xlopt_' + m.key;
+  const note = m.templateOnly ? ' <span class="text-muted">(template default only)</span>' : '';
+  if (m.type === 'bool') {
+    return '<label class="inline xl-opt"><input type="checkbox" id="' + id + '" data-xlopt="' + m.key + '"' + (v ? ' checked' : '') + '> ' + U.esc(m.label) + note + '</label>';
+  }
+  if (m.type === 'number') {
+    return '<label class="field xl-opt"><span class="label-text">' + U.esc(m.label) + note + '</span><input type="number" id="' + id + '" data-xlopt="' + m.key
+      + '" min="' + m.min + '" max="' + m.max + '" step="1" value="' + U.escAttr(v) + '"></label>';
+  }
+  const vals = m.values.slice();
+  if (!vals.some(p => String(p[0]) === String(v))) vals.push([v, String(v) + (typeof v === 'number' ? ' px' : '')]);
+  let s = '<label class="field xl-opt"><span class="label-text">' + U.esc(m.label) + note + '</span><select id="' + id + '" data-xlopt="' + m.key + '">';
+  vals.forEach(p => { s += '<option value="' + U.escAttr(JSON.stringify(p[0])) + '"' + (String(p[0]) === String(v) ? ' selected' : '') + '>' + U.esc(p[1]) + '</option>'; });
+  return s + '</select></label>';
+},
+_xlReadOptForm() {
+  const vals = {};
+  document.querySelectorAll('#appModalBody [data-xlopt]').forEach(el => {
+    const m = Reco._xlMeta(el.dataset.xlopt);
+    if (!m) return;
+    if (m.type === 'bool') vals[m.key] = !!el.checked;
+    else if (m.type === 'number') vals[m.key] = el.value === '' ? undefined : Number(el.value);
+    else { try { vals[m.key] = JSON.parse(el.value); } catch (e) { vals[m.key] = el.value; } }
+  });
+  return vals;
+},
+_xlResetOptForm() {
+  const tpl = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
+  if (!tpl) return;
+  const tv = Reco.xlOptions(tpl, {});
+  document.querySelectorAll('#appModalBody [data-xlopt]').forEach(el => {
+    const m = Reco._xlMeta(el.dataset.xlopt), v = m && tv[m.key];
+    if (!m) return;
+    if (m.type === 'bool') el.checked = !!v;
+    else if (m.type === 'number') el.value = v;
+    else Array.from(el.options).forEach(op => { try { op.selected = String(JSON.parse(op.value)) === String(v); } catch (e) {} });
+  });
+},
+/* mode 'personal': localStorage (only what differs from the template);
+   mode 'template': tpl.excelView for everyone (personal preferences cleared). */
+_xlSaveOptForm(mode) {
+  const tpl = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
+  if (!tpl) return;
+  const vals = Reco._xlReadOptForm();
+  const before = Reco.xlOptions(tpl);
+  if (mode === 'template') {
+    const prev = Reco.xlCleanOptions(tpl.excelView);
+    const ev = {};
+    Reco.XL_OPTION_META.forEach(m => {
+      const has = Object.prototype.hasOwnProperty.call(vals, m.key) && vals[m.key] !== undefined;
+      const v = has ? Reco._xlClampOpt(m, vals[m.key], Reco.XL_DEFAULTS[m.key])
+        : (Object.prototype.hasOwnProperty.call(prev, m.key) ? prev[m.key] : Reco.XL_DEFAULTS[m.key]);
+      if (m.key === 'editScope' || m.key === 'allowPkEdit' || v !== Reco.XL_DEFAULTS[m.key]) ev[m.key] = v;
+    });
+    tpl.excelView = ev;
+    Reco._xlSavePrefs(tpl, {});
+    AppState.save();
+    U.toast('Saved as the template default', 'success');
+  } else {
+    const tview = Reco.xlOptions(tpl, {});
+    const prefs = {};
+    Reco.XL_OPTION_META.forEach(m => {
+      if (m.templateOnly || !Object.prototype.hasOwnProperty.call(vals, m.key) || vals[m.key] === undefined) return;
+      const v = Reco._xlClampOpt(m, vals[m.key], tview[m.key]);
+      if (v !== tview[m.key]) prefs[m.key] = v;
+    });
+    if (!Reco._xlSavePrefs(tpl, prefs)) U.toast('Settings applied for now — this computer does not allow saving them', 'warn');
+  }
+  App.closeModal();
+  Reco._xlApplyOptionChange(before, Reco.xlOptions(tpl));
+},
+
+_xlDestroy() {
+  const ws = Reco._xlWorksheet;
+  if (Reco._xlRO) { try { Reco._xlRO.disconnect(); } catch (e) {} Reco._xlRO = null; }
+  if (Reco._xlRefitRaf) { cancelAnimationFrame(Reco._xlRefitRaf); Reco._xlRefitRaf = 0; }
+  if (Reco._xlSelRaf) { cancelAnimationFrame(Reco._xlSelRaf); Reco._xlSelRaf = 0; }
+  if (Reco._xlCtx && Reco._xlCtx.noticeTimer) clearTimeout(Reco._xlCtx.noticeTimer);
+  if (ws) {
+    // An open editor is saved through the normal path first.
+    try { if (ws.edition) ws.closeEditor(ws.edition[0], true); }
+    catch (e) { console.error('Excel view: closing the editor failed', e); }
+    try {
+      const el = ws.parent && ws.parent.element;
+      if (el && el.spreadsheet && typeof jspreadsheet !== 'undefined' && typeof jspreadsheet.destroy === 'function') jspreadsheet.destroy(el, true);
+      else if (ws.parent) ws.parent._recoDestroyed = true;
+    } catch (e) { console.error('Excel view: destroy failed', e); }
+    try { if (typeof jspreadsheet !== 'undefined' && jspreadsheet.current === ws) jspreadsheet.current = null; } catch (e) {}
+  }
+  document.querySelectorAll('.xl-palette').forEach(p => p.remove());
+  Reco._xlWorksheet = null;
+  Reco._xlInstance = null;
+  Reco._xlCtx = null;
+  Reco._xlById = null;
+  Reco._xlFullCache = null;
+  Reco._xlSelIds = [];
+  Reco._xlSortCtx = null;
+},
+
+/* ---- (old Excel view code below is removed in the following edits) ---- */
+_xlOldToolbarHtml() {
   let h = '';
   h += '<button class="xl-btn" onclick="Reco._xlAct(\'undo\')"  title="Undo (Ctrl+Z)">↶</button>';
   h += '<button class="xl-btn" onclick="Reco._xlAct(\'redo\')"  title="Redo (Ctrl+Y)">↷</button>';

@@ -716,6 +716,28 @@ def write_workbook(head: dict, cells_rows: list, base_rows: list, out_stream,
     Raises Cancelled when *cancel* is set (checked every 1,000 rows).
     """
     from openpyxl import Workbook
+    wb = Workbook(write_only=True)
+    try:
+        return _fill_workbook(wb, head, cells_rows, base_rows, out_stream, progress, cancel)
+    except BaseException:
+        _abandon(wb)
+        raise
+
+
+def _abandon(wb) -> None:
+    """Close the write-only sheets of an unsaved workbook and delete their temp files."""
+    for ws in wb.worksheets:
+        with contextlib.suppress(Exception):
+            ws.close()
+        writer = getattr(ws, "_writer", None)
+        if writer is not None:
+            with contextlib.suppress(Exception):
+                writer.cleanup()
+
+
+def _fill_workbook(wb, head: dict, cells_rows: list, base_rows: list, out_stream,
+                   progress: Callable[[int, int], None] | None,
+                   cancel: threading.Event | None) -> dict:
     from openpyxl.cell import WriteOnlyCell
     from openpyxl.comments import Comment
     from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -742,7 +764,6 @@ def write_workbook(head: dict, cells_rows: list, base_rows: list, out_stream,
             warnings.append(f"sanitized:{key}")
         return s2
 
-    wb = Workbook(write_only=True)
     _register_styles(wb, date_fmt, value_fmt)          # once, before any sheet
     wb.properties.creator = _clip(head.get("user") or "Reco", 255)
     wb.properties.title = _clip(head.get("tplName") or "", 255)
@@ -794,10 +815,12 @@ def write_workbook(head: dict, cells_rows: list, base_rows: list, out_stream,
     for i, c in enumerate(cols):
         cd = ws.column_dimensions[letters[i]]
         cd.width = _col_width(c)
-        if c.get("hidden"):
+        if c.get("hidden") or c.get("kind") == "id":      # A:B (row id, key) are always hidden
             cd.hidden = True
-        if buffer and editable[i]:
-            cd.style = cell_styles[i]                     # buffer rows inherit the editable style
+        if buffer and editable[i]:                         # rows typed below the data look editable
+            cd.fill = PatternFill(fill_type="solid", start_color="FFF9DB", end_color="FFF9DB")
+            cd.protection = Protection(locked=False)
+            cd.number_format = {"date": date_fmt, "value": value_fmt}.get(c.get("kind"), "@")
     for j, _title in enumerate(scratch):
         cd = ws.column_dimensions[get_column_letter(ncol + 1 + j)]
         cd.width = 24
@@ -817,8 +840,9 @@ def write_workbook(head: dict, cells_rows: list, base_rows: list, out_stream,
             cell._style = copy.copy(arr)
 
     def text_cell(sheet, value: str, style: str | None = None):
-        cell = WriteOnlyCell(sheet, value=value)
-        cell.data_type = "s"
+        cell = WriteOnlyCell(sheet, value=value or None)      # never an empty inlineStr
+        if value:
+            cell.data_type = "s"
         if style:
             set_style(cell, style)
         return cell
@@ -1054,7 +1078,8 @@ def _read_meta(wb) -> dict | None:
         if not row or row[0] is None:
             continue
         k = _hdr_text(row[0])
-        v = "" if len(row) < 2 or row[1] is None else _unescape_ctrl(_id_text(row[1]) if not isinstance(row[1], str) else row[1])
+        raw = row[1] if len(row) > 1 else None
+        v = "" if raw is None else _unescape_ctrl(raw if isinstance(raw, str) else _id_text(raw))
         m = re.match(r"^columnsJson\.(\d+)$", k)
         if m:
             chunks[int(m.group(1))] = v
@@ -1403,7 +1428,8 @@ class ExcelLinkEngine:
 
     # ---- locations -------------------------------------------------------------
     def work_dir(self) -> Path:
-        """Local area: env RECO_XL_WORK_DIR, %LOCALAPPDATA%\\AutomationHub\\ExcelLink, ~/.automation_hub/excel_link."""
+        """Local area: RECO_XL_WORK_DIR, else %LOCALAPPDATA%\\AutomationHub\\ExcelLink,
+        else ~/.automation_hub/excel_link."""
         if self._work_dir:
             return self._work_dir
         env = os.environ.get("RECO_XL_WORK_DIR", "").strip()
@@ -2088,7 +2114,7 @@ class ExcelLinkEngine:
                     "savedSinceExport": st["savedSinceExport"], "newSinceLastImport": st["newSinceLastImport"],
                     "otherPc": st["otherPc"],
                 })
-        links.sort(key=lambda x: str(x.get("exportedAt") or ""), reverse=True)
+        links.sort(key=lambda x: (str(x.get("exportedAt") or ""), x["exportId"]), reverse=True)
         return {"ok": True, "links": links}
 
     @_api

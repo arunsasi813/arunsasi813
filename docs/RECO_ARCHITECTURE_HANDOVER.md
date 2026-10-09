@@ -2,7 +2,7 @@
 
 **Status as of this build (v2)** · `apps/Reco.html` (≈11,400 lines) · `special_jv_templates/TCH.html` (≈740 lines) · `main.py` + `folder_manager.py` (Automation Hub launcher)
 
-This document is the cold-start brief. Read it before touching code in a new session. §7 lists every issue from the previous handover and how it was resolved; §10 covers the new base-folder set/switch/migrate feature.
+This document is the cold-start brief. Read it before touching code in a new session. §7 lists every issue from the previous handover and how it was resolved; §10 covers the base-folder set/switch/migrate feature; §11 the **Excel link** (📗 Edit in Excel → Load back); §12 the in-app Excel view and its options.
 
 ---
 
@@ -44,6 +44,8 @@ The launcher asks for one **base folder** once, persists it to `launcher_config.
 ├── reco_data/<dataFolder>/<MMM-YY>/<DD>.csv        versioned row store (see §5)
 ├── reco_data/<dataFolder>/_archive/…               full copies kept by "Compact" (Manage → Version History)
 ├── reco_attachments/<templateId>/<id>_<filename>   uploaded files; storedPath is RELATIVE to ROOT
+├── reco_excel/<dataFolder>/<user>/<file>.xlsx      workbooks opened with "📗 Edit in Excel" (§11)
+├── reco_excel/<dataFolder>/_links/<exportId>.json  Excel-link manifests (+ .base.json baselines)
 ├── special_jv_mapping/<REF>.json       JV definition (ref, displayName, inputColumns, accounts)
 └── special_jv_templates/<REF>.html     JV calculator UI (ROOT/apps/special_jv_templates/ also works)
 ```
@@ -75,6 +77,7 @@ Folder names are **load-bearing** — `Store`, `Versioning`, `SpecialJV`, and `A
 | `current_username()` | `str` | Signed-in user's name (resolves the OS user from `user.csv` if the hub has not run). |
 | `return_to_hub()` | — | Reco's 🏠 Hub button calls `App.returnToHub()`, which flushes pending saves first. |
 | `path_exists(rel)` | `bool` | Used to find JV pages with older launchers. |
+| `excel_link_*` *(new, optional)* | `{ok:true,…}` / `{ok:false, code, error}` | The Excel link engine (`excel_link.py`, §11): `capabilities`, `export_begin/rows/finish`, `job`/`job_cancel`/`job_release`, `open`, `status`, `read_start`/`read_page`, `manifest`, `update_manifest`, `list`, `close`, `pick_file`, `reveal`, `save_copy`. Never raise. Without them Reco falls back to SheetJS (§11.6). |
 
 ### Other bridge methods (for other hub apps)
 
@@ -145,7 +148,9 @@ Control columns: `_pk` (PK columns joined with `||`, or `_auto_<uid>`), `_ver` (
 
 - Header = control columns + template columns + every key present (Papa's default would drop columns added later).
 - Writes are serialised per file. With the new launcher, rows are **appended** (`append_csv_rows`); with an older one the file is read strictly and rewritten (a failed read aborts instead of rewriting with only the new rows).
-- Single-cell edits (grid, Excel view, sheet mode, fill) are queued for 150 ms and written as **one `Cn` per PK per burst** (`Versioning.queueChange`).
+- Single-cell edits (grid, Excel view, sheet mode, fill) go through `Reco.applyEdits` and are queued for 150 ms and written as **one `Cn` per PK per burst** (`Versioning.queueChange`).
+- Edits loaded back from Excel are written **history first** (`appendChangesBatch(tpl, pkRows, meta)`; the session only changes once the rows are on disk) and carry two audit columns, `_src` = `excel:<exportId>` and `_by` = user. Reopening data copies only template columns, so these never reach the rows.
+- `Versioning.changesSince(tpl, isoTs, pkSet)` returns the newest `Cn` per key written after a moment (used to detect colleagues' edits while a workbook was out in Excel).
 - `collapseToActive()` — highest `Cn` per PK, else `upload`; ties go to the row written later.
 - Opening a file (`Reco.loadVersionedFile` → `Versioning.loadActive`) applies the latest `Cn` from **newer** files, because edits always go to the day's file. Auto-load picks the newest file that contains `upload` rows.
 - **Compaction** (Manage → Version History): keeps every upload row and the latest `Cn` per PK; optionally archives the full file to `_archive/` first.
@@ -298,3 +303,80 @@ All in the hub (📁 **Base folder…**, admin password from `ROOT/pwd.txt`, def
   6. writes `MIGRATED_TO.txt` in the old folder — any launcher still pointing there offers **Switch to the new folder**.
 
   Nothing is switched if any file fails to copy or verify. Because every stored path (attachments included) is relative to ROOT, the app works unchanged in the new folder.
+
+---
+
+## 11. Excel link — "📗 Edit in Excel" and Load back
+
+**What the user sees.** In a template's Reco view, **📗 Edit in Excel** opens a dialog (rows: shown / open / selected / all; columns: as shown / all template columns; protection; date format; shared folder or this PC). **Create workbook** writes a real `.xlsx` and opens it in Excel. A green banner then follows the file: *not saved yet* → *Excel is saving…* → *Saved in Excel at 10:42 · changes not loaded* (amber, with **Load back**; a toast offers the same). **Load back** reads the saved file, compares it with Reco and opens a review: **Changes** (ticked), **Conflicts** (changed in Excel *and* in Reco since the export — default *Keep Reco*), **Problems** (never applied) and **Info**. **Apply** writes the ticked edits; the grid, Excel view, pivot and reports all recompute from the updated rows. **📗 Links** (toolbar) and **Manage → 📗 Excel Links** list every workbook (mine / everyone; open, saved-not-loaded, closed, stale) with Load back, Open, Show in folder, Save a copy, Close link and **Load from file…** (for a copy saved elsewhere).
+
+### 11.1 Pieces
+
+| Where | What |
+|---|---|
+| `excel_link.py` | Engine: workbook writer (openpyxl `write_only`), reader (two passes, snapshot copy), save detection, manifests, background jobs, sweep. Pure functions are unit-tested. |
+| `main.py` | Thin `LauncherAPI.excel_link_*` wrappers. Every call returns `{ok:true,…}` or `{ok:false, code, error}` and never raises. |
+| `apps/Reco.html` · `XlSchema` (module 3j) | The column model shared by the Excel link and the in-app Excel view: which columns exist and which are editable with which editor, `canon()` (the only comparison function), `coerce()` (write back in the row's own style). |
+| `apps/Reco.html` · `ExcelLink` (module 3k) | Dialog, export, banner/polling, Load back (read → match → three-way diff), review, apply, links panel, SheetJS fallback. |
+| `Reco.applyEdits(tpl, sess, edits, opts)` | **The one write path** for cell edits (grid `editCell`/`setTag`, the Excel view and the Excel link). |
+| `Versioning.appendChangesBatch(tpl, pkRows, meta)` / `changesSince(tpl, isoTs, pkSet)` | `meta` adds audit columns `_src` (`excel:<exportId>`) and `_by`; `changesSince` returns the newest `Cn` per key written after a moment (colleagues' edits while the workbook was out). |
+
+### 11.2 Files
+
+```
+<ROOT>/reco_excel/<dataFolder>/<user>/<Template>_<yyyymmdd-HHMM>_<id4>.xlsx   the workbook (shared area, default)
+<ROOT>/reco_excel/<dataFolder>/_links/<exportId>.json                         head manifest (small, updated on every import)
+<ROOT>/reco_excel/<dataFolder>/_links/<exportId>.base.json                    baseline values + row signatures (written once)
+%LOCALAPPDATA%\AutomationHub\ExcelLink\<file>.xlsx                            "This PC" area (and the fallback for long paths / read-only share)
+```
+
+`exportId` = `X<yyyymmdd>T<HHMMSS>-<4 chars>`. Workbooks are never overwritten. Closed links' workbooks are deleted after a day (unless open in Excel), their manifests after 90 days; open links are never cleaned up, only flagged *stale* after `staleDays` (7).
+
+### 11.3 The workbook
+
+| Sheet | Content |
+|---|---|
+| `Reco Data` | Row 1 headers, data from row 2. Hidden **A `__reco_row_id`** (= `row._id`) and **B `__reco_key`** (= `row._pk`), C `Reco Status`, then the columns in Reco's order. Editable cells yellow (unlocked), read-only grey, ids grey. Typed cells: dates are real dates (`dd-mmm-yyyy` by default so a day/month swap is visible), amounts numbers with `#,##0.00;(#,##0.00)`, text always text (so `000123` and `=…` stay as typed — no formula injection). Freeze panes at D2, autofilter over every column (A:B included, so sorting moves the ids with their rows). |
+| `How to use` | Steps, notes, a table of the columns (editable? how? allowed values) and the To-Account codes. |
+| `Lists` (hidden) | One column per dropdown; data validation uses defined names `RecoList_<n>` (no 255-character limit, commas allowed). Strict lists stop invalid input; datalist columns only warn. |
+| `_reco_meta` (very hidden) | Export id, template id, data folder, column model (JSON) — so a copy can be loaded from anywhere. |
+| `_reco_base` (very hidden, ≤ 20,000 rows) | Baseline copy used when the shared manifest is not reachable. |
+
+Protection modes: **Guarded** (default; no sheet protection, read-only columns shaded and guarded by a custom validation, sorting works), **Locked** (sheet protected without password, filtering allowed, Excel refuses to sort; three unlocked "Notes" scratch columns), **None**. In every mode the **importer** is what keeps the data correct; Excel's validation can be bypassed by paste.
+
+### 11.4 Save detection
+
+Reco polls `excel_link_status` every 2 s while the template is on screen (and on window focus; every 10 s after 10 quiet minutes). "Open in Excel" comes from Excel's `~$<name>` owner file; "saved" means size/mtime changed and stayed the same for 1.5 s. Status never opens the workbook (no lock probe while Excel saves). Folder migration skips `~$` files.
+
+### 11.5 Load back
+
+1. Flush pending saves; the launcher **snapshot-copies** the workbook (retries while Excel is mid-save) and reads the copy twice with openpyxl (formulas, then cached values). Rows whose cells are byte-identical to the export (row signature) are not sent to the page; rows that were already loaded once are always sent, so a revert is still seen.
+2. Identity: template id must match. Sheet found by the `__reco_row_id` header (renamed sheets and title rows are fine). Headers mapped by exact text → normalised text → position. Rows matched by hidden id; if the data was reopened since the export (`_id` regenerated) they re-match by unique `_pk` (badge *re-matched*). Hidden columns deleted → key column → visible primary keys (after a confirmation). A fingerprint of read-only identity columns (keys, value, doc number, or the template's `excelLink.fpCols`) detects rows that were sorted only partly or pasted over (`rowMisaligned`, row skipped).
+3. Three-way rule per editable cell: `B` = value at export (or as last loaded), `C` = Reco now **including shared history written after the export**, `E` = Excel. `E=B` unchanged · `E=C` already applied · invalid (not in list, not a date/number, Excel error, formula without a value, merged cell) → Problem · `C=B` → Change (ticked) · otherwise → Conflict (Keep Reco by default). Changes are unticked when the row was offset or posted since the export, when a pending Special JV used the row (To Account), and when more than 50 cells / 20 % of a column were cleared.
+4. Values are compared through `XlSchema.canon` (dates `D:YYYY-MM-DD`, amounts `N:<number>`, text trimmed with NBSP/CRLF normalised, dropdowns matched case-insensitively and spelled as the option). Leading zeros lost by Excel (`000123` → 123) count as unchanged.
+5. **Apply** revalidates (rows still there, values unchanged since the review, history queue empty), then `Reco.applyEdits(…, {historyFirst:true, meta})` writes **one `Cn` per key first** and only then changes the session — if the history write fails nothing changes. A colleague's newer values for other columns of the same key are carried into that `Cn` so they are not reverted. Tag columns go to `sess.manualTags` (session only, as in the grid); a non-template To-Account column to the row. The manifest is then rebased (`rebased`/`dismissed`/`imports`/`lastImport`), so loading the same file again shows nothing new and only later edits appear next time.
+6. Rows deleted in Excel are never deleted in Reco; rows added in Excel are counted and ignored (use **+ Persistent Row**).
+
+### 11.6 Fallback (older launcher or browser)
+
+Without `excel_link_*` (or without openpyxl) the workbook is built with SheetJS in the page and downloaded: same layout and hidden sheets, visible `Lists` sheet, **no dropdowns, colours or protection**. After saving in Excel, **Load from file…** reads it with SheetJS and goes through the same review and apply. With an older launcher that still has `write_file`, the manifest is written to the same `_links/` folder.
+
+### 11.7 Template options
+
+Template wizard → step "Columns & display" → **Excel view & Excel link**: default rows/columns/protection/date format/area, stale days, identity columns (`tpl.excelLink`), and the in-app Excel view's edit scope, key-column policy and display defaults (`tpl.excelView`). Users override the view defaults for themselves with **⚙ View** (stored in their browser profile; they can only *narrow* the edit scope).
+
+### 11.8 Known limitations
+
+- Tag and To-Account extra columns are session-only, as before (lost when data is reopened). `recoSessions.json` remains last-writer-wins across users.
+- Duplicate primary keys collapse to one row per key in history; a change to one duplicate is applied to all rows with that key.
+- New rows typed in Excel are not imported (v1).
+- openpyxl cannot write "ignore error" flags: text cells holding digits show Excel's green triangle (harmless, explained on *How to use*).
+- Real Excel behaviour (repair prompts, owner-file naming on the share, Protected View, export time on a slow share) cannot be tested in CI — see the manual checklist in §11.9.
+
+### 11.9 Manual checks on a Windows PC with Excel
+
+1. Guarded mode: sorting works; typing in a grey column is refused (paste is not — expected). Locked mode: filtering works, sorting is refused.
+2. After a save in Excel: no repair prompt; hidden sheets, dropdowns and comments survive.
+3. Save repeatedly while Reco is open: the banner moves to *Saved* and Excel never reports a sharing violation.
+4. **Open again** brings the open workbook to the front; Excel not installed → *Save a copy…* works.
+5. Export 20k × 20 on the share and compare with the dialog's time estimate.
