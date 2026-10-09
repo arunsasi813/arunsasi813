@@ -182,6 +182,9 @@ def iter_files(root: str, exclude_top: Iterable[str] = (POINTER_FILE,)):
             # Skip our own in-flight temp files from an interrupted copy.
             if name.startswith(".hubcopy-") and name.endswith(".tmp"):
                 continue
+            # Excel owner files (~$Book.xlsx) are locked while a workbook is open.
+            if name.startswith("~$"):
+                continue
             full = os.path.join(dirpath, name)
             try:
                 st = os.stat(full)

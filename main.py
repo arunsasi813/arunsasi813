@@ -175,6 +175,7 @@ class LauncherAPI:
         self._inflight_lock = threading.Lock()
         self._migration: fm.MigrationJob | None = None
         self._auto_login = True
+        self._xl = None  # excel_link.ExcelLinkEngine, created on first use
         cfg = self._load_cfg()
         folder = config_folder(cfg)
         self.folder_path = fm.norm(folder) if folder else None
@@ -956,6 +957,85 @@ class LauncherAPI:
 
     def load_projects_pair(self, name_a: str, name_b: str) -> dict:
         return {"a": self.load_project(name_a), "b": self.load_project(name_b)}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Excel link (Reco "Edit in Excel" / "Load back"); the work is in excel_link.py
+    # ──────────────────────────────────────────────────────────────────────
+    def _xlink(self):
+        if self._xl is None:
+            import excel_link
+            self._xl = excel_link.ExcelLinkEngine(
+                abs_resolver=self._abs, root_getter=self._root, user_getter=self.current_username,
+                window_getter=lambda: self._window, writing_ctx=self._writing,
+                atomic_write=_atomic_write_bytes, safe_segment=_safe_segment, dialog_type=_dialog_type)
+        return self._xl
+
+    def _xl_call(self, method: str, *args, fallback=None):
+        """Delegate to the engine; never raise (pywebview would reject the promise with a bare error)."""
+        try:
+            import excel_link
+            eng = self._xlink()
+            eng.maybe_sweep()
+            return excel_link.json_safe(getattr(eng, method)(*args))
+        except Exception as exc:
+            log.exception("excel_link_%s failed", method)
+            if fallback is not None:
+                return fallback
+            return {"ok": False, "code": "internal", "error": f"{type(exc).__name__}: {exc}"}
+
+    def excel_link_capabilities(self) -> dict:
+        return self._xl_call("capabilities")
+
+    def excel_link_export_begin(self, head) -> dict:
+        return self._xl_call("export_begin", head)
+
+    def excel_link_export_rows(self, token, cells, base=None) -> dict:
+        return self._xl_call("export_rows", token, cells, base)
+
+    def excel_link_export_finish(self, token) -> dict:
+        return self._xl_call("export_finish", token)
+
+    def excel_link_job(self, job_id) -> dict:
+        return self._xl_call("job", job_id)
+
+    def excel_link_job_cancel(self, job_id) -> bool:
+        return self._xl_call("job_cancel", job_id, fallback=False)
+
+    def excel_link_job_release(self, job_id) -> bool:
+        return self._xl_call("job_release", job_id, fallback=False)
+
+    def excel_link_open(self, export_id) -> dict:
+        return self._xl_call("open", export_id)
+
+    def excel_link_status(self, export_id) -> dict:
+        return self._xl_call("status", export_id)
+
+    def excel_link_read_start(self, source, opts=None) -> dict:
+        return self._xl_call("read_start", source, opts)
+
+    def excel_link_read_page(self, job_id, offset=0, limit=2000) -> dict:
+        return self._xl_call("read_page", job_id, offset, limit)
+
+    def excel_link_manifest(self, export_id, with_base=False) -> dict:
+        return self._xl_call("manifest", export_id, with_base)
+
+    def excel_link_update_manifest(self, export_id, patch) -> dict:
+        return self._xl_call("update_manifest", export_id, patch)
+
+    def excel_link_list(self, data_folder="") -> dict:
+        return self._xl_call("list", data_folder)
+
+    def excel_link_close(self, export_id, delete_workbook=True) -> dict:
+        return self._xl_call("close", export_id, delete_workbook)
+
+    def excel_link_pick_file(self) -> dict:
+        return self._xl_call("pick_file")
+
+    def excel_link_reveal(self, export_id) -> dict:
+        return self._xl_call("reveal", export_id)
+
+    def excel_link_save_copy(self, export_id) -> dict:
+        return self._xl_call("save_copy", export_id)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

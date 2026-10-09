@@ -98,6 +98,30 @@ THEMES['default'] = {
   .empty { padding: 24px; text-align: center; color: var(--text-muted, #9ca3af); font-style: italic; border: 1px dashed var(--border, #d1d5db); border-radius: 6px; }
   .tag { display: inline-block; background: var(--tag-bg, #e0e7ff); color: var(--tag-text, #3730a3); padding: 2px 8px; border-radius: 10px; font-size: 11px; margin: 2px 3px 2px 0; }
   .tag .x { cursor: pointer; margin-left: 4px; opacity: 0.6; }
+  /* Excel link */
+  .tag.active { background: var(--primary, #2563eb); color: #fff; }
+  .pill-row .tag { cursor: pointer; }
+  .xl-link-banner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding: 6px 10px; border-radius: 6px; font-size: 12px; background: var(--badge-green-bg, #dcfce7); color: var(--badge-green, #166534); border: 1px solid rgba(22,101,52,0.25); }
+  .xl-link-banner.empty { display: none; }
+  .xl-link-banner .xl-banner-text { flex: 1; min-width: 200px; }
+  .xl-link-banner .xl-banner-text.amber { color: var(--badge-amber, #92400e); font-weight: 600; }
+  .xl-link-banner .xl-banner-text.warn { color: var(--danger, #b91c1c); font-weight: 600; }
+  .xl-link-banner .xl-banner-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+  .xl-warn, .xl-err, .xl-info { padding: 7px 10px; border-radius: 5px; margin: 6px 0; font-size: 12px; }
+  .xl-warn { background: var(--badge-amber-bg, #fef3c7); color: var(--badge-amber, #92400e); }
+  .xl-err { background: #fee2e2; color: #991b1b; }
+  .xl-info { background: var(--badge-blue-bg, #dbeafe); color: var(--badge-blue, #1e40af); }
+  .xl-prog { height: 8px; background: var(--th-bg, #f3f4f6); border-radius: 4px; overflow: hidden; margin-top: 10px; }
+  .xl-prog > div { height: 100%; width: 2%; background: var(--success, #059669); transition: width .25s; }
+  .xl-dlg-row { display: grid; grid-template-columns: 110px 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border, #e5e7eb); align-items: start; }
+  .xl-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; background: var(--th-bg, #f3f4f6); color: var(--text-muted, #4b5563); border: 1px solid var(--border, #e5e7eb); white-space: nowrap; }
+  .xl-b-offsetSinceExport, .xl-b-postedSinceExport, .xl-b-jvPending, .xl-b-cleared, .xl-b-ambiguousDate, .xl-b-noBaseline { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+  .xl-rv-head { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted, #4b5563); margin-bottom: 6px; }
+  .xl-rv-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .xl-rv-table th, .xl-rv-table td { padding: 4px 6px; border-bottom: 1px solid var(--border, #e5e7eb); text-align: left; vertical-align: top; }
+  .xl-info li, ul.xl-info li { margin: 3px 0; }
+  ul.xl-info { font-size: 12px; padding-left: 18px; }
+  .toast.xl-toast { display: flex; gap: 8px; align-items: center; }
   td.cell-error { background: var(--danger-bg, #fee2e2) !important; color: var(--danger, #b91c1c); font-weight: 600; }
   td.cell-corrected { background: var(--success-bg, #d1fae5) !important; color: var(--success, #065f46); }
   td.missing-rc { background: var(--danger-bg, #fee2e2) !important; color: var(--danger, #b91c1c); font-weight: 600; }
@@ -1866,7 +1890,7 @@ const Versioning = {
      one new Cn version row reflecting the latest values across all the
      column changes batched in. `pkRows` is an array of { pk, row } pairs.
      Returns a map { pk: 'Cn' } of version labels written. */
-  async appendChangesBatch(tpl, pkRows) {
+  async appendChangesBatch(tpl, pkRows, meta) {
     if (!pkRows || !pkRows.length) return {};
     const path = Versioning.pathFor(tpl);
     return Versioning._withLock(path, async () => {
@@ -1881,6 +1905,9 @@ const Versioning = {
         const verLabel = 'C' + n;
         const rec = { _pk: pk, _ver: verLabel, _ts: stamp };
         tpl.columns.forEach(c => { const v = latestByPk[pk][c.name]; rec[c.name] = v != null ? v : ''; });
+        // Audit fields such as _src (excel:<exportId>) and _by. Rows reopened
+        // from history only copy tpl.columns, so these never reach the data.
+        if (meta) Object.keys(meta).forEach(k => { if (k[0] === '_' && !(k in rec)) rec[k] = meta[k] == null ? '' : meta[k]; });
         recs.push(rec);
         versionsOut[pk] = verLabel;
       });
@@ -1926,6 +1953,26 @@ const Versioning = {
     })();
     Versioning._flushing = run;
     return run;
+  },
+
+  /* Latest change row per key written after `isoTs` (e.g. by a colleague
+     while a workbook was out in Excel). Edits always go to the day's file,
+     so files from that day onwards are read, older → newer; within a file
+     the highest Cn wins, a later file wins over an earlier one.
+     Returns Map(pk → version record). */
+  async changesSince(tpl, isoTs, pkSet) {
+    const out = new Map();
+    const since = new Date(isoTs);
+    if (!isoTs || isNaN(since.getTime())) return out;
+    const day = { monthFolder: Versioning.monthFolder(since), file: Versioning.dayFile(since) };
+    const dayKey = Versioning._sortKey(day);
+    const files = (await Versioning.listFiles(tpl)).filter(f => Versioning._sortKey(f) >= dayKey).reverse();
+    for (const f of files) {
+      const rows = (await Versioning.readFile(f.fullPath))
+        .filter(r => r && /^C\d+$/.test(r._ver || '') && String(r._ts || '') > isoTs && (!pkSet || pkSet.has(r._pk)));
+      Versioning.collapseToActive(rows).forEach(r => out.set(r._pk, r));
+    }
+    return out;
   },
 
   /* Reduce a versioned-row list to "active" rows: highest Cn per PK, else
@@ -3313,6 +3360,2100 @@ const FindReplace = {
 
 
 /* ================================================================
+   MODULE 3j — XLSCHEMA
+   One column model for the Excel link and the in-app Excel view: which
+   columns exist, which are editable and with what editor, the single
+   normaliser used to compare values (canon), and write-back in the style
+   the row already uses (coerce).
+   ================================================================ */
+const XlSchema = {
+  RESERVED: ['__reco_row_id', '__reco_key', 'Reco Status'],
+  SEP: String.fromCharCode(31),
+  LOCKED: String.fromCharCode(0) + 'LOCKED',
+  _ws: new RegExp('[' + String.fromCharCode(0xA0, 0x202F) + ']', 'g'),
+  _ctl: new RegExp('[' + String.fromCharCode(0) + '-' + String.fromCharCode(8) + String.fromCharCode(11, 12)
+    + String.fromCharCode(14) + '-' + String.fromCharCode(31) + ']', 'g'),
+
+  /* Text as compared: CRLF → LF, NFC, no-break spaces → spaces, trimmed. */
+  T(v) {
+    if (v == null) return '';
+    let s = String(v).replace(/\r\n?/g, '\n');
+    try { s = s.normalize('NFC'); } catch (e) {}
+    return s.replace(XlSchema._ws, ' ').trim();
+  },
+  NUM(n) { return n === 0 ? '0' : String(+Number(n).toPrecision(15)); },
+  fnv1a(str) {
+    let h = 0x811c9dc5;
+    const s = String(str == null ? '' : str);
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return ('0000000' + h.toString(16)).slice(-8);
+  },
+  /* Remove characters Excel cannot store and cut at its cell limit. */
+  sanitize(s) {
+    const t = String(s);
+    let out = t.replace(XlSchema._ctl, '');
+    if (out.length > 32767) out = out.slice(0, 32767);
+    return out;
+  },
+
+  aegTemplateFor(tpl) {
+    if (!tpl || !tpl.aegIntegration || !tpl.aegIntegration.enabled || !tpl.aegIntegration.aegTemplateId) return null;
+    return (AppState.aegTemplates || []).find(at => at.id === tpl.aegIntegration.aegTemplateId) || null;
+  },
+  /* AEG "To Account" input column (mode input / inputOrSelect), else null. */
+  toAccountCol(tpl) {
+    const a = XlSchema.aegTemplateFor(tpl);
+    if (a && a.toAccount && (a.toAccount.mode === 'input' || a.toAccount.mode === 'inputOrSelect')) return a.toAccount.inputColumn || null;
+    return null;
+  },
+
+  _opt(o) {
+    if (o && typeof o === 'object') return { value: String(o.value == null ? '' : o.value), label: String(o.label == null ? o.value : o.label), group: o.group || '' };
+    return { value: String(o == null ? '' : o), label: String(o == null ? '' : o), group: '' };
+  },
+  /* Options of a list / combo column as [{value,label,group}]. */
+  optionsFor(tpl, sess, desc) {
+    let raw = [];
+    if (desc.role === 'toAccount') {
+      raw = SpecialJV.buildToAccountOptions().map(o => ({ value: o.value, label: o.label, group: o.kind === 'jv' ? 'Special JVs' : 'Accounts Master' }));
+    } else if (desc.role === 'tag') {
+      raw = Masters._extraDropdownOptions(tpl, desc._ac || {});
+    } else {
+      const cfg = (tpl.editableColumnConfig || {})[desc.name] || {};
+      if (cfg.optionsSource === 'master' && cfg.masterCfg && cfg.masterCfg.source && cfg.masterCfg.field) {
+        raw = Masters.distinctValues(cfg.masterCfg.source, tpl.id, cfg.masterCfg.field);
+      } else raw = (cfg.manualOptions || []).slice();
+    }
+    const seen = new Set();
+    return raw.map(XlSchema._opt).filter(o => o.value !== '' && !seen.has(o.value) && seen.add(o.value));
+  },
+
+  /* Column model.
+     opts: { scope:'template'|'allStandard'|'readonly', allowPkEdit, includeHidden,
+             showStatus (true), showExtras:'all'|'inputs'|'none', rows (for kind detection) } */
+  build(tpl, sess, opts) {
+    opts = opts || {};
+    const scope = opts.scope || 'template';
+    const allowPk = !!opts.allowPkEdit;
+    const showExtras = opts.showExtras || 'all';
+    SpecialJV.resetOptions();
+    const toAcc = XlSchema.toAccountCol(tpl);
+    const pks = new Set(tpl.primaryKeys || []);
+    const editableSet = new Set(tpl.editableColumns || []);
+    const colDefs = new Map((tpl.columns || []).map(c => [c.name, c]));
+    const extras = [...(tpl.additionalColumns || []), ...((sess && sess.extraColumns) || [])];
+    const extraByName = new Map();
+    extras.forEach(ac => { if (ac && ac.name && !extraByName.has(ac.name)) extraByName.set(ac.name, ac); });
+    const rows = opts.rows || (sess && sess.data) || [];
+    const cols = [];
+    const seen = new Set();
+    const header = n => XlSchema.RESERVED.includes(n) ? n + ' (column)' : n;
+
+    if (opts.showStatus !== false) {
+      cols.push({ name: '_status_', header: 'Reco Status', kind: 'status', role: 'status', isPk: false, isDate: false, isValue: false,
+        versioned: false, editable: false, lockReason: 'status', editor: 'none', options: null, strict: false, writeTo: null, formats: null });
+      seen.add('_status_');
+    }
+
+    const addTpl = name => {
+      const c = colDefs.get(name);
+      if (!c || seen.has(name)) return;
+      seen.add(name);
+      const isPk = pks.has(name);
+      const kind = c.isDate ? 'date' : (c.isValue ? 'value' : 'text');
+      const d = { name, header: header(name), kind, role: name === toAcc ? 'toAccount' : 'tpl', isPk, isDate: !!c.isDate, isValue: !!c.isValue,
+        versioned: true, editable: false, lockReason: '', editor: 'none', options: null, strict: false, writeTo: null,
+        formats: (c.formats && c.formats.length) ? c.formats : null };
+      let can = d.role === 'toAccount' || scope === 'allStandard' || editableSet.has(name);
+      if (can && isPk && !allowPk) { can = false; d.lockReason = 'pk'; }
+      if (can && scope === 'readonly') { can = false; d.lockReason = 'notEditable'; }
+      if (!can && !d.lockReason) d.lockReason = 'notEditable';
+      d.editable = can;
+      if (can) {
+        d.writeTo = 'row';
+        if (d.role === 'toAccount') { d.editor = 'list'; d.strict = true; }
+        else {
+          const cfg = editableSet.has(name) ? ((tpl.editableColumnConfig || {})[name] || {}) : {};
+          if (cfg.editType === 'dropdown') { d.editor = 'list'; d.strict = true; }
+          else if (cfg.editType === 'datalist') { d.editor = 'combo'; d.strict = false; }
+          else d.editor = kind === 'date' ? 'date' : (kind === 'value' ? 'number' : 'text');
+        }
+        if (d.editor === 'list' || d.editor === 'combo') d.options = XlSchema.optionsFor(tpl, sess, d);
+      }
+      cols.push(d);
+    };
+    const addExtra = (ac, synthetic) => {
+      if (!ac || !ac.name || seen.has(ac.name) || colDefs.has(ac.name)) return;
+      const isTo = ac.name === toAcc;
+      const type = ac.type || 'custom';
+      const computed = !isTo && (type === 'formula' || type === 'master' || type === 'master_lookup');
+      if (showExtras === 'none') return;
+      if (showExtras === 'inputs' && computed) return;
+      seen.add(ac.name);
+      const d = { name: ac.name, header: header(ac.name), kind: 'text', role: isTo ? 'toAccount' : (computed ? 'computed' : 'tag'),
+        isPk: false, isDate: false, isValue: false, versioned: false, editable: !computed && scope !== 'readonly',
+        lockReason: computed ? 'computed' : (scope === 'readonly' ? 'notEditable' : ''), editor: 'none', options: null, strict: false,
+        writeTo: null, formats: null, _ac: ac, synthetic: !!synthetic };
+      if (computed) {
+        d.computedType = type;
+        if (type === 'formula') {
+          // Numeric formulas export as numbers; anything textual stays text.
+          let any = false, allNum = true;
+          for (let i = 0; i < rows.length && i < 2000; i++) {
+            let v; try { v = Reco._extraValueForRow(tpl, sess, rows[i], ac); } catch (e) { v = ''; }
+            if (v == null || v === '') continue;
+            any = true;
+            if (!U.isNumeric(v)) { allNum = false; break; }
+          }
+          if (any && allNum) { d.kind = 'value'; d.isValue = true; }
+        }
+      } else if (d.editable) {
+        d.writeTo = isTo ? 'row' : 'tag';
+        if (isTo || type === 'dropdown') { d.editor = 'list'; d.strict = true; d.options = XlSchema.optionsFor(tpl, sess, d); }
+        else d.editor = 'text';
+      }
+      cols.push(d);
+    };
+
+    Reco.effectiveDisplayCols(tpl, sess).forEach(n => { if (colDefs.has(n)) addTpl(n); });
+    if (opts.includeHidden) (tpl.columns || []).forEach(c => addTpl(c.name));
+    if (toAcc && colDefs.has(toAcc) && !seen.has(toAcc)) addTpl(toAcc);
+    const hidden = new Set((sess && sess.hiddenCols) || []);
+    extras.forEach(ac => { if (opts.includeHidden || !hidden.has(ac.name) || ac.name === toAcc) addExtra(ac); });
+    if (toAcc && !colDefs.has(toAcc) && !extraByName.has(toAcc)) addExtra({ name: toAcc, type: 'custom' }, true);
+
+    const byName = new Map(cols.map(d => [d.name, d]));
+    return { cols, byName, toAccountCol: toAcc };
+  },
+
+  statusOf(sess, row) {
+    return (sess.offsets && sess.offsets[row._id]) ? (row._manualOffset ? 'Offset ✋' : 'Offset') : 'Open';
+  },
+  /* Current Reco value of a column (full = Reco._rowWithExtras for the row). */
+  currentValue(desc, row, full, sess) {
+    if (desc.role === 'status') return XlSchema.statusOf(sess, row);
+    if (desc.role === 'tag' || desc.role === 'computed') {
+      if (!full) return '';
+      const v = full[desc.name];
+      return v == null ? '' : v;
+    }
+    const v = row[desc.name];
+    return v == null ? '' : v;
+  },
+
+  _isoDate(d) { return d ? U.fmtDate(d, 'YYYY-MM-DD') : ''; },
+  _dateFromIso(s) {
+    const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? U._mkDate(+m[1], +m[2], +m[3]) : null;
+  },
+  _matchOption(desc, c) {
+    if (!desc.options || !desc.options.length || c === '') return null;
+    const key = s => String(s).replace(/\s+/g, ' ').trim().toLowerCase();
+    const k = key(c);
+    const hit = desc.options.find(o => key(o.value) === k);
+    return hit ? hit.value : null;
+  },
+
+  /* The one comparison function.
+     side 'reco': raw session value. side 'excel': raw cell [t, v, f] (or a
+     plain typed value, treated as text / number). ctx.B: baseline canonical
+     (leading-zero and exponent checks).
+     Returns { c, err?, verr?, warn:[] }: err = the cell cannot be used at all
+     (Excel error, formula without a result); verr = validation error that
+     only matters when the cell actually changed. */
+  canon(desc, raw, side, ctx) {
+    const out = { c: '', warn: [] };
+    if (side !== 'excel') return XlSchema._canonReco(desc, raw, out);
+    let cell = raw;
+    if (cell == null || cell === '') return out;
+    if (!Array.isArray(cell)) cell = typeof cell === 'number' ? ['n', cell] : (typeof cell === 'boolean' ? ['b', cell] : ['s', String(cell)]);
+    let t = cell[0], v = cell[1];
+    if (t === 'f') {
+      out.warn.push('formula');
+      const inner = cell[1];
+      if (inner == null) { out.c = null; out.err = 'formulaNoResult'; return out; }
+      t = inner[0]; v = inner[1];
+    }
+    if (t === 'z') { out.c = null; out.err = 'formulaNoResult'; return out; }
+    if (t === 'e') { out.c = null; out.err = 'excelError'; out.errText = String(v || ''); return out; }
+    if (t === 'b') { t = 's'; v = v ? 'TRUE' : 'FALSE'; }
+    let date = null;
+    if (t === 'd') {
+      date = XlSchema._dateFromIso(v);
+      if (/T(\d{2}):(\d{2}):(\d{2})/.test(String(v)) && !/T00:00:00/.test(String(v))) out.warn.push('timeDropped');
+      if (!date) { t = 's'; v = String(v); }
+    }
+    if (t === 's' && XlSchema.T(v) === '') return out;
+    const B = ctx && ctx.B != null ? String(ctx.B) : null;
+
+    if (desc.kind === 'date') {
+      if (t === 'd') out.c = 'D:' + XlSchema._isoDate(date);
+      else if (t === 'n') {
+        const d = U._excelSerialToDate(v);
+        out.c = d ? 'D:' + XlSchema._isoDate(d) : 'T:' + XlSchema.NUM(v);
+      } else {
+        const text = XlSchema.T(v);
+        const d = U.parseDate(text);
+        if (d && d.getFullYear() >= 1900 && d.getFullYear() <= 2200) {
+          out.c = 'D:' + XlSchema._isoDate(d);
+          out.warn.push('textDate');
+          const m = text.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.]\d{2,4}$/);
+          if (m && +m[1] <= 12 && +m[2] <= 12 && m[1] !== m[2]) out.warn.push('ambiguousDate');
+        } else out.c = 'T:' + text;
+      }
+      if (out.c.startsWith('T:')) out.verr = 'notADate';
+      else {
+        const y = +out.c.slice(2, 6);
+        if (y < 1950 || y > 2100) out.verr = 'implausibleDate';
+      }
+    } else if (desc.kind === 'value') {
+      if (t === 'n') out.c = 'N:' + XlSchema.NUM(v);
+      else if (t === 'd') { out.c = 'T:' + XlSchema._isoDate(date); out.verr = 'notANumber'; }
+      else {
+        const text = XlSchema.T(v);
+        if (U.isNumeric(text)) { out.c = 'N:' + XlSchema.NUM(U.num(text)); out.warn.push('textNumber'); }
+        else { out.c = 'T:' + text; out.verr = 'notANumber'; }
+      }
+    } else {
+      if (t === 'n') {
+        if (Number.isInteger(v) && Math.abs(v) < 1e15) out.c = String(v);
+        else if (Math.abs(v) >= 1e15) { out.c = XlSchema.NUM(v); out.verr = 'precisionLost'; }
+        else out.c = XlSchema.NUM(v);
+        if (B != null && /^0+\d+$/.test(B) && B.replace(/^0+/, '') === out.c) { out.c = B; out.warn.push('leadingZeros'); }
+      } else if (t === 'd') {
+        out.c = U.fmtDate(date, 'DD/MM/YYYY');
+        out.warn.push('dateInTextColumn');
+      } else {
+        out.c = XlSchema.T(v);
+        if (/^\d(\.\d+)?E\+\d+$/i.test(out.c) && B != null && /^\d+$/.test(B)) out.verr = 'precisionLost';
+      }
+    }
+    if (desc.editor === 'list' || desc.editor === 'combo') {
+      const hit = XlSchema._matchOption(desc, desc.kind === 'text' ? out.c : XlSchema._plain(out.c));
+      if (hit != null) out.c = desc.kind === 'text' ? hit : XlSchema._canonReco(desc, hit, { c: '', warn: [] }).c;
+      else if (desc.strict && out.c !== '' && !out.verr) out.verr = 'notInList';
+    }
+    return out;
+  },
+  _canonReco(desc, raw, out) {
+    if (raw == null) return out;
+    if (typeof raw === 'string' && XlSchema.T(raw) === '') return out;
+    if (desc.kind === 'date') {
+      const d = U.parseDate(raw);
+      out.c = (d && d.getFullYear() >= 1900 && d.getFullYear() <= 2200) ? 'D:' + XlSchema._isoDate(d) : 'T:' + XlSchema.T(raw);
+    } else if (desc.kind === 'value') {
+      if (typeof raw === 'number' && isFinite(raw)) out.c = 'N:' + XlSchema.NUM(raw);
+      else if (U.isNumeric(raw)) out.c = 'N:' + XlSchema.NUM(U.num(raw));
+      else out.c = 'T:' + XlSchema.T(raw);
+    } else {
+      out.c = XlSchema.T(String(raw));
+      if (desc.editor === 'list' || desc.editor === 'combo') {
+        const hit = XlSchema._matchOption(desc, out.c);
+        if (hit != null) out.c = hit;
+      }
+    }
+    return out;
+  },
+  /* Canonical value without its D:/N:/T: prefix (for display / option match). */
+  _plain(c) { return (typeof c === 'string' && /^[DNT]:/.test(c)) ? c.slice(2) : (c == null ? '' : String(c)); },
+  /* Human-readable form of a canonical value. */
+  display(c) {
+    if (c == null) return '';
+    if (c === XlSchema.LOCKED) return '(not loadable)';
+    if (c.startsWith('D:')) { const d = XlSchema._dateFromIso(c.slice(2)); return d ? U.fmtDate(d, 'DD-MMM-YYYY') : c.slice(2); }
+    if (c.startsWith('N:')) {
+      const n = Number(c.slice(2));
+      const s = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return n < 0 ? '(' + s + ')' : s;
+    }
+    if (c.startsWith('T:')) return c.slice(2);
+    return c;
+  },
+
+  dateStyleOf(raw) {
+    if (typeof raw === 'number') return 'serial-num';
+    const s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    if (/^\d{5}(\.0+)?$/.test(s)) return 'serial-text';
+    if (/^\d{4}-\d{2}-\d{2}[ T]00:00:00/.test(s)) return 'YYYY-MM-DD 00:00:00';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return 'YYYY-MM-DD';
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) return 'DD/MM/YYYY';
+    if (/^\d{1,2}\/\d{1,2}\/\d{2}$/.test(s)) return 'DD/MM/YY';
+    if (/^\d{2}-\d{2}-\d{4}$/.test(s)) return 'DD-MM-YYYY';
+    if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) return 'DD.MM.YYYY';
+    if (/^\d{1,2}-[A-Za-z]{3}-\d{2}$/.test(s)) return 'DD-MMM-YY';
+    if (/^\d{1,2}-[A-Za-z]{3}-\d{4}$/.test(s)) return 'DD-MMM-YYYY';
+    if (/^\d{1,2} [A-Za-z]{3} \d{4}$/.test(s)) return 'DD MMM YYYY';
+    return null;
+  },
+  valueStyleOf(raw) {
+    if (typeof raw === 'number') return 'number';
+    const s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    if (/^\(.*\)$/.test(s)) return 'paren';
+    if (/-$/.test(s)) return 'trailingMinus';
+    if (s.indexOf(',') !== -1) return 'thousands';
+    return 'plain';
+  },
+  /* Majority write style of a column over its first 200 non-empty values. */
+  columnStyle(sess, desc) {
+    if (!desc || (desc.kind !== 'date' && desc.kind !== 'value')) return null;
+    const fn = desc.kind === 'date' ? XlSchema.dateStyleOf : XlSchema.valueStyleOf;
+    const counts = {};
+    let n = 0;
+    for (const r of (sess.data || [])) {
+      const v = r[desc.name];
+      if (v == null || v === '') continue;
+      const st = fn(v);
+      if (st) counts[st] = (counts[st] || 0) + 1;
+      if (++n >= 200) break;
+    }
+    let best = null;
+    Object.keys(counts).forEach(k => { if (!best || counts[k] > counts[best]) best = k; });
+    return best || (desc.kind === 'date' ? 'DD/MM/YYYY' : 'plain');
+  },
+  _fmt2(n) { return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+  /* Value to store for canonical `c`, written in the style the row already
+     uses (or the column's majority style when the row's value is empty). */
+  coerce(desc, c, currentRaw, colStyle) {
+    if (c == null || c === '') return '';
+    if (desc.kind === 'date' && c.startsWith('D:')) {
+      const d = XlSchema._dateFromIso(c.slice(2));
+      if (!d) return c.slice(2);
+      const style = XlSchema.dateStyleOf(currentRaw) || colStyle || 'DD/MM/YYYY';
+      const serial = Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(1899, 11, 30)) / 86400000);
+      if (style === 'serial-num') return serial;
+      if (style === 'serial-text') return String(serial);
+      if (style === 'YYYY-MM-DD 00:00:00') return U.fmtDate(d, 'YYYY-MM-DD') + ' 00:00:00';
+      return U.fmtDate(d, style);
+    }
+    if (desc.kind === 'value' && c.startsWith('N:')) {
+      const n = Number(c.slice(2));
+      const style = XlSchema.valueStyleOf(currentRaw) || colStyle || 'plain';
+      if (style === 'number') return n;
+      if (style === 'paren') return n < 0 ? '(' + XlSchema._fmt2(-n) + ')' : XlSchema._fmt2(n);
+      if (style === 'trailingMinus') return n < 0 ? XlSchema._fmt2(-n) + '-' : XlSchema._fmt2(n);
+      if (style === 'thousands') return XlSchema._fmt2(n);
+      return XlSchema.NUM(n);
+    }
+    return XlSchema._plain(c);
+  },
+
+  /* Check a value typed in the in-app view. Strict lists must match an
+     option (or the unchanged value). Returns { ok, c, reason }. */
+  validateInput(desc, v, currentRaw) {
+    const cell = (typeof v === 'number') ? ['n', v] : ['s', v == null ? '' : String(v)];
+    const r = XlSchema.canon(desc, cell, 'excel', { B: XlSchema.canon(desc, currentRaw, 'reco').c });
+    if (r.err) return { ok: false, reason: r.err };
+    const cur = XlSchema.canon(desc, currentRaw, 'reco').c;
+    if (r.c === cur) return { ok: true, c: r.c, unchanged: true };
+    if (r.verr) return { ok: false, reason: r.verr, c: r.c };
+    return { ok: true, c: r.c };
+  },
+  dateLabel(v, display) {
+    if (v == null || v === '') return '';
+    const d = U.parseDate(v);
+    return d ? U.fmtDate(d, display || 'DD/MM/YYYY') : String(v);
+  },
+
+  /* Signature of the template's column setup (detects template edits made
+     after an export). */
+  tplSignature(tpl) {
+    const cfg = {};
+    (tpl.editableColumns || []).forEach(c => { cfg[c] = ((tpl.editableColumnConfig || {})[c] || {}).editType || 'free'; });
+    return XlSchema.fnv1a(JSON.stringify({ cols: (tpl.columns || []).map(c => [c.name, !!c.isDate, !!c.isValue]),
+      pk: tpl.primaryKeys || [], ed: tpl.editableColumns || [], cfg }));
+  },
+
+  REASONS: {
+    computed: 'computed in Reco', pk: 'primary-key column', notEditable: 'not an editable column', status: 'status column',
+    unknown: 'unknown column', excelError: 'Excel error value', formulaNoResult: 'formula without a calculated value (open and save it in Excel)',
+    notInList: 'not one of the allowed values', notADate: 'not a date', implausibleDate: 'date outside 1950–2100',
+    notANumber: 'not a number', precisionLost: 'number too long — Excel lost digits', sourceSanitized: 'the Reco value had characters Excel cannot hold',
+    mergedCell: 'merged cell', duplicateRowId: 'row copied in Excel (same hidden id twice)', unknownRowId: 'hidden row id not from this export',
+    identityMismatch: 'hidden key does not match the row', rowNotInCurrentData: 'row is not in the data open in Reco',
+    rowMisaligned: 'identity columns changed — the row was sorted or pasted over', noPk: 'row has no key'
+  },
+  reason(code) { return XlSchema.REASONS[code] || code; }
+};
+
+/* ================================================================
+   MODULE 3k — EXCEL LINK
+   "📗 Edit in Excel": build a real .xlsx (typed cells, dropdowns, shaded
+   read-only columns), open it in Excel, notice when Excel saves, read it
+   back, show a three-way review (at export / in Reco now / in Excel) and
+   apply only the ticked edits through Reco.applyEdits (history first).
+   Tier P: the launcher's openpyxl engine (excel_link_* bridge methods).
+   Tier S: SheetJS in the page (older launcher or a browser): no dropdowns,
+   colours or protection; the user saves the file and picks it again.
+   ================================================================ */
+const ExcelLink = {
+  LINK_DEFAULTS: { protect: 'soft', scope: 'view', columns: 'asShown', area: 'shared', dateFormat: 'dd-mmm-yyyy',
+                   allowNewRows: false, fpCols: [], staleDays: 7 },
+  VALUE_FMT: '#,##0.00;(#,##0.00)',
+  CHUNK: 5000,
+  PAGE: 2000,
+  POLL_MS: 2000,
+  SLOW_MS: 10000,
+  _caps: undefined,
+  _plan: null,
+  _busy: false,
+  _cancel: false,
+  _jobId: null,
+  _watch: null,
+  _active: {},        // tplId -> { exportId, fileName, tier, status, loaded:{at,count}, sawOwner }
+  _lookedUp: {},      // tplId -> true once the shared link list was checked
+
+  ERRORS: {
+    no_bridge: 'This needs the Automation Hub launcher.',
+    no_openpyxl: 'The launcher cannot write Excel files (openpyxl is missing).',
+    no_root: 'The base folder is not available.',
+    bad_spec: 'The export request was not valid.',
+    too_large: 'Too many rows or columns for one Excel sheet — filter first.',
+    exists: 'A workbook with that name already exists — try again in a minute.',
+    manifest_write_failed: 'The link record could not be saved to the shared folder.',
+    missing: 'The workbook was not found (moved, renamed or deleted?). Use "Load from file…".',
+    missing_manifest: 'The link record was not found.',
+    other_pc: 'This workbook was created on another PC. Open it there, or copy it here and use "Load from file…".',
+    no_app: 'No program is set up to open .xlsx files on this PC. Use "Save a copy…" or the in-app Excel view.',
+    launch_failed: 'Excel could not be started.',
+    unsupported_format: 'Save the file as Excel Workbook (*.xlsx) and try again.',
+    busy_saving: 'Excel is still saving the file — try again in a moment.',
+    ambiguous_sheet: 'More than one sheet has Reco row ids — pick the sheet to read.',
+    bad_token: 'The picked file is no longer available — pick it again.',
+    unknown_job: 'The background task was lost — try again.',
+    not_done: 'The background task has not finished yet.',
+    bad_patch: 'The link record update was refused.',
+    row_count_mismatch: 'Not all rows reached the launcher — try again.',
+    internal: 'Unexpected error in the launcher.'
+  },
+
+  api() { return Store._hasApi() ? window.pywebview.api : null; },
+  _has(name) { const a = ExcelLink.api(); return !!(a && typeof a[name] === 'function'); },
+  async caps() {
+    if (ExcelLink._caps !== undefined) return ExcelLink._caps;
+    let c = null;
+    if (ExcelLink._has('excel_link_capabilities')) {
+      try { c = await ExcelLink.api().excel_link_capabilities(); } catch (e) { c = null; }
+    }
+    ExcelLink._caps = (c && c.ok !== false) ? c : null;
+    return ExcelLink._caps;
+  },
+  async tier() { const c = await ExcelLink.caps(); return (c && c.openpyxl) ? 'P' : 'S'; },
+  cfg(tpl) { return Object.assign({}, ExcelLink.LINK_DEFAULTS, (tpl && tpl.excelLink) || {}); },
+  _lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  _lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  user() { return AppState.currentUser || 'user'; },
+  _ctx() {
+    const id = AppState.activeRecoId;
+    return { tpl: AppState.recoTemplates.find(x => x.id === id), sess: AppState.recoSessions[id] };
+  },
+  _sleep(ms) { return new Promise(r => setTimeout(r, ms)); },
+  _err(r) {
+    const code = (r && r.code) || 'internal';
+    const e = new Error(ExcelLink.ERRORS[code] ? ExcelLink.ERRORS[code] + (code === 'internal' && r && r.error ? ' (' + r.error + ')' : '')
+      : ((r && r.error) || code));
+    e.code = code; e.detail = r;
+    return e;
+  },
+  async _call(name, ...args) {
+    const a = ExcelLink.api();
+    if (!a || typeof a[name] !== 'function') throw ExcelLink._err({ code: 'no_bridge' });
+    const r = await a[name](...args);
+    if (r && r.ok === false) throw ExcelLink._err(r);
+    return r;
+  },
+  _cancelled() { const e = new Error('Cancelled'); e.code = 'cancelled'; return e; },
+  newExportId() {
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    const abc = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let s = '';
+    for (let i = 0; i < 4; i++) s += abc[Math.floor(Math.random() * abc.length)];
+    return 'X' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + 'T' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '-' + s;
+  },
+  _safeName(s, n) { return (String(s || '').replace(/[^A-Za-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'Reco').slice(0, n || 40); },
+  _hhmm(iso) {
+    const d = iso ? new Date(iso) : null;
+    return d && !isNaN(d.getTime()) ? String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '';
+  },
+  _when(iso) {
+    const d = iso ? new Date(iso) : null;
+    return d && !isNaN(d.getTime()) ? U.fmtDate(d, 'DD-MMM-YYYY') + ' ' + ExcelLink._hhmm(iso) : '';
+  },
+  _linksDir(tpl) { return 'reco_excel/' + Versioning.folderFor(tpl) + '/_links/'; },
+
+  /* ---------------- rows, schema and the export dialog ---------------- */
+  rowsFor(tpl, sess, scope) {
+    if (scope === 'all') return sess.data.slice();
+    if (scope === 'open') return sess.data.filter(r => !(sess.offsets && sess.offsets[r._id]));
+    if (scope === 'selected') { const sel = sess.selectedRows || {}; return sess.data.filter(r => sel[r._id]); }
+    return Reco.applyTableFiltersSort(tpl, sess);
+  },
+  schemaFor(tpl, sess, columnsMode) {
+    return XlSchema.build(tpl, sess, { includeHidden: columnsMode === 'allTemplate', scope: 'template',
+      allowPkEdit: !!(tpl.excelView && tpl.excelView.allowPkEdit), showExtras: 'all' });
+  },
+  canExport(tpl, sess) {
+    if (!tpl || !sess || !sess.data || !sess.data.length) return { ok: false, reason: 'Load data first' };
+    // rows:[] skips the formula-kind scan: only editability matters here (runs on every render)
+    const S = XlSchema.build(tpl, sess, { includeHidden: true, scope: 'template', showExtras: 'all', rows: [],
+      allowPkEdit: !!(tpl.excelView && tpl.excelView.allowPkEdit) });
+    if (!S.cols.some(d => d.editable)) return { ok: false, reason: 'No editable columns — mark columns as editable in the template' };
+    return { ok: true };
+  },
+  buttonHtml(tpl, sess) {
+    const chk = ExcelLink.canExport(tpl, sess);
+    return '<button class="success small" id="xlEditInExcelBtn"' + (chk.ok ? '' : ' disabled') + ' title="'
+      + U.escAttr(chk.ok ? 'Open these rows in Microsoft Excel with dropdowns, then load the edits back' : chk.reason)
+      + '" onclick="ExcelLink.openDialog()">📗 Edit in Excel</button>';
+  },
+
+  async openDialog(tplId) {
+    const tpl = AppState.recoTemplates.find(x => x.id === (tplId || AppState.activeRecoId));
+    const sess = tpl && AppState.recoSessions[tpl.id];
+    const chk = ExcelLink.canExport(tpl, sess);
+    if (!chk.ok) { U.toast(chk.reason, 'error'); return; }
+    try { await Versioning.flushQueue(); await AppState.flush(); } catch (e) {}
+    const tier = await ExcelLink.tier();
+    if (tier === 'P') {
+      const links = await ExcelLink.listLinks(tpl);
+      const mine = links.filter(l => l.tplId === tpl.id && l.status === 'open' && l.exportedBy === ExcelLink.user() && l.newSinceLastImport);
+      if (mine.length) {
+        const l = mine[0];
+        App.openModal('Edit in Excel',
+          '<div class="help" style="font-size:12px;">Your workbook <b>' + U.esc(l.fileName) + '</b> has changes saved in Excel that are not loaded back yet.</div>',
+          '<button onclick="App.closeModal()">Cancel</button>'
+          + '<button onclick="ExcelLink._renderDialog(\'' + U.jsq(tpl.id) + '\', \'P\')">Create a new one</button>'
+          + '<button onclick="App.closeModal(); ExcelLink.openInExcel(\'' + U.jsq(l.exportId) + '\')">Open it again</button>'
+          + '<button class="primary" onclick="App.closeModal(); ExcelLink.load({exportId:\'' + U.jsq(l.exportId) + '\'})">Load it back first</button>');
+        return;
+      }
+    }
+    ExcelLink._renderDialog(tpl.id, tier);
+  },
+
+  _dialogPrefs(tpl) {
+    const c = ExcelLink.cfg(tpl);
+    const base = { rows: c.scope, columns: c.columns, includeComputed: true, protect: c.protect, dateFormat: c.dateFormat,
+      area: c.area, openAfter: true };
+    const saved = ExcelLink._lsGet('reco.xl.export.v1.' + tpl.id, {});
+    const out = Object.assign(base, saved);
+    out.autoReview = !!ExcelLink._lsGet('reco.xl.autoReview', false);
+    return out;
+  },
+  _renderDialog(tplId, tier) {
+    const tpl = AppState.recoTemplates.find(x => x.id === tplId);
+    const sess = AppState.recoSessions[tplId];
+    if (!tpl || !sess) return;
+    const p = ExcelLink._dialogPrefs(tpl);
+    const nSel = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]).length;
+    if (p.rows === 'selected' && !nSel) p.rows = 'view';
+    const counts = { view: Reco.applyTableFiltersSort(tpl, sess).length,
+      open: sess.data.filter(r => !(sess.offsets && sess.offsets[r._id])).length, selected: nSel, all: sess.data.length };
+    const opt = (name, val, cur, label, dis) => '<label class="inline" style="margin-right:12px;"><input type="radio" name="' + name + '" value="' + val + '"'
+      + (cur === val ? ' checked' : '') + (dis ? ' disabled' : '') + ' onchange="ExcelLink._dlgUpdate()"> ' + label + '</label>';
+    let h = '<div id="xlDlg" data-tpl="' + U.escAttr(tpl.id) + '" data-tier="' + tier + '" style="font-size:12px;">';
+    if (tier === 'S') h += '<div class="xl-warn">This launcher cannot add dropdowns, colours or protection. The workbook is downloaded; after editing, save it and use <b>Load from file…</b>.</div>';
+    h += '<div class="xl-dlg-row"><b>Rows</b><div>' + opt('xlRows', 'view', p.rows, 'Shown in Reco now (' + counts.view + ')')
+      + opt('xlRows', 'open', p.rows, 'Open rows (' + counts.open + ')') + opt('xlRows', 'selected', p.rows, 'Selected (' + counts.selected + ')', !counts.selected)
+      + opt('xlRows', 'all', p.rows, 'All loaded rows (' + counts.all + ')') + '</div></div>';
+    h += '<div class="xl-dlg-row"><b>Columns</b><div>' + opt('xlCols', 'asShown', p.columns, 'As shown') + opt('xlCols', 'allTemplate', p.columns, 'All template columns')
+      + '<label class="inline"><input type="checkbox" id="xlComputed"' + (p.includeComputed ? ' checked' : '') + ' onchange="ExcelLink._dlgUpdate()"> Include computed columns (values only)</label></div></div>';
+    h += '<div class="xl-dlg-row"><b>You can edit</b><div id="xlEditChips"></div></div>';
+    if (tier === 'P') {
+      h += '<div class="xl-dlg-row"><b>Protection</b><div>'
+        + opt('xlProt', 'soft', p.protect, 'Guarded <span class="text-muted">(read-only columns greyed; sorting works)</span>')
+        + opt('xlProt', 'locked', p.protect, 'Locked <span class="text-muted">(sheet protected; filter only)</span>')
+        + opt('xlProt', 'none', p.protect, 'None') + '</div></div>';
+    }
+    h += '<div class="xl-dlg-row"><b>Date format</b><div>' + opt('xlDate', 'dd-mmm-yyyy', p.dateFormat, '06-Oct-2026')
+      + opt('xlDate', 'dd/mm/yyyy', p.dateFormat, '06/10/2026') + opt('xlDate', 'yyyy-mm-dd', p.dateFormat, '2026-10-06') + '</div></div>';
+    if (tier === 'P') {
+      h += '<div class="xl-dlg-row"><b>Save to</b><div>' + opt('xlArea', 'shared', p.area, 'Shared folder <span class="text-muted">(load back from any PC)</span>')
+        + opt('xlArea', 'local', p.area, 'This PC only') + '</div></div>';
+      h += '<div class="xl-dlg-row"><b></b><div><label class="inline" style="margin-right:12px;"><input type="checkbox" id="xlOpenAfter"' + (p.openAfter ? ' checked' : '') + '> Open in Excel when ready</label>'
+        + '<label class="inline"><input type="checkbox" id="xlAutoReview"' + (p.autoReview ? ' checked' : '') + '> Open the review automatically when Excel saves</label></div></div>';
+    }
+    h += '<div id="xlEstimate" class="help"></div><div id="xlWarnings"></div>';
+    h += '</div>';
+    App.openModal('📗 Edit in Excel — ' + tpl.name, h,
+      '<button onclick="App.closeModal()">Cancel</button><button class="primary" id="xlCreateBtn" onclick="ExcelLink._fromDialog()">Create workbook</button>');
+    ExcelLink._dlgUpdate();
+  },
+  _dlgRead() {
+    const el = document.getElementById('xlDlg');
+    if (!el) return null;
+    const val = (name, d) => { const x = el.querySelector('input[name="' + name + '"]:checked'); return x ? x.value : d; };
+    const chk = (id, d) => { const x = document.getElementById(id); return x ? x.checked : d; };
+    return { tplId: el.dataset.tpl, tier: el.dataset.tier, rows: val('xlRows', 'view'), columns: val('xlCols', 'asShown'),
+      includeComputed: chk('xlComputed', true), protect: val('xlProt', 'soft'), dateFormat: val('xlDate', 'dd-mmm-yyyy'),
+      area: val('xlArea', 'shared'), openAfter: chk('xlOpenAfter', true), autoReview: chk('xlAutoReview', false) };
+  },
+  _dlgUpdate() {
+    const o = ExcelLink._dlgRead();
+    if (!o) return;
+    const tpl = AppState.recoTemplates.find(x => x.id === o.tplId);
+    const sess = AppState.recoSessions[o.tplId];
+    const S = ExcelLink.schemaFor(tpl, sess, o.columns);
+    const cols = S.cols.filter(d => o.includeComputed || d.role !== 'computed');
+    const ed = cols.filter(d => d.editable);
+    const how = d => d.editor === 'list' ? 'list' : d.editor === 'combo' ? 'suggestions' : d.editor === 'date' ? 'date' : d.editor === 'number' ? 'number' : '';
+    const chips = document.getElementById('xlEditChips');
+    if (chips) chips.innerHTML = ed.length ? ed.map(d => '<span class="tag">' + U.esc(d.name) + (how(d) ? ' <span class="text-muted">(' + how(d) + ')</span>' : '') + '</span>').join(' ')
+      : '<span class="text-muted">none</span>';
+    const n = ExcelLink.rowsFor(tpl, sess, o.rows).length;
+    const nc = cols.length + 2;
+    const est = document.getElementById('xlEstimate');
+    if (est) est.textContent = '≈ ' + n + ' rows × ' + nc + ' columns · about ' + Math.ceil(n * nc * 2.5e-5 + 2) + ' s';
+    const warns = [];
+    if (n > 50000) warns.push('Large export — consider filtering first.');
+    if (!ExcelLink._fpCols(tpl, cols).length && o.protect !== 'locked' && o.tier === 'P')
+      warns.push('No read-only identity columns: sorting part of the sheet cannot be detected — "Locked" is recommended.');
+    const w = document.getElementById('xlWarnings');
+    if (w) w.innerHTML = warns.map(x => '<div class="xl-warn">' + U.esc(x) + '</div>').join('');
+    const btn = document.getElementById('xlCreateBtn');
+    if (btn) btn.disabled = !n || !ed.length;
+  },
+  async _fromDialog() {
+    const o = ExcelLink._dlgRead();
+    if (!o) return;
+    const tpl = AppState.recoTemplates.find(x => x.id === o.tplId);
+    const sess = AppState.recoSessions[o.tplId];
+    ExcelLink._lsSet('reco.xl.export.v1.' + tpl.id, { rows: o.rows, columns: o.columns, includeComputed: o.includeComputed,
+      protect: o.protect, dateFormat: o.dateFormat, area: o.area, openAfter: o.openAfter });
+    ExcelLink._lsSet('reco.xl.autoReview', !!o.autoReview);
+    await ExcelLink.exportNow(tpl, sess, o);
+  },
+
+  /* Identity columns whose values must not change for a row to be trusted:
+     tpl.excelLink.fpCols, else keys + value + doc number, else the first
+     three read-only template columns. */
+  _fpCols(tpl, cols) {
+    const ro = cols.filter(d => d.role === 'tpl' && !d.editable);
+    const roNames = new Set(ro.map(d => d.name));
+    const cfg = ExcelLink.cfg(tpl);
+    let fp = (cfg.fpCols || []).filter(n => roNames.has(n));
+    if (!fp.length) {
+      const want = [...(tpl.primaryKeys || []), tpl.valueColumn, tpl.docNumberColumn].filter(Boolean);
+      fp = Array.from(new Set(want)).filter(n => roNames.has(n));
+    }
+    if (!fp.length) fp = ro.slice(0, 3).map(d => d.name);
+    return fp;
+  },
+  _isPosted(tpl, full) {
+    const aeg = tpl.aegIntegration || {};
+    return !!(aeg.postEntryColumn && aeg.postEntryValue && String(full[aeg.postEntryColumn] == null ? '' : full[aeg.postEntryColumn]) === String(aeg.postEntryValue));
+  },
+  _howNote(d) {
+    if (d.role === 'status') return 'Reco status — read-only';
+    if (d.role === 'computed') return 'Computed in Reco — values only';
+    if (!d.editable) return d.isPk ? 'Key column — read-only, changes are ignored' : 'Read-only — changes here are ignored';
+    if (d.editor === 'list') return d.options && d.options.length ? 'Editable · dropdown (strict)' + (d.role === 'toAccount' ? ' · To Account codes' : '') : 'Editable · No options configured';
+    if (d.editor === 'combo') return 'Editable · suggestions';
+    return 'Editable';
+  },
+
+  /* Everything the workbook needs: head (columns, lists, meta, manifest),
+     typed cells per row and the baseline per row. */
+  async buildExport(tpl, sess, o, tier, onProgress) {
+    const cfg = ExcelLink.cfg(tpl);
+    const S = ExcelLink.schemaFor(tpl, sess, o.columns);
+    const cols = S.cols.filter(d => o.includeComputed !== false || d.role !== 'computed');
+    const rows = ExcelLink.rowsFor(tpl, sess, o.rows);
+    const extras = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
+    const fullOf = r => extras.length ? Reco._rowWithExtras(tpl, sess, r) : r;
+    // Unique headers (Excel autofilter, and Load back matches by header text)
+    const used = new Set(['__reco_row_id', '__reco_key']);
+    cols.forEach(d => {
+      let h = String(d.header).trim() || d.name, k = 2;
+      const base = h;
+      while (used.has(h.toLowerCase())) h = base + ' (' + (k++) + ')';
+      used.add(h.toLowerCase());
+      d.header = h;
+    });
+    const fpCols = ExcelLink._fpCols(tpl, cols);
+    const fpSet = new Set(fpCols);
+    const byName = new Map(cols.map(d => [d.name, d]));
+    // Dropdown lists, one per distinct option set
+    const lists = {}, listByKey = new Map();
+    cols.forEach(d => {
+      if (!d.editable || (d.editor !== 'list' && d.editor !== 'combo') || !d.options || !d.options.length) return;
+      const vals = d.options.map(x => x.value);
+      const key = JSON.stringify(vals);
+      if (!listByKey.has(key)) {
+        const name = 'RecoList_' + (listByKey.size + 1);
+        listByKey.set(key, name);
+        lists[name] = { title: d.name, values: vals };
+      }
+      d._list = listByKey.get(key);
+    });
+    const exportId = ExcelLink.newExportId();
+    const exportedAt = new Date().toISOString();
+    const dt = new Date(), p2 = n => String(n).padStart(2, '0');
+    const fileName = ExcelLink._safeName(tpl.name, 40) + '_' + dt.getFullYear() + p2(dt.getMonth() + 1) + p2(dt.getDate())
+      + '-' + p2(dt.getHours()) + p2(dt.getMinutes()) + '_' + exportId.slice(-4) + '.xlsx';
+    const baseCols = cols.filter(d => d.editable).map(d => d.name);
+
+    // Widths: the grid's width, else from the header and the first values
+    const widthOf = d => {
+      const w = (sess.columnWidths || {})[d.name];
+      if (w) return Math.max(50, Math.min(480, +w));
+      let len = String(d.header).length;
+      for (let i = 0; i < rows.length && i < 200; i++) {
+        const v = d.role === 'status' ? 'Offset' : (d.role === 'tag' || d.role === 'computed' ? '' : rows[i][d.name]);
+        if (v != null) len = Math.max(len, String(v).length);
+      }
+      return Math.max(60, Math.min(420, len * 7 + 18));
+    };
+    const hcols = [
+      { key: '__reco_row_id', header: '__reco_row_id', kind: 'id', role: 'id', editable: false, hidden: true, widthPx: 90, editor: 'none' },
+      { key: '__reco_key', header: '__reco_key', kind: 'id', role: 'id', editable: false, hidden: true, widthPx: 90, editor: 'none' }
+    ].concat(cols.map(d => ({
+      key: d.name, header: d.header, kind: d.role === 'status' ? 'status' : d.kind, role: d.role, editable: !!d.editable, hidden: false,
+      widthPx: widthOf(d), editor: d.editor, list: d._list || null, strict: !!d.strict,
+      prompt: d.role === 'toAccount' ? "Codes: see the 'How to use' sheet" : '', note: ExcelLink._howNote(d)
+    })));
+
+    const cells = [], base = [];
+    const LOCK = XlSchema.LOCKED, SEP = XlSchema.SEP;
+    let sanitized = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (i && i % 2000 === 0) {
+        if (onProgress) onProgress(i, rows.length);
+        await ExcelLink._sleep(0);
+        if (ExcelLink._cancel) throw ExcelLink._cancelled();
+      }
+      const row = rows[i];
+      const full = fullOf(row);
+      const line = [row._id, row._pk || ''];
+      const bvals = {};
+      const fpv = [];
+      let flags = '';
+      if (sess.offsets && sess.offsets[row._id]) flags += 'O';
+      if (ExcelLink._isPosted(tpl, full)) flags += 'P';
+      cols.forEach(d => {
+        let raw = XlSchema.currentValue(d, row, full, sess);
+        let locked = false;
+        if (typeof raw === 'string') {
+          const s2 = XlSchema.sanitize(raw);
+          if (s2 !== raw) { sanitized++; if (d.editable) locked = true; raw = s2; }
+        }
+        let cell = null;
+        if (raw !== '' && raw != null) {
+          if (d.role === 'status' || d.kind === 'text') cell = String(raw);
+          else if (d.kind === 'date') {
+            const dd = U.parseDate(raw);
+            cell = (dd && dd.getFullYear() >= 1900 && dd.getFullYear() <= 2200) ? U.fmtDate(dd, 'YYYY-MM-DD') : { s: String(raw) };
+          } else if (d.kind === 'value') {
+            if (typeof raw === 'number' && isFinite(raw)) cell = raw;
+            else if (U.isNumeric(raw)) cell = U.num(raw);
+            else cell = { s: String(raw) };
+          } else cell = String(raw);
+        }
+        line.push(cell);
+        if (d.editable) bvals[d.name] = locked ? LOCK : XlSchema.canon(d, raw, 'reco').c;
+        if (fpSet.has(d.name)) fpv[fpCols.indexOf(d.name)] = XlSchema.canon(d, raw, 'reco').c;
+      });
+      cells.push(line);
+      base.push([row._id, row._pk || '', XlSchema.fnv1a(fpv.join(SEP)), flags].concat(baseCols.map(c => bvals[c])));
+    }
+
+    const manifestCols = hcols.map((c, i) => ({ key: c.key, header: c.header, colIndex: i, kind: c.kind, role: c.role,
+      editable: c.editable, isPk: !!(byName.get(c.key) && byName.get(c.key).isPk), editor: c.editor || 'none', strict: !!c.strict,
+      list: c.list || null, fp: fpSet.has(c.key), versioned: !!(byName.get(c.key) && byName.get(c.key).versioned) }));
+    const dataFolder = Versioning.folderFor(tpl);
+    const manifest = {
+      format: 1, exportId, tplId: tpl.id, tplName: tpl.name, dataFolder, tier,
+      exportedAt, exportedBy: ExcelLink.user(), scope: o.rows, columnsMode: o.columns, protect: o.protect || 'soft',
+      dateFormat: o.dateFormat, allowNewRows: false, includeBase: tier === 'S' || rows.length <= 20000,
+      session: { activeVersionFile: sess.activeVersionFile || '', rowCount: sess.data.length, exportedRows: rows.length },
+      tplSignature: XlSchema.tplSignature(tpl), columns: manifestCols, baseCols, fpCols
+    };
+    const meta = {
+      format: '1', exportId, tplId: tpl.id, tplName: tpl.name, dataFolder, dataSheet: 'Reco Data', headerRow: '1',
+      exportedAt, exportedBy: ExcelLink.user(), manifestRel: ExcelLink._linksDir(tpl) + exportId + '.json', area: o.area || 'shared',
+      tplSignature: manifest.tplSignature, protect: manifest.protect, rowCount: String(rows.length), columnsJson: JSON.stringify(manifestCols)
+    };
+    const scopeText = { view: 'rows shown in Reco', open: 'open rows', selected: 'selected rows', all: 'all loaded rows' }[o.rows] || o.rows;
+    const readme = [
+      [tpl.name + ' — edit in Excel'],
+      ['Exported by', ExcelLink.user(), 'at', ExcelLink._when(exportedAt)],
+      ['File', fileName],
+      ['Rows', rows.length + ' (' + scopeText + ')'],
+      [],
+      ['How to edit'],
+      ['1.', 'Edit the yellow columns. Grey columns are read-only in Reco: changes there are ignored.'],
+      ['2.', 'Press Ctrl+S and keep the .xlsx format (do not save as .xls or .csv).'],
+      ['3.', 'Go back to Reco and click "Load back". You review every change before it is applied.'],
+      [],
+      ['Notes'],
+      ['•', 'Do not delete or edit the hidden columns A–B: they identify each row.'],
+      ['•', 'You can sort and filter freely; rows are matched by their hidden id.'],
+      ['•', 'Rows added at the bottom are not loaded (add them in Reco).'],
+      ['•', 'Green triangles ("number stored as text") are harmless.'],
+      ['•', 'If Excel shows "Enable Editing", click it.'],
+      [],
+      ['Columns'],
+      ['Column', 'Editable', 'How', 'Allowed values', 'Options']
+    ];
+    cols.forEach(d => readme.push([d.header, d.editable ? 'yes' : 'no', ExcelLink._howNote(d),
+      d._list ? ('list ' + d._list) : '', d.options ? String(d.options.length) : '']));
+    const toAcc = cols.find(d => d.role === 'toAccount' && d.options && d.options.length);
+    if (toAcc) {
+      readme.push([], ['To Account codes'], ['Code', 'Description']);
+      toAcc.options.forEach(x => readme.push([x.value, x.label !== x.value ? x.label : (x.group || '')]));
+    }
+    const head = {
+      api: 1, exportId, tplId: tpl.id, tplName: tpl.name, dataFolder, user: ExcelLink.user(), area: o.area || 'shared', fileName,
+      rowCount: rows.length, sheetName: 'Reco Data', protect: manifest.protect, dateFormat: o.dateFormat, valueFormat: ExcelLink.VALUE_FMT,
+      includeBase: manifest.includeBase, allowNewRows: false, newRowBuffer: 0, columns: hcols, lists, meta, readme, manifest
+    };
+    return { head, cells, base, rows, cols, schema: S, sanitized };
+  },
+
+  /* ---------------- progress modal ---------------- */
+  _progress(text, pct, cancellable) {
+    let el = document.getElementById('xlProgText');
+    if (!el || !document.getElementById('appModal').classList.contains('show')) {
+      App.openModal('📗 Excel', '<div style="font-size:12px;"><div id="xlProgText"></div>'
+        + '<div class="xl-prog"><div id="xlProgBar"></div></div></div>',
+        cancellable === false ? '' : '<button onclick="ExcelLink.cancel()">Cancel</button>');
+      el = document.getElementById('xlProgText');
+    }
+    el.textContent = text;
+    const bar = document.getElementById('xlProgBar');
+    if (bar && pct != null) bar.style.width = Math.max(2, Math.min(100, pct)) + '%';
+  },
+  cancel() {
+    ExcelLink._cancel = true;
+    if (ExcelLink._jobId && ExcelLink._has('excel_link_job_cancel')) { try { ExcelLink.api().excel_link_job_cancel(ExcelLink._jobId); } catch (e) {} }
+    App.closeModal();
+  },
+  async _waitJob(jobId, onProgress) {
+    ExcelLink._jobId = jobId;
+    try {
+      for (;;) {
+        await ExcelLink._sleep(300);
+        const j = await ExcelLink.api().excel_link_job(jobId);
+        if (!j || j.ok === false) throw ExcelLink._err(j);
+        if (onProgress) onProgress(j);
+        if (j.state === 'done') return j;
+        if (j.state === 'cancelled') throw ExcelLink._cancelled();
+        if (j.state === 'failed') {
+          const e = ExcelLink._err({ code: j.code, error: j.error });
+          e.result = j.result;
+          throw e;
+        }
+        if (ExcelLink._cancel) throw ExcelLink._cancelled();
+      }
+    } finally { ExcelLink._jobId = null; }
+  },
+
+  /* ---------------- export ---------------- */
+  async exportNow(tpl, sess, o) {
+    if (ExcelLink._busy) { U.toast('An Excel task is already running', 'error'); return; }
+    ExcelLink._busy = true; ExcelLink._cancel = false;
+    const tier = o.tier || await ExcelLink.tier();
+    try {
+      ExcelLink._progress('Preparing rows…', 3);
+      await ExcelLink._sleep(20);
+      const built = await ExcelLink.buildExport(tpl, sess, o, tier, (i, n) => ExcelLink._progress('Preparing rows… ' + i + ' / ' + n, 3 + 17 * i / n));
+      if (!built.rows.length) throw new Error('No rows to export');
+      if (tier === 'P') await ExcelLink._exportP(tpl, built, o);
+      else await ExcelLink._exportS(tpl, built, o);
+      if (built.sanitized) U.toast(built.sanitized + ' value(s) had characters Excel cannot hold; those cells cannot be loaded back', 'error');
+    } catch (e) {
+      if (e.code !== 'cancelled') { App.closeModal(); U.toast('Excel export failed: ' + e.message, 'error'); console.error(e); }
+    } finally { ExcelLink._busy = false; }
+  },
+  async _exportP(tpl, built, o) {
+    const n = built.cells.length;
+    const chunks = Math.ceil(n / ExcelLink.CHUNK);
+    let r = await ExcelLink._call('excel_link_export_begin', built.head);
+    const token = r.token;
+    for (let i = 0, k = 1; i < n; i += ExcelLink.CHUNK, k++) {
+      if (ExcelLink._cancel) throw ExcelLink._cancelled();
+      ExcelLink._progress('Sending ' + k + '/' + chunks + '…', 20 + 30 * k / chunks);
+      await ExcelLink._call('excel_link_export_rows', token, built.cells.slice(i, i + ExcelLink.CHUNK), built.base.slice(i, i + ExcelLink.CHUNK));
+    }
+    r = await ExcelLink._call('excel_link_export_finish', token);
+    const job = await ExcelLink._waitJob(r.job_id, j => ExcelLink._progress('Writing workbook ' + (j.percent || 0) + '%', 50 + 0.45 * (j.percent || 0)));
+    try { ExcelLink.api().excel_link_job_release(r.job_id); } catch (e) {}
+    const res = job.result || {};
+    ExcelLink._active[tpl.id] = { exportId: built.head.exportId, fileName: res.name || built.head.fileName, tier: 'P', status: null, sawOwner: false };
+    ExcelLink._lookedUp[tpl.id] = true;
+    (res.warnings || []).forEach(w => {
+      if (w === 'pathTooLong' || w === 'sharedNotWritable') U.toast('The shared folder could not take the workbook; it was saved on this PC instead', 'error');
+    });
+    if (o.openAfter !== false) {
+      ExcelLink._progress('Opening Excel…', 98);
+      try { await ExcelLink._call('excel_link_open', built.head.exportId); }
+      catch (e) { U.toast(e.message, 'error'); }
+    }
+    App.closeModal();
+    ExcelLink.watch(tpl.id, built.head.exportId);
+    App.navigate('reco');
+    U.toast('Workbook ready: ' + (res.name || built.head.fileName) + ' (' + built.rows.length + ' rows)', 'success');
+  },
+
+  /* SheetJS workbook: same layout, no validation or styles. */
+  _xlsxWorkbook(built) {
+    const head = built.head;
+    const enc = XLSX.utils.encode_cell;
+    const dateZ = head.dateFormat || 'dd-mmm-yyyy';
+    const ws = {};
+    const nc = head.columns.length;
+    head.columns.forEach((c, ci) => { ws[enc({ r: 0, c: ci })] = { t: 's', v: c.header }; });
+    built.cells.forEach((line, ri) => {
+      line.forEach((v, ci) => {
+        if (v == null || v === '') return;
+        const kind = head.columns[ci].kind;
+        let cell;
+        if (v && typeof v === 'object') cell = { t: 's', v: String(v.s) };
+        else if (kind === 'date') {
+          const d = XlSchema._dateFromIso(v);
+          cell = d ? { t: 'n', v: Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(1899, 11, 30)) / 86400000), z: dateZ } : { t: 's', v: String(v) };
+        } else if (kind === 'value' && typeof v === 'number') cell = { t: 'n', v, z: ExcelLink.VALUE_FMT };
+        else cell = { t: 's', v: String(v) };
+        ws[enc({ r: ri + 1, c: ci })] = cell;
+      });
+    });
+    const last = XLSX.utils.encode_cell({ r: built.cells.length, c: nc - 1 });
+    ws['!ref'] = 'A1:' + last;
+    ws['!autofilter'] = { ref: 'A1:' + last };
+    ws['!cols'] = head.columns.map((c, i) => i < 2 ? { wch: 13, hidden: true } : { wch: Math.max(8, Math.min(60, Math.round((c.widthPx || 100) / 7))) });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Reco Data');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(head.readme.map(r => r.map(x => x == null ? '' : String(x)))), 'How to use');
+    const names = Object.keys(head.lists);
+    const maxLen = names.reduce((m, k) => Math.max(m, head.lists[k].values.length), 0);
+    const aoaL = [names.map(k => head.lists[k].title + ' (' + k + ')')];
+    for (let i = 0; i < maxLen; i++) aoaL.push(names.map(k => head.lists[k].values[i] == null ? '' : head.lists[k].values[i]));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(names.length ? aoaL : [['No dropdown lists']]), 'Lists');
+    const metaRows = [];
+    Object.keys(head.meta).forEach(k => {
+      if (k === 'columnsJson') {
+        const s = head.meta[k];
+        for (let i = 0, n = 0; i < s.length || (i === 0 && n === 0); i += 30000, n++) metaRows.push(['columnsJson.' + n, s.slice(i, i + 30000)]);
+      } else metaRows.push([k, String(head.meta[k])]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(metaRows), '_reco_meta');
+    const baseAoa = [['rid', 'pk', 'fp', 'flags'].concat(head.manifest.baseCols)].concat(built.base.map(b => b.map(x => x == null ? '' : String(x))));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(baseAoa), '_reco_base');
+    wb.Workbook = { Sheets: [{ Hidden: 0 }, { Hidden: 0 }, { Hidden: 0 }, { Hidden: 2 }, { Hidden: 2 }] };
+    wb.Props = { Title: head.tplName, Author: head.user };
+    return wb;
+  },
+  async _exportS(tpl, built, o) {
+    if (typeof XLSX === 'undefined') throw new Error('SheetJS is not loaded');
+    ExcelLink._progress('Writing workbook…', 60, false);
+    await ExcelLink._sleep(20);
+    const wb = ExcelLink._xlsxWorkbook(built);
+    const head = built.head;
+    const m = Object.assign({}, head.manifest, { file: { area: 'download', name: head.fileName }, status: 'open', closedAt: null, rev: 1,
+      rebased: {}, dismissed: {}, imports: [], lastImport: null, newRowSigs: {}, sigWidth: head.columns.length });
+    const api = ExcelLink.api();
+    if (api && typeof api.write_file === 'function') {
+      try {
+        const dir = ExcelLink._linksDir(tpl);
+        await api.write_file(dir + head.exportId + '.base.json', JSON.stringify({ format: 1, exportId: head.exportId, baseCols: m.baseCols, rows: built.base }));
+        await api.write_file(dir + head.exportId + '.json', JSON.stringify(m, null, 1));
+      } catch (e) { console.error('excel link manifest', e); U.toast('The link record could not be saved; the baseline inside the workbook will be used', 'error'); }
+    }
+    const idx = ExcelLink._lsGet('reco.xl.links.v1', []);
+    idx.unshift({ exportId: head.exportId, tplId: tpl.id, fileName: head.fileName, exportedAt: m.exportedAt });
+    ExcelLink._lsSet('reco.xl.links.v1', idx.slice(0, 50));
+    App.closeModal();
+    const saved = await U.downloadWorkbook(wb, head.fileName);
+    if (saved === false) { U.toast('Export cancelled', 'error'); return; }
+    ExcelLink._active[tpl.id] = { exportId: head.exportId, fileName: head.fileName, tier: 'S', status: null };
+    ExcelLink._lookedUp[tpl.id] = true;
+    App.navigate('reco');
+  },
+
+  /* ---------------- links, banner and save detection ---------------- */
+  async listLinks(tpl) {
+    if (!ExcelLink._has('excel_link_list')) return [];
+    try {
+      const r = await ExcelLink.api().excel_link_list(Versioning.folderFor(tpl));
+      return (r && r.ok !== false && Array.isArray(r.links)) ? r.links.filter(l => l.tplId === tpl.id) : [];
+    } catch (e) { console.error('excel_link_list', e); return []; }
+  },
+  bannerHtml(tpl) {
+    setTimeout(() => ExcelLink.ensureWatch(tpl), 0);
+    const a = ExcelLink._active[tpl.id];
+    return '<div id="xlLinkBanner" class="xl-link-banner' + (a ? '' : ' empty') + '" data-tpl="' + U.escAttr(tpl.id) + '">' + (a ? ExcelLink._bannerInner(a) : '') + '</div>';
+  },
+  _bannerInner(a) {
+    const id = U.jsq(a.exportId);
+    const b = (label, fn, cls) => '<button class="small' + (cls ? ' ' + cls : '') + '" onclick="' + fn + '">' + label + '</button>';
+    const file = '<b>' + U.esc(a.fileName || a.exportId) + '</b>';
+    const fromFile = b('Load from file…', 'ExcelLink.pickAndLoad()');
+    const close = b('Close link', 'ExcelLink.closeLink(\'' + id + '\')');
+    const openB = b('Open again', 'ExcelLink.openInExcel(\'' + id + '\')');
+    const loadB = cls => b('Load back', 'ExcelLink.load({exportId:\'' + id + '\'})', cls);
+    const links = b('Links…', 'ExcelLink.openLinksPanel()');
+    let cls = '', text = '', btns = '';
+    if (a.tier === 'S') {
+      text = '📗 ' + file + ' was downloaded. Open it in Excel, edit, save, then <b>Load from file…</b>';
+      btns = b('Load from file…', 'ExcelLink.pickAndLoad()', 'primary') + close;
+    } else {
+      const st = a.status;
+      if (!st) { text = '📗 Linked to ' + file + ' · checking…'; btns = openB + loadB('') + links; }
+      else if (st.state === 'other_pc') { text = '📗 ' + file + ' was created on another PC; open it there or use Load from file…'; btns = fromFile + links; }
+      else if (st.state === 'missing' && a.missingFor >= 10000) { cls = 'warn'; text = '📗 ' + file + ' · file not found'; btns = fromFile + close; }
+      else if (st.state === 'saving' || st.state === 'missing') { text = '📗 Excel is saving ' + file + '…'; }
+      else if (st.state === 'saved' && st.newSinceLastImport) {
+        cls = 'amber'; text = '📗 Saved in Excel at ' + ExcelLink._hhmm(st.mtime) + ' · changes not loaded';
+        btns = loadB('primary') + openB + links;
+      } else if (st.state === 'saved') {
+        const li = a.loaded || null;
+        text = '📗 ' + file + (li ? ' · loaded ' + li.count + ' change(s) at ' + ExcelLink._hhmm(li.at) : ' · loaded');
+        btns = openB + close + links;
+      } else if (!st.ownerFile && a.sawOwner) {
+        text = '📗 Excel closed without saving ' + file; btns = openB + close + links;
+      } else {
+        text = '📗 Linked to ' + file + (st.ownerFile ? ' · open in Excel' : '') + ' · not saved yet';
+        btns = openB + loadB('') + close + links;
+      }
+    }
+    return '<span class="xl-banner-text ' + cls + '">' + text + '</span><span class="xl-banner-btns">' + btns + '</span>';
+  },
+  _paintBanner(tplId) {
+    const el = document.getElementById('xlLinkBanner');
+    if (!el || el.dataset.tpl !== tplId) return;
+    const a = ExcelLink._active[tplId];
+    el.classList.toggle('empty', !a);
+    el.innerHTML = a ? ExcelLink._bannerInner(a) : '';
+  },
+  async ensureWatch(tpl) {
+    if (!tpl) return;
+    const a = ExcelLink._active[tpl.id];
+    if (a) { if (a.tier === 'P') ExcelLink.watch(tpl.id, a.exportId, true); return; }
+    if (ExcelLink._lookedUp[tpl.id]) return;
+    ExcelLink._lookedUp[tpl.id] = true;
+    if ((await ExcelLink.tier()) !== 'P') return;
+    const links = (await ExcelLink.listLinks(tpl)).filter(l => l.status === 'open' && l.exportedBy === ExcelLink.user() && l.exists !== false);
+    if (!links.length) return;
+    links.sort((x, y) => String(y.exportedAt).localeCompare(String(x.exportedAt)));
+    const l = links[0];
+    ExcelLink._active[tpl.id] = { exportId: l.exportId, fileName: l.fileName, tier: 'P', status: null,
+      loaded: l.lastImport ? { at: l.lastImport.at, count: (l.lastImport.count != null ? l.lastImport.count : '') } : null };
+    ExcelLink.watch(tpl.id, l.exportId);
+    ExcelLink._paintBanner(tpl.id);
+  },
+  watch(tplId, exportId, quiet) {
+    const w = ExcelLink._watch;
+    if (w && w.exportId === exportId) { if (!quiet) { w.lastPoll = 0; ExcelLink._tick(); } return; }
+    ExcelLink.unwatch();
+    ExcelLink._watch = { tplId, exportId, lastPoll: 0, lastChange: Date.now(), key: '', inflight: false, notified: null, missingSince: 0,
+      timer: setInterval(() => ExcelLink._tick(), ExcelLink.POLL_MS) };
+    if (!ExcelLink._focusWired) {
+      ExcelLink._focusWired = true;
+      window.addEventListener('focus', () => { if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); } });
+    }
+    ExcelLink._tick();
+  },
+  unwatch() {
+    if (ExcelLink._watch) clearInterval(ExcelLink._watch.timer);
+    ExcelLink._watch = null;
+  },
+  async _tick() {
+    const w = ExcelLink._watch;
+    if (!w || w.inflight) return;
+    if (AppState.currentPage !== 'reco' || AppState.activeRecoId !== w.tplId) return;
+    if (document.visibilityState && document.visibilityState !== 'visible') return;
+    const now = Date.now();
+    const interval = now - w.lastChange > 600000 ? ExcelLink.SLOW_MS : ExcelLink.POLL_MS - 100;
+    if (w.lastPoll && now - w.lastPoll < interval) return;
+    if (!ExcelLink._has('excel_link_status')) return;
+    w.inflight = true; w.lastPoll = now;
+    let st = null;
+    try { st = await ExcelLink.api().excel_link_status(w.exportId); } catch (e) { st = null; }
+    finally { w.inflight = false; }
+    if (ExcelLink._watch !== w) return;
+    const a = ExcelLink._active[w.tplId];
+    if (!a || a.exportId !== w.exportId) return;
+    if (!st || st.ok === false) {
+      if (st && st.code === 'missing_manifest') { delete ExcelLink._active[w.tplId]; ExcelLink.unwatch(); ExcelLink._paintBanner(w.tplId); }
+      return;
+    }
+    const key = [st.state, st.mtimeNs, st.ownerFile, st.newSinceLastImport].join('|');
+    if (key !== w.key) { w.key = key; w.lastChange = now; }
+    if (st.ownerFile) a.sawOwner = true;
+    if (st.state === 'missing') { if (!w.missingSince) w.missingSince = now; a.missingFor = now - w.missingSince; }
+    else { w.missingSince = 0; a.missingFor = 0; }
+    a.status = st;
+    if (st.state === 'saved' && st.newSinceLastImport && st.mtimeNs !== w.notified) {
+      w.notified = st.mtimeNs;
+      if (ExcelLink._lsGet('reco.xl.autoReview', false) && !ExcelLink._busy && !document.getElementById('appModal').classList.contains('show')) {
+        ExcelLink.load({ exportId: w.exportId });
+      } else {
+        ExcelLink._actionToast('Saved in Excel at ' + ExcelLink._hhmm(st.mtime), 'Load back', () => ExcelLink.load({ exportId: w.exportId }));
+      }
+    }
+    ExcelLink._paintBanner(w.tplId);
+  },
+  _actionToast(msg, label, fn) {
+    const t = document.createElement('div');
+    t.className = 'toast xl-toast';
+    t.innerHTML = '<span></span> <button class="small primary"></button>';
+    t.firstChild.textContent = msg;
+    const btn = t.querySelector('button');
+    btn.textContent = label;
+    btn.onclick = () => { t.remove(); fn(); };
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 9000);
+  },
+  /* Leaving with Excel edits saved but not loaded back? */
+  confirmLeave() {
+    const pending = Object.keys(ExcelLink._active).map(k => ExcelLink._active[k])
+      .filter(a => a && a.status && a.status.state === 'saved' && a.status.newSinceLastImport);
+    if (!pending.length) return true;
+    return confirm('Excel has saved changes that are not loaded back into Reco yet (' + pending.map(a => a.fileName).join(', ') + '). Leave anyway?');
+  },
+
+  async openInExcel(exportId) {
+    try { const r = await ExcelLink._call('excel_link_open', exportId); if (r.action === 'skipped') U.toast('Opening Excel is disabled here', 'success'); }
+    catch (e) { U.toast(e.message, 'error'); }
+    if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); }
+  },
+  async closeLink(exportId, quiet) {
+    const { tpl } = ExcelLink._ctx();
+    const a = tpl && ExcelLink._active[tpl.id];
+    if (a && a.tier === 'S') {
+      delete ExcelLink._active[tpl.id];
+      ExcelLink._paintBanner(tpl.id);
+      return;
+    }
+    if (!quiet && a && a.exportId === exportId && a.status && a.status.newSinceLastImport
+        && !confirm('Excel saved changes that were not loaded back. Close the link anyway?')) return;
+    try {
+      const r = await ExcelLink._call('excel_link_close', exportId, true);
+      if (!quiet) U.toast(r.deferred ? 'Link closed — the workbook is still open in Excel and will be removed later' : 'Link closed', 'success');
+    } catch (e) { U.toast(e.message, 'error'); }
+    if (tpl && a && a.exportId === exportId) { delete ExcelLink._active[tpl.id]; ExcelLink.unwatch(); ExcelLink._paintBanner(tpl.id); }
+  },
+  async reveal(exportId) { try { await ExcelLink._call('excel_link_reveal', exportId); } catch (e) { U.toast(e.message, 'error'); } },
+  async saveCopy(exportId) {
+    try { const r = await ExcelLink.api().excel_link_save_copy(exportId); if (r && r.ok) U.toast('Saved a copy', 'success'); else if (r && !r.cancelled) throw ExcelLink._err(r); }
+    catch (e) { U.toast(e.message, 'error'); }
+  },
+
+  /* ---------------- Load back ---------------- */
+  async pickAndLoad() {
+    if (await ExcelLink.tier() === 'P' && ExcelLink._has('excel_link_pick_file')) {
+      try {
+        const r = await ExcelLink.api().excel_link_pick_file();
+        if (!r || r.cancelled || !r.token) return;
+        if (r.ok === false) throw ExcelLink._err(r);
+        return ExcelLink.load({ token: r.token, name: r.name });
+      } catch (e) { U.toast(e.message, 'error'); return; }
+    }
+    let inp = document.getElementById('xlLoadFileInput');
+    if (!inp) {
+      inp = document.createElement('input');
+      inp.type = 'file'; inp.id = 'xlLoadFileInput'; inp.accept = '.xlsx,.xlsm'; inp.style.display = 'none';
+      inp.onchange = ev => { const f = ev.target.files && ev.target.files[0]; ev.target.value = ''; if (f) ExcelLink.load({ file: f }); };
+      document.body.appendChild(inp);
+    }
+    inp.click();
+  },
+  async load(source, readOpts) {
+    const { tpl, sess } = ExcelLink._ctx();
+    if (!tpl || !sess) { U.toast('Open the template first', 'error'); return; }
+    if (ExcelLink._busy) { U.toast('An Excel task is already running', 'error'); return; }
+    ExcelLink._busy = true; ExcelLink._cancel = false;
+    try {
+      try { await Versioning.flushQueue(); await AppState.flush(); } catch (e) {}
+      ExcelLink._progress('Reading the workbook…', 5);
+      const read = source.file ? await ExcelLink._readS(source.file, readOpts) : await ExcelLink._readP(source, readOpts);
+      ExcelLink._progress('Comparing with Reco…', 85);
+      const mf = await ExcelLink._manifestFor(tpl, read, source);
+      const plan = await ExcelLink.diff(tpl, sess, read, mf);
+      if (plan.refused) {
+        App.openModal('Load back', '<div class="xl-warn">' + U.esc(plan.refused) + '</div>', '<button class="primary" onclick="App.closeModal()">OK</button>');
+        return;
+      }
+      if (ExcelLink._cancel) return;
+      if (plan.needsConfirm && !confirm(plan.needsConfirm)) { App.closeModal(); return; }
+      ExcelLink._plan = plan;
+      ExcelLink.renderReview(plan);
+    } catch (e) {
+      if (e.code === 'cancelled') return;
+      if (e.code === 'ambiguous_sheet') {
+        const cands = (e.detail && e.detail.candidates) || (e.result && e.result.candidates) || [];
+        ExcelLink._busy = false;
+        const pick = prompt(e.message + '\n\nSheets: ' + cands.join(', '), cands[0] || '');
+        if (pick) return await ExcelLink.load(source, Object.assign({}, readOpts || {}, { sheet: pick }));
+        App.closeModal();
+        return;
+      }
+      App.closeModal();
+      U.toast('Load back failed: ' + e.message, 'error');
+      console.error(e);
+    } finally { ExcelLink._busy = false; }
+  },
+  async _readP(source, readOpts) {
+    const src = source.exportId ? { exportId: source.exportId } : { token: source.token };
+    const r = await ExcelLink._call('excel_link_read_start', src, Object.assign({ headerScanRows: 20, elide: true }, readOpts || {}));
+    let job;
+    try { job = await ExcelLink._waitJob(r.job_id, j => ExcelLink._progress('Reading the workbook… ' + (j.percent || 0) + '%', 5 + 0.6 * (j.percent || 0))); }
+    catch (e) { try { ExcelLink.api().excel_link_job_release(r.job_id); } catch (x) {} throw e; }
+    const res = job.result || {};
+    const rows = [];
+    try {
+      let off = 0;
+      while (off != null) {
+        const p = await ExcelLink._call('excel_link_read_page', r.job_id, off, ExcelLink.PAGE);
+        (p.rows || []).forEach(x => rows.push(x));
+        off = p.next;
+        ExcelLink._progress('Reading rows… ' + rows.length, 70);
+      }
+    } finally { try { ExcelLink.api().excel_link_job_release(r.job_id); } catch (x) {} }
+    res.rows = rows;
+    res.tier = 'P';
+    if (!res.exportId && source.exportId) res.exportId = source.exportId;
+    return res;
+  },
+
+  /* SheetJS reader producing the same shape as the launcher's read job. */
+  async _readS(file, readOpts) {
+    if (!/\.(xlsx|xlsm)$/i.test(file.name || '')) throw ExcelLink._err({ code: 'unsupported_format' });
+    if (typeof XLSX === 'undefined') throw new Error('SheetJS is not loaded');
+    const buf = await file.arrayBuffer();
+    let sha = '';
+    try {
+      if (window.crypto && crypto.subtle) {
+        const dg = await crypto.subtle.digest('SHA-256', buf);
+        sha = Array.from(new Uint8Array(dg)).map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+    } catch (e) {}
+    const wb = XLSX.read(buf, { type: 'array', cellFormula: true, cellNF: true, sheetStubs: true, cellDates: false });
+    const d1904 = !!(wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904);
+    const p2 = n => String(n).padStart(2, '0');
+    const isoOf = pc => pc ? pc.y + '-' + p2(pc.m) + '-' + p2(pc.d) + 'T' + p2(pc.H || 0) + ':' + p2(pc.M || 0) + ':' + p2(Math.floor(pc.S || 0)) : null;
+    const conv = (c, inner) => {
+      if (!c) return null;
+      if (!inner && c.f) {
+        if (c.t === 'z' || c.v == null) return ['z', null, '=' + c.f];
+        return ['f', conv(c, true), '=' + c.f];
+      }
+      if (c.t === 'z') return null;
+      if (c.t === 's' || c.t === 'str') return ['s', c.v == null ? '' : String(c.v)];
+      if (c.t === 'b') return ['b', !!c.v];
+      if (c.t === 'e') return ['e', c.w || '#ERR'];
+      if (c.t === 'd') { const d = c.v instanceof Date ? c.v : new Date(c.v); return ['d', U.fmtDate(d, 'YYYY-MM-DD') + 'T00:00:00']; }
+      if (c.t === 'n') {
+        if (c.z && XLSX.SSF.is_date(c.z)) {
+          const iso = isoOf(XLSX.SSF.parse_date_code(c.v + (d1904 ? 1462 : 0)));
+          if (iso) return ['d', iso];
+        }
+        return ['n', c.v];
+      }
+      return ['s', String(c.v)];
+    };
+    const sheetRows = ws => {
+      if (!ws || !ws['!ref']) return [];
+      return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
+    };
+    // _reco_meta
+    const meta = {};
+    const metaName = wb.SheetNames.find(n => n === '_reco_meta');
+    if (metaName) {
+      const parts = [];
+      sheetRows(wb.Sheets[metaName]).forEach(r => {
+        if (!r || r[0] == null) return;
+        const k = String(r[0]), v = r[1] == null ? '' : String(r[1]);
+        const m = k.match(/^columnsJson\.(\d+)$/);
+        if (m) parts[+m[1]] = v; else meta[k] = v;
+      });
+      if (parts.length) { try { meta.columns = JSON.parse(parts.join('')); } catch (e) { meta.columns = null; } }
+    }
+    // data sheet and header row
+    const scanRows = (readOpts && readOpts.headerScanRows) || 20;
+    const findHdr = name => {
+      const ws = wb.Sheets[name];
+      if (!ws || !ws['!ref']) return -1;
+      const rg = XLSX.utils.decode_range(ws['!ref']);
+      for (let r = rg.s.r; r <= Math.min(rg.e.r, rg.s.r + scanRows - 1); r++) {
+        for (let c = rg.s.c; c <= rg.e.c; c++) {
+          const cell = ws[XLSX.utils.encode_cell({ r, c })];
+          if (cell && String(cell.v).trim() === '__reco_row_id') return r;
+        }
+      }
+      return -1;
+    };
+    let sheet = null, hr = -1, sheetMatch = 'first';
+    if (readOpts && readOpts.sheet && wb.Sheets[readOpts.sheet]) { sheet = readOpts.sheet; hr = Math.max(0, findHdr(sheet)); sheetMatch = 'meta'; }
+    else if (meta.dataSheet && wb.Sheets[meta.dataSheet] && findHdr(meta.dataSheet) >= 0) { sheet = meta.dataSheet; hr = findHdr(sheet); sheetMatch = 'meta'; }
+    else {
+      const cands = wb.SheetNames.filter(n => !n.startsWith('_reco_') && findHdr(n) >= 0);
+      if (cands.length > 1) { const e = ExcelLink._err({ code: 'ambiguous_sheet' }); e.detail = { candidates: cands }; throw e; }
+      if (cands.length === 1) { sheet = cands[0]; hr = findHdr(sheet); sheetMatch = 'header-scan'; }
+      else { sheet = meta.dataSheet && wb.Sheets[meta.dataSheet] ? meta.dataSheet : wb.SheetNames[0]; hr = 0; }
+    }
+    const ws = wb.Sheets[sheet];
+    const rg = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+    const headers = [];
+    let lastHdr = -1;
+    for (let c = 0; c <= rg.e.c; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: hr, c })];
+      const text = cell && cell.v != null ? String(cell.v).trim() : '';
+      headers.push({ col: c, text });
+      if (text) lastHdr = c;
+    }
+    headers.length = lastHdr + 1;
+    const counts = {};
+    headers.forEach(h => { if (h.text) counts[h.text] = (counts[h.text] || 0) + 1; });
+    const dupHeaders = Object.keys(counts).filter(k => counts[k] > 1);
+    const ridCol = headers.findIndex(h => h.text === '__reco_row_id');
+    const keyCol = headers.findIndex(h => h.text === '__reco_key');
+    const textOf = c => {
+      if (!c || c.v == null) return '';
+      if (typeof c.v === 'number' && Number.isInteger(c.v)) return String(c.v);
+      return String(c.v).trim();
+    };
+    const rows = [], ridCount = {};
+    let blankRows = 0, formulaCells = 0;
+    for (let r = hr + 1; r <= rg.e.r; r++) {
+      const cells = headers.map(h => conv(ws[XLSX.utils.encode_cell({ r, c: h.col })]));
+      if (cells.every(x => x == null)) { blankRows++; continue; }
+      cells.forEach(x => { if (x && (x[0] === 'f' || x[0] === 'z')) formulaCells++; });
+      const rid = ridCol >= 0 ? textOf(ws[XLSX.utils.encode_cell({ r, c: ridCol })]) : '';
+      const pk = keyCol >= 0 ? textOf(ws[XLSX.utils.encode_cell({ r, c: keyCol })]) : '';
+      if (rid) (ridCount[rid] || (ridCount[rid] = [])).push(r + 1);
+      rows.push({ r: r + 1, rid, pk, cells });
+    }
+    const dupRids = {};
+    Object.keys(ridCount).forEach(k => { if (ridCount[k].length > 1) dupRids[k] = ridCount[k]; });
+    let base = null;
+    if (wb.Sheets._reco_base) {
+      const b = sheetRows(wb.Sheets._reco_base);
+      if (b.length) base = { header: (b[0] || []).map(x => x == null ? '' : String(x)), rows: b.slice(1).filter(r => r && r.some(x => x != null && x !== '')).map(r => r.map(x => x == null ? '' : String(x))) };
+    }
+    return {
+      tier: 'S', file: { name: file.name, ext: '.' + String(file.name).split('.').pop().toLowerCase(), size: file.size,
+        mtimeNs: String((file.lastModified || 0) * 1e6), mtime: file.lastModified ? new Date(file.lastModified).toISOString() : '',
+        sha256: sha, lastModifiedBy: (wb.Props && wb.Props.LastAuthor) || '', modified: (wb.Props && wb.Props.ModifiedDate) ? String(wb.Props.ModifiedDate) : '' },
+      meta: metaName ? meta : null, exportId: meta.exportId || null, manifestFound: false, baseInWorkbook: !!base, base,
+      sheet, sheetMatch, headerRow: hr + 1, headers, dupHeaders, merged: (ws['!merges'] || []).map(m => XLSX.utils.encode_range(m)),
+      ridCol, keyCol, rowsRead: rows.length, rowsSent: rows.length, unchangedRids: [], dupRids, blankRows, formulaCells, warnings: [], rows
+    };
+  },
+
+  /* Head + baseline for a read: the shared manifest, else the copy inside
+     the workbook (_reco_base), else none (baseline-less review). */
+  async _manifestFor(tpl, read, source) {
+    let head = null, base = null, src = 'none';
+    const exportId = read.exportId || source.exportId || (read.meta && read.meta.exportId) || null;
+    const api = ExcelLink.api();
+    if (exportId && ExcelLink._has('excel_link_manifest') && (read.manifestFound || source.exportId || read.tier === 'S' || source.token)) {
+      try {
+        const m = await api.excel_link_manifest(exportId, true);
+        if (m && m.ok !== false) { head = m.head || null; if (m.base && m.base.rows) { base = m.base; src = 'manifest'; } }
+      } catch (e) { console.error('excel_link_manifest', e); }
+    }
+    if (!head && exportId && api && typeof api.read_file === 'function' && /^X\d{8}T\d{6}-[a-z0-9]{4}$/.test(exportId)) {
+      const df = (read.meta && read.meta.dataFolder) || Versioning.folderFor(tpl);
+      const dir = 'reco_excel/' + Versioning._safe(df) + '/_links/';
+      try {
+        const t = await api.read_file(dir + exportId + '.json');
+        if (t) head = JSON.parse(t);
+        const tb = head ? await api.read_file(dir + exportId + '.base.json') : '';
+        if (tb) { const b = JSON.parse(tb); if (b && b.rows) { base = { baseCols: b.baseCols, rows: b.rows }; src = 'manifest'; } }
+      } catch (e) { console.error('manifest read', e); }
+    }
+    if (!base && read.base && read.base.header && read.base.header[0] === 'rid') {
+      base = { baseCols: read.base.header.slice(4), rows: read.base.rows };
+      src = 'workbook';
+    }
+    if (!head && read.meta && read.meta.tplId) {
+      const mc = read.meta.columns || [];
+      head = { format: 1, exportId, tplId: read.meta.tplId, tplName: read.meta.tplName, dataFolder: read.meta.dataFolder,
+        exportedAt: read.meta.exportedAt, exportedBy: read.meta.exportedBy, tplSignature: read.meta.tplSignature, protect: read.meta.protect,
+        columns: mc, baseCols: base ? base.baseCols : mc.filter(c => c.editable).map(c => c.key), fpCols: mc.filter(c => c.fp).map(c => c.key),
+        rebased: {}, dismissed: {}, imports: [], session: {}, _synthetic: true };
+    }
+    return { head, base, baselineSource: src, exportId };
+  },
+
+  /* Header mapping: exact text → normalised text → position (guarded). */
+  mapHeaders(mcols, headers) {
+    const out = { map: {}, warnings: [], ambiguous: [], missing: [], unknown: [] };
+    const norm = s => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const counts = {};
+    headers.forEach(h => { if (h && h.text) counts[h.text] = (counts[h.text] || 0) + 1; });
+    const known = new Set(mcols.map(c => c.header));
+    const claimed = new Set();
+    mcols.forEach(mc => {
+      if (counts[mc.header] > 1) { out.ambiguous.push(mc.key); return; }
+      let hit = headers.filter(h => h && h.text === mc.header);
+      if (hit.length !== 1) hit = headers.filter(h => h && h.text && norm(h.text) === norm(mc.header));
+      if (hit.length === 1 && !claimed.has(hit[0].col)) { out.map[mc.key] = hit[0].col; claimed.add(hit[0].col); return; }
+      const h = headers[mc.colIndex];
+      if (h && !claimed.has(h.col) && (!h.text || !known.has(h.text)) && mc.kind !== 'id') {
+        out.map[mc.key] = h.col; claimed.add(h.col);
+        out.warnings.push('Column "' + mc.header + '" was matched by position' + (h.text ? ' (header now "' + h.text + '")' : ''));
+        return;
+      }
+      out.missing.push(mc.key);
+    });
+    headers.forEach(h => { if (h && h.text && !claimed.has(h.col)) out.unknown.push(h.text); });
+    return out;
+  },
+
+  /* Three-way comparison: B (at export, or as last loaded), C (Reco now,
+     incl. shared history written after the export), E (in Excel). */
+  async diff(tpl, sess, read, mf) {
+    const head = mf.head;
+    const plan = { tplId: tpl.id, exportId: mf.exportId || '', head, file: read.file || {}, createdAt: new Date().toISOString(),
+      baselineSource: mf.baselineSource, tier: read.tier, banners: [], changes: [], conflicts: [], problems: [], previouslyKept: [],
+      info: { unchanged: 0, alreadyApplied: 0, notInFile: 0, newRows: 0, readOnly: {}, unknownCols: [], mapping: [], elided: (read.unchangedRids || []).length,
+        blankRows: read.blankRows || 0, rowsRead: read.rowsRead || 0, sheet: read.sheet, sheetMatch: read.sheetMatch, colWarnings: [] },
+      pulledByPk: {}, rowsTouched: 0 };
+    if (!head) { plan.refused = 'This workbook was not created by Reco\'s "Edit in Excel" (no Reco information found inside it).'; return plan; }
+    if (head.tplId && head.tplId !== tpl.id) {
+      const other = AppState.recoTemplates.find(x => x.id === head.tplId);
+      plan.refused = other ? 'This workbook belongs to template "' + other.name + '". Open that template and load it there.'
+        : 'This workbook belongs to a template that no longer exists ("' + (head.tplName || head.tplId) + '").';
+      return plan;
+    }
+    const cfg = ExcelLink.cfg(tpl);
+    const expAt = new Date(head.exportedAt || 0);
+    if (head.exportedAt && Date.now() - expAt.getTime() > cfg.staleDays * 86400000)
+      plan.banners.push({ kind: 'warn', text: 'This workbook was exported on ' + ExcelLink._when(head.exportedAt) + ' — more than ' + cfg.staleDays + ' days ago.' });
+    if (head.tplSignature && head.tplSignature !== XlSchema.tplSignature(tpl))
+      plan.banners.push({ kind: 'warn', text: 'The template changed since the export; columns that are no longer editable are ignored.' });
+    if (head.session && head.session.activeVersionFile && sess.activeVersionFile && head.session.activeVersionFile !== sess.activeVersionFile)
+      plan.banners.push({ kind: 'warn', text: 'Reco has different data open than when the workbook was exported (' + head.session.activeVersionFile + ').',
+        action: { label: 'Load that data file', fn: 'ExcelLink._loadExportData()' } });
+    if (plan.file.sha256 && (head.imports || []).some(i => i.fileSha256 === plan.file.sha256)) {
+      const imp = head.imports.filter(i => i.fileSha256 === plan.file.sha256).pop();
+      plan.banners.push({ kind: 'info', text: 'This exact file was already loaded on ' + ExcelLink._when(imp.at) + '.' });
+    }
+    if (plan.file.sha256 && head.exportSha256 && plan.file.sha256 === head.exportSha256)
+      plan.banners.push({ kind: 'info', text: 'Nothing has been saved in Excel yet — press Ctrl+S in Excel to include your edits.' });
+    else if (ExcelLink._active[tpl.id] && ExcelLink._active[tpl.id].status && ExcelLink._active[tpl.id].status.ownerFile)
+      plan.banners.push({ kind: 'info', text: 'The workbook is still open in Excel: only its last save is loaded (press Ctrl+S in Excel to include newer edits).' });
+    if (mf.baselineSource === 'workbook') plan.banners.push({ kind: 'info', text: 'The baseline was read from inside the workbook (the shared link record was not found).' });
+    if (mf.baselineSource === 'none') plan.banners.push({ kind: 'error', text: 'No baseline found: conflicts cannot be detected and nothing is ticked. Review each change.' });
+
+    const mcols = (head.columns || []).filter(c => c && c.key);
+    const mapRes = ExcelLink.mapHeaders(mcols, read.headers || []);
+    plan.info.mapping = mapRes.warnings;
+    plan.info.unknownCols = mapRes.unknown.filter(t => !/^Notes \d \(not loaded\)$/.test(t));
+    mapRes.ambiguous.forEach(k => plan.info.colWarnings.push('Column "' + k + '" appears more than once in the sheet — its edits cannot be loaded.'));
+    const ridPos = mapRes.map.__reco_row_id != null ? mapRes.map.__reco_row_id : (read.ridCol >= 0 ? read.ridCol : -1);
+    const keyPos = mapRes.map.__reco_key != null ? mapRes.map.__reco_key : (read.keyCol >= 0 ? read.keyCol : -1);
+    const posOf = new Map((read.headers || []).map((h, i) => [h.col, i]));   // sheet column → index in row.cells
+    const cellAt = (row, key) => { const c = mapRes.map[key]; if (c == null) return null; const i = posOf.get(c); return i == null ? null : row.cells[i]; };
+
+    const S = XlSchema.build(tpl, sess, { scope: 'template', includeHidden: true, showExtras: 'all',
+      allowPkEdit: !!(tpl.excelView && tpl.excelView.allowPkEdit) });
+    plan.schema = S;
+    const extras = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
+    const fullCache = new Map();
+    const fullOf = r => { if (!fullCache.has(r)) fullCache.set(r, extras.length ? Reco._rowWithExtras(tpl, sess, r) : r); return fullCache.get(r); };
+
+    // Columns to diff: editable at export AND now, present in the file
+    const edCols = [];
+    mcols.forEach(mc => {
+      if (mc.kind === 'id' || !mc.editable) return;
+      const now = S.byName.get(mc.key);
+      if (!now || !now.editable) { plan.info.colWarnings.push('"' + mc.key + '" is no longer editable in Reco — its edits are ignored.'); return; }
+      if (mapRes.map[mc.key] == null) { if (!mapRes.ambiguous.includes(mc.key)) plan.info.colWarnings.push('Column "' + mc.header + '" is missing from the sheet — its edits cannot be loaded.'); return; }
+      edCols.push({ mc, desc: now });
+    });
+    mcols.forEach(mc => {
+      if (mc.kind === 'id' || mc.editable) return;
+      const now = S.byName.get(mc.key);
+      if (now && now.editable && now.role === 'tpl') plan.info.colWarnings.push('"' + mc.key + '" became editable after the export — its edits are ignored (re-export to edit it).');
+    });
+    // Read-only template columns checked for ignored edits
+    const roCols = mcols.filter(mc => mc.kind !== 'id' && mc.kind !== 'status' && !mc.editable && mapRes.map[mc.key] != null)
+      .map(mc => ({ mc, desc: S.byName.get(mc.key) })).filter(x => x.desc && x.desc.role === 'tpl' && !x.desc.editable);
+    const fpCols = (head.fpCols || []).filter(Boolean);
+    const fpOk = fpCols.length && fpCols.every(k => mapRes.map[k] != null);
+    if (fpCols.length && !fpOk) plan.info.colWarnings.push('An identity column is missing — sorted or pasted-over rows cannot be detected.');
+    const fpDesc = k => {
+      const mc = mcols.find(c => c.key === k) || {};
+      const now = S.byName.get(k);
+      return { name: k, kind: (now && now.kind) || mc.kind || 'text', editor: 'none', options: null, role: 'tpl' };
+    };
+    const fpDescs = fpCols.map(fpDesc);
+
+    // Baseline
+    const baseCols = (mf.base && mf.base.baseCols) || head.baseCols || [];
+    const baseByRid = new Map(), baseByPk = new Map();
+    if (mf.base && Array.isArray(mf.base.rows)) {
+      mf.base.rows.forEach(b => {
+        const vals = {};
+        baseCols.forEach((c, i) => { vals[c] = b[4 + i] == null ? '' : String(b[4 + i]); });
+        const rec = { rid: String(b[0]), pk: String(b[1] || ''), fp: String(b[2] || ''), flags: String(b[3] || ''), vals };
+        baseByRid.set(rec.rid, rec);
+        if (rec.pk) baseByPk.set(rec.pk, rec);
+      });
+    }
+    const hasBase = baseByRid.size > 0;
+    const rebased = head.rebased || {}, dismissed = head.dismissed || {};
+
+    // Live rows
+    const byId = new Map(sess.data.map(r => [r._id, r]));
+    const pkCount = new Map();
+    sess.data.forEach(r => { const k = r._pk || ''; if (k) pkCount.set(k, (pkCount.get(k) || 0) + 1); });
+    const byPk = new Map();
+    sess.data.forEach(r => { if (r._pk && pkCount.get(r._pk) === 1) byPk.set(r._pk, r); });
+    const filePkCount = new Map();
+    (read.rows || []).forEach(r => { if (r.pk) filePkCount.set(r.pk, (filePkCount.get(r.pk) || 0) + 1); });
+    const pendingPks = new Set();
+    (AppState.pendingSpecialJV[tpl.id] || []).forEach(p => (p.sentPks || []).forEach(k => pendingPks.add(k)));
+
+    // Identity: rid; else key; else visible primary-key values (confirmed)
+    let mode = 'rid';
+    if (ridPos < 0 && keyPos >= 0) mode = 'key';
+    else if (ridPos < 0) {
+      const pkd = (tpl.primaryKeys || []).map(k => ({ k, d: S.byName.get(k) || fpDesc(k) }));
+      if (pkd.length && pkd.every(x => mapRes.map[x.k] != null)) {
+        mode = 'visible';
+        plan.needsConfirm = 'The hidden row-id columns were deleted from the sheet. Match rows by their visible key (' + tpl.primaryKeys.join(' + ') + ') instead?';
+        const liveKey = new Map(), cnt = new Map();
+        sess.data.forEach(r => {
+          const k = pkd.map(x => XlSchema.canon(x.d, r[x.k], 'reco').c).join(XlSchema.SEP);
+          cnt.set(k, (cnt.get(k) || 0) + 1); liveKey.set(k, r);
+        });
+        plan._visibleKey = row => {
+          const k = pkd.map(x => XlSchema.canon(x.d, cellAt(row, x.k), 'excel').c).join(XlSchema.SEP);
+          return cnt.get(k) === 1 ? liveKey.get(k) : null;
+        };
+      } else { plan.refused = 'The hidden row-id columns (A–B) were deleted from the sheet, so rows cannot be matched. Export again.'; return plan; }
+    }
+
+    // Group file rows by identity
+    const groups = new Map(), seenRids = new Set(read.unchangedRids || []);
+    (read.rows || []).forEach(row => {
+      let id = mode === 'rid' ? (row.rid || '') : mode === 'key' ? (row.pk || '') : '';
+      if (mode === 'visible') { const lr = plan._visibleKey(row); id = lr ? '#vis#' + lr._id : ''; row._live = lr; }
+      if (!id) {
+        const anyVal = mcols.some(mc => mc.kind !== 'id' && mc.kind !== 'status' && (() => { const c = cellAt(row, mc.key); return c != null && !(c[0] === 's' && XlSchema.T(c[1]) === ''); })());
+        if (anyVal) plan.info.newRows++;
+        return;
+      }
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(row);
+      if (mode === 'rid') seenRids.add(id);
+    });
+    if (hasBase && mode === 'rid') baseByRid.forEach((b, rid) => { if (!seenRids.has(rid)) plan.info.notInFile++; });
+
+    // Merged cells (non-anchor cells)
+    const mergedSet = new Set();
+    (read.merged || []).forEach(ref => {
+      try {
+        const m = String(ref).match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/);
+        if (!m) return;
+        const ci = s => s.split('').reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+        const c1 = ci(m[1]), r1 = +m[2], c2 = ci(m[3]), r2 = +m[4];
+        if ((c2 - c1 + 1) * (r2 - r1 + 1) > 20000) return;
+        for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) if (r !== r1 || c !== c1) mergedSet.add(c + ':' + r);
+      } catch (e) {}
+    });
+
+    // History written after the export (colleagues, other sessions)
+    const matchedPks = new Set();
+    const plans = [];
+    groups.forEach((rowsOf, id) => {
+      let row = rowsOf[0];
+      if (rowsOf.length > 1) {
+        const sig = r => edCols.map(x => XlSchema.canon(x.desc, cellAt(r, x.mc.key), 'excel').c).join(XlSchema.SEP);
+        const s0 = sig(rowsOf[0]);
+        if (!rowsOf.every(r => sig(r) === s0)) {
+          rowsOf.forEach(r => plan.problems.push(ExcelLink._prob(r, id, '', 'duplicateRowId', 'Excel rows ' + rowsOf.map(x => x.r).join(', '))));
+          return;
+        }
+      }
+      let baseRow = null, live = null, rematched = false;
+      if (mode === 'rid') {
+        baseRow = baseByRid.get(id) || null;
+        if (hasBase && !baseRow) { plan.problems.push(ExcelLink._prob(row, id, '', 'unknownRowId')); return; }
+        live = byId.get(id) || null;
+        if (live) {
+          if (keyPos >= 0 && (live._pk || '') !== (row.pk || '')) { plan.problems.push(ExcelLink._prob(row, id, '', 'identityMismatch')); return; }
+        } else if (row.pk && filePkCount.get(row.pk) === 1 && byPk.has(row.pk)) { live = byPk.get(row.pk); rematched = true; }
+      } else if (mode === 'key') {
+        baseRow = baseByPk.get(id) || null;
+        live = byPk.get(id) || null;
+        rematched = true;
+      } else {
+        live = row._live; rematched = true;
+        baseRow = live && live._pk ? (baseByPk.get(live._pk) || null) : null;
+      }
+      if (!live) { plan.problems.push(ExcelLink._prob(row, id, '', 'rowNotInCurrentData')); return; }
+      if (fpOk && baseRow && baseRow.fp) {
+        const fp = XlSchema.fnv1a(fpDescs.map(d => XlSchema.canon(d, cellAt(row, d.name), 'excel').c).join(XlSchema.SEP));
+        if (fp !== baseRow.fp) { plan.problems.push(ExcelLink._prob(row, id, '', 'rowMisaligned')); return; }
+      }
+      const pk = live._pk || Reco.getRowPK(tpl, live) || '';
+      if (pk) matchedPks.add(pk);
+      plans.push({ row, id, baseRow, live, pk, rematched });
+    });
+    const Shist = matchedPks.size && head.exportedAt ? await Versioning.changesSince(tpl, head.exportedAt, matchedPks) : new Map();
+
+    const toAccCol = S.toAccountCol;
+    let iid = 0;
+    const clearedByCol = {};
+    plans.forEach(p => {
+      const { row, id, baseRow, live, pk } = p;
+      const full = fullOf(live);
+      const fileRid = mode === 'rid' ? id : (baseRow ? baseRow.rid : live._id);
+      edCols.forEach(({ mc, desc }) => {
+        const col = mc.key;
+        const key = fileRid + '|' + col;
+        const cell = cellAt(row, col);
+        const sheetCol = mapRes.map[col];
+        if (cell != null && mergedSet.has(sheetCol + ':' + row.r)) { plan.problems.push(ExcelLink._prob(row, id, col, 'mergedCell')); return; }
+        let B;
+        if (Object.prototype.hasOwnProperty.call(rebased, key)) B = rebased[key];
+        else if (baseRow) B = baseRow.vals[col];
+        const E = XlSchema.canon(desc, cell, 'excel', { B });
+        const liveRaw = XlSchema.currentValue(desc, live, full, sess);
+        const cLive = XlSchema.canon(desc, liveRaw, 'reco').c;
+        let C = cLive, fromHist = false;
+        if (desc.versioned && pk && Shist.has(pk)) {
+          const hv = Shist.get(pk)[col];
+          C = XlSchema.canon(desc, hv == null ? '' : hv, 'reco').c;
+          fromHist = C !== cLive;
+        }
+        const it = { id: iid++, r: row.r, rid: fileRid, pk, row: live, col, desc, B, C, cLive, E: E.c, liveRaw, badges: [], key };
+        if (B === XlSchema.LOCKED) { plan.problems.push(ExcelLink._prob(row, id, col, 'sourceSanitized')); return; }
+        if (E.err) { plan.problems.push(ExcelLink._prob(row, id, col, E.err, E.errText)); return; }
+        if (B !== undefined && E.c === B) { plan.info.unchanged++; return; }
+        if (E.c === C) { plan.info.alreadyApplied++; return; }
+        if (E.verr) { plan.problems.push(Object.assign(ExcelLink._prob(row, id, col, E.verr), { eText: XlSchema.display(E.c), live })); return; }
+        E.warn.forEach(w => { if (w !== 'textNumber') it.badges.push(w); });
+        if (p.rematched) it.badges.push('rematchedByKey');
+        if (pk && pkCount.get(live._pk) > 1) it.badges.push('dupPk');
+        if (desc.role === 'tag' || (desc.role === 'toAccount' && !desc.versioned) || !pk) it.badges.push('sessionOnly');
+        if (fromHist) it.badges.push('changedInHistory');
+        if (B !== undefined && dismissed[key] === E.c) { it.cat = 'kept'; plan.previouslyKept.push(it); return; }
+        if (B === undefined) { it.badges.push('noBaseline'); it.tick = false; it.cat = 'change'; plan.changes.push(it); return; }
+        if (C === B) {
+          it.cat = 'change'; it.tick = true;
+          const flags = baseRow ? baseRow.flags : '';
+          if (baseRow && !flags.includes('O') && sess.offsets && sess.offsets[live._id]) { it.badges.push('offsetSinceExport'); it.tick = false; }
+          if (baseRow && !flags.includes('P') && ExcelLink._isPosted(tpl, full)) { it.badges.push('postedSinceExport'); it.tick = false; }
+          if (desc.role === 'toAccount' && pk && pendingPks.has(pk)) { it.badges.push('jvPending'); it.tick = false; }
+          if (B !== '' && E.c === '') { it.badges.push('cleared'); (clearedByCol[col] || (clearedByCol[col] = [])).push(it); }
+          plan.changes.push(it);
+        } else {
+          it.cat = 'conflict'; it.take = false;
+          plan.conflicts.push(it);
+        }
+      });
+      // Read-only cells edited in Excel (never applied)
+      roCols.forEach(({ mc, desc }) => {
+        const cur = XlSchema.canon(desc, XlSchema.currentValue(desc, live, full, sess), 'reco').c;
+        const e = XlSchema.canon(desc, cellAt(row, mc.key), 'excel', { B: cur });
+        if (!e.err && e.c !== cur) plan.info.readOnly[mc.key] = (plan.info.readOnly[mc.key] || 0) + 1;
+      });
+    });
+    plan.info.problemsByCode = {};
+    plan.problems.forEach(pr => { plan.info.problemsByCode[pr.code] = (plan.info.problemsByCode[pr.code] || 0) + 1; });
+
+    // Bulk-clear guard
+    const exported = (head.session && head.session.exportedRows) || baseByRid.size || (read.rowsRead || 0);
+    Object.keys(clearedByCol).forEach(col => {
+      const list = clearedByCol[col].filter(x => x.tick);
+      if (list.length > 50 || (exported && list.length > 0.2 * exported && list.length > 3)) {
+        list.forEach(x => { x.tick = false; });
+        plan.banners.push({ kind: 'warn', text: list.length + ' cells were cleared in "' + col + '" — they are unticked; tick them to apply.' });
+      }
+    });
+    // Values written to shared history by others after the export
+    const tplCols = tpl.columns.map(c => c.name);
+    const liveByPk = new Map();
+    plan.changes.concat(plan.conflicts).forEach(x => { if (x.desc.versioned && x.pk && !liveByPk.has(x.pk)) liveByPk.set(x.pk, x.row); });
+    liveByPk.forEach((live, pk) => {
+      const rec = Shist.get(pk);
+      if (!rec) return;
+      const diffs = [];
+      tplCols.forEach(c => {
+        const hv = rec[c] == null ? '' : String(rec[c]);
+        const lv = live[c] == null ? '' : String(live[c]);
+        if (hv !== lv) diffs.push({ col: c, value: rec[c] == null ? '' : rec[c], from: lv });
+      });
+      if (diffs.length) plan.pulledByPk[pk] = diffs;
+    });
+    if (plan.changes.some(x => x.badges.includes('rematchedByKey')) || plan.conflicts.some(x => x.badges.includes('rematchedByKey')))
+      plan.banners.push({ kind: 'info', text: 'Some rows were matched by their key because the data was reopened after the export.' });
+    plan.reRunOffset = plan.changes.concat(plan.conflicts).some(x => x.col === tpl.valueColumn || (tpl.aggregateBy || []).includes(x.col));
+    return plan;
+  },
+  _prob(row, id, col, code, extra) {
+    return { r: row.r, rid: id, col: col || '', code, msg: XlSchema.reason(code) + (extra ? ' (' + extra + ')' : '') };
+  },
+  async _loadExportData() {
+    const plan = ExcelLink._plan;
+    if (!plan || !plan.head || !plan.head.session) return;
+    App.closeModal();
+    await Reco.loadVersionedFile(plan.head.session.activeVersionFile, plan.tplId);
+    U.toast('Data reopened — click Load back again', 'success');
+  },
+
+  /* ---------------- review screen ---------------- */
+  BADGES: {
+    formula: ['fx', 'typed as a formula; its calculated value is used'], rematchedByKey: ['re-matched', 'matched by key after the data was reopened'],
+    leadingZeros: ['0…', 'leading zeros kept'], textDate: ['text date', 'date typed as text'], ambiguousDate: ['day/month?', 'day and month could be swapped — check'],
+    timeDropped: ['time dropped', 'the time part was ignored'], dateInTextColumn: ['date→text', 'a date in a text column'], dupPk: ['dup key', 'history keeps one row per key'],
+    sessionOnly: ['session only', 'kept in this session, not in version history'], changedInHistory: ['history', 'Reco value comes from shared history written after the export'],
+    offsetSinceExport: ['offset since', 'the row was offset after the export'], postedSinceExport: ['posted since', 'an entry was posted for this row after the export'],
+    jvPending: ['JV pending', 'a pending Special JV used this row — it will no longer match'], cleared: ['cleared', 'the cell was emptied in Excel'],
+    noBaseline: ['no baseline', 'the value at export is unknown'], formatWarning: ['format', 'does not match the column format rules']
+  },
+  _badgeHtml(list) {
+    return (list || []).map(b => { const d = ExcelLink.BADGES[b] || [b, b]; return '<span class="xl-badge xl-b-' + b + '" title="' + U.escAttr(d[1]) + '">' + U.esc(d[0]) + '</span>'; }).join(' ');
+  },
+  _keyOf(tpl, it) {
+    const row = it.row || it.live;
+    if (row && (tpl.primaryKeys || []).length) return tpl.primaryKeys.map(k => row[k] == null ? '' : String(row[k])).join(' · ');
+    if (row && tpl.docNumberColumn) return String(row[tpl.docNumberColumn] || '');
+    return 'R' + it.r;
+  },
+  _shown(c) { const s = XlSchema.display(c); return s === '' ? '<i class="text-muted">(empty)</i>' : U.esc(s); },
+  renderReview(plan) {
+    const tpl = AppState.recoTemplates.find(x => x.id === plan.tplId);
+    plan.tab = plan.tab || (plan.changes.length ? 'changes' : plan.conflicts.length ? 'conflicts' : plan.problems.length ? 'problems' : 'info');
+    plan.colFilter = plan.colFilter || '';
+    plan.limit = plan.limit || 200;
+    const f = plan.file || {}, hd = plan.head || {};
+    let h = '<div class="xl-review">';
+    h += '<div class="xl-rv-head"><span><b>' + U.esc(f.name || '') + '</b></span>'
+      + '<span>exported by ' + U.esc(hd.exportedBy || '?') + ' · ' + U.esc(ExcelLink._when(hd.exportedAt)) + '</span>'
+      + (f.mtime ? '<span>saved ' + (f.lastModifiedBy ? 'by ' + U.esc(f.lastModifiedBy) + ' ' : '') + U.esc(ExcelLink._when(f.mtime)) + '</span>' : '')
+      + '<span>' + plan.info.rowsRead + ' rows in file</span><span>baseline: ' + U.esc(plan.baselineSource) + '</span></div>';
+    plan.banners.forEach(b => {
+      h += '<div class="xl-' + (b.kind === 'error' ? 'err' : b.kind === 'info' ? 'info' : 'warn') + '">' + U.esc(b.text)
+        + (b.action ? ' <button class="small" onclick="' + b.action.fn + '">' + U.esc(b.action.label) + '</button>' : '') + '</div>';
+    });
+    const all = plan.changes.concat(plan.conflicts).concat(plan.problems);
+    const colCounts = {};
+    all.forEach(x => { if (x.col) colCounts[x.col] = (colCounts[x.col] || 0) + 1; });
+    const cols = Object.keys(colCounts);
+    if (cols.length > 1) {
+      h += '<div class="pill-row">' + '<span class="tag' + (plan.colFilter ? '' : ' active') + '" onclick="ExcelLink._rvCol(\'\')">All columns</span>'
+        + cols.map(c => '<span class="tag' + (plan.colFilter === c ? ' active' : '') + '" onclick="ExcelLink._rvCol(\'' + U.jsq(c) + '\')">' + U.esc(c) + ' (' + colCounts[c] + ')</span>').join('') + '</div>';
+    }
+    const tab = (k, label, n) => '<button class="small' + (plan.tab === k ? ' primary' : '') + '" onclick="ExcelLink._rvTab(\'' + k + '\')">' + label + (n != null ? ' (' + n + ')' : '') + '</button>';
+    h += '<div class="toolbar" style="margin:8px 0;">' + tab('changes', 'Changes', plan.changes.length) + tab('conflicts', 'Conflicts', plan.conflicts.length)
+      + tab('problems', 'Problems', plan.problems.length) + tab('info', 'Info') + '</div>';
+    const flt = list => plan.colFilter ? list.filter(x => x.col === plan.colFilter) : list;
+    if (plan.tab === 'changes') {
+      const list = flt(plan.changes);
+      h += '<div class="toolbar" style="margin-bottom:6px;"><button class="small" onclick="ExcelLink._rvTickAll(true)">Tick all</button><button class="small" onclick="ExcelLink._rvTickAll(false)">Untick all</button></div>';
+      h += '<table class="xl-rv-table"><thead><tr><th></th><th>Excel row</th><th>Key</th><th>Column</th><th>Before</th><th>Excel</th><th></th></tr></thead><tbody>';
+      list.slice(0, plan.limit).forEach(x => {
+        h += '<tr><td><input type="checkbox"' + (x.tick ? ' checked' : '') + ' onchange="ExcelLink._rvTick(' + x.id + ', this.checked)"></td><td>' + x.r + '</td><td>' + U.esc(ExcelLink._keyOf(tpl, x))
+          + '</td><td>' + U.esc(x.col) + '</td><td>' + (x.B === undefined ? '<i class="text-muted">?</i>' : ExcelLink._shown(x.B)) + '</td><td><b>' + ExcelLink._shown(x.E) + '</b></td><td>' + ExcelLink._badgeHtml(x.badges) + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      if (!list.length) h += '<div class="empty">No changes.</div>';
+    } else if (plan.tab === 'conflicts') {
+      const list = flt(plan.conflicts);
+      h += '<div class="help">Changed both in Excel and in Reco since the export. Pick which value to keep.</div>';
+      h += '<div class="toolbar" style="margin:6px 0;"><button class="small" onclick="ExcelLink._rvTakeAll(true)">Take Excel for all</button><button class="small" onclick="ExcelLink._rvTakeAll(false)">Keep Reco for all</button></div>';
+      h += '<table class="xl-rv-table"><thead><tr><th>Excel row</th><th>Key</th><th>Column</th><th>At export</th><th>In Reco now</th><th>In Excel</th><th>Keep</th><th></th></tr></thead><tbody>';
+      list.slice(0, plan.limit).forEach(x => {
+        h += '<tr><td>' + x.r + '</td><td>' + U.esc(ExcelLink._keyOf(tpl, x)) + '</td><td>' + U.esc(x.col) + '</td><td>' + ExcelLink._shown(x.B) + '</td><td>' + ExcelLink._shown(x.C)
+          + '</td><td>' + ExcelLink._shown(x.E) + '</td><td><label class="inline"><input type="radio" name="xlc' + x.id + '"' + (x.take ? '' : ' checked') + ' onchange="ExcelLink._rvTake(' + x.id + ', false)"> Reco</label> '
+          + '<label class="inline"><input type="radio" name="xlc' + x.id + '"' + (x.take ? ' checked' : '') + ' onchange="ExcelLink._rvTake(' + x.id + ', true)"> Excel</label></td><td>' + ExcelLink._badgeHtml(x.badges) + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      if (!list.length) h += '<div class="empty">No conflicts.</div>';
+    } else if (plan.tab === 'problems') {
+      const list = flt(plan.problems);
+      h += '<div class="help">These cells are not applied.</div>';
+      h += '<table class="xl-rv-table"><thead><tr><th>Excel row</th><th>Key</th><th>Column</th><th>Problem</th><th>Excel</th></tr></thead><tbody>';
+      list.slice(0, plan.limit).forEach(x => {
+        h += '<tr><td>' + x.r + '</td><td>' + U.esc(x.live ? ExcelLink._keyOf(tpl, x) : x.rid) + '</td><td>' + U.esc(x.col || '(row)') + '</td><td>' + U.esc(x.msg) + '</td><td>' + U.esc(x.eText || '') + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      if (!list.length) h += '<div class="empty">No problems.</div>';
+    } else {
+      const i = plan.info;
+      const li = (t) => '<li>' + t + '</li>';
+      h += '<ul class="xl-info">';
+      h += li('Sheet <b>' + U.esc(i.sheet || '') + '</b> (' + U.esc(i.sheetMatch || '') + ') · ' + i.rowsRead + ' rows read, ' + i.elided + ' identical to the export, ' + i.blankRows + ' blank');
+      h += li(i.unchanged + ' edited cell(s) unchanged since the export');
+      h += li(i.alreadyApplied + ' cell(s) already equal to Reco (already applied)');
+      if (plan.previouslyKept.length) h += li(plan.previouslyKept.length + ' cell(s) where you kept Reco\'s value last time <button class="small" onclick="ExcelLink._rvShowKept()">Show in Conflicts</button>');
+      if (i.notInFile) h += li(i.notInFile + ' exported row(s) not in the file — no action (Reco never deletes rows)');
+      if (i.newRows) h += li(i.newRows + ' row(s) added in Excel — ignored (use + Persistent Row in Reco)');
+      Object.keys(i.readOnly).forEach(c => { h += li('"' + U.esc(c) + '": ' + i.readOnly[c] + ' read-only cell(s) changed in Excel — ignored'); });
+      i.colWarnings.forEach(w => { h += li(U.esc(w)); });
+      i.mapping.forEach(w => { h += li(U.esc(w)); });
+      if (i.unknownCols.length) h += li('Columns not from Reco (ignored): ' + U.esc(i.unknownCols.join(', ')));
+      const pulled = Object.keys(plan.pulledByPk);
+      if (pulled.length) h += li(pulled.length + ' row(s) have newer values in shared history (written after the export); they are kept when applying: '
+        + U.esc(pulled.slice(0, 5).map(k => k + ': ' + plan.pulledByPk[k].map(d => d.col).join(', ')).join(' · ')));
+      h += '</ul>';
+    }
+    const shown = plan.tab === 'changes' ? flt(plan.changes).length : plan.tab === 'conflicts' ? flt(plan.conflicts).length : plan.tab === 'problems' ? flt(plan.problems).length : 0;
+    if (shown > plan.limit) h += '<div style="margin-top:6px;"><button class="small" onclick="ExcelLink._rvMore()">Show more (' + (shown - plan.limit) + ' hidden)</button></div>';
+    h += '</div>';
+    const footer = '<label class="inline" style="margin-right:auto;"><input type="checkbox" id="xlReOffset"' + (plan.reRunOffset ? ' checked' : '') + '> Re-run Offset after applying</label>'
+      + '<button onclick="ExcelLink.exportReviewCsv()">Export review CSV</button><button onclick="ExcelLink.closeReview()">Cancel</button>'
+      + '<button class="primary" id="xlApplyBtn" onclick="ExcelLink.apply()"></button>';
+    App.openModal('Load back from Excel', h, footer);
+    const m = document.querySelector('#appModal .modal');
+    if (m) { m.style.maxWidth = '1200px'; m.dataset._xlWidened = '1'; }
+    ExcelLink._rvFooter();
+  },
+  _rvCounts() {
+    const p = ExcelLink._plan;
+    const picks = p.changes.filter(x => x.tick).concat(p.conflicts.filter(x => x.take));
+    const rows = new Set(picks.map(x => x.row));
+    const vers = new Set(picks.filter(x => x.desc.versioned && x.pk).map(x => x.pk));
+    return { n: picks.length, m: rows.size, k: vers.size };
+  },
+  _rvFooter() {
+    const b = document.getElementById('xlApplyBtn');
+    if (!b || !ExcelLink._plan) return;
+    const c = ExcelLink._rvCounts();
+    b.textContent = 'Apply ' + c.n + ' change' + (c.n === 1 ? '' : 's') + ' to ' + c.m + ' row' + (c.m === 1 ? '' : 's') + (c.k ? ' (writes ' + c.k + ' history version' + (c.k === 1 ? '' : 's') + ')' : '');
+    b.disabled = !c.n && !ExcelLink._plan.conflicts.length;
+  },
+  _keepOffset() { const el = document.getElementById('xlReOffset'); if (el && ExcelLink._plan) ExcelLink._plan.reRunOffset = el.checked; },
+  _rvRerender() { ExcelLink._keepOffset(); const body = document.getElementById('appModalBody'); const st = body ? body.scrollTop : 0; ExcelLink.renderReview(ExcelLink._plan); if (body) body.scrollTop = st; },
+  _rvTab(t) { ExcelLink._plan.tab = t; ExcelLink._plan.limit = 200; ExcelLink._rvRerender(); },
+  _rvCol(c) { ExcelLink._plan.colFilter = c; ExcelLink._rvRerender(); },
+  _rvMore() { ExcelLink._plan.limit += 200; ExcelLink._rvRerender(); },
+  _rvTick(id, on) { const x = ExcelLink._plan.changes.find(i => i.id === id); if (x) x.tick = on; ExcelLink._rvFooter(); },
+  _rvTake(id, on) { const x = ExcelLink._plan.conflicts.find(i => i.id === id); if (x) x.take = on; ExcelLink._rvFooter(); },
+  _rvTickAll(on) {
+    const p = ExcelLink._plan;
+    p.changes.forEach(x => { if (!p.colFilter || x.col === p.colFilter) x.tick = on; });
+    ExcelLink._rvRerender();
+  },
+  _rvTakeAll(on) {
+    const p = ExcelLink._plan;
+    p.conflicts.forEach(x => { if (!p.colFilter || x.col === p.colFilter) x.take = on; });
+    ExcelLink._rvRerender();
+  },
+  _rvShowKept() {
+    const p = ExcelLink._plan;
+    p.previouslyKept.forEach(x => { x.cat = 'conflict'; x.take = false; p.conflicts.push(x); });
+    p.previouslyKept = [];
+    p.tab = 'conflicts';
+    ExcelLink._rvRerender();
+  },
+  closeReview() {
+    ExcelLink._plan = null;
+    App.closeModal();
+  },
+  exportReviewCsv() {
+    const p = ExcelLink._plan;
+    if (!p) return;
+    const tpl = AppState.recoTemplates.find(x => x.id === p.tplId);
+    const out = [];
+    const add = (cat, x, extra) => out.push(Object.assign({ category: cat, excelRow: x.r, key: x.row || x.live ? ExcelLink._keyOf(tpl, x) : x.rid, column: x.col || '',
+      atExport: x.B === undefined ? '' : XlSchema.display(x.B), inReco: x.C === undefined ? '' : XlSchema.display(x.C), inExcel: x.E === undefined ? (x.eText || '') : XlSchema.display(x.E),
+      decision: '', note: (x.badges || []).join(' ') }, extra || {}));
+    p.changes.forEach(x => add('change', x, { decision: x.tick ? 'apply' : 'skip' }));
+    p.conflicts.forEach(x => add('conflict', x, { decision: x.take ? 'take Excel' : 'keep Reco' }));
+    p.problems.forEach(x => add('problem', x, { note: x.msg }));
+    p.previouslyKept.forEach(x => add('previously kept Reco', x));
+    U.download('excel_review_' + (p.exportId || 'file') + '.csv', Papa.unparse(out), 'text/csv');
+  },
+
+  /* ---------------- apply ---------------- */
+  async apply() {
+    const plan = ExcelLink._plan;
+    if (!plan || ExcelLink._busy) return;
+    ExcelLink._keepOffset();
+    const { tpl, sess } = ExcelLink._ctx();
+    if (!tpl || !sess || tpl.id !== plan.tplId) { U.toast('Open the template this review belongs to', 'error'); return; }
+    const picks = plan.changes.filter(x => x.tick).concat(plan.conflicts.filter(x => x.take));
+    const kept = plan.conflicts.filter(x => !x.take);
+    if (!picks.length && !kept.length) return;
+    ExcelLink._busy = true;
+    const btn = document.getElementById('xlApplyBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+    const abort = msg => { ExcelLink._busy = false; U.toast(msg, 'error'); ExcelLink._rvFooter(); };
+    try {
+      // Revalidate: nothing may have changed while the review was open.
+      try { await Versioning.flushQueue(); } catch (e) {}
+      if (Versioning.pendingCount() > 0) return abort('Version history is still being written — try again in a moment.');
+      if (Store.lastError && Store.lastError.key === 'version history' && Store.lastError.at > plan.createdAt)
+        return abort('Version history could not be written (' + Store.lastError.message + '). Fix the shared folder, then Load back again.');
+      const live = new Set(sess.data);
+      const extras = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
+      const fullOf = r => extras.length ? Reco._rowWithExtras(tpl, sess, r) : r;
+      for (const x of picks) {
+        if (!live.has(x.row)) return abort('Data changed while reviewing — Load back again.');
+        const now = XlSchema.canon(x.desc, XlSchema.currentValue(x.desc, x.row, fullOf(x.row), sess), 'reco').c;
+        if (now !== x.cLive) return abort('Data changed while reviewing — Load back again.');
+      }
+      const styles = new Map();
+      const styleOf = d => { if (!styles.has(d.name)) styles.set(d.name, XlSchema.columnStyle(sess, d)); return styles.get(d.name); };
+      const edits = picks.map(x => {
+        const value = XlSchema.coerce(x.desc, x.E, x.liveRaw, styleOf(x.desc));
+        if (x.desc.formats && value !== '' && !FMT.validate(value, x.desc.formats)) x.badges.push('formatWarning');
+        return { row: x.row, col: x.col, value };
+      });
+      const pkSet = new Set(picks.filter(x => x.desc.versioned && x.pk).map(x => x.pk));
+      const pulled = [];
+      pkSet.forEach(pk => (plan.pulledByPk[pk] || []).forEach(d => pulled.push({ pk, col: d.col, value: d.value })));
+      let res = { applied: 0, rows: 0, versions: {} };
+      if (edits.length) {
+        try {
+          res = await Reco.applyEdits(tpl, sess, edits, { source: 'excel', historyFirst: true, schema: plan.schema,
+            meta: { _src: 'excel:' + (plan.exportId || 'file'), _by: ExcelLink.user() }, pulled });
+        } catch (e) {
+          console.error('apply excel edits', e);
+          ExcelLink._busy = false;
+          App.openModal('Load back', '<div class="xl-err">Nothing was changed: the version history could not be written.<br><small>' + U.esc(e.message || e) + '</small></div>',
+            '<button class="primary" onclick="App.closeModal()">OK</button>');
+          return;
+        }
+      }
+      // Record what was loaded (rebase), so the next Load back only shows new edits.
+      const at = new Date().toISOString();
+      const rebased = {}, dismissed = {};
+      picks.forEach(x => { rebased[x.key] = x.E; });
+      kept.forEach(x => { dismissed[x.key] = x.E; });
+      const f = plan.file || {};
+      const patch = {
+        rebased, dismissed,
+        importAppend: { at, by: ExcelLink.user(), fileSha256: f.sha256 || '', fileMtimeNs: f.mtimeNs || '',
+          counts: { applied: picks.filter(x => x.cat === 'change').length, conflictsKept: kept.length, conflictsTaken: picks.filter(x => x.cat === 'conflict').length,
+            problems: plan.problems.length, newRows: 0, pulled: pulled.length },
+          applied: picks.slice(0, 5000).map(x => [x.rid, x.pk, x.col, x.liveRaw == null ? '' : String(x.liveRaw), XlSchema._plain(x.E)]) },
+        lastImport: { at, by: ExcelLink.user(), sha256: f.sha256 || '', mtimeNs: f.mtimeNs || '', size: f.size || 0, count: picks.length }
+      };
+      await ExcelLink._updateManifest(tpl, plan, patch);
+      ExcelLink._plan = null;
+      try { AppState.save(); await AppState.flush(); } catch (e) {}
+      const a = ExcelLink._active[tpl.id];
+      if (a && a.exportId === plan.exportId) {
+        a.loaded = { at, count: picks.length };
+        if (a.status) a.status = Object.assign({}, a.status, { newSinceLastImport: false });
+      }
+      ExcelLink._busy = false;
+      App.closeModal();
+      if (plan.reRunOffset && res.applied) Reco.recalcOffsets();
+      else App.navigate('reco');
+      U.toast('Applied ' + picks.length + ' change' + (picks.length === 1 ? '' : 's') + ' to ' + new Set(picks.map(x => x.row)).size + ' row(s)', 'success');
+      if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); }
+    } finally { ExcelLink._busy = false; }
+  },
+  async _updateManifest(tpl, plan, patch) {
+    if (!plan.exportId || (plan.head && plan.head._synthetic)) return;
+    try {
+      if (ExcelLink._has('excel_link_update_manifest')) {
+        const r = await ExcelLink.api().excel_link_update_manifest(plan.exportId, patch);
+        if (r && r.ok === false) throw ExcelLink._err(r);
+        return;
+      }
+      const api = ExcelLink.api();
+      if (!api || typeof api.read_file !== 'function' || typeof api.write_file !== 'function') return;
+      const df = (plan.head && plan.head.dataFolder) || Versioning.folderFor(tpl);
+      const path = 'reco_excel/' + Versioning._safe(df) + '/_links/' + plan.exportId + '.json';
+      const t = await api.read_file(path);
+      if (!t) return;
+      const m = JSON.parse(t);
+      m.rebased = Object.assign(m.rebased || {}, patch.rebased);
+      m.dismissed = Object.assign(m.dismissed || {}, patch.dismissed);
+      m.imports = (m.imports || []).concat([patch.importAppend]).slice(-50);
+      m.lastImport = patch.lastImport;
+      m.rev = (m.rev || 0) + 1;
+      await api.write_file(path, JSON.stringify(m, null, 1));
+    } catch (e) {
+      console.error('excel link manifest update', e);
+      U.toast('Changes applied, but the link record could not be updated (' + e.message + ')', 'error');
+    }
+  },
+
+  /* ---------------- Excel links panel ---------------- */
+  async openLinksPanel(filter) {
+    const { tpl } = ExcelLink._ctx();
+    if (!tpl) return;
+    const tier = await ExcelLink.tier();
+    ExcelLink._panelFilter = filter || ExcelLink._panelFilter || { who: 'mine', status: '' };
+    let links = tier === 'P' ? await ExcelLink.listLinks(tpl) : [];
+    const cfg = ExcelLink.cfg(tpl);
+    const now = Date.now();
+    const stale = l => {
+      if (l.status !== 'open') return false;
+      const age = now - new Date(l.exportedAt || 0).getTime();
+      return age > cfg.staleDays * 86400000;
+    };
+    const fl = ExcelLink._panelFilter;
+    const me = ExcelLink.user();
+    links.sort((x, y) => String(y.exportedAt).localeCompare(String(x.exportedAt)));
+    const counts = { open: 0, saved: 0, closed: 0, stale: 0 };
+    links.forEach(l => {
+      if (l.status === 'closed') counts.closed++; else counts.open++;
+      if (l.status === 'open' && l.newSinceLastImport) counts.saved++;
+      if (stale(l)) counts.stale++;
+    });
+    let shown = links.filter(l => fl.who !== 'mine' || l.exportedBy === me);
+    if (fl.status === 'open') shown = shown.filter(l => l.status === 'open');
+    if (fl.status === 'saved') shown = shown.filter(l => l.status === 'open' && l.newSinceLastImport);
+    if (fl.status === 'closed') shown = shown.filter(l => l.status === 'closed');
+    if (fl.status === 'stale') shown = shown.filter(stale);
+    const chip = (k, label, n) => '<span class="tag' + (fl.status === k ? ' active' : '') + '" onclick="ExcelLink.openLinksPanel({who:\'' + fl.who + '\',status:\'' + (fl.status === k ? '' : k) + '\'})">' + label + ' (' + n + ')</span>';
+    let h = '<div style="font-size:12px;">';
+    if (tier !== 'P') h += '<div class="xl-warn">This launcher keeps no shared list of Excel links. Use <b>Load from file…</b> to load an edited workbook.</div>';
+    h += '<div class="pill-row"><label class="inline"><input type="radio" name="xlWho"' + (fl.who === 'mine' ? ' checked' : '') + ' onchange="ExcelLink.openLinksPanel({who:\'mine\',status:\'' + fl.status + '\'})"> Mine</label>'
+      + '<label class="inline"><input type="radio" name="xlWho"' + (fl.who !== 'mine' ? ' checked' : '') + ' onchange="ExcelLink.openLinksPanel({who:\'all\',status:\'' + fl.status + '\'})"> Everyone</label>'
+      + chip('open', 'Open', counts.open) + chip('saved', 'Saved, not loaded', counts.saved) + chip('closed', 'Closed', counts.closed) + chip('stale', 'Stale', counts.stale) + '</div>';
+    h += '<table class="xl-rv-table"><thead><tr><th>File</th><th>Created</th><th>Rows</th><th>Status</th><th>Last saved</th><th>Last import</th><th></th></tr></thead><tbody>';
+    shown.forEach(l => {
+      const id = U.jsq(l.exportId);
+      const st = l.status === 'closed' ? 'closed' : !l.exists ? 'file missing' : l.otherPc ? 'other PC' : l.newSinceLastImport ? '<b>saved, not loaded</b>' : l.savedSinceExport ? 'loaded' : 'not saved yet';
+      const li = l.lastImport ? U.esc((l.lastImport.by || '') + ' ' + ExcelLink._when(l.lastImport.at) + (l.lastImport.count != null ? ' · ' + l.lastImport.count : '')) : '';
+      h += '<tr><td>' + U.esc(l.fileName) + (l.ownerFile ? ' <span class="xl-badge" title="open in Excel">open</span>' : '') + '</td><td>' + U.esc((l.exportedBy || '') + ' ' + ExcelLink._when(l.exportedAt))
+        + '</td><td>' + (l.rows != null ? l.rows : '') + '</td><td>' + st + (stale(l) ? ' <span class="xl-badge">stale</span>' : '') + '</td><td>' + U.esc(l.savedSinceExport ? ExcelLink._when(l.mtime) : '') + '</td><td>' + li + '</td><td style="white-space:nowrap;">';
+      if (l.status !== 'closed' && l.exists && !l.otherPc) {
+        h += '<button class="small primary" onclick="App.closeModal(); ExcelLink._loadFromPanel(\'' + id + '\',' + (l.ownerFile && l.exportedBy !== me ? 'true' : 'false') + ')">Load back</button>'
+          + '<button class="small" onclick="ExcelLink.openInExcel(\'' + id + '\')">Open</button>'
+          + '<button class="small" onclick="ExcelLink.reveal(\'' + id + '\')">Show in folder</button>'
+          + '<button class="small" onclick="ExcelLink.saveCopy(\'' + id + '\')">Save a copy…</button>';
+      }
+      if (l.status !== 'closed') h += '<button class="small" onclick="ExcelLink._closeFromPanel(\'' + id + '\')">Close link</button>';
+      h += '</td></tr>';
+    });
+    h += '</tbody></table>';
+    if (!shown.length) h += '<div class="empty">No Excel links' + (fl.who === 'mine' ? ' of yours' : '') + '.</div>';
+    h += '</div>';
+    App.openModal('📗 Excel links — ' + tpl.name, h,
+      (counts.stale ? '<button style="margin-right:auto;" onclick="ExcelLink._closeStale()">Close stale links</button>' : '')
+      + '<button onclick="App.closeModal(); ExcelLink.pickAndLoad()">Load from file…</button><button class="primary" onclick="App.closeModal()">Done</button>');
+    const m = document.querySelector('#appModal .modal');
+    if (m) { m.style.maxWidth = '1100px'; m.dataset._xlWidened = '1'; }
+  },
+  _loadFromPanel(exportId, othersOpen) {
+    if (othersOpen) U.toast('Someone has this workbook open in Excel — only their last save is loaded', 'error');
+    ExcelLink.load({ exportId });
+  },
+  async _closeFromPanel(exportId) {
+    await ExcelLink.closeLink(exportId, false);
+    ExcelLink.openLinksPanel();
+  },
+  async _closeStale() {
+    const { tpl } = ExcelLink._ctx();
+    const cfg = ExcelLink.cfg(tpl);
+    const links = await ExcelLink.listLinks(tpl);
+    const now = Date.now();
+    const stale = links.filter(l => l.status === 'open' && now - new Date(l.exportedAt || 0).getTime() > cfg.staleDays * 86400000 && !l.newSinceLastImport);
+    if (!stale.length) { U.toast('No stale links without unloaded saves', 'success'); return; }
+    if (!confirm('Close ' + stale.length + ' stale link(s)? Their workbooks are deleted.')) return;
+    for (const l of stale) { try { await ExcelLink._call('excel_link_close', l.exportId, true); } catch (e) {} }
+    U.toast('Closed ' + stale.length + ' link(s)', 'success');
+    ExcelLink.openLinksPanel();
+  }
+};
+
+/* ================================================================
    MODULE 4 — APP STATE (Updated to Nest Flat Data)
    ================================================================ */
 const AppState = {
@@ -3428,6 +5569,7 @@ const AppState = {
 const App = {
   /* Back to the Automation Hub — flush pending saves first so nothing is lost. */
   async returnToHub() {
+    if (typeof ExcelLink !== 'undefined' && !ExcelLink.confirmLeave()) return;
     try { await AppState.flush(); } catch (e) { console.error('flush before hub failed', e); }
     if (Store._hasApi() && typeof window.pywebview.api.return_to_hub === 'function') {
       window.pywebview.api.return_to_hub();
@@ -3468,6 +5610,8 @@ const App = {
   closeModal() {
     // A Special JV iframe may still be listening; drop its handler with the modal.
     if (typeof SpecialJV !== 'undefined' && SpecialJV._activeHandler) SpecialJV._detach();
+    const xm = document.querySelector('#appModal .modal');
+    if (xm && xm.dataset._xlWidened) { xm.style.maxWidth = ''; delete xm.dataset._xlWidened; }
     document.getElementById('appModal').classList.remove('show');
   },
   exportBackup() {
@@ -3824,6 +5968,73 @@ defaultTemplate() {
     return t.editableColumnConfig[colName] = t.editableColumnConfig[colName] || { editType:'free' };
   },
 
+  /* Template panel "Excel view & Excel link": defaults for 📗 Edit in Excel
+     (tpl.excelLink) and the in-app Excel view (tpl.excelView). */
+  _renderExcelPanel(t) {
+    const L = Object.assign({}, ExcelLink.LINK_DEFAULTS, t.excelLink || {});
+    const V = t.excelView || {};
+    const sel = (group, key, cur, opts) => '<select onchange="RecoTemplate._setXl(\'' + group + '\',\'' + key + '\',this.value)">'
+      + opts.map(o => '<option value="' + U.escAttr(o[0]) + '"' + (String(cur) === String(o[0]) ? ' selected' : '') + '>' + U.esc(o[1]) + '</option>').join('') + '</select>';
+    let h = '<div class="editor-section"><div class="section-head"><strong>Excel view &amp; Excel link</strong></div>';
+    h += '<div class="help">Defaults for <b>📗 Edit in Excel</b> (a real workbook with dropdowns that is loaded back after you save it in Excel) and for the in-app Excel view. Users can still change them when exporting.</div>';
+    h += '<div class="grid-3" style="margin-top:8px;">';
+    h += '<label class="field"><span class="label-text">Rows exported</span>' + sel('excelLink', 'scope', L.scope, [['view', 'Shown in Reco'], ['open', 'Open rows'], ['selected', 'Selected rows'], ['all', 'All rows']]) + '</label>';
+    h += '<label class="field"><span class="label-text">Columns exported</span>' + sel('excelLink', 'columns', L.columns, [['asShown', 'As shown'], ['allTemplate', 'All template columns']]) + '</label>';
+    h += '<label class="field"><span class="label-text">Protection</span>' + sel('excelLink', 'protect', L.protect, [['soft', 'Guarded (sorting works)'], ['locked', 'Locked sheet'], ['none', 'None']]) + '</label>';
+    h += '<label class="field"><span class="label-text">Date format in Excel</span>' + sel('excelLink', 'dateFormat', L.dateFormat, [['dd-mmm-yyyy', '06-Oct-2026'], ['dd/mm/yyyy', '06/10/2026'], ['yyyy-mm-dd', '2026-10-06']]) + '</label>';
+    h += '<label class="field"><span class="label-text">Save workbooks to</span>' + sel('excelLink', 'area', L.area, [['shared', 'Shared folder'], ['local', 'This PC']]) + '</label>';
+    h += '<label class="field"><span class="label-text">Stale after (days)</span><input type="number" min="1" max="365" value="' + U.escAttr(L.staleDays) + '" onchange="RecoTemplate._setXl(\'excelLink\',\'staleDays\',Math.max(1, Math.min(365, parseInt(this.value, 10) || 7)))"></label>';
+    h += '</div>';
+    const ro = (t.columns || []).filter(c => !(t.editableColumns || []).includes(c.name));
+    if (ro.length) {
+      h += '<div class="help" style="margin-top:8px;">Identity columns — a row whose values here change in Excel (sorted or pasted over) is not loaded. Leave empty for automatic (keys, value and document number).</div><div>';
+      ro.forEach(c => {
+        const on = (L.fpCols || []).includes(c.name);
+        h += '<label class="inline"><input type="checkbox"' + (on ? ' checked' : '') + ' onchange="RecoTemplate._toggleFp(\'' + U.jsq(c.name) + '\',this.checked)"> ' + U.esc(c.label || c.name) + '</label>';
+      });
+      h += '</div>';
+    }
+    h += '<div class="grid-3" style="margin-top:10px;">';
+    h += '<label class="field"><span class="label-text">Excel view: who can edit</span>' + sel('excelView', 'editScope', V.editScope || 'template',
+      [['template', 'Editable columns only'], ['allStandard', 'All standard columns'], ['readonly', 'Read-only']]) + '</label>';
+    h += '<label class="field"><span class="label-text">Key columns</span>' + sel('excelView', 'allowPkEdit', V.allowPkEdit ? 'true' : 'false',
+      [['false', 'Read-only (recommended)'], ['true', 'Editable']]) + '</label>';
+    h += '</div>';
+    const meta = (typeof Reco !== 'undefined' && Array.isArray(Reco.XL_OPTION_META)) ? Reco.XL_OPTION_META.filter(m => m.key !== 'editScope' && m.key !== 'allowPkEdit') : [];
+    if (meta.length) {
+      const defs = Reco.XL_DEFAULTS || {};
+      h += '<details style="margin-top:8px;"><summary class="help" style="cursor:pointer;">More Excel view defaults (each user can override them with ⚙ View)</summary><div class="grid-3" style="margin-top:6px;">';
+      meta.forEach(m => {
+        const cur = V[m.key] != null ? V[m.key] : defs[m.key];
+        let ctl;
+        if (m.type === 'bool') ctl = sel('excelView', m.key, cur ? 'true' : 'false', [['true', 'Yes'], ['false', 'No']]);
+        else if (m.type === 'number') ctl = '<input type="number"' + (m.min != null ? ' min="' + m.min + '"' : '') + (m.max != null ? ' max="' + m.max + '"' : '') + ' value="' + U.escAttr(cur == null ? '' : cur) + '" onchange="RecoTemplate._setXl(\'excelView\',\'' + U.jsq(m.key) + '\',this.value===\'\'?null:Number(this.value))">';
+        else ctl = sel('excelView', m.key, cur, (m.values || []).map(v => Array.isArray(v) ? v : [v, v]));
+        h += '<label class="field"><span class="label-text">' + U.esc(m.label || m.key) + '</span>' + ctl + '</label>';
+      });
+      h += '</div></details>';
+    }
+    h += '</div>';
+    return h;
+  },
+  _setXl(group, key, value) {
+    const t = RecoTemplate._editing;
+    if (!t) return;
+    t[group] = Object.assign({}, t[group] || {});
+    if (value === 'true') value = true;
+    else if (value === 'false') value = false;
+    else if (typeof value === 'string' && /^-?\d+$/.test(value) && group === 'excelView') value = Number(value);
+    if (value == null || value === '') delete t[group][key];
+    else t[group][key] = value;
+  },
+  _toggleFp(name, on) {
+    const t = RecoTemplate._editing;
+    if (!t) return;
+    t.excelLink = Object.assign({}, t.excelLink || {});
+    const set = new Set(t.excelLink.fpCols || []);
+    if (on) set.add(name); else set.delete(name);
+    t.excelLink.fpCols = Array.from(set);
+  },
   _renderEditTypeSelect(t, colName) {
     const cfg = RecoTemplate._editCfg(t, colName);
     const safe = U.jsq(colName);
@@ -4272,6 +6483,7 @@ defaultTemplate() {
       h += '</tbody></table>';
     }
     h += '</div>';
+    h += RecoTemplate._renderExcelPanel(t);
 
 
     // Additional columns are edited in step 2 (Keys & Rules).
@@ -7604,7 +9816,10 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '<button class="small" onclick="Reco.recalcOffsets()">Re-run Offset</button>';
     h += '<button class="success small" onclick="Reco.exportData(\'csv\')">CSV</button>';
     h += '<button class="success small" onclick="Reco.exportData(\'xlsx\')">XLSX</button>';
+    h += ExcelLink.buttonHtml(tpl, sess);
+    h += '<button class="small" onclick="ExcelLink.openLinksPanel()" title="Workbooks opened with Edit in Excel: load back, reopen, load from file">📗 Links</button>';
     h += '</div>';
+    h += ExcelLink.bannerHtml(tpl);
 
     // Active slicers display
     h += Reco.renderSlicers(tpl, sess);
@@ -8802,29 +11017,146 @@ renderRecoTable(tpl, sess) {
     U.toast('Offset '+n+' rows (sum '+U.fmtNum(chk.sum)+', within tolerance)','success');
   },
 
+  /* The one write path for cell edits (grid, in-app Excel view, Excel link).
+     edits: [{row, col, value}]
+     opts: { source:'excel'|'xl-view'|'xl-undo'|'xl-redo'|'grid', historyFirst,
+             meta:{_src,_by}, pulled:[{pk,col,value}], scope, allowPkEdit,
+             schema (prebuilt XlSchema), trusted (caller already checked
+             editability, e.g. the grid) }
+     historyFirst: the version rows are written first and nothing in the
+     session changes when that write fails (Excel link). Otherwise the rows
+     change at once and history follows (batched like typing in the grid).
+     Resolves { applied, rows, versions:{pk:'Cn'}, sessionOnly:[], rejected:[], noop }. */
+  async applyEdits(tpl, sess, edits, opts) {
+    opts = opts || {};
+    const res = { applied: 0, rows: 0, versions: {}, sessionOnly: [], rejected: [], noop: 0 };
+    if (!tpl || !sess || !Array.isArray(edits) || !edits.length) return res;
+    const S = opts.schema || XlSchema.build(tpl, sess, { scope: opts.scope || 'template', allowPkEdit: opts.allowPkEdit,
+      includeHidden: true, showExtras: 'all' });
+    const colDefs = new Map(tpl.columns.map(c => [c.name, c]));
+    const extras = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
+    const versioned = [], sessionOnly = [];
+    const fullCache = new Map();
+    const fullOf = row => {
+      if (!fullCache.has(row)) fullCache.set(row, extras.length ? Reco._rowWithExtras(tpl, sess, row) : row);
+      return fullCache.get(row);
+    };
+    for (const e of edits) {
+      if (!e || !e.row || e.col == null) continue;
+      let desc = S.byName.get(e.col);
+      if (!desc && opts.trusted && colDefs.has(e.col)) {
+        desc = { name: e.col, kind: 'text', role: 'tpl', versioned: true, editable: true, writeTo: 'row', editor: 'text' };
+      }
+      if (!desc) { res.rejected.push({ row: e.row, col: e.col, reason: 'unknown' }); continue; }
+      if (!desc.editable && !(opts.trusted && desc.role !== 'status' && desc.role !== 'computed')) {
+        res.rejected.push({ row: e.row, col: e.col, reason: desc.lockReason || 'notEditable' }); continue;
+      }
+      if (desc.role === 'status' || desc.role === 'computed') { res.rejected.push({ row: e.row, col: e.col, reason: desc.role }); continue; }
+      const value = e.value == null ? '' : e.value;
+      const cur = XlSchema.currentValue(desc, e.row, fullOf(e.row), sess);
+      if (String(value) === String(cur)) { res.noop++; continue; }
+      if (!opts.trusted && XlSchema.canon(desc, value, 'reco').c === XlSchema.canon(desc, cur, 'reco').c) { res.noop++; continue; }
+      const pk = e.row._pk || Reco.getRowPK(tpl, e.row);
+      const isVersioned = desc.writeTo === 'row' && (desc.role === 'tpl' || (desc.role === 'toAccount' && colDefs.has(desc.name)));
+      if (isVersioned && pk) versioned.push({ row: e.row, col: desc.name, value, pk });
+      else sessionOnly.push({ row: e.row, col: desc.name, value, desc,
+        reason: desc.writeTo === 'tag' ? 'tag' : (isVersioned ? 'noPk' : 'sessionOnly') });
+    }
+
+    const setCell = (row, col, value) => {
+      row[col] = value;
+      delete row['_corrected_' + col];
+      const rk = row._pk || row._id;
+      if (sess.cellFormulas && sess.cellFormulas[rk]) delete sess.cellFormulas[rk][col];
+    };
+    const touched = new Set();
+
+    if (versioned.length) {
+      const byPk = new Map();
+      versioned.forEach(v => {
+        const en = byPk.get(v.pk) || { rows: new Set(), changes: {} };
+        en.rows.add(v.row);
+        en.changes[v.col] = v.value;
+        byPk.set(v.pk, en);
+      });
+      if (opts.historyFirst) {
+        const pulled = {};
+        (opts.pulled || []).forEach(p => {
+          if (!p || !p.pk || !byPk.has(p.pk) || !colDefs.has(p.col)) return;
+          (pulled[p.pk] || (pulled[p.pk] = {}))[p.col] = p.value;
+        });
+        const pkRows = [];
+        byPk.forEach((en, pk) => {
+          const live = en.rows.values().next().value;
+          pkRows.push({ pk, row: Object.assign({}, live, pulled[pk] || {}, en.changes) });
+        });
+        // Throws when the history write fails: nothing has been changed yet.
+        const versions = await Versioning.appendChangesBatch(tpl, pkRows, opts.meta);
+        // Every live row with the key takes the values (history keeps one row per key).
+        const livePk = new Map();
+        sess.data.forEach(r => {
+          const k = r._pk || Reco.getRowPK(tpl, r);
+          if (k && byPk.has(k)) { if (!livePk.has(k)) livePk.set(k, []); livePk.get(k).push(r); }
+        });
+        byPk.forEach((en, pk) => {
+          const rows = livePk.get(pk) || Array.from(en.rows);
+          rows.forEach(r => {
+            Object.keys(pulled[pk] || {}).forEach(c => setCell(r, c, pulled[pk][c]));
+            Object.keys(en.changes).forEach(c => setCell(r, c, en.changes[c]));
+            if (versions[pk]) r._ver = versions[pk];
+            touched.add(r);
+          });
+          res.applied += Object.keys(en.changes).length;
+        });
+        res.versions = versions;
+      } else {
+        byPk.forEach((en, pk) => {
+          en.rows.forEach(r => {
+            Object.keys(en.changes).forEach(c => setCell(r, c, en.changes[c]));
+            touched.add(r);
+          });
+          res.applied += Object.keys(en.changes).length;
+          const row = en.rows.values().next().value;
+          Versioning.queueChange(tpl, pk, row).then(v => {
+            if (v) en.rows.forEach(r => { r._ver = v; });
+          });
+        });
+      }
+    }
+
+    sessionOnly.forEach(s => {
+      if (s.desc.writeTo === 'tag') {
+        sess.manualTags = sess.manualTags || {};
+        const k = s.row._id + '||' + s.col;
+        if (s.value === '' || s.value == null) delete sess.manualTags[k];
+        else sess.manualTags[k] = s.value;
+        // A value on the row would hide the tag (see _extraOwnValue).
+        delete s.row[s.col];
+      } else setCell(s.row, s.col, s.value);
+      touched.add(s.row);
+      res.applied++;
+      res.sessionOnly.push({ row: s.row, col: s.col, reason: s.reason });
+    });
+    res.rows = touched.size;
+    if (res.applied) AppState.save();
+    return res;
+  },
+
   editCell(rowIdx, col, val) {
     const id = AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
-    if (!sess || !sess.data[rowIdx]) return;
-    const row = sess.data[rowIdx];
-    row[col] = val;
-    // Phase 2: overwriting an editable cell drops any formula stored on it
-    if (sess.cellFormulas) {
-      const rk = row._pk || row._id;
-      if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][col];
-    }
-
-    // record change in versioned file (batched with other quick edits)
-    const pk = row._pk || Reco.getRowPK(tpl, row);
-    if (pk) Versioning.queueChange(tpl, pk, row).then(v => { if (v) row._ver = v; });
-    AppState.save();
+    if (!tpl || !sess || !sess.data[rowIdx]) return;
+    Reco.applyEdits(tpl, sess, [{ row: sess.data[rowIdx], col, value: val }], { source: 'grid', trusted: true });
   },
 
   setTag(rowId, tagName, val) {
     const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
-    if (!sess) return;
+    if (!tpl || !sess) return;
+    const row = sess.data.find(r => r._id === rowId);
+    if (row) { Reco.applyEdits(tpl, sess, [{ row, col: tagName, value: val }], { source: 'grid', trusted: true }); return; }
     sess.manualTags = sess.manualTags || {};
     sess.manualTags[rowId + '||' + tagName] = val;
     AppState.save();
@@ -10223,6 +12555,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
            h += '<p>'+comCount+' comment(s) across rows and groups.</p></div>';
 
 
+
+    h += '<div class="card" onclick="ExcelLink.openLinksPanel()">';
+    h += '<h3>📗 Excel Links</h3><p>Workbooks opened with "Edit in Excel": load back, reopen, load from a file, close or clean up.</p></div>';
 
     h += '<div class="card" onclick="Reco.openVersionHistoryModal()">';
     h += '<h3>Version History</h3><p>Upload / edit files in <code>reco_data/'+U.esc(Versioning.folderFor(tpl))+'/</code>. Compact long edit histories.</p></div>';
