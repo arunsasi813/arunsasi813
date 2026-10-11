@@ -7212,31 +7212,40 @@ _xlInit(tpl, sess) {
   const o = Reco.xlOptions(tpl);
   if (!Reco._xlHasFeature('sortMode')) o.sortMode = 'off';
   if (!Reco._xlHasFeature('search')) o.search = false;
-  const S = XlSchema.build(tpl, sess, { scope: o.editScope, allowPkEdit: o.allowPkEdit, showStatus: o.showStatus, showExtras: o.showExtras });
-  const cols = Reco._xlOrderCols(S.cols, sess);
-  let rows = Reco.applyTableFiltersSort(tpl, sess);
-  if (rows.length > o.maxRows) {
-    U.toast('Showing first ' + o.maxRows + ' rows — filter in Reco to narrow', 'warn');
-    rows = rows.slice(0, o.maxRows);
-  }
-  Reco._xlById = new Map(rows.map(r => [r._id, r]));
-  Reco._xlFullCache = new Map();
-  Reco._xlSelIds = [];
-  const C = Reco._xlCtx = {
-    tplId: tpl.id, tpl, sess, o, S, cols, ws: null, ridX: cols.length,
-    colStyle: new Map(), pending: new Map(), rejects: new Map(), skipped: 0, noticeTimer: null,
-    formulasOn: !!(o.formulas && typeof formula === 'function')
-  };
-  if (!rows.length || !cols.length) {
-    host.innerHTML = '<div class="xl-empty">' + (rows.length ? 'No columns to show.' : 'No rows match the current filters.') + '</div>';
+  let S, cols, rows, C, data, columns;
+  try {
+    S = XlSchema.build(tpl, sess, { scope: o.editScope, allowPkEdit: o.allowPkEdit, showStatus: o.showStatus, showExtras: o.showExtras });
+    cols = Reco._xlOrderCols(S.cols, sess);
+    rows = Reco.applyTableFiltersSort(tpl, sess);
+    if (rows.length > o.maxRows) {
+      U.toast('Showing first ' + o.maxRows + ' rows — filter in Reco to narrow', 'warn');
+      rows = rows.slice(0, o.maxRows);
+    }
+    Reco._xlById = new Map(rows.map(r => [r._id, r]));
+    Reco._xlFullCache = new Map();
+    Reco._xlSelIds = [];
+    C = Reco._xlCtx = {
+      tplId: tpl.id, tpl, sess, o, S, cols, ws: null, ridX: cols.length,
+      colStyle: new Map(), pending: new Map(), rejects: new Map(), skipped: 0, noticeTimer: null,
+      formulasOn: !!(o.formulas && typeof formula === 'function')
+    };
+    if (!rows.length || !cols.length) {
+      Reco._xlCtx = null;
+      host.innerHTML = '<div class="xl-empty">' + (rows.length ? 'No columns to show.' : 'No rows match the current filters.') + '</div>';
+      return;
+    }
+    data = rows.map(r => {
+      const full = Reco._xlFull(r);
+      return cols.map(d => Reco._xlSheetValue(d, r, full, sess)).concat([r._id]);
+    });
+    columns = cols.map((d, i) => Reco._xlJssColumn(d, o, sess, data, i))
+      .concat([{ type: 'hidden', name: '_rid', title: '_rid', readOnly: true }]);
+  } catch (e) {
+    console.error('Excel view: could not prepare the data', e);
+    Reco._xlCtx = null;
+    host.innerHTML = '<div class="xl-empty">The Excel view could not be prepared: ' + U.esc((e && e.message) || String(e)) + '</div>';
     return;
   }
-  const data = rows.map(r => {
-    const full = Reco._xlFull(r);
-    return cols.map(d => Reco._xlSheetValue(d, r, full, sess)).concat([r._id]);
-  });
-  const columns = cols.map((d, i) => Reco._xlJssColumn(d, o, sess, data, i))
-    .concat([{ type: 'hidden', name: '_rid', title: '_rid', readOnly: true }]);
   const paginate = o.rendering === 'paginate';
   const cfg = {
     worksheets: [{
@@ -7461,18 +7470,53 @@ _xlStatusHtml(row, sess, tpl) {
   const off = sess.offsets && sess.offsets[row._id];
   let h = off ? '<span class="badge offset">Offset' + (row._manualOffset ? ' ✋' : '') + '</span>' : '<span class="badge open">Open</span>';
   if (row._ssAdded) h += ' <span class="badge ss-added" title="Added row">✚</span>';
+  if (row._ssPersistent) h += ' <span class="badge ss-persist" title="Persistent (in versioned CSV)">💾</span>';
+  if (row._ssSingleUse) h += ' <span class="badge ss-single" title="Single-use — removed after next entry">⏱</span>';
   const pk = Reco.getRowPK(tpl, row);
   if (pk) {
-    if (tpl.groupsEnabled && typeof Groups !== 'undefined') {
-      const g = Groups.groupsForPk(tpl.id, pk);
-      if (g.length) h += ' <span class="badge general" title="In groups: ' + U.escAttr(g.map(x => x.name).join(' · ')) + '">📁 ' + g.length + '</span>';
-    }
-    const a = typeof Attachments !== 'undefined' ? Attachments.forPk(tpl.id, pk).length : 0;
-    const c = typeof Comments !== 'undefined' ? Comments.forPk(tpl.id, pk).length : 0;
+    const ix = Reco._xlBadgeIndex(tpl);
+    const g = ix.groupsOf(pk);
+    if (tpl.groupsEnabled && g.length) h += ' <span class="badge general" title="In groups: ' + U.escAttr(g.map(x => x.name).join(' · ')) + '">📁 ' + g.length + '</span>';
+    const a = ix.attachments(pk), c = ix.comments(pk);
     if (a) h += ' <span class="badge fc" title="' + a + ' attachment(s)">📎 ' + a + '</span>';
     if (c) h += ' <span class="badge specific" title="' + c + ' comment(s)">💬 ' + c + '</span>';
   }
   return h;
+},
+/* Groups / attachments / comments per key, built once per view (the
+   module lookups scan and sort their whole lists for every row). Same
+   counting as Attachments.forPk / Comments.forPk: direct links plus links
+   through a group the key is in, each item once. */
+_xlBadgeIndex(tpl) {
+  const C = Reco._xlCtx;
+  if (C && C.badgeIx && C.badgeIx.tplId === tpl.id) return C.badgeIx;
+  const groupsByPk = new Map();
+  const groups = typeof Groups !== 'undefined' ? (Groups.list(tpl.id) || []) : [];
+  groups.forEach(g => (g.members || []).forEach(pk => {
+    if (!groupsByPk.has(pk)) groupsByPk.set(pk, []);
+    if (groupsByPk.get(pk).indexOf(g) === -1) groupsByPk.get(pk).push(g);
+  }));
+  const groupsOf = pk => groupsByPk.get(pk) || [];
+  const counter = list => {
+    const byPk = new Map(), byGroup = new Map();
+    const add = (m, k, it) => { if (!m.has(k)) m.set(k, []); m.get(k).push(it); };
+    (list || []).forEach(it => {
+      (it.linkedPks || []).forEach(pk => add(byPk, pk, it));
+      (it.linkedGroups || []).forEach(gid => add(byGroup, gid, it));
+    });
+    return pk => {
+      const seen = new Set(byPk.get(pk) || []);
+      groupsOf(pk).forEach(g => (byGroup.get(g.id) || []).forEach(it => seen.add(it)));
+      return seen.size;
+    };
+  };
+  const ix = {
+    tplId: tpl.id, groupsOf,
+    attachments: counter(typeof Attachments !== 'undefined' ? Attachments.list(tpl.id) : []),
+    comments: counter(typeof Comments !== 'undefined' ? Comments.list(tpl.id) : [])
+  };
+  if (C) C.badgeIx = ix;
+  return ix;
 },
 /* Column render: the cell text plus error / corrected / offset classes,
    status badges and the sess.cellFormats styles. Runs after jss creates or
@@ -7670,6 +7714,9 @@ _xlOnAfterChanges(ws, records) {
   C.pending.clear();
   if (skipped && records.length > 1) C.skipped += skipped;
   Reco._xlFlushNotices();
+  // A paste of cells copied in the sheet also copies their inline styles;
+  // paint the touched cells from sess.cellFormats again.
+  Reco._xlRepaintCells(records.filter(c => c && c.x != null && c.y != null).map(c => ({ x: parseInt(c.x, 10), y: parseInt(c.y, 10) })));
   const items = Array.from(byKey.values());
   if (!items.length) { Reco._xlUpdateUndoButtons(); return; }
   // Exact raw values for undo/redo (the sheet holds display-normalised ones).
@@ -7769,10 +7816,23 @@ _xlOnHistory(ws, rec, redo) {
   }
   Reco._xlUpdateUndoButtons();
 },
-_xlOnBeforePaste() {
+/* data: rows of [{value}] cells. jss (CE 5.0.4) cannot add columns here and
+   keeps writing into the last visible column when a block is wider than
+   what is left, so the block is cut to the visible columns from x on. */
+_xlOnBeforePaste(ws, data, x) {
   const C = Reco._xlCtx;
   if (C && C.o.pasteMode === 'off') { U.toast('Paste is turned off for this view (⚙ View)', 'warn'); return false; }
-  return undefined;
+  if (!C || C.ws !== ws || !Array.isArray(data) || !data.length) return undefined;
+  const x0 = parseInt(x, 10);
+  if (isNaN(x0)) return undefined;
+  let room = 0;
+  for (let k = x0; k < ws.options.columns.length; k++) {
+    const c = ws.options.columns[k];
+    if (c && c.type !== 'hidden' && !(ws.headers[k] && ws.headers[k].style.display === 'none')) room++;
+  }
+  const width = Math.max(...data.map(r => (Array.isArray(r) ? r.length : 0)));
+  if (!room || width <= room) return undefined;
+  return data.map(r => r.slice(0, room).map(c => (c && typeof c === 'object' && 'value' in c) ? c.value : c));
 },
 /* Clean values: ISO dates, plain numbers, raw dropdown values; no hidden
    columns; an optional header line. */
@@ -8191,6 +8251,11 @@ _xlWireKeys() {
       e.preventDefault();
       e.stopPropagation();
       Promise.resolve(AppState.flush()).then(() => U.toast('Saved — every change is saved as you go', 'success'));
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F') && ownSheet && !C.ws.edition
+      && !document.querySelector('#appModal.show')) {
+      e.preventDefault();
+      e.stopPropagation();
+      Reco._xlOpenSearch();
     } else if (e.key === 'Escape' && C.o.fullscreen && !C.ws.edition && !document.querySelector('#appModal.show')) {
       Reco._xlSetPref('fullscreen', false);
     }
@@ -8373,694 +8438,6 @@ _xlDestroy() {
   Reco._xlFullCache = null;
   Reco._xlSelIds = [];
   Reco._xlSortCtx = null;
-},
-
-/* ---- (old Excel view code below is removed in the following edits) ---- */
-_xlOldToolbarHtml() {
-  let h = '';
-  h += '<button class="xl-btn" onclick="Reco._xlAct(\'undo\')"  title="Undo (Ctrl+Z)">↶</button>';
-  h += '<button class="xl-btn" onclick="Reco._xlAct(\'redo\')"  title="Redo (Ctrl+Y)">↷</button>';
-  h += '<span class="xl-sep"></span>';
-  h += '<button class="xl-btn" onclick="Reco._xlStyle(\'font-weight\',\'bold\')"  title="Bold (Ctrl+B)"><b>B</b></button>';
-  h += '<button class="xl-btn" onclick="Reco._xlStyle(\'font-style\',\'italic\')" title="Italic (Ctrl+I)"><i>I</i></button>';
-  h += '<span class="xl-sep"></span>';
-  h += '<button class="xl-btn" onclick="Reco._xlStyle(\'text-align\',\'left\')"   title="Align left">⬅</button>';
-  h += '<button class="xl-btn" onclick="Reco._xlStyle(\'text-align\',\'center\')" title="Align center">↔</button>';
-  h += '<button class="xl-btn" onclick="Reco._xlStyle(\'text-align\',\'right\')"  title="Align right">➡</button>';
-  h += '<span class="xl-sep"></span>';
-  h += '<button class="xl-btn" onclick="Reco._xlOpenPalette(event,\'background-color\')" title="Fill color">🎨</button>';
-  h += '<button class="xl-btn" onclick="Reco._xlOpenPalette(event,\'color\')"            title="Text color"><b>A</b></button>';
-  h += '<span class="xl-sep"></span>';
-  h += '<select class="xl-sel" onchange="Reco._xlNumFmt(this.value); this.selectedIndex=0;">';
-  h += '<option value="">Number format…</option>';
-  ['general','number','number0','currency','accounting','percent','date_short','date_long','month_year'].forEach(k => {
-    h += '<option value="'+k+'">'+({general:'General',number:'1,234.56',number0:'1,235',currency:'AED 1,234.56',accounting:'(1,234.56)',percent:'12.34%',date_short:'DD/MM/YY',date_long:'DD-MMM-YYYY',month_year:'MMM-YY'})[k]+'</option>';
-  });
-  h += '</select>';
-  h += '<span class="xl-sep"></span>';
-  h += '<button class="xl-btn" onclick="Reco._xlOpenFxWizard()" title="Insert function (SUMIFS, COUNTIFS, etc.)">fx</button>';
-  h += '<button class="xl-btn" onclick="Reco._xlOpenSearch()"   title="Find &amp; replace (Ctrl+F)">🔍</button>';
-  h += '<button class="xl-btn" onclick="Reco._xlClearFormat()"  title="Clear formatting on selection">⌫ fmt</button>';
-  h += '<span class="xl-sep"></span>';
-  h += '<button class="xl-btn" onclick="Reco._xlExportXlsx()" title="Download as .xlsx">⬇ xlsx</button>';
-  return '<div class="excel-view-toolbar">' + h + '</div>';
-},
-
-_xlGetSelectedRange() {
-  // Returns { minX, maxX, minY, maxY } or null
-  const ws = Reco._xlWorksheet; if (!ws) return null;
-  const sel = ws.getSelected && ws.getSelected();
-  if (!sel || !sel.length) return null;
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  sel.forEach(s => {
-    const x = s.x != null ? s.x : (Array.isArray(s) ? s[0] : 0);
-    const y = s.y != null ? s.y : (Array.isArray(s) ? s[1] : 0);
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (y < minY) minY = y; if (y > maxY) maxY = y;
-  });
-  return isFinite(minX) ? { minX, maxX, minY, maxY } : null;
-},
-
-_xlAct(name) {
-  const ws = Reco._xlWorksheet; if (!ws) return;
-  try {
-    if (name === 'undo' && ws.undo) ws.undo();
-    else if (name === 'redo' && ws.redo) ws.redo();
-  } catch(e) { console.error('xl act', e); }
-},
-
-_xlStyle(prop, value) {
-  const ws = Reco._xlWorksheet; if (!ws) return;
-  const r = Reco._xlGetSelectedRange(); if (!r) { U.toast('Select cells first', 'error'); return; }
-  for (let y = r.minY; y <= r.maxY; y++) {
-    for (let x = r.minX; x <= r.maxX; x++) {
-      try {
-        const cur = ws.getStyle ? (ws.getStyle([x, y]) || '') : '';
-        // Toggle if already applied with same value
-        const re = new RegExp(prop + '\\s*:\\s*' + value, 'i');
-        if (re.test(cur)) ws.setStyle([x, y], prop + ': ; ');
-        else ws.setStyle([x, y], prop + ': ' + value + ';');
-      } catch(e) {}
-    }
-  }
-},
-
-_xlClearFormat() {
-  const ws = Reco._xlWorksheet; if (!ws) return;
-  const r = Reco._xlGetSelectedRange(); if (!r) { U.toast('Select cells first', 'error'); return; }
-  for (let y = r.minY; y <= r.maxY; y++) {
-    for (let x = r.minX; x <= r.maxX; x++) {
-      try { ws.resetStyle && ws.resetStyle([x, y]); } catch(e) {}
-    }
-  }
-  U.toast('Cleared formatting', 'success');
-},
-
-_xlOpenPalette(e, prop) {
-  document.querySelectorAll('.xl-palette').forEach(p => p.remove());
-  const fillColors = ['', '#fee2e2','#fed7aa','#fef3c7','#d1fae5','#cffafe','#dbeafe','#ede9fe','#fce7f3','#f3f4f6'];
-  const textColors = ['', '#b91c1c','#c2410c','#a16207','#15803d','#0e7490','#1d4ed8','#6d28d9','#be185d','#000000'];
-  const colors = prop === 'color' ? textColors : fillColors;
-  const palette = document.createElement('div');
-  palette.className = 'xl-palette';
-  colors.forEach(c => {
-    const sw = document.createElement('div');
-    sw.className = 'sw' + (c ? '' : ' none');
-    sw.style.background = c || 'transparent';
-    sw.title = c || (prop === 'color' ? 'Default text' : 'No fill');
-    sw.onclick = () => { Reco._xlStyle(prop, c); palette.remove(); };
-    palette.appendChild(sw);
-  });
-  document.body.appendChild(palette);
-  const r = e.target.getBoundingClientRect();
-  palette.style.left = Math.min(r.left, window.innerWidth - 190) + 'px';
-  palette.style.top  = (r.bottom + 6) + 'px';
-  setTimeout(() => {
-    const close = ev => { if (!palette.contains(ev.target) && ev.target !== e.target) { palette.remove(); document.removeEventListener('click', close); } };
-    document.addEventListener('click', close);
-  }, 0);
-},
-
-_xlNumFmt(fmt) {
-  // Apply the same number format the Phase 4 toolbar offered, but write it to JSS as a cell style + formatted display value.
-  const ws = Reco._xlWorksheet; if (!ws || !fmt) return;
-  const r = Reco._xlGetSelectedRange(); if (!r) { U.toast('Select cells first', 'error'); return; }
-  for (let y = r.minY; y <= r.maxY; y++) {
-    for (let x = r.minX; x <= r.maxX; x++) {
-      const row = Reco._xlRows[y]; if (!row) continue;
-      const col = Reco._xlCols[x]; if (!col || col === '_status_') continue;
-      // Get current raw value, apply format, set back as displayed value via setValue
-      const raw = row[col];
-      const formatted = (Reco._ssApplyNumFmt ? Reco._ssApplyNumFmt(raw, fmt) : raw);
-      // Display only: the stored value stays numeric (no edit / version row).
-      Reco._xlSuppressChange = true;
-      try { ws.setValue([x, y], formatted, true); } catch(e) {}
-      finally { Reco._xlSuppressChange = false; }
-      // Cell-level alignment hint based on type
-      if (['number','number0','currency','accounting','percent'].indexOf(fmt) !== -1) {
-        try { ws.setStyle([x, y], 'text-align: right; font-variant-numeric: tabular-nums;'); } catch(e) {}
-      }
-    }
-  }
-  U.toast('Applied ' + fmt + ' format', 'success');
-},
-
-_xlOpenSearch() {
-  const ws = Reco._xlWorksheet; if (!ws) return;
-  if (ws.openSearch) { try { ws.openSearch(); return; } catch(e) {} }
-  // Fallback: prompt for a search term, find first match
-  const q = prompt('Find:'); if (!q) return;
-  const needle = q.toLowerCase();
-  for (let y = 0; y < (Reco._xlRows || []).length; y++) {
-    const row = Reco._xlRows[y];
-    for (let x = 0; x < Reco._xlCols.length; x++) {
-      const v = row[Reco._xlCols[x]];
-      if (v != null && String(v).toLowerCase().indexOf(needle) !== -1) {
-        try { ws.updateSelectionFromCoords ? ws.updateSelectionFromCoords(x, y, x, y) : ws.selectCell && ws.selectCell([x, y]); return; } catch(e) {}
-      }
-    }
-  }
-  U.toast('No match for "' + q + '"', 'error');
-},
-
-_xlExportXlsx() {
-  const ws = Reco._xlWorksheet; if (!ws) return;
-  try {
-    if (ws.download) { ws.download(true); return; }
-    if (Reco._xlInstance && Reco._xlInstance.download) { Reco._xlInstance.download(true); return; }
-  } catch(e) { console.error(e); }
-  U.toast('Download not supported by this JSS version', 'error');
-},
-
-/* ----- Function wizard ----- */
-
-_xlOpenFxWizard() {
-  const opts = [
-    ['', 'Choose a function…'],
-    ['sumifs',    'SUMIFS — sum a column where conditions match'],
-    ['countifs',  'COUNTIFS — count rows where conditions match'],
-    ['duplicate', 'DUPLICATE — flag duplicate values'],
-    ['textbefore','Extract text BEFORE a delimiter'],
-    ['textafter', 'Extract text AFTER a delimiter'],
-    ['textbetween','Extract text BETWEEN two delimiters']
-  ];
-  let h = '<label class="field"><span class="label-text">Function</span>';
-  h += '<select id="fxType" onchange="Reco._xlRenderFxFields(this.value)">';
-  opts.forEach(o => { h += '<option value="'+o[0]+'">'+o[1]+'</option>'; });
-  h += '</select></label>';
-  h += '<div id="fxFields"></div>';
-  h += '<div class="help">The formula will be inserted at the active cell. Use the column letter to pick which column to operate on (column letters are shown in the JSS header, e.g. A, B, C…).</div>';
-  App.openModal('Function Wizard',
-    h,
-    '<button onclick="App.closeModal()">Cancel</button>' +
-    '<button class="primary" onclick="Reco._xlApplyFxWizard()">Insert</button>');
-},
-
-_xlRenderFxFields(type) {
-  const wrap = document.getElementById('fxFields');
-  if (!wrap) return;
-  const colLetters = (Reco._xlCols || []).map((_, i) => Reco._xlColLetter(i));
-  const colMenu = (id, label) => {
-    let s = '<label class="field"><span class="label-text">'+label+'</span><select id="'+id+'">';
-    (Reco._xlCols || []).forEach((name, i) => {
-      if (name === '_status_') return;
-      s += '<option value="'+colLetters[i]+'">'+colLetters[i]+' — '+U.esc(name)+'</option>';
-    });
-    s += '</select></label>';
-    return s;
-  };
-  let h = '';
-  if (type === 'sumifs') {
-    h += colMenu('fxSumCol', 'Column to sum');
-    h += '<div class="text-muted" style="margin: 8px 0 4px;">Conditions (up to 3 — leave blank to skip):</div>';
-    for (let i = 1; i <= 3; i++) {
-      h += '<div class="row" style="display:flex; gap:6px;">';
-      h += colMenu('fxCondCol'+i, 'Condition column ' + i);
-      h += '<label class="field" style="flex:1"><span class="label-text">Criteria</span><input id="fxCrit'+i+'" placeholder="e.g. Open, &gt;100, A2" /></label>';
-      h += '</div>';
-    }
-  } else if (type === 'countifs') {
-    h += '<div class="text-muted" style="margin: 4px 0;">Count rows where these match:</div>';
-    for (let i = 1; i <= 3; i++) {
-      h += '<div class="row" style="display:flex; gap:6px;">';
-      h += colMenu('fxCondCol'+i, 'Column ' + i);
-      h += '<label class="field" style="flex:1"><span class="label-text">Criteria</span><input id="fxCrit'+i+'" placeholder="e.g. Open" /></label>';
-      h += '</div>';
-    }
-  } else if (type === 'duplicate') {
-    h += colMenu('fxDupCol', 'Column to check');
-    h += '<div class="text-muted">Inserts a formula that shows TRUE for rows where the value appears more than once in the selected column.</div>';
-  } else if (type === 'textbefore' || type === 'textafter') {
-    h += colMenu('fxTxtCol', 'Source column');
-    h += '<label class="field"><span class="label-text">Delimiter (single char or substring)</span><input id="fxDelim" value="-" /></label>';
-    h += '<label class="inline"><input type="checkbox" id="fxSkipBlanks"> Skip empty matches</label>';
-  } else if (type === 'textbetween') {
-    h += colMenu('fxTxtCol', 'Source column');
-    h += '<label class="field"><span class="label-text">Start delimiter</span><input id="fxDelimStart" value="(" /></label>';
-    h += '<label class="field"><span class="label-text">End delimiter</span><input id="fxDelimEnd"   value=")" /></label>';
-  }
-  wrap.innerHTML = h;
-},
-
-_xlApplyFxWizard() {
-  const type = (document.getElementById('fxType') || {}).value || '';
-  if (!type) { U.toast('Pick a function', 'error'); return; }
-  const ws = Reco._xlWorksheet; if (!ws) return;
-
-  // Active cell — use first cell of current selection, or 0,0 fallback
-  const r = Reco._xlGetSelectedRange();
-  const tx = r ? r.minX : 1;
-  const ty = r ? r.minY : 0;
-  const rowNum = ty + 1;       // JSS is 0-indexed; A1 references are 1-indexed
-  const ROWS = (Reco._xlRows || []).length;
-
-  const grab = id => (document.getElementById(id) || {}).value || '';
-  let formula = '';
-
-  if (type === 'sumifs') {
-    const sum = grab('fxSumCol'); if (!sum) { U.toast('Pick a sum column', 'error'); return; }
-    const parts = [sum + '2:' + sum + (ROWS + 1)];
-    for (let i = 1; i <= 3; i++) {
-      const c = grab('fxCondCol' + i), v = grab('fxCrit' + i).trim();
-      if (c && v) parts.push(c + '2:' + c + (ROWS + 1), '"' + v.replace(/"/g, '""') + '"');
-    }
-    formula = '=SUMIFS(' + parts.join(',') + ')';
-  } else if (type === 'countifs') {
-    const parts = [];
-    for (let i = 1; i <= 3; i++) {
-      const c = grab('fxCondCol' + i), v = grab('fxCrit' + i).trim();
-      if (c && v) parts.push(c + '2:' + c + (ROWS + 1), '"' + v.replace(/"/g, '""') + '"');
-    }
-    if (!parts.length) { U.toast('Add at least one condition', 'error'); return; }
-    formula = '=COUNTIFS(' + parts.join(',') + ')';
-  } else if (type === 'duplicate') {
-    const c = grab('fxDupCol'); if (!c) { U.toast('Pick a column', 'error'); return; }
-    formula = '=COUNTIF(' + c + '2:' + c + (ROWS + 1) + ',' + c + rowNum + ')>1';
-  } else if (type === 'textbefore') {
-    const c = grab('fxTxtCol'), d = grab('fxDelim');
-    if (!c || !d) { U.toast('Pick a column and delimiter', 'error'); return; }
-    formula = '=IFERROR(LEFT(' + c + rowNum + ',FIND("' + d + '",' + c + rowNum + ')-1),' + c + rowNum + ')';
-  } else if (type === 'textafter') {
-    const c = grab('fxTxtCol'), d = grab('fxDelim');
-    if (!c || !d) { U.toast('Pick a column and delimiter', 'error'); return; }
-    formula = '=IFERROR(MID(' + c + rowNum + ',FIND("' + d + '",' + c + rowNum + ')+' + d.length + ',999),"")';
-  } else if (type === 'textbetween') {
-    const c = grab('fxTxtCol'), ds = grab('fxDelimStart'), de = grab('fxDelimEnd');
-    if (!c || !ds || !de) { U.toast('Fill all fields', 'error'); return; }
-    formula = '=IFERROR(MID(' + c + rowNum + ',FIND("' + ds + '",' + c + rowNum + ')+' + ds.length + ',FIND("' + de + '",' + c + rowNum + ',FIND("' + ds + '",' + c + rowNum + '))-FIND("' + ds + '",' + c + rowNum + ')-' + ds.length + '),"")';
-  }
-
-  try { ws.setValue([tx, ty], formula, true); } catch(e) { console.error(e); }
-  App.closeModal();
-  U.toast('Inserted formula at ' + Reco._xlColLetter(tx) + rowNum, 'success');
-},
-
-_xlColLetter(idx) {
-  // 0 → A, 1 → B, …, 25 → Z, 26 → AA, …
-  let s = '', n = idx;
-  do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
-  return s;
-},
-
-
-/* ============== EXCEL VIEW (JSPREADSHEET v9+) ============== */
-
-_xlInstance: null,
-_xlWorksheet: null,
-_xlRows: null,     // filtered rows in order, indexed by JSS y
-_xlCols: null,     // column names in order, indexed by JSS x
-
-renderExcelView(tpl, sess) {
-  let h = '<div class="excel-view-wrap">';
-  h += Reco._xlToolbarHtml(tpl);
-  h += '<div class="excel-view-host" id="excelViewHost"></div>';
-  h += '<div class="sel-sum-bar" id="xlSelSumBar"></div>';
-  h += '</div>';
-  setTimeout(() => Reco._xlInit(tpl, sess), 30);
-  return h;
-},
-
-_xlBuildColumns(tpl, sess, allCols) {
-  SpecialJV.resetOptions();
-  return allCols.map(name => {
-    // Status pseudo-column (first column injected by _xlInit)
-    if (name === '_status_') {
-      return { type: 'text', title: 'Status', width: 80, readOnly: true };
-    }
-
-    const std = (tpl.columns || []).find(c => c.name === name);
-    const editCfg = ((tpl.editableColumnConfig || {})[name]) || null;
-    const isEditable = (tpl.editableColumns || []).indexOf(name) !== -1;
-
-    // AEG "To Account" — dropdown with master refs + JV refs flattened
-    const aeg = (tpl.aegIntegration && tpl.aegIntegration.enabled)
-      ? AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId) : null;
-    const isToAcct = aeg && aeg.toAccount &&
-      (aeg.toAccount.mode === 'input' || aeg.toAccount.mode === 'inputOrSelect') &&
-      aeg.toAccount.inputColumn === name;
-
-    let type = 'text';
-    let extra = {};
-    if (isToAcct) {
-      const opts = SpecialJV.buildToAccountOptions();
-      type = 'dropdown';
-      extra.source = opts.map(o => ({ id: o.value, name: o.label }));
-      extra.autocomplete = true;
-    } else if (isEditable && editCfg && (editCfg.editType === 'dropdown' || editCfg.editType === 'datalist')) {
-      let opts = [];
-      if (editCfg.optionsSource === 'master' && editCfg.masterCfg && editCfg.masterCfg.source && editCfg.masterCfg.field) {
-        opts = Masters.distinctValues(editCfg.masterCfg.source, tpl.id, editCfg.masterCfg.field);
-      } else {
-        opts = (editCfg.manualOptions || []).slice();
-      }
-      type = 'dropdown';
-      extra.source = opts;
-      extra.autocomplete = editCfg.editType === 'datalist';
-    } else if (std && std.isDate) {
-      type = 'calendar';
-      extra.options = { format: 'DD/MM/YYYY' };
-    } else if (std && std.isValue) {
-      type = 'numeric';
-      extra.mask = '#,##0.00';
-    }
-
-    return Object.assign({
-      type,
-      title: name,
-      width: sess.columnWidths[name] || 130,
-      readOnly: !isEditable && !isToAcct && (std == null || !!std._readOnly)  // additional cols are computed → readOnly
-    }, extra);
-  });
-},
-
-_xlInit(tpl, sess) {
-  const host = document.getElementById('excelViewHost');
-  if (!host) return;
-  if (typeof jspreadsheet === 'undefined') { U.toast('Jspreadsheet not loaded', 'error'); return; }
-
-  // Build the column list — visible cols + extras, prepended with a synthetic Status column
-  const displayCols = Reco.effectiveDisplayCols(tpl, sess);
-  const extra = [].concat(tpl.additionalColumns || [], sess.extraColumns || []);
-  const extraNames = extra.map(a => a.name).filter(n => displayCols.indexOf(n) === -1);
-  const allCols = ['_status_'].concat(displayCols).concat(extraNames);
-
-  const columns = Reco._xlBuildColumns(tpl, sess, allCols);
-  const filtered = Reco.applyTableFiltersSort(tpl, sess);
-
-  // Build rows in same order as columns
-  const data = filtered.map(row => {
-    // Additional-column values computed exactly as in the grid (cascading)
-    const full = extra.length ? Reco._rowWithExtras(tpl, sess, row) : row;
-    return allCols.map(col => {
-    if (col === '_status_') {
-      const isOff = sess.offsets && sess.offsets[row._id];
-      return isOff ? (row._manualOffset ? 'Offset ✋' : 'Offset') : 'Open';
-    }
-    const acDef = extra.find(a => a.name === col);
-    if (acDef && (acDef.type === 'master' || acDef.type === 'master_lookup' || acDef.type === 'formula')) {
-      return full[col] != null ? full[col] : '';
-    }
-    let v = row[col];
-    if (col.toLowerCase().includes('date')) v = U.formatExcelDate(v);
-    return v != null ? v : '';
-    });
-  });
-
-  Reco._xlRows = filtered;
-  Reco._xlCols = allCols;
-  const hostH = host.clientHeight || 600;
-
-  Reco._xlInstance = jspreadsheet(host, {
-    worksheets: [{
-      data,
-      columns,
-      columnSorting: true,
-      columnDrag:    true,
-      filters:       true,
-      lazyLoading:   true,        // NEW — render only the visible window
-      loadingSpin:   true,        // NEW — spinner while a chunk loads
-      tableOverflow: true,        // required for lazy loading
-      tableHeight:   hostH + 'px',// required: a fixed scroll viewport
-      tableWidth:    '100%',
-      allowInsertRow:    false,
-      allowInsertColumn: false,
-      allowDeleteRow:    false,
-      allowDeleteColumn: false
-    }],
-    onchange:    Reco._xlOnChange,
-    onselection: Reco._xlOnSelection,
-    updateTable: Reco._xlUpdateTable   // NEW — per-cell decoration (replaces _xlApplyDecorations hooks)
-  });
-  Reco._xlWorksheet = Reco._xlInstance.worksheets ? Reco._xlInstance.worksheets[0] : null;
-},
-
-_xlAfterLoad() {
-  // Apply cell coloring for format errors and corrected cells.
-  // Runs after JSS finishes building the table DOM.
-  const sess = AppState.recoSessions[AppState.activeRecoId];
-  const tpl  = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
-  if (!sess || !tpl || !Reco._xlRows || !Reco._xlCols) return;
-
-  const host = document.getElementById('excelViewHost'); if (!host) return;
-  // Skip the status column (index 0)
-  Reco._xlRows.forEach((row, y) => {
-    for (let x = 1; x < Reco._xlCols.length; x++) {
-      const col = Reco._xlCols[x];
-      const colDef = tpl.columns.find(c => c.name === col);
-      const td = host.querySelector('tr[data-y="' + y + '"] td[data-x="' + x + '"]');
-      if (!td) continue;
-      if (row['_corrected_' + col]) td.classList.add('jss-corr');
-      else if (colDef && colDef.formats && colDef.formats.length && !FMT.validate(row[col], colDef.formats)) td.classList.add('jss-err');
-      if (sess.offsets && sess.offsets[row._id]) td.classList.add('jss-row-offset');
-    }
-  });
-},
-
-_xlOnChange(worksheet, cell, x, y, newVal /*, oldVal */) {
-  if (Reco._xlSuppressChange) return;
-  const row = Reco._xlRows && Reco._xlRows[y];
-  if (!row) return;
-  const col = Reco._xlCols[x];
-  if (!col || col === '_status_') return;
-
-  // Skip writes to computed additional columns
-  const tpl  = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
-  const sess = AppState.recoSessions[AppState.activeRecoId];
-  const acDef = ((tpl.additionalColumns || []).concat(sess.extraColumns || []))
-    .find(a => a.name === col);
-  if (acDef && (acDef.type === 'master' || acDef.type === 'master_lookup' || acDef.type === 'formula')) {
-    U.toast('"' + col + '" is computed — edit the source columns instead', 'error');
-    return;
-  }
-
-  row[col] = newVal;
-  delete row['_corrected_' + col]; // user has overwritten the corrected state
-
-  const pk = row._pk || Reco.getRowPK(tpl, row);
-  if (pk) Versioning.queueChange(tpl, pk, row).then(v => { if (v) row._ver = v; });
-  AppState.save();
-},
-
-_xlOnSelection(worksheet, x1, y1, x2, y2) {
-  if (!Reco._xlRows || !Reco._xlCols) return;
-  const tpl  = AppState.recoTemplates.find(t => t.id === AppState.activeRecoId);
-  const sess = AppState.recoSessions[AppState.activeRecoId];
-  const bar  = document.getElementById('xlSelSumBar');
-  if (!bar) return;
-
-  const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-  const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
-
-  // If selection is a single column (or full column), compute over it as a column op
-  let cellCount = 0, numCount = 0, sum = 0, min = Infinity, max = -Infinity;
-  const valueCol = tpl.valueColumn;
-  let valueColSum = 0;
-  const selectedRowIds = new Set();
-
-  for (let y = minY; y <= maxY; y++) {
-    const row = Reco._xlRows[y]; if (!row) continue;
-    selectedRowIds.add(row._id);
-    for (let x = minX; x <= maxX; x++) {
-      const col = Reco._xlCols[x]; if (!col || col === '_status_') continue;
-      const v = row[col];
-      if (v === '' || v == null) continue;
-      cellCount++;
-      const n = parseFloat(String(v).replace(/,/g, ''));
-      if (!isNaN(n) && isFinite(n)) {
-        sum += n;
-        numCount++;
-        if (n < min) min = n;
-        if (n > max) max = n;
-      }
-    }
-    if (valueCol) valueColSum += U.num(row[valueCol]);
-  }
-
-  if (!cellCount && !selectedRowIds.size) { bar.classList.remove('show'); bar.innerHTML = ''; return; }
-
-  const tol = tpl.toleranceValue || 0;
-  const selRows = Array.from(selectedRowIds).map(rid => sess.data.find(r => r._id === rid)).filter(Boolean);
-  const within = Reco.isWithinTolerance(tpl, valueColSum, selRows);
-  const tolLabel = tpl.toleranceMode === 'percentage' ? tol + '%' : tol;
-
-  let h = '<span>Rows: <b>' + selectedRowIds.size + '</b></span>';
-  h += '<span>Cells: <b>' + cellCount + '</b></span>';
-  if (numCount) {
-    h += '<span>Sum: <b>' + U.fmtNum(sum) + '</b></span>';
-    h += '<span>Avg: <b>' + U.fmtNum(sum / numCount) + '</b></span>';
-  }
-  if (valueCol) {
-    h += '<span>Σ ' + valueCol + ': <b>' + U.fmtNum(valueColSum) + '</b></span>';
-    h += within ? '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;">Within tolerance ✓</span>'
-                : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±' + tolLabel + ')</span>';
-    if (within && selectedRowIds.size) {
-      const ids = Array.from(selectedRowIds);
-      h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco._xlOffsetSelectedRows(' + U.esc(JSON.stringify(ids)) + ')">Offset Selected</button>';
-    }
-  }
-  bar.innerHTML = h;
-  bar.classList.add('show');
-},
-
-_xlOffsetSelectedRows(rowIds) {
-  if (!Array.isArray(rowIds) || !rowIds.length) return;
-  const id  = AppState.activeRecoId;
-  const tpl = AppState.recoTemplates.find(x => x.id === id);
-  const sess = AppState.recoSessions[id];
-  const chk = Reco.checkOffsetTolerance(tpl, sess, rowIds);
-  if (!chk.ok) { U.toast(chk.msg, 'error'); return; }
-  const rid = 'M' + Date.now().toString(36);
-  const mm = AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
-  let n = 0;
-  rowIds.forEach(rowId => {
-    const row = sess.data.find(r => r._id === rowId);
-    if (!row || sess.offsets[rowId]) return;
-    sess.offsets[rowId] = true;
-    row._recoId = rid;
-    row._manualOffset = true;
-    const pk = Reco.getRowPK(tpl, row);
-    if (pk) mm[pk] = { recoId: rid, byUser: true };
-    n++;
-  });
-  AppState.save();
-  App.navigate('reco');
-  U.toast('Offset ' + n + ' row(s)', 'success');
-},
-
-_xlDestroy() {
-  if (Reco._xlInstance) {
-    try {
-      if (Reco._xlInstance.destroy) Reco._xlInstance.destroy();
-      else if (Reco._xlWorksheet && Reco._xlWorksheet.destroy) Reco._xlWorksheet.destroy();
-    } catch(e) {}
-  }
-  Reco._xlInstance = null;
-  Reco._xlWorksheet = null;
-  Reco._xlRows = null;
-  Reco._xlCols = null;
-},
-
-
-/* ============== JSPREADSHEET SPIKE (REMOVABLE) ============== */
-
-_jssInstance: null,
-_jssFiltered: null,
-_jssCols: null,
-
-openJssSpike() {
-  const id   = AppState.activeRecoId;
-  const tpl  = AppState.recoTemplates.find(x => x.id === id);
-  const sess = AppState.recoSessions[id];
-  if (!tpl || !sess || !sess.data.length) { U.toast('Load data first', 'error'); return; }
-  if (typeof jspreadsheet === 'undefined') {
-    U.toast('jspreadsheet library not loaded — check lib/ folder', 'error');
-    return;
-  }
-
-  const body = '<div id="jssSpikeContainer" style="height: 75vh; overflow: auto;"></div>'
-             + '<div class="text-muted" style="margin-top:6px; font-size:11px;">'
-             +   'Beta — edits are saved to the same session and versioned CSV as the normal view. '
-             +   'Status badges / AEG dropdowns / formatting are not wired up here yet.'
-             + '</div>';
-  const footer = '<button onclick="Reco._jssClose()">Close</button>';
-  App.openModal('Spreadsheet (beta)', body, footer);
-
-  // Widen the modal almost full screen
-  const modalEl = document.querySelector('#appModal .modal');
-  if (modalEl) { modalEl.style.maxWidth = '96vw'; modalEl.dataset._jssWidened = '1'; }
-
-  setTimeout(() => Reco._jssInit(tpl, sess), 80);
-},
-
-_jssInit(tpl, sess) {
-  const root = document.getElementById('jssSpikeContainer');
-  if (!root) return;
-
-  const displayCols = Reco.effectiveDisplayCols(tpl, sess);
-  const extra = [].concat(tpl.additionalColumns || [], sess.extraColumns || []);
-  const extraNames = extra.map(a => a.name).filter(n => displayCols.indexOf(n) === -1);
-  const allCols = displayCols.concat(extraNames);
-
-  const columns = allCols.map(name => {
-    const std = (tpl.columns || []).find(c => c.name === name);
-    let type = 'text';
-    if (std && std.isDate)  type = 'calendar';
-    if (std && std.isValue) type = 'numeric';
-    return { type, title: name, width: sess.columnWidths[name] || 120 };
-  });
-
-  const filtered = Reco.applyTableFiltersSort(tpl, sess);
-  const data = filtered.map(row => allCols.map(c => row[c] != null ? row[c] : ''));
-
-  Reco._jssFiltered = filtered;
-  Reco._jssCols     = allCols;
-
-  Reco._jssInstance = jspreadsheet(root, {
-    worksheets: [{
-      data,
-      columns,
-      columnSorting: true,
-      columnDrag:    true,
-      allowInsertRow:    false,
-      allowInsertColumn: false,
-      allowDeleteRow:    false,
-      allowDeleteColumn: false
-    }],
-    onchange:    Reco._jssOnChange,
-    onselection: Reco._jssOnSelection
-  });
-},
-
-_jssOnChange(instance, cell, x, y, newVal) {
-  const row = Reco._jssFiltered && Reco._jssFiltered[y];
-  if (!row) return;
-  const col = Reco._jssCols[x];
-  if (col == null) return;
-
-  row[col] = newVal;
-
-  const id  = AppState.activeRecoId;
-  const tpl = AppState.recoTemplates.find(t => t.id === id);
-  const pk  = row._pk || Reco.getRowPK(tpl, row);
-  if (pk) Versioning.queueChange(tpl, pk, row).then(v => { if (v) row._ver = v; });
-  AppState.save();
-},
-
-_jssOnSelection(instance, x1, y1, x2, y2) {
-  // Lightweight info bar — JSS has its own status at bottom too, this just demonstrates the hook
-  if (!Reco._jssFiltered || !Reco._jssCols) return;
-  const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
-  const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
-  let sum = 0, count = 0, num = 0;
-  for (let y = minY; y <= maxY; y++) {
-    const row = Reco._jssFiltered[y]; if (!row) continue;
-    for (let x = minX; x <= maxX; x++) {
-      const col = Reco._jssCols[x]; if (col == null) continue;
-      const v = row[col]; if (v === '' || v == null) continue;
-      count++;
-      const n = parseFloat(String(v).replace(/,/g, ''));
-      if (!isNaN(n) && isFinite(n)) { sum += n; num++; }
-    }
-  }
-  // Stash on the title bar for easy visibility
-  const t = document.getElementById('appModalTitle');
-  if (t) t.textContent = 'Spreadsheet (beta) — ' + count + ' cells'
-    + (num ? ', Sum ' + U.fmtNum(sum) : '');
-},
-
-_jssClose() {
-  if (Reco._jssInstance) {
-    try { Reco._jssInstance.destroy(); } catch(e) {}
-    Reco._jssInstance = null;
-  }
-  Reco._jssFiltered = null;
-  Reco._jssCols     = null;
-  // Restore modal width
-  const modalEl = document.querySelector('#appModal .modal');
-  if (modalEl && modalEl.dataset._jssWidened) { modalEl.style.maxWidth = ''; delete modalEl.dataset._jssWidened; }
-  App.closeModal();
-  // Refresh the underlying view so any edits show in the regular table
-  App.navigate('reco');
 },
 
 /* ============== SPREADSHEET MODE — PHASE 5: ADD ROWS & COLUMNS ============== */
@@ -10832,7 +10209,6 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     if (sess.data.length) {
       h += '<div class="view-controls">';
       h += '<button class="small'+(sess.spreadsheetMode?' active':'')+'" onclick="Reco.toggleSpreadsheetMode()" title="Spreadsheet mode — cell selection, arrow keys, formulas">📊 Sheet</button>';
-            h += '<button class="small" onclick="Reco.openJssSpike()" title="Open in Jspreadsheet (beta)">🆗 Spreadsheet</button>';
             h += '<button class="small'+(sess.formatToolbarOpen?' active':'')+'" onclick="Reco.toggleFormatToolbar()" title="Toggle formatting toolbar (Alt+H)">🎨 Format</button>';
 
      if ((sess.hiddenCols||[]).length) {

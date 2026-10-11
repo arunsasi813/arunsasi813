@@ -188,7 +188,7 @@ try {
   // ════════════════════════════════════════════════════════════════════════
   console.log('\n[E] Excel link on the new launcher (openpyxl engine)');
   const root = makeRoot('root');
-  const B = await startBridge(root, 18761); procs.push(B.proc);
+  const B = await startBridge(root, 18771); procs.push(B.proc);
   const { page, errors } = await openReco(browser, B);
   const caps = await page.evaluate(() => ExcelLink.caps());
   check(caps && caps.openpyxl && caps.api === 1, 'capabilities: openpyxl engine available (tier P)', caps);
@@ -395,7 +395,7 @@ try {
   // ════════════════════════════════════════════════════════════════════════
   console.log('\n[S] Excel link on an older launcher (SheetJS fallback)');
   const rootS = makeRoot('rootS');
-  const BS = await startBridge(rootS, 18763, ['--legacy']); procs.push(BS.proc);
+  const BS = await startBridge(rootS, 18773, ['--legacy']); procs.push(BS.proc);
   const S = await openReco(browser, BS);
   const tierS = await S.page.evaluate(() => ExcelLink.tier());
   check(tierS === 'S', 'E15 older launcher → SheetJS tier', tierS);
