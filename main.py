@@ -995,6 +995,9 @@ class LauncherAPI:
     def excel_link_export_finish(self, token) -> dict:
         return self._xl_call("export_finish", token)
 
+    def excel_link_export_abort(self, token) -> dict:
+        return self._xl_call("export_abort", token)
+
     def excel_link_job(self, job_id) -> dict:
         return self._xl_call("job", job_id)
 

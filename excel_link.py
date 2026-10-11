@@ -319,7 +319,11 @@ def raw_cell(value, data_type: str | None = None):
             return ["e", "#NUM!"]
         return ["n", value]
     if isinstance(value, _dt.datetime):
-        d = (value.replace(tzinfo=None) + _dt.timedelta(microseconds=500000)).replace(microsecond=0)
+        v = value.replace(tzinfo=None)
+        try:
+            d = (v + _dt.timedelta(microseconds=500000)).replace(microsecond=0)
+        except OverflowError:
+            d = v.replace(microsecond=0)   # datetime.max: rounding up would overflow
         return ["d", d.isoformat(timespec="seconds")]
     if isinstance(value, _dt.date):
         return ["d", _dt.datetime(value.year, value.month, value.day).isoformat(timespec="seconds")]
@@ -1007,7 +1011,8 @@ def _fill_workbook(wb, head: dict, cells_rows: list, base_rows: list, out_stream
     if base_ws is not None:
         base_ws.sheet_state = "veryHidden"
         base_cols = (head.get("manifest") or {}).get("baseCols") or head.get("baseCols") or []
-        base_ws.append([text_cell(base_ws, t) for t in ["rid", "pk", "fp", "flags"] + [str(c) for c in base_cols]])
+        base_ws.append([text_cell(base_ws, clean(t, "base"))
+                        for t in ["rid", "pk", "fp", "flags"] + [str(c) for c in base_cols]])
         for r_i, row in enumerate(base_rows):
             if cancel is not None and r_i % CANCEL_EVERY == 0 and cancel.is_set():
                 raise Cancelled()
@@ -1217,6 +1222,10 @@ def read_workbook(path, head: dict | None = None, base: dict | None = None, opts
                     sig_map[str(brow[0])] = sig
         estimate = max(1, _int((meta or {}).get("rowCount")) or len(sig_map) or 1)
         scan_width = max(width, sig_width)
+        # Columns the export did not write: a value typed there is a real edit,
+        # so such a row must never be elided. The writer's own "(not loaded)"
+        # scratch columns are exempt.
+        extra_pos = [i for i in range(sig_width, width) if texts[i] not in SCRATCH_COLS]
 
         def cells_of(row) -> tuple[list, int]:
             cells, nf = [], 0
@@ -1253,7 +1262,8 @@ def read_workbook(path, head: dict | None = None, base: dict | None = None, opts
             pk = _id_text(vals[key_col]) if 0 <= key_col < len(vals) else ""
             if rid:
                 occurrences[rid].append(r)
-            if sig_map and rid and rid not in no_elide and rid in sig_map:
+            if (sig_map and rid and rid not in no_elide and rid in sig_map
+                    and all(i >= len(vals) or vals[i] is None or vals[i] == "" for i in extra_pos)):
                 fpos = [i for i, c in enumerate(row[:sig_width]) if c.data_type == "f"]
                 if row_sig(vals[:sig_width], sig_width, fpos) == sig_map[rid]:
                     unchanged.append(rid)
@@ -1663,7 +1673,9 @@ class ExcelLinkEngine:
                     if not fm.is_writable(str(p.parent)):
                         raise PermissionError(str(p.parent))
                     return "shared", rel, p, warnings
-                except PermissionError:
+                except OSError:
+                    # Not just PermissionError: a share can also answer with
+                    # "network name no longer available", ENOSPC or a stale handle.
                     warnings.append("sharedNotWritable")
         wd = self.work_dir()
         wd.mkdir(parents=True, exist_ok=True)
@@ -1727,6 +1739,14 @@ class ExcelLinkEngine:
             return {"ok": True, "received": len(tok["cells"])}
 
     @_api
+    def export_abort(self, token) -> dict:
+        """Drop a half-sent export. Without it the buffered rows would sit in
+        memory until the token expires, and a cancel-and-retry would stack."""
+        with self._lock:
+            self._tokens.pop(str(token or ""), None)
+        return {"ok": True}
+
+    @_api
     def export_finish(self, token) -> dict:
         tok = self._token(token)
         if len(tok["cells"]) != tok["head"]["rowCount"]:
@@ -1769,7 +1789,10 @@ class ExcelLinkEngine:
         job.progress(1, 1, 90, 95, "Saving workbook")
         try:
             target = self._save_new(target, data)
-        except PermissionError:
+        except OSError:
+            # The workbook is built; a share that blipped must not cost the
+            # user the whole export. (LinkError("exists") is not an OSError,
+            # so the never-overwrite refusal still propagates.)
             if area != "shared":
                 raise
             warnings.append("sharedNotWritable")

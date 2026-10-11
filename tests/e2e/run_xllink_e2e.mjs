@@ -346,6 +346,22 @@ try {
   check(P.problems.filter(p => p.code === 'duplicateRowId').length === 2, 'E10 copied row → duplicateRowId for both rows', P.problems.map(p => p.code));
   await page.evaluate(() => ExcelLink.closeReview());
 
+  // E18 — a merged cell must never be applied as a deliberate clear. openpyxl
+  // returns null for the cells a merge swallows, which used to look like
+  // "the user emptied this cell" and wiped real data on apply.
+  const X18 = await exportViaDialog(page, root, tpl.id);
+  const remarksCol = JSON.parse(fs.readFileSync(X18.headPath, 'utf8')).columns.find(c => c.key === 'Remarks').colIndex;
+  const L = String.fromCharCode(65 + remarksCol);
+  const beforeRemarks = (await rowOf(page, tpl.id, 'D8')).Remarks;
+  xlEdit(X18.file, [{ op: 'merge', range: `${L}9:${L}11` }]);      // data starts at row 2 → D8..D10
+  P = await loadBack(page, { exportId: X18.exportId });
+  const mergedProblems = P.problems.filter(p => p.code === 'mergedCell');
+  check(mergedProblems.length === 2, 'E18 cells swallowed by a merge are problems, not changes', P.problems.map(p => p.code + ':' + p.col));
+  check(!P.changes.some(c => c.col === 'Remarks' && c.badges.includes('cleared')), 'E18 no merged cell is offered as a cleared change', P.changes);
+  await page.evaluate(() => ExcelLink.closeReview());
+  check((await rowOf(page, tpl.id, 'D8')).Remarks === beforeRemarks, 'E18 the merged row keeps its value in Reco');
+  await page.evaluate((x) => ExcelLink.closeLink(x, true), X18.exportId);
+
   // E8 — full sort keeps matching; a partial (column) shuffle is refused
   const X2 = await exportViaDialog(page, root, tpl.id);
   xlEdit(X2.file, [{ op: 'sort', col: 'Doc', reverse: true }, { op: 'set', rid: rid.D3, col: 'Remarks', value: 'after-sort' }]);

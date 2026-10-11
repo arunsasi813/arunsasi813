@@ -431,6 +431,32 @@ def test_partial_column_shuffle_sends_rows(api, root):
     assert first["cells"][3] == ["s", "000010"]                       # Doc now belongs to another row
 
 
+def test_column_added_in_excel_is_not_elided(api, root):
+    # A value typed into a column the export did not write is a real edit: the
+    # row must be sent even though its exported cells are untouched.
+    _, p = do_export(api, root, 6)
+    wb = openpyxl.load_workbook(p)
+    ws = wb["Reco Data"]
+    ws.cell(row=1, column=len(COLS) + 1, value="Extra")
+    ws.cell(row=3, column=len(COLS) + 1, value="typed here")
+    wb.save(p)
+    j, rows = read(api, {"exportId": EID})
+    assert [x["rid"] for x in rows] == [rid(1)]
+    assert rid(1) not in j["result"]["unchangedRids"] and len(j["result"]["unchangedRids"]) == 5
+    assert rows[0]["cells"][len(COLS)] == ["s", "typed here"]
+
+
+def test_scratch_columns_do_not_block_elision(api, root):
+    # The writer's own "(not loaded)" columns in locked mode are exempt.
+    _, p = do_export(api, root, 5, protect="locked")
+    wb = openpyxl.load_workbook(p)
+    ws = wb["Reco Data"]
+    ws.cell(row=3, column=len(COLS) + 1, value="my note")      # Notes 1 (not loaded)
+    wb.save(p)
+    j, _ = read(api, {"exportId": EID})
+    assert j["result"]["rowsSent"] == 0 and len(j["result"]["unchangedRids"]) == 5
+
+
 def test_rebased_rows_not_elided(api, root):
     do_export(api, root, 8)
     assert api.excel_link_update_manifest(EID, {"rebased": {f"{rid(4)}|Status": "Open"}})["ok"]
@@ -913,6 +939,7 @@ def test_raw_cell_and_row_sig():
     assert rc(dt.datetime(2026, 10, 6, 12, 30, 59, 700000)) == ["d", "2026-10-06T12:31:00"]
     assert rc(dt.date(2026, 10, 6)) == ["d", "2026-10-06T00:00:00"]
     assert rc(dt.time(9, 5, 1)) == ["s", "09:05:01"]
+    assert rc(dt.datetime.max) == ["d", dt.datetime.max.replace(microsecond=0).isoformat()]   # no OverflowError
     assert rc("=A1*2", "f") == ["f", None, "=A1*2"] and rc("a_x000D_\nb", "s") == ["s", "a\r\nb"]
     sig = excel_link.row_sig
     assert sig(["a", None, 1.0], 4) == sig(["a", "", 1, None])

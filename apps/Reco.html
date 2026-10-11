@@ -4217,7 +4217,9 @@ const ExcelLink = {
       [],
       ['Notes'],
       ['•', 'Do not delete or edit the hidden columns A–B: they identify each row.'],
-      ['•', 'You can sort and filter freely; rows are matched by their hidden id.'],
+      ['•', manifest.protect === 'locked'
+        ? 'You can filter freely; rows are matched by their hidden id. Excel blocks sorting in this protected workbook — use the filters, or ask for "Guarded" protection next time to sort.'
+        : 'You can sort and filter freely; rows are matched by their hidden id.'],
       ['•', 'Rows added at the bottom are not loaded (add them in Reco).'],
       ['•', 'Green triangles ("number stored as text") are harmless.'],
       ['•', 'If Excel shows "Enable Editing", click it.'],
@@ -4300,12 +4302,19 @@ const ExcelLink = {
     const chunks = Math.ceil(n / ExcelLink.CHUNK);
     let r = await ExcelLink._call('excel_link_export_begin', built.head);
     const token = r.token;
-    for (let i = 0, k = 1; i < n; i += ExcelLink.CHUNK, k++) {
-      if (ExcelLink._cancel) throw ExcelLink._cancelled();
-      ExcelLink._progress('Sending ' + k + '/' + chunks + '…', 20 + 30 * k / chunks);
-      await ExcelLink._call('excel_link_export_rows', token, built.cells.slice(i, i + ExcelLink.CHUNK), built.base.slice(i, i + ExcelLink.CHUNK));
+    try {
+      for (let i = 0, k = 1; i < n; i += ExcelLink.CHUNK, k++) {
+        if (ExcelLink._cancel) throw ExcelLink._cancelled();
+        ExcelLink._progress('Sending ' + k + '/' + chunks + '…', 20 + 30 * k / chunks);
+        await ExcelLink._call('excel_link_export_rows', token, built.cells.slice(i, i + ExcelLink.CHUNK), built.base.slice(i, i + ExcelLink.CHUNK));
+      }
+      r = await ExcelLink._call('excel_link_export_finish', token);
+    } catch (e) {
+      // Give the rows sent so far back to the launcher instead of leaving them
+      // buffered there until the token expires.
+      if (ExcelLink._has('excel_link_export_abort')) { try { await ExcelLink.api().excel_link_export_abort(token); } catch (x) {} }
+      throw e;
     }
-    r = await ExcelLink._call('excel_link_export_finish', token);
     const job = await ExcelLink._waitJob(r.job_id, j => ExcelLink._progress('Writing workbook ' + (j.percent || 0) + '%', 50 + 0.45 * (j.percent || 0)));
     try { ExcelLink.api().excel_link_job_release(r.job_id); } catch (e) {}
     const res = job.result || {};
@@ -5039,7 +5048,10 @@ const ExcelLink = {
         const key = fileRid + '|' + col;
         const cell = cellAt(row, col);
         const sheetCol = mapRes.map[col];
-        if (cell != null && mergedSet.has(sheetCol + ':' + row.r)) { plan.problems.push(ExcelLink._prob(row, id, col, 'mergedCell')); return; }
+        // A cell swallowed by a merge reads as empty, which would look like a
+        // deliberate clear — the anchor is not in mergedSet, so its real value
+        // still loads normally.
+        if (mergedSet.has(sheetCol + ':' + row.r)) { plan.problems.push(ExcelLink._prob(row, id, col, 'mergedCell')); return; }
         let B;
         if (Object.prototype.hasOwnProperty.call(rebased, key)) B = rebased[key];
         else if (baseRow) B = baseRow.vals[col];
