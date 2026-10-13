@@ -223,7 +223,7 @@ try {
 
   // E2 — round trip
   const rid = {};
-  for (const d of ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D10']) rid[d] = await ridOf(page, tpl.id, d);
+  for (const d of ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D10']) rid[d] = await ridOf(page, tpl.id, d);
   xlEdit(X.file, [
     { op: 'set', rid: rid.D1, col: 'Status', value: 'Cleared' },
     { op: 'set', rid: rid.D2, col: 'Remarks', value: 'x' },
@@ -345,6 +345,42 @@ try {
   P = await loadBack(page, { exportId: X.exportId });
   check(P.problems.filter(p => p.code === 'duplicateRowId').length === 2, 'E10 copied row → duplicateRowId for both rows', P.problems.map(p => p.code));
   await page.evaluate(() => ExcelLink.closeReview());
+
+  // E19 — "Take Excel" whose value already equals the live row still writes a
+  // version row, and still carries a colleague's other-column edit with it.
+  const X19 = await exportViaDialog(page, root, tpl.id);
+  const d7idx = await page.evaluate((id) => AppState.recoSessions[id].data.findIndex(r => r.Doc === 'D7'), tpl.id);
+  await page.evaluate((i) => Reco.editCell(i, 'Remarks', 'local'), d7idx);
+  await page.evaluate(() => Versioning.flushQueue());
+  {
+    const hdr2 = fs.readFileSync(vf, 'utf8').split(/\r?\n/)[0].split(',');
+    const d7 = await rowOf(page, tpl.id, 'D7');
+    const rec2 = { _pk: 'D7', _ver: 'C7', _ts: new Date(Date.now() + 2000).toISOString(), Doc: 'D7',
+                   Status: 'Cleared', Remarks: 'colleague', When: d7.When, Amount: d7.Amount, Ref: d7.Ref };
+    fs.appendFileSync(vf, hdr2.map(h => { const v = rec2[h] == null ? '' : String(rec2[h]); return /[",]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }).join(',') + '\r\n');
+  }
+  xlEdit(X19.file, [{ op: 'set', rid: rid.D7, col: 'Remarks', value: 'local' }]);   // same as the live value
+  P = await loadBack(page, { exportId: X19.exportId });
+  check(P.conflicts.length === 1 && P.conflicts[0].doc === 'D7', 'E19 conflict against the colleague history value', P.conflicts);
+  const before19 = parseCsv(fs.readFileSync(vf, 'utf8')).length;
+  await page.evaluate(() => ExcelLink._rvTakeAll(true));
+  await applyReview(page);
+  const added19 = parseCsv(fs.readFileSync(vf, 'utf8')).slice(before19);
+  check(added19.length === 1 && added19[0]._pk === 'D7' && added19[0].Remarks === 'local',
+    'E19 the explicit decision is written to history even though the value matched', added19);
+  check(added19[0].Status === 'Cleared', 'E19 the colleague\'s other-column edit rides along', added19[0]);
+  await page.evaluate((x) => ExcelLink.closeLink(x, true), X19.exportId);
+
+  // E20 — a save in Excel that changed nothing clears the "not loaded" state.
+  const X20 = await exportViaDialog(page, root, tpl.id);
+  xlEdit(X20.file, []);                                   // open and re-save, no edits
+  await waitSaved(page, tpl.id);
+  P = await loadBack(page, { exportId: X20.exportId });
+  check(!P.changes.length && !P.conflicts.length && !P.problems.length, 'E20 nothing to apply after an empty save', P);
+  await page.evaluate(() => ExcelLink.closeReview());
+  check(JSON.parse(fs.readFileSync(X20.headPath, 'utf8')).lastImport !== null, 'E20 the read is recorded in the manifest');
+  check(await page.evaluate(() => ExcelLink.confirmLeave()), 'E20 Return to hub is no longer blocked');
+  await page.evaluate((x) => ExcelLink.closeLink(x, true), X20.exportId);
 
   // E18 — a merged cell must never be applied as a deliberate clear. openpyxl
   // returns null for the cells a merge swallows, which used to look like

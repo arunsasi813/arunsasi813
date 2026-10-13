@@ -1840,8 +1840,11 @@ const Versioning = {
      that appears in any row (Papa.unparse would otherwise only use the first
      row's keys and silently drop columns added later). */
   _fields(rows, tpl) {
-    const seen = new Set(['_pk', '_ver', '_ts']);
-    const out = ['_pk', '_ver', '_ts'];
+    // _src/_by are always in the header, even when empty: a later Excel-link
+    // write would otherwise widen the file, and that rewrite can lose a
+    // colleague's concurrent append.
+    const seen = new Set(['_pk', '_ver', '_ts', '_src', '_by']);
+    const out = ['_pk', '_ver', '_ts', '_src', '_by'];
     (tpl ? tpl.columns.map(c => c.name) : []).forEach(n => { if (!seen.has(n)) { seen.add(n); out.push(n); } });
     rows.forEach(r => Object.keys(r || {}).forEach(k => { if (!seen.has(k)) { seen.add(k); out.push(k); } }));
     return out;
@@ -3502,7 +3505,10 @@ const XlSchema = {
           else if (cfg.editType === 'datalist') { d.editor = 'combo'; d.strict = false; }
           else d.editor = kind === 'date' ? 'date' : (kind === 'value' ? 'number' : 'text');
         }
-        if (d.editor === 'list' || d.editor === 'combo') d.options = XlSchema.optionsFor(tpl, sess, d);
+        if (d.editor === 'list' || d.editor === 'combo') {
+          d.options = XlSchema.optionsFor(tpl, sess, d);
+          if (d.kind !== 'text') XlSchema.optCanon(d);
+        }
       }
       cols.push(d);
     };
@@ -3617,10 +3623,19 @@ const XlSchema = {
         out.c = d ? 'D:' + XlSchema._isoDate(d) : 'T:' + XlSchema.NUM(v);
       } else {
         const text = XlSchema.T(v);
-        const d = U.parseDate(text);
+        // The export writes an unparseable date as forced text; reading it back
+        // must give the same thing, or an untouched cell looks like a change.
+        if (ctx && ctx.B != null && String(ctx.B).slice(0, 2) === 'T:' && String(ctx.B).slice(2) === text) {
+          out.c = String(ctx.B);
+          return out;
+        }
+        // A bare number is a serial here, as it is on the Reco side — never a
+        // string for new Date() to guess at ('0' is not 01-Jan-2000).
+        const bare = /^[-+]?\d+(\.\d+)?$/.test(text);
+        const d = bare ? U._excelSerialToDate(Number(text)) : U.parseDate(text);
         if (d && d.getFullYear() >= 1900 && d.getFullYear() <= 2200) {
           out.c = 'D:' + XlSchema._isoDate(d);
-          out.warn.push('textDate');
+          if (!bare) out.warn.push('textDate');
           const m = text.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.]\d{2,4}$/);
           if (m && +m[1] <= 12 && +m[2] <= 12 && m[1] !== m[2]) out.warn.push('ambiguousDate');
         } else out.c = 'T:' + text;
@@ -3653,11 +3668,24 @@ const XlSchema = {
       }
     }
     if (desc.editor === 'list' || desc.editor === 'combo') {
-      const hit = XlSchema._matchOption(desc, desc.kind === 'text' ? out.c : XlSchema._plain(out.c));
-      if (hit != null) out.c = desc.kind === 'text' ? hit : XlSchema._canonReco(desc, hit, { c: '', warn: [] }).c;
-      else if (desc.strict && out.c !== '' && !out.verr) out.verr = 'notInList';
+      if (desc.kind === 'text') {
+        const hit = XlSchema._matchOption(desc, out.c);
+        if (hit != null) out.c = hit;
+        else if (desc.strict && out.c !== '' && !out.verr) out.verr = 'notInList';
+      } else {
+        // A date or value column with a dropdown: compare on the canonical
+        // footing, so picking "31/10/2026" or "1,000.00" from the list matches.
+        const canonSet = desc._optCanon || XlSchema.optCanon(desc);
+        if (!canonSet.has(out.c) && desc.strict && out.c !== '' && !out.verr) out.verr = 'notInList';
+      }
     }
     return out;
+  },
+  /* Canonical forms of a non-text column's options, computed once per desc. */
+  optCanon(desc) {
+    const set = new Set((desc.options || []).map(o => XlSchema._canonReco(desc, o.value, { c: '', warn: [] }).c));
+    try { desc._optCanon = set; } catch (e) {}
+    return set;
   },
   _canonReco(desc, raw, out) {
     if (raw == null) return out;
@@ -3687,7 +3715,7 @@ const XlSchema = {
     if (c.startsWith('D:')) { const d = XlSchema._dateFromIso(c.slice(2)); return d ? U.fmtDate(d, 'DD-MMM-YYYY') : c.slice(2); }
     if (c.startsWith('N:')) {
       const n = Number(c.slice(2));
-      const s = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const s = XlSchema._fmt2(Math.abs(n), XlSchema._dp(c));
       return n < 0 ? '(' + s + ')' : s;
     }
     if (c.startsWith('T:')) return c.slice(2);
@@ -3736,7 +3764,18 @@ const XlSchema = {
     Object.keys(counts).forEach(k => { if (!best || counts[k] > counts[best]) best = k; });
     return best || (desc.kind === 'date' ? 'DD/MM/YYYY' : 'plain');
   },
-  _fmt2(n) { return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+  /* Thousands-grouped text. `dp` keeps the decimals the value actually has
+     (a 3-decimal currency must not be rounded to 2 on the way back). */
+  _fmt2(n, dp) {
+    const d = Math.min(20, Math.max(2, dp || 0));
+    return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  },
+  /* Decimals in a canonical N: value, 0 unless it is a plain decimal
+     (NUM() can emit exponent notation for extreme magnitudes). */
+  _dp(c) {
+    const m = /^-?\d+\.(\d+)$/.exec(String(c).slice(2));
+    return m ? m[1].length : 0;
+  },
   /* Value to store for canonical `c`, written in the style the row already
      uses (or the column's majority style when the row's value is empty). */
   coerce(desc, c, currentRaw, colStyle) {
@@ -3753,11 +3792,12 @@ const XlSchema = {
     }
     if (desc.kind === 'value' && c.startsWith('N:')) {
       const n = Number(c.slice(2));
+      const dp = XlSchema._dp(c);
       const style = XlSchema.valueStyleOf(currentRaw) || colStyle || 'plain';
       if (style === 'number') return n;
-      if (style === 'paren') return n < 0 ? '(' + XlSchema._fmt2(-n) + ')' : XlSchema._fmt2(n);
-      if (style === 'trailingMinus') return n < 0 ? XlSchema._fmt2(-n) + '-' : XlSchema._fmt2(n);
-      if (style === 'thousands') return XlSchema._fmt2(n);
+      if (style === 'paren') return n < 0 ? '(' + XlSchema._fmt2(-n, dp) + ')' : XlSchema._fmt2(n, dp);
+      if (style === 'trailingMinus') return n < 0 ? XlSchema._fmt2(-n, dp) + '-' : XlSchema._fmt2(n, dp);
+      if (style === 'thousands') return XlSchema._fmt2(n, dp);
       return XlSchema.NUM(n);
     }
     return XlSchema._plain(c);
@@ -4244,6 +4284,7 @@ const ExcelLink = {
 
   /* ---------------- progress modal ---------------- */
   _progress(text, pct, cancellable) {
+    if (ExcelLink._cancel) return;          // the user dismissed this run
     let el = document.getElementById('xlProgText');
     if (!el || !document.getElementById('appModal').classList.contains('show')) {
       App.openModal('📗 Excel', '<div style="font-size:12px;"><div id="xlProgText"></div>'
@@ -4613,9 +4654,13 @@ const ExcelLink = {
         App.openModal('Load back', '<div class="xl-warn">' + U.esc(plan.refused) + '</div>', '<button class="primary" onclick="App.closeModal()">OK</button>');
         return;
       }
-      if (ExcelLink._cancel) return;
+      if (ExcelLink._cancel) { App.closeModal(); return; }
       if (plan.needsConfirm && !confirm(plan.needsConfirm)) { App.closeModal(); return; }
       ExcelLink._plan = plan;
+      // A save in Excel that changed nothing still flags the link as "saved,
+      // not loaded". Record that this exact version was looked at, or the
+      // banner and the leave-confirmation would never clear.
+      if (!plan.changes.length && !plan.conflicts.length && !plan.problems.length) await ExcelLink._markSeen(tpl, plan);
       ExcelLink.renderReview(plan);
     } catch (e) {
       if (e.code === 'cancelled') return;
@@ -4643,6 +4688,7 @@ const ExcelLink = {
     try {
       let off = 0;
       while (off != null) {
+        if (ExcelLink._cancel) throw ExcelLink._cancelled();      // stop paging the share
         const p = await ExcelLink._call('excel_link_read_page', r.job_id, off, ExcelLink.PAGE);
         (p.rows || []).forEach(x => rows.push(x));
         off = p.next;
@@ -4930,7 +4976,7 @@ const ExcelLink = {
         baseCols.forEach((c, i) => { vals[c] = b[4 + i] == null ? '' : String(b[4 + i]); });
         const rec = { rid: String(b[0]), pk: String(b[1] || ''), fp: String(b[2] || ''), flags: String(b[3] || ''), vals };
         baseByRid.set(rec.rid, rec);
-        if (rec.pk) baseByPk.set(rec.pk, rec);
+        if (rec.pk) baseByPk.set(ExcelLink._pkTxt(rec.pk), rec);
       });
     }
     const hasBase = baseByRid.size > 0;
@@ -4938,12 +4984,16 @@ const ExcelLink = {
 
     // Live rows
     const byId = new Map(sess.data.map(r => [r._id, r]));
+    // The readers strip the hidden key cell, so every key comparison and index
+    // here works on the trimmed form. The raw row._pk is still what gets written.
     const pkCount = new Map();
-    sess.data.forEach(r => { const k = r._pk || ''; if (k) pkCount.set(k, (pkCount.get(k) || 0) + 1); });
+    sess.data.forEach(r => { const k = ExcelLink._pkTxt(r._pk); if (k) pkCount.set(k, (pkCount.get(k) || 0) + 1); });
     const byPk = new Map();
-    sess.data.forEach(r => { if (r._pk && pkCount.get(r._pk) === 1) byPk.set(r._pk, r); });
+    sess.data.forEach(r => { const k = ExcelLink._pkTxt(r._pk); if (k && pkCount.get(k) === 1) byPk.set(k, r); });
+    const dupPkRaw = new Set();
+    sess.data.forEach(r => { if (r._pk && pkCount.get(ExcelLink._pkTxt(r._pk)) > 1) dupPkRaw.add(r._pk); });
     const filePkCount = new Map();
-    (read.rows || []).forEach(r => { if (r.pk) filePkCount.set(r.pk, (filePkCount.get(r.pk) || 0) + 1); });
+    (read.rows || []).forEach(r => { const k = ExcelLink._pkTxt(r.pk); if (k) filePkCount.set(k, (filePkCount.get(k) || 0) + 1); });
     const pendingPks = new Set();
     (AppState.pendingSpecialJV[tpl.id] || []).forEach(p => (p.sentPks || []).forEach(k => pendingPks.add(k)));
 
@@ -4974,7 +5024,19 @@ const ExcelLink = {
       if (mode === 'visible') { const lr = plan._visibleKey(row); id = lr ? '#vis#' + lr._id : ''; row._live = lr; }
       if (!id) {
         const anyVal = mcols.some(mc => mc.kind !== 'id' && mc.kind !== 'status' && (() => { const c = cellAt(row, mc.key); return c != null && !(c[0] === 's' && XlSchema.T(c[1]) === ''); })());
-        if (anyVal) plan.info.newRows++;
+        if (anyVal) {
+          // A row that does carry a key but does not resolve is an unmatched
+          // row, not a row the user added: saying "added in Excel (ignored)"
+          // would explain a dropped edit with the opposite reason.
+          const hadKey = mode === 'visible' && (tpl.primaryKeys || []).some(k => {
+            const c = cellAt(row, k);
+            return c != null && !(c[0] === 's' && XlSchema.T(c[1]) === '');
+          });
+          if (hadKey) {
+            if (plan.problems.length < 2000) plan.problems.push(ExcelLink._prob(row, row.pk || '', '', 'rowNotInCurrentData'));
+            else plan.info.unresolvedExtra = (plan.info.unresolvedExtra || 0) + 1;
+          } else plan.info.newRows++;
+        }
         return;
       }
       if (!groups.has(id)) groups.set(id, []);
@@ -5015,15 +5077,17 @@ const ExcelLink = {
         if (hasBase && !baseRow) { plan.problems.push(ExcelLink._prob(row, id, '', 'unknownRowId')); return; }
         live = byId.get(id) || null;
         if (live) {
-          if (keyPos >= 0 && (live._pk || '') !== (row.pk || '')) { plan.problems.push(ExcelLink._prob(row, id, '', 'identityMismatch')); return; }
-        } else if (row.pk && filePkCount.get(row.pk) === 1 && byPk.has(row.pk)) { live = byPk.get(row.pk); rematched = true; }
+          if (keyPos >= 0 && ExcelLink._pkTxt(live._pk) !== ExcelLink._pkTxt(row.pk)) { plan.problems.push(ExcelLink._prob(row, id, '', 'identityMismatch')); return; }
+        } else if (row.pk && filePkCount.get(ExcelLink._pkTxt(row.pk)) === 1 && byPk.has(ExcelLink._pkTxt(row.pk))) {
+          live = byPk.get(ExcelLink._pkTxt(row.pk)); rematched = true;
+        }
       } else if (mode === 'key') {
-        baseRow = baseByPk.get(id) || null;
-        live = byPk.get(id) || null;
+        baseRow = baseByPk.get(ExcelLink._pkTxt(id)) || null;
+        live = byPk.get(ExcelLink._pkTxt(id)) || null;
         rematched = true;
       } else {
         live = row._live; rematched = true;
-        baseRow = live && live._pk ? (baseByPk.get(live._pk) || null) : null;
+        baseRow = live && live._pk ? (baseByPk.get(ExcelLink._pkTxt(live._pk)) || null) : null;
       }
       if (!live) { plan.problems.push(ExcelLink._prob(row, id, '', 'rowNotInCurrentData')); return; }
       if (fpOk && baseRow && baseRow.fp) {
@@ -5039,6 +5103,8 @@ const ExcelLink = {
     const toAccCol = S.toAccountCol;
     let iid = 0;
     const clearedByCol = {};
+    const colStyles = new Map();
+    const colStyleOf = d => { if (!colStyles.has(d.name)) colStyles.set(d.name, XlSchema.columnStyle(sess, d)); return colStyles.get(d.name); };
     plans.forEach(p => {
       const { row, id, baseRow, live, pk } = p;
       const full = fullOf(live);
@@ -5072,9 +5138,13 @@ const ExcelLink = {
         if (E.verr) { plan.problems.push(Object.assign(ExcelLink._prob(row, id, col, E.verr), { eText: XlSchema.display(E.c), live })); return; }
         E.warn.forEach(w => { if (w !== 'textNumber') it.badges.push(w); });
         if (p.rematched) it.badges.push('rematchedByKey');
-        if (pk && pkCount.get(live._pk) > 1) it.badges.push('dupPk');
+        if (pk && dupPkRaw.has(live._pk)) it.badges.push('dupPk');
         if (desc.role === 'tag' || (desc.role === 'toAccount' && !desc.versioned) || !pk) it.badges.push('sessionOnly');
         if (fromHist) it.badges.push('changedInHistory');
+        if (desc.formats) {
+          const cv = XlSchema.coerce(desc, E.c, liveRaw, colStyleOf(desc));
+          if (cv !== '' && !FMT.validate(cv, desc.formats)) it.badges.push('formatWarning');
+        }
         if (B !== undefined && dismissed[key] === E.c) { it.cat = 'kept'; plan.previouslyKept.push(it); return; }
         if (B === undefined) { it.badges.push('noBaseline'); it.tick = false; it.cat = 'change'; plan.changes.push(it); return; }
         if (C === B) {
@@ -5112,7 +5182,10 @@ const ExcelLink = {
     // Values written to shared history by others after the export
     const tplCols = tpl.columns.map(c => c.name);
     const liveByPk = new Map();
-    plan.changes.concat(plan.conflicts).forEach(x => { if (x.desc.versioned && x.pk && !liveByPk.has(x.pk)) liveByPk.set(x.pk, x.row); });
+    // previouslyKept is included: "Show in Conflicts" can promote those items,
+    // and a promoted Take Excel must still carry a colleague's other columns.
+    plan.changes.concat(plan.conflicts, plan.previouslyKept)
+      .forEach(x => { if (x.desc.versioned && x.pk && !liveByPk.has(x.pk)) liveByPk.set(x.pk, x.row); });
     liveByPk.forEach((live, pk) => {
       const rec = Shist.get(pk);
       if (!rec) return;
@@ -5129,6 +5202,9 @@ const ExcelLink = {
     plan.reRunOffset = plan.changes.concat(plan.conflicts).some(x => x.col === tpl.valueColumn || (tpl.aggregateBy || []).includes(x.col));
     return plan;
   },
+  /* Keys are compared trimmed: the workbook readers strip the hidden key cell,
+     while a raw _pk from an ERP upload may carry surrounding spaces. */
+  _pkTxt(v) { return String(v == null ? '' : v).trim(); },
   _prob(row, id, col, code, extra) {
     return { r: row.r, rid: id, col: col || '', code, msg: XlSchema.reason(code) + (extra ? ' (' + extra + ')' : '') };
   },
@@ -5228,6 +5304,7 @@ const ExcelLink = {
       if (plan.previouslyKept.length) h += li(plan.previouslyKept.length + ' cell(s) where you kept Reco\'s value last time <button class="small" onclick="ExcelLink._rvShowKept()">Show in Conflicts</button>');
       if (i.notInFile) h += li(i.notInFile + ' exported row(s) not in the file — no action (Reco never deletes rows)');
       if (i.newRows) h += li(i.newRows + ' row(s) added in Excel — ignored (use + Persistent Row in Reco)');
+      if (i.unresolvedExtra) h += li(i.unresolvedExtra + ' further row(s) could not be matched (only the first 2,000 are listed in Problems)');
       Object.keys(i.readOnly).forEach(c => { h += li('"' + U.esc(c) + '": ' + i.readOnly[c] + ' read-only cell(s) changed in Excel — ignored'); });
       i.colWarnings.forEach(w => { h += li(U.esc(w)); });
       i.mapping.forEach(w => { h += li(U.esc(w)); });
@@ -5335,14 +5412,17 @@ const ExcelLink = {
       }
       const styles = new Map();
       const styleOf = d => { if (!styles.has(d.name)) styles.set(d.name, XlSchema.columnStyle(sess, d)); return styles.get(d.name); };
-      const edits = picks.map(x => {
-        const value = XlSchema.coerce(x.desc, x.E, x.liveRaw, styleOf(x.desc));
-        if (x.desc.formats && value !== '' && !FMT.validate(value, x.desc.formats)) x.badges.push('formatWarning');
-        return { row: x.row, col: x.col, value };
-      });
+      const edits = picks.map(x => ({ row: x.row, col: x.col, force: true,
+        value: XlSchema.coerce(x.desc, x.E, x.liveRaw, styleOf(x.desc)) }));
+      // History values written by colleagues after the export ride along, so
+      // their edits to OTHER columns are not reverted — but never over a cell
+      // the user just decided here.
       const pkSet = new Set(picks.filter(x => x.desc.versioned && x.pk).map(x => x.pk));
+      const picked = new Set(picks.map(x => x.pk + XlSchema.SEP + x.col));
       const pulled = [];
-      pkSet.forEach(pk => (plan.pulledByPk[pk] || []).forEach(d => pulled.push({ pk, col: d.col, value: d.value })));
+      pkSet.forEach(pk => (plan.pulledByPk[pk] || []).forEach(d => {
+        if (!picked.has(pk + XlSchema.SEP + d.col)) pulled.push({ pk, col: d.col, value: d.value });
+      }));
       let res = { applied: 0, rows: 0, versions: {} };
       if (edits.length) {
         try {
@@ -5385,6 +5465,26 @@ const ExcelLink = {
       U.toast('Applied ' + picks.length + ' change' + (picks.length === 1 ? '' : 's') + ' to ' + new Set(picks.map(x => x.row)).size + ' row(s)', 'success');
       if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); }
     } finally { ExcelLink._busy = false; }
+  },
+  /* Nothing to apply: log the read so the "changes not loaded" state clears. */
+  async _markSeen(tpl, plan) {
+    const f = plan.file || {};
+    const at = new Date().toISOString();
+    try {
+      await ExcelLink._updateManifest(tpl, plan, {
+        rebased: {}, dismissed: {},
+        importAppend: { at, by: ExcelLink.user(), fileSha256: f.sha256 || '', fileMtimeNs: f.mtimeNs || '',
+          counts: { applied: 0, conflictsKept: 0, conflictsTaken: 0, problems: 0, newRows: 0, pulled: 0 }, applied: [] },
+        lastImport: { at, by: ExcelLink.user(), sha256: f.sha256 || '', mtimeNs: f.mtimeNs || '', size: f.size || 0, count: 0 }
+      });
+    } catch (e) { return; }
+    const a = ExcelLink._active[tpl.id];
+    if (a && a.exportId === plan.exportId) {
+      a.loaded = { at, count: 0 };
+      if (a.status) a.status = Object.assign({}, a.status, { newSinceLastImport: false });
+      ExcelLink._paintBanner(tpl.id);
+    }
+    if (ExcelLink._watch) ExcelLink._watch.notified = (plan.file || {}).mtimeNs || ExcelLink._watch.notified;
   },
   async _updateManifest(tpl, plan, patch) {
     if (!plan.exportId || (plan.head && plan.head._synthetic)) return;
@@ -8308,7 +8408,12 @@ _xlApplyLive(changed) {
   if (changed.indexOf('showRowNumbers') !== -1 && Reco._xlFeat && Reco._xlFeat.showIndex) {
     if (o.showRowNumbers) ws.showIndex(); else ws.hideIndex();
   }
-  if (changed.indexOf('undo') !== -1) ws.ignoreHistory = !o.undo;
+  if (changed.indexOf('undo') !== -1) {
+    ws.ignoreHistory = !o.undo;
+    // Dropping the records too: a sort does not write a history entry, so a
+    // later Ctrl+Z would replay an old value into whatever row now sits there.
+    if (!o.undo) { ws.history = []; ws.historyIndex = -1; }
+  }
   if (changed.indexOf('fullscreen') !== -1) {
     const wrap = document.getElementById('xlViewWrap');
     if (wrap) wrap.classList.toggle('xl-fullscreen', !!o.fullscreen);
@@ -9577,6 +9682,11 @@ _ssOnKey(e) {
       return;
     }
   }
+  // Everything below acts on the grid's active cell. Only renderRecoTable
+  // draws that grid, so in the Excel view, the pivot or any other section
+  // these keys would hit a cell the user cannot see (Delete used to blank a
+  // stale row, a primary key included, behind applyEdits' back).
+  if (!document.querySelector('.reco-table-wrap')) return;
   // F2 focuses the formula bar even when nothing else is focused
     if (e.key === 'F2' && sess.activeCell) {
       e.preventDefault();
@@ -11850,10 +11960,17 @@ renderRecoTable(tpl, sess) {
       if (desc.role === 'status' || desc.role === 'computed') { res.rejected.push({ row: e.row, col: e.col, reason: desc.role }); continue; }
       const value = e.value == null ? '' : e.value;
       const cur = XlSchema.currentValue(desc, e.row, fullOf(e.row), sess);
-      if (String(value) === String(cur)) { res.noop++; continue; }
-      if (!opts.trusted && XlSchema.canon(desc, value, 'reco').c === XlSchema.canon(desc, cur, 'reco').c) { res.noop++; continue; }
+      // A decision the user made explicitly (e.g. "Take Excel") is written even
+      // when the value already matches the row: the version row is the record of
+      // that decision, and it carries the history values pulled with it.
+      if (!e.force) {
+        if (String(value) === String(cur)) { res.noop++; continue; }
+        if (!opts.trusted && XlSchema.canon(desc, value, 'reco').c === XlSchema.canon(desc, cur, 'reco').c) { res.noop++; continue; }
+      }
       const pk = e.row._pk || Reco.getRowPK(tpl, e.row);
-      const isVersioned = desc.writeTo === 'row' && (desc.role === 'tpl' || (desc.role === 'toAccount' && colDefs.has(desc.name)));
+      // Identity, not the current scope: a key column the template marks
+      // editable is still a template column, so its edits belong in history.
+      const isVersioned = desc.writeTo === 'row' && desc.versioned;
       if (isVersioned && pk) versioned.push({ row: e.row, col: desc.name, value, pk });
       else sessionOnly.push({ row: e.row, col: desc.name, value, desc,
         reason: desc.writeTo === 'tag' ? 'tag' : (isVersioned ? 'noPk' : 'sessionOnly') });

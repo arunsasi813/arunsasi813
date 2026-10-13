@@ -138,7 +138,10 @@ try {
   check(u.quoted === '"q"', 'Formula: token inside a string literal keeps the old substitution behaviour', u.quoted);
   check(u.jsq === "O\\&#39;Brien\\\\x", 'U.jsq escapes for JS then HTML', u.jsq);
   check(u.libs, 'PapaParse + SheetJS load from apps/lib (no CDN)');
-  check(u.unparseUnion === '_pk,_ver,_ts,a,b', 'version CSV header is the union of all row keys', u.unparseUnion);
+  // Control columns first (_src/_by always present, so an Excel-link write never
+  // widens the file and its rewrite can never lose a colleague's append), then
+  // the union of every row's keys.
+  check(u.unparseUnion === '_pk,_ver,_ts,_src,_by,a,b', 'version CSV header: fixed control columns + the union of all row keys', u.unparseUnion);
   check(await page.evaluate(() => Object.keys(SpecialJV.registry).join()) === 'TCH', 'Special JV registry loaded TCH');
 
   const tpl = await createTemplate(page, 'BSP RUB', { cols: FIELDS, pks: ['Doc'], value: 'AED', editable: ['ToAccount', 'Status'], aeg: true });

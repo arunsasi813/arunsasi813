@@ -87,7 +87,7 @@ async function openReco(browser, bridge) {
   await ctx.addInitScript(PAGE_HELPERS);
   const page = await ctx.newPage();
   const errors = [];
-  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  page.on('pageerror', e => errors.push('pageerror: ' + e.message + ' | ' + (e.stack||'').split('\n').slice(0,4).join(' << ')));
   page.on('console', m => { if (m.type() === 'error' && !/favicon|Failed to load resource/.test(m.text())) errors.push('console: ' + m.text()); });
   page.on('dialog', d => d.accept());
   await page.goto(bridge.url + '/apps/Reco.html');
@@ -674,6 +674,40 @@ try {
   const idx = await page.evaluate(() => ({ same: Reco._xlWorksheet === window.__xvPrevWs || true, hidden: getComputedStyle(document.querySelector('#excelViewHost thead td.jss_selectall') || document.body).display }));
   check(idx.hidden === 'none', 'showRowNumbers off is applied live (index column hidden)', idx);
   await page.evaluate(() => Reco._xlSetPref('showRowNumbers', true));
+
+  // ── sheet mode must not reach into the Excel view ───────────────────────
+  // Sheet mode keeps an active grid cell. Its Delete handler used to fire in
+  // the Excel view and blank that stale cell — a primary key included —
+  // behind applyEdits' back.
+  const hijack = await page.evaluate(async (id) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    sess.spreadsheetMode = true;
+    AppState.activeSubSection = 'reco';
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 120));
+    const fidx = Reco.applyTableFiltersSort(tpl, sess).findIndex(r => r.Doc === 'D2');
+    Reco._ssSetActiveCell(fidx, 'Doc', false);              // a cell in the grid
+    AppState.activeSubSection = 'excel';
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 400));
+    const before = sess.data.find(r => r.Doc === 'D2');
+    const pkBefore = before ? before.Doc : null;
+    // Call the grid's own key handler, the way a real Delete reaches it. (A
+    // synthetic keydown dispatched on `document` also lands in jspreadsheet's
+    // handler, which expects a real element as the target.)
+    const ev = { key: 'Delete', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
+                 target: document.body, preventDefault() {}, stopPropagation() {} };
+    Reco._ssOnKey(ev);
+    await new Promise(r => setTimeout(r, 200));
+    const grid = !!document.querySelector('.reco-table-wrap');
+    sess.spreadsheetMode = false;
+    return { pkBefore, grid, pkAfter: (sess.data.find(r => r._id === (before || {})._id) || {}).Doc };
+  }, tpl.id);
+  check(hijack.pkBefore === 'D2' && hijack.pkAfter === 'D2' && hijack.grid === false,
+    'Delete in the Excel view does not blank the grid\'s stale active cell', hijack);
+  await page.evaluate((id) => { AppState.activeSubSection = 'excel'; App.navigate('reco'); }, tpl.id);
+  await page.waitForFunction(() => !!Reco._xlWorksheet, null, { timeout: 15000 });
 
   // ── toolbar: Open in Excel, CSV ──────────────────────────────────────────
   const tb = await page.$$eval('.excel-view-toolbar button, .excel-view-toolbar select', els => els.map(e => (e.textContent || '').trim()));
