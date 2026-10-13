@@ -331,9 +331,9 @@ try {
   check(surg.clearNoneTicked && surg.barHidden, '2.10 clearing unticks the visible rows and hides the bar', surg);
   check(surg.headerPartial && surg.headerAllTicked && surg.headerEmpty,
     '2.10b the header box reads empty / half / full to match the real selection', surg);
-  under(surg.clearMs, 200, '2.11 clearing a 200,000-row selection', 120);
+  under(surg.clearMs, 100, '2.11 clearing a 200,000-row selection', 120);  // new 33-84ms (variance), old 120ms+
   check(surg.pageSurvived, '2.12 turning the page re-renders the grid, not the screen');
-  under(surg.pageMs, 250, '2.13 jumping to page 501 of 1,000', 117);
+  under(surg.pageMs, 90, '2.13 jumping to page 501 of 1,000', 117);        // new ~51ms, old 117ms
   check(surg.chipSurvived, '2.14 removing a slicer chip does not re-render the whole screen');
   check(surg.chipsLeft === 1, '2.15 the chip strip is refreshed in place', surg.chipsLeft);
   check(surg.rowsAfterChip === BIG / 4, '2.16 and the table follows the remaining chip', surg.rowsAfterChip);
@@ -559,6 +559,16 @@ try {
     const r = timeSort('Ref');    o.refMs = r.ms;  o.refFirst = r.first.Ref;   o.refLast = r.last.Ref;
     const a = timeSort('Amount'); o.amtMs = a.ms;  o.amtFirst = a.first.Amount;
     const c = timeSort('Calc');   o.calcMs = c.ms;
+    // Count the formula evaluations a sort costs: the keyed sort must evaluate
+    // each row once, where the old comparator evaluated per comparison.
+    const realEval = Formula.evaluate;
+    let evals = 0;
+    Formula.evaluate = function (f, row) { evals++; return realEval.call(Formula, f, row); };
+    try {
+      sess.columnSorts = { col: 'Calc', dir: 'asc' };
+      const n = Reco.applyTableFiltersSort(tpl, sess).length;
+      o.calcEvalsPerRow = Math.round((evals / Math.max(1, n)) * 100) / 100;
+    } finally { Formula.evaluate = realEval; }
     sess.columnSorts = null;
     return o;
   });
@@ -567,8 +577,12 @@ try {
   }
   under(sort.dateMs, 800, '5.2 sorting 200,000 rows by a date column', 1747);
   under(sort.refMs, 700, '5.3 sorting 200,000 rows by a text column', 1623);
-  under(sort.amtMs, 500, '5.4 sorting 200,000 rows by a value column', 176);
-  under(sort.calcMs, 800, '5.5 sorting 200,000 rows by a formula column', 160);
+  under(sort.amtMs, 150, '5.4 sorting 200,000 rows by a value column', 176);   // new ~93ms, old 176ms
+  // A formula column cannot gain from key caching (Formula.evaluate dominates).
+  // What the keyed sort guarantees is one evaluation per row, not one per
+  // comparison — ~200k instead of ~3.4M — so assert the call count.
+  check(sort.calcEvalsPerRow != null && sort.calcEvalsPerRow <= 1.05,
+    '5.5 a formula column is evaluated once per row, not once per comparison', sort.calcEvalsPerRow);
   check(sort.dateN === BIG, '5.6 nothing is lost in the sort', sort.dateN);
   check(sort.dateFirst === '01/01/2024', '5.7 dates sort as dates, oldest first', sort.dateFirst);
   // Natural order puts R199999 last; code-point order would end on R99999.

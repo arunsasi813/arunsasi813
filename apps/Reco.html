@@ -1385,10 +1385,13 @@ const FilterOps = {
      'text' is the untyped catch-all and keeps every operator, because a
      text column may legitimately hold anything.                        */
   _byKind: {
+    // contains/not_contains stay on the typed kinds: they are unambiguous on
+    // any value and they are how people find "every March" or a reference
+    // fragment in one step. Dropping them made the new menus a subset.
     date:   ['equals','not_equals','before','after','on_or_before','on_or_after',
-             'between','not_between','empty','not_empty','in_list','not_in_list'],
+             'between','not_between','contains','not_contains','empty','not_empty','in_list','not_in_list'],
     value:  ['equals','not_equals','greater','greater_eq','less','less_eq',
-             'between','not_between','empty','not_empty','in_list','not_in_list'],
+             'between','not_between','contains','not_contains','empty','not_empty','in_list','not_in_list'],
     status: ['equals','not_equals','in_list','not_in_list']
   },
   /* On a date column "date before" is just "before". */
@@ -1444,6 +1447,9 @@ const FilterOps = {
       const a = U.parseDate(v), b = U.parseDate(q);
       return a && b ? test(a.getTime(), b.getTime()) : false;
     }
+    // A plainly-date value is not a number: parseFloat('04-Feb-26') is 4, and
+    // "between 1 and 10" used to match the 4th and the 10th of any month.
+    if (!U.isNumeric(v) && U.looksLikeDate(v)) return false;
     return test(FilterOps._n(v), FilterOps._n(q));   // NaN fails every test
   },
   /* Inclusive range. Bounds given the wrong way round still mean the range. */
@@ -1454,6 +1460,7 @@ const FilterOps = {
       const t = a.getTime();
       return t >= Math.min(l.getTime(), h.getTime()) && t <= Math.max(l.getTime(), h.getTime());
     }
+    if (!U.isNumeric(v) && U.looksLikeDate(v)) return false;     // see _cmp
     const a = FilterOps._n(v), l = FilterOps._n(lo), h = FilterOps._n(hi);
     return a >= Math.min(l, h) && a <= Math.max(l, h);
   },
@@ -1461,12 +1468,23 @@ const FilterOps = {
      date column, the same amount on a value column ('1,234.50' matches the
      typed 1234.5), the same text anywhere else. */
   _eq(v, q, kind) {
-    if (kind === 'date') { const a = U.parseDate(v), b = U.parseDate(q); if (a && b) return a.getTime() === b.getTime(); }
-    else if (kind === 'value') { if (U.isNumeric(v) && U.isNumeric(q)) return U.num(v) === U.num(q); }
+    const dateish = x => !U.isNumeric(x) && U.looksLikeDate(x);
+    // Same rule _cmpMode uses, so equality and a range mean the same thing on
+    // the same column (an untyped computed column holding dates included).
+    if (kind === 'date' || (kind !== 'value' && kind !== 'status' && dateish(v) && dateish(q))) {
+      const a = U.parseDate(v), b = U.parseDate(q);
+      if (a && b) return a.getTime() === b.getTime();
+    } else if (kind === 'value') { if (U.isNumeric(v) && U.isNumeric(q)) return U.num(v) === U.num(q); }
     return String(v == null ? '' : v).toLowerCase() === String(q == null ? '' : q).toLowerCase();
   },
   _inList(v, val, kind) {
-    const list = String(val||'').split(',').map(s => s.trim()).filter(Boolean);
+    const raw = String(val || '');
+    // On a value column a comma can be a thousands separator OR a list
+    // separator: '1,234.50' is one amount, '1,234.50, -50' is two. Split only
+    // where the comma is not followed by a 3-digit group (splitting blindly
+    // matched the rows worth 1 and 234.50 instead of the one worth 1,234.50).
+    const list = (kind === 'value' ? raw.split(/,(?!\d{3}(?:\D|$))/) : raw.split(','))
+      .map(x => x.trim()).filter(Boolean);
     return list.some(q => FilterOps._eq(v, q, kind));
   },
 
@@ -10519,7 +10537,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       const fsCount = FilterSets.list(tpl).length;
       const hasActive = FilterSets.hasActiveFilters(sess);
       h += '<div class="view-controls">';
-      h += '<button class="small'+(hasActive?' active':'')+'" onclick="Reco.openFilterSetsMenu(this)" title="Saved filter sets">';
+      h += '<button class="small'+(hasActive?' active':'')+'" id="recoFilterSetBtn" onclick="Reco.openFilterSetsMenu(this)" title="Saved filter sets">';
       h += '🎯 Filters'+(fsCount?' ('+fsCount+')':'');
       if (hasActive) h += ' •';
       h += ' ▾</button>';
@@ -11195,10 +11213,13 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       Object.keys(sess.slicers || {}).forEach(col => {
         const sel = sess.slicers[col];
         if (!sel || !sel.length) return;
+        // Hashed once per column: sel.includes() per row is O(rows x picked),
+        // which took 103 s for a 200k-value selection.
+        const selSet = new Set(sel.map(v => String(v == null ? '' : v)));
         const extraDef = Reco._extraDef(tpl, col);
         filtered = filtered.filter(row => {
           const val = extraDef ? Reco._extraValueForRow(tpl, sess, row, extraDef) : row[col];
-          return sel.includes(String(val||''));
+          return selSet.has(String(val || ''));
         });
       });
 
@@ -11396,6 +11417,14 @@ refreshGrid() {
   area.innerHTML = Reco.renderRecoTable(tpl, sess);
   const bar = document.getElementById('recoSlicerBar');
   if (bar) bar.innerHTML = Reco.renderSlicers(tpl, sess);
+  // The dot is how a user tells a filter set is in effect; a grid-only redraw
+  // used to leave it lit (or dark) until the next full render.
+  const fb = document.getElementById('recoFilterSetBtn');
+  if (fb) {
+    const on = FilterSets.hasActiveFilters(sess), n = FilterSets.list(tpl).length;
+    fb.classList.toggle('active', on);
+    fb.innerHTML = '🎯 Filters' + (n ? ' (' + n + ')' : '') + (on ? ' •' : '') + ' ▾';
+  }
   const nw = area.querySelector('.reco-table-wrap');
   if (nw) { nw.scrollTop = top; nw.scrollLeft = left; }
   Reco.updateSelSumBar();
@@ -11943,10 +11972,14 @@ renderRecoTable(tpl, sess) {
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) return;
     const st = Reco._virtStateFor(tpl, sess);
-    const total = st ? st.filtered.length : null;
-    const sel = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]).length;
-    box.checked = total != null && total > 0 && sel >= total;
-    box.indeterminate = sel > 0 && !box.checked;
+    // Counted inside the filtered list: a session-wide count read "all
+    // selected" when the filter had moved to rows none of which are.
+    const sel = sess.selectedRows || {};
+    const total = st ? st.filtered.length : 0;
+    let hit = 0;
+    if (st) for (const r of st.filtered) if (sel[r._id]) hit++;
+    box.checked = total > 0 && hit === total;
+    box.indeterminate = hit > 0 && hit < total;
   },
 
 
@@ -12123,12 +12156,18 @@ renderRecoTable(tpl, sess) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     if (!sess) return;
     sess.page = Math.max(0, p | 0);
+    // Back to the top of the new page: keeping the old offset left the first
+    // rows of the page above the viewport, silently skipped.
+    const w = document.querySelector('.reco-table-wrap');
+    if (w) w.scrollTop = 0;
     Reco.refreshGrid();
   },
   setPageSize(s) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.pageSize = s;
     sess.page = 0;
+    const w = document.querySelector('.reco-table-wrap');
+    if (w) w.scrollTop = 0;
     AppState.save();
     Reco.refreshGrid();
   },
@@ -12207,6 +12246,11 @@ renderRecoTable(tpl, sess) {
     if (AppState.currentPage !== 'reco') return;
     const sess = AppState.recoSessions[AppState.activeRecoId];
     if (!sess || !sess.data.length || sess.spreadsheetMode) return;
+    // Only where the grid is actually drawn. These keys were being swallowed
+    // in the Excel view, the pivot and the other sections, where they silently
+    // turned a page the user could not see.
+    if ((sess.activeSection || 'action') !== 'action') return;
+    if ((AppState.activeSubSection || 'reco') !== 'reco') return;
     if (document.getElementById('appModal').classList.contains('show')) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
@@ -12305,8 +12349,11 @@ renderRecoTable(tpl, sess) {
     sess.columnSorts = { col, dir };
     AppState.save();
     try {
-      await Reco._withBusy(sess.data.length,
-        'Sorting ' + U.fmtInt(sess.data.length) + ' rows by ' + col + '…',
+      // Sized from the filtered rows: a 200k session narrowed to one row was
+      // flashing up "Sorting 200,000 rows…" for a 33 ms sort.
+      const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+      const n = tpl ? Reco._filteredCount(tpl, sess) : sess.data.length;
+      await Reco._withBusy(n, 'Sorting ' + U.fmtInt(n) + ' rows by ' + col + '…',
         () => Reco.refreshGrid());
     } catch (e) { Reco._busyDone(); U.toast('Could not sort: ' + e.message, 'error'); }
   },
@@ -12318,8 +12365,13 @@ renderRecoTable(tpl, sess) {
   },
   addColFilter(col) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
+    const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+    // 'contains' is not offered on a typed column, so defaulting to it started
+    // every new date/amount filter in a state the menu labels as wrong.
+    const kind = FilterOps.kindOf(tpl, col);
+    const op = FilterOps.suits(kind, 'contains') ? 'contains' : 'equals';
     sess.columnFilters[col] = sess.columnFilters[col] || [];
-    sess.columnFilters[col].push({ op: 'contains', val: '', val2: '', enabled: true });
+    sess.columnFilters[col].push({ op, val: '', val2: '', enabled: true });
     AppState.save();
     Reco.refreshGrid();
     Reco._reopenColDropdown(col);
@@ -12382,6 +12434,7 @@ renderRecoTable(tpl, sess) {
      value a user had already picked may not be on screen, and reading the
      selection back off the DOM would silently drop it. */
   SLICER_CAP: 500,           // values rendered at once
+  SLICER_PICK_CAP: 5000,     // values one "Select matching" may add
   SLICER_CHUNK: 20000,       // rows scanned between yields
 
   _slicerState: null,
@@ -12543,7 +12596,19 @@ renderRecoTable(tpl, sess) {
   _slicerSelectMatching() {
     const st = Reco._slicerState;
     if (!st) return;
+    if (!(st.q || '').trim()) {
+      // With an empty box this selected every distinct value — on a reference
+      // column that is a filter listing every row, written to the shared
+      // session file. Filtering by "all values" is what Clear is for.
+      U.toast('Type something to match first — an empty search would select every value', 'error');
+      return;
+    }
     const matches = Reco._slicerMatches();
+    if (matches.length > Reco.SLICER_PICK_CAP) {
+      U.toast('That matches ' + U.fmtInt(matches.length) + ' values — narrow the search (at most '
+        + U.fmtInt(Reco.SLICER_PICK_CAP) + ' can be picked at once)', 'error');
+      return;
+    }
     matches.forEach(v => st.sel.add(v));
     Reco._slicerRender();
     U.toast('Selected ' + U.fmtInt(matches.length) + ' value(s)', 'success');
@@ -12634,8 +12699,9 @@ renderRecoTable(tpl, sess) {
     // selection runs inside the same overlay, so there is no second silent
     // pause after the bar disappears.
     try {
-      await Reco._withBusy(checked ? sess.data.length / 2 : 0,
-        'Selecting ' + U.fmtInt(sess.data.length) + ' rows…', () => {
+      const nSel = Reco._filteredCount(tpl, sess);
+      await Reco._withBusy(checked ? nSel / 2 : 0,
+        'Selecting ' + U.fmtInt(nSel) + ' rows…', () => {
           sess.selectedRows = {};
           if (checked) {
             // Everything the current filters leave visible, as before — from
@@ -13219,10 +13285,10 @@ renderRecoTable(tpl, sess) {
     if (!openRows.length) return '<div class="empty" style="color:var(--success, #059669);">All items are offset!</div>';
     const cols = tpl.columns.map(c => c.name);
     const CAP = Reco.REPORT_ROW_CAP;
-    let h = '<h3>Open Items ('+openRows.length.toLocaleString()+')</h3>';
+    let h = '<h3>Open Items ('+U.fmtInt(openRows.length)+')</h3>';
     h += '<button class="success small" onclick="Reco.exportRowsCsv(\'open_items\','+U.esc(JSON.stringify(cols))+')">Export CSV</button>';
-    if (openRows.length > CAP) h += ' <span class="tag">showing the first '+CAP.toLocaleString()+' of '
-      +openRows.length.toLocaleString()+' — Export CSV gives all '+openRows.length.toLocaleString()+'</span>';
+    if (openRows.length > CAP) h += ' <span class="tag">showing the first '+U.fmtInt(CAP)+' of '
+      +U.fmtInt(openRows.length)+' — Export CSV gives all '+U.fmtInt(openRows.length)+'</span>';
     h += '<div style="overflow-x:auto; max-height:400px; overflow-y:auto"><table><thead><tr>';
     cols.forEach(c => { h += '<th>'+U.esc(c)+'</th>'; });
     h += '</tr></thead><tbody>';
@@ -13232,8 +13298,8 @@ renderRecoTable(tpl, sess) {
       h += '</tr>';
     });
     h += '</tbody></table></div>';
-    if (openRows.length > CAP) h += '<div class="text-muted">Showing the first '+CAP.toLocaleString()+' of '
-      +openRows.length.toLocaleString()+' open items. <b>Export CSV</b> writes all '+openRows.length.toLocaleString()+'.</div>';
+    if (openRows.length > CAP) h += '<div class="text-muted">Showing the first '+U.fmtInt(CAP)+' of '
+      +U.fmtInt(openRows.length)+' open items. <b>Export CSV</b> writes all '+U.fmtInt(openRows.length)+'.</div>';
     return h;
   },
 
@@ -13250,11 +13316,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     // 1. Title & Toolbar
     h += '<h3>'+U.esc(rpt.name)+'</h3>';
-    h += '<div class="toolbar"><span class="text-muted">'+rows.length.toLocaleString()+' rows · logic: '+(rpt.logic||'AND')+'</span>';
+    h += '<div class="toolbar"><span class="text-muted">'+U.fmtInt(rows.length)+' rows · logic: '+(rpt.logic||'AND')+'</span>';
     // Say up front how much of the result is on screen. The cards and the
     // total row below always cover all of it, and so does the CSV.
     if (capped) h += '<span class="tag" title="The summary cards, the total row and the CSV export all cover every row.">showing the first '
-      +CAP.toLocaleString()+' of '+rows.length.toLocaleString()+' rows — Export CSV gives all '+rows.length.toLocaleString()+'</span>';
+      +U.fmtInt(CAP)+' of '+U.fmtInt(rows.length)+' rows — Export CSV gives all '+U.fmtInt(rows.length)+'</span>';
     h += '<button class="success small" onclick="Reco.exportCustomReport('+idx+')">Export CSV</button></div>';
 
     // 2. Render Summary Cards
@@ -13279,7 +13345,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
               if (x > mx) mx = x;
             }
             let cardValue;
-            if (func === 'Count') cardValue = filled.toLocaleString();
+            if (func === 'Count') cardValue = U.fmtInt(filled);
             // Sum of nothing is zero; an average, minimum or maximum of
             // nothing has no answer, so those stay blank.
             else if (func === 'Sum') cardValue = (n || !rows.length) ? U.fmtNum(sum) : '—';
@@ -13348,9 +13414,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
     }
 
     h += '</tbody></table></div>';
-    if (capped) h += '<div class="text-muted">Showing the first '+CAP.toLocaleString()+' of '+rows.length.toLocaleString()
-      +' rows. The summary cards and the total row above cover all '+rows.length.toLocaleString()
-      +'; <b>Export CSV</b> writes all '+rows.length.toLocaleString()+'.</div>';
+    if (capped) h += '<div class="text-muted">Showing the first '+U.fmtInt(CAP)+' of '+U.fmtInt(rows.length)
+      +' rows. The summary cards and the total row above cover all '+U.fmtInt(rows.length)
+      +'; <b>Export CSV</b> writes all '+U.fmtInt(rows.length)+'.</div>';
     return h;
   },
 

@@ -38,6 +38,10 @@ function check(cond, msg, extra) {
   else { failures++; console.log('  ✗ ' + msg + (extra !== undefined ? '  → ' + JSON.stringify(extra).slice(0, 600) : '')); }
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Mirrors FilterOps._byKind.date in apps/Reco.html (kept here so the suite
+// states the expectation rather than reading it from the code it tests).
+const FILTER_KIND_OPS = { date: ['equals','not_equals','before','after','on_or_before','on_or_after',
+  'between','not_between','contains','not_contains','empty','not_empty','in_list','not_in_list'] };
 function eqCheck(got, expected, msg) { check(same(got, expected), msg, { got, expected }); }
 
 function makeRoot(name) {
@@ -221,13 +225,35 @@ try {
     ['D4'], 'A14 the exact text still matches too');
   eqCheck(await docsOf(page, id, oneFilter('Amount', 'in_list', '-50, 1234.5')),
     ['D3', 'D4'], 'A15 in-list on a value column compares amounts');
+  // A thousands separator is not a list separator (it split '1,234.50' into
+  // 1 and 234.50 and matched the wrong rows).
+  eqCheck(await docsOf(page, id, oneFilter('Amount', 'in_list', '1,234.50')),
+    ['D4'], 'A15b one amount with a thousands separator is one list item');
+  eqCheck(await docsOf(page, id, oneFilter('Amount', 'not_in_list', '1,234.50')),
+    ['D1', 'D2', 'D3', 'D5', 'D6'], 'A15c not-in-list excludes exactly that amount');
+  eqCheck(await docsOf(page, id, oneFilter('Amount', 'in_list', '1,234.50, -50')),
+    ['D3', 'D4'], 'A15d a real list of amounts still splits on the comma');
+  // Equality must mean on the same column what a range means (a date operand
+  // on an untyped column was honoured by between but not by equals).
+  eqCheck(await docsOf(page, id, oneFilter('TxtDate', 'equals', '05/01/2026')),
+    await docsOf(page, id, oneFilter('TxtDate', 'between', '05/01/2026', '05/01/2026')),
+    'A15e equals and a one-day range agree on a text column holding dates');
+  // A date must never be reduced to its day number by a numeric comparison.
+  eqCheck(await docsOf(page, id, oneFilter('TxtDate', 'between', '1', '10')),
+    [], 'A15f a numeric range matches no date (it used to match the 1st-10th of any month)');
   // an untyped column: the filter's own bounds decide
   eqCheck(await docsOf(page, id, oneFilter('TxtDate', 'between', '01/01/2026', '31/03/2026')),
     ['D1', 'D2', 'D3'], 'A16 a text column holding dates gets a date range');
   eqCheck(await docsOf(page, id, oneFilter('TxtNum', 'between', '100', '300')),
     ['D1', 'D2', 'D5'], 'A17 a text column holding numbers keeps a numeric range');
+  // On an untyped column the operand decides, and it must decide the SAME way
+  // for every operator: A16 already honours a date range here, so equality
+  // honours a date too. One mental model per column is the whole point of this
+  // round — two would be the bug we just fixed, in a smaller place.
   eqCheck(await docsOf(page, id, oneFilter('TxtDate', 'equals', '2026-02-15')),
-    [], 'A18 equality on an untyped column stays exact text');
+    ['D2'], 'A18 equality on an untyped column honours a date operand, as a range does');
+  eqCheck(await docsOf(page, id, oneFilter('TxtDate', 'equals', 'not a date at all')),
+    [], 'A18b a non-date operand is still compared as exact text');
   eqCheck(await docsOf(page, id, oneFilter('DueDt', 'between', '01/02/2026', '30/04/2026')),
     ['D1', 'D2', 'D3'], 'A19 a computed column producing dates gets a date range');
   eqCheck(await docsOf(page, id, oneFilter('Dbl', 'greater', '250')),
@@ -236,7 +262,7 @@ try {
   // report declares it a date. (A template column's own flags always win.)
   eqCheck(await docsOf(page, id, { name: 'R', columns: ['Doc'],
     filters: [{ col: 'DueDt', op: 'equals', val: '2026-02-04' }] }),
-    [], 'A21 without a date format, equality on an extra column is exact text');
+    ['D1'], 'A21 equality on an extra column honours a date operand (same rule as A18)');
   eqCheck(await docsOf(page, id, { name: 'R', columns: ['Doc'], dateFormats: { DueDt: 'MMM-YY' },
     filters: [{ col: 'DueDt', op: 'equals', val: '2026-02-04' }] }),
     ['D1'], 'A21b a date format on an extra column makes its filter compare days');
@@ -274,6 +300,8 @@ try {
     'B1 a date column offers "between" and not ">"', ops.date);
   check(ops.value.includes('greater') && !ops.value.includes('before'),
     'B2 a value column offers ">" and not "date before"', ops.value);
+  check(ops.date.includes('contains') && ops.value.includes('contains'),
+    'B2b typed columns keep "contains" — it is how people find every March or a reference fragment', ops);
   eqCheck(ops.status, ['equals', 'not_equals', 'in_list', 'not_in_list'],
     'B3 the status column offers only equality and list operators');
   check(ops.textN === ops.allN, 'B4 an untyped text column keeps every operator', ops);
@@ -307,8 +335,10 @@ try {
   check(/value="greater"/.test(menus.value), 'B10 the report editor offers ">" on a value column');
   check(/<option value="offset"/.test(menus.status) && !/placeholder="value"/.test(menus.status),
     'B11 the status filter gets a two-value picker, not a free-text box');
-  check(menus.afterSwitch === 'equals',
-    'B12 switching a filter to a date column drops "contains" for "equals"', menus.afterSwitch);
+  // 'contains' is valid on a date column (B2b), so switching keeps it. The
+  // invariant that matters is that the operator always suits the new column.
+  check(menus.afterSwitch && FILTER_KIND_OPS.date.includes(menus.afterSwitch),
+    'B12 switching a filter column leaves an operator that suits the new column', menus.afterSwitch);
   check(menus.statusVal === 'open', 'B13 switching to the status column seeds a valid value', menus.statusVal);
 
   const editor = await page.evaluate((id) => {
