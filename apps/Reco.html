@@ -327,6 +327,10 @@ th.col-ss-added .col-marker {
   .stat-card .stat-val { font-size: 24px; font-weight: 700; color: var(--text, #1f2937); }
   .stat-card .stat-label { font-size: 11px; color: var(--text-muted, #6b7280); margin-top: 4px; }
   .virt-spacer-top td, .virt-spacer-bot td { border: none !important; background: transparent !important; padding: 0 !important; }
+  .pager .goto-box { width: 62px; padding: 2px 6px; font-size: 11px; text-align: center; }
+  /* Brief marker on the row "Go to row" landed on, so the jump is visible. */
+  @keyframes recoRowFlash { 0%,100% { background: transparent; } 20%,60% { background: rgba(37,99,235,0.22); } }
+  tr.row-flash > td { animation: recoRowFlash 1.6s ease-in-out; }
   /* full-height reco shell (only on reco page) */
   body.reco-fullheight { overflow: hidden; }
   body.reco-fullheight #appMain { padding: 0; }
@@ -852,6 +856,16 @@ const U = {
     return /^\(?[-+]?[\d,\s\u00a0]*\.?\d+\)?-?$/.test(s) && /\d/.test(s);
   },
   fmtNum(n) { if (n==null) return '0.00'; const v=Number(n); return isNaN(v)?'0.00':v.toFixed(2); },
+  /* Row counts with thousands separators. '200000' reads as a blur; a finance
+     user scanning "Showing 200 of 200,000" sees the scale at a glance. Grouped
+     by hand rather than toLocaleString so the digits never change with the
+     machine's locale. */
+  fmtInt(n) {
+    const v = Math.round(Number(n));
+    if (!isFinite(v)) return '0';
+    const s = Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return (v < 0 ? '-' : '') + s;
+  },
   toast(msg, kind) {
     const t=document.createElement('div');
     t.className='toast'+(kind?' '+kind:'');
@@ -970,6 +984,23 @@ const U = {
     }
     const d = new Date(s);
     return isNaN(d.getTime()) ? null : d;
+  },
+  /* Strict date sniffer: true only for the notations parseDate recognises
+     explicitly (ISO · dd/mm/yyyy · dd-MMM-yy · 5-digit Excel serial). Unlike
+     parseDate it never falls through to `new Date(text)`, which happily turns
+     '1-2-3' into a date — so this can be used to DECIDE whether a value is a
+     date without guessing. */
+  looksLikeDate(v) {
+    if (v == null || v === '') return false;
+    if (v instanceof Date) return !isNaN(v.getTime());
+    if (typeof v === 'number') return v > 20000 && v < 80000;
+    const s = String(v).trim();
+    if (!s) return false;
+    if (/^\d{5}(\.\d+)?$/.test(s)) { const n = parseFloat(s); return n > 20000 && n < 80000; }
+    if (!/^\d{4}-\d{1,2}-\d{1,2}/.test(s)
+        && !/^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$/.test(s)
+        && !/^\d{1,2}[\s\-\/][A-Za-z]{3}[A-Za-z]*\.?[\s\-\/,]+\d{2,4}$/.test(s)) return false;
+    return !!U.parseDate(s);
   },
   _mkDate(y, mo, d) {
     if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
@@ -1291,8 +1322,7 @@ const Formula = {
     const c = Formula._compile(formula);
     if (c) {
       try {
-        const out = c.fn(c.tokens.map(k => Formula._tokenValue(row, k)), ...c.helpers);
-        return out == null ? '' : out;
+        return Formula._result(c.fn(c.tokens.map(k => Formula._tokenValue(row, k)), ...c.helpers));
       } catch (e) {
         return '#ERR';
       }
@@ -1301,11 +1331,19 @@ const Formula = {
       const subbed = Formula.substituteTokens(formula, row);
       const scope = Formula._helpers;
       const fn = new Function(...Object.keys(scope), 'return (' + subbed + ');');
-      const out = fn(...Object.values(scope));
-      return out == null ? '' : out;
+      return Formula._result(fn(...Object.values(scope)));
     } catch (e) {
       return '#ERR';
     }
+  },
+  /* A formula that produced NaN or Infinity did not work — usually a bare
+     {Amount} token on a formatted amount, where NUM({Amount}) is needed.
+     Say so instead of printing "NaN", which reads like a value yet is
+     silently skipped by report totals, summary cards and sorting. */
+  _result(out) {
+    if (out == null) return '';
+    if (typeof out === 'number' && !isFinite(out)) return '#ERR';
+    return out;
   }
 };
 
@@ -1339,33 +1377,126 @@ const FilterOps = {
     { op: 'in_list',        label: 'in list (a,b,c)' },
     { op: 'not_in_list',    label: 'not in list' }
   ],
-  evaluate(rawVal, op, val, val2, isDate) {
+
+  /* ---- which operators suit which column kind -------------------------
+     The single source of truth. Every place that offers operators asks
+     opsFor(), and every place that evaluates one passes the same kind to
+     evaluate(), so the menu and the arithmetic can never drift apart.
+     'text' is the untyped catch-all and keeps every operator, because a
+     text column may legitimately hold anything.                        */
+  _byKind: {
+    date:   ['equals','not_equals','before','after','on_or_before','on_or_after',
+             'between','not_between','empty','not_empty','in_list','not_in_list'],
+    value:  ['equals','not_equals','greater','greater_eq','less','less_eq',
+             'between','not_between','empty','not_empty','in_list','not_in_list'],
+    status: ['equals','not_equals','in_list','not_in_list']
+  },
+  /* On a date column "date before" is just "before". */
+  _dateLabels: { before:'before', after:'after', on_or_before:'on or before', on_or_after:'on or after' },
+
+  /* The kind to assume for a column, from configuration alone:
+     'date' | 'value' | 'status' | 'text'. A template column answers from its
+     own flags. An extra or computed column has none, but giving it a date
+     format in `rpt` declares it a date; otherwise it stays 'text', where the
+     filter's own operands decide what a comparison means (see _cmpMode). */
+  kindOf(tpl, col, rpt) {
+    if (col === '_status') return 'status';
+    const c = ((tpl && tpl.columns) || []).find(x => x.name === col);
+    if (c) return c.isDate ? 'date' : (c.isValue ? 'value' : 'text');
+    if (rpt && rpt.dateFormats && rpt.dateFormats[col]) return 'date';
+    return 'text';
+  },
+  suits(kind, op) { const a = FilterOps._byKind[kind]; return !a || a.indexOf(op) >= 0; },
+
+  /* Operators to offer for `kind`. An operator saved before the column was
+     typed stays visible (flagged) when passed as `keepOp`, so an existing
+     report can still be read and corrected instead of silently losing it. */
+  opsFor(kind, keepOp) {
+    const allow = FilterOps._byKind[kind];
+    let out = allow
+      ? allow.map(op => {
+          const o = FilterOps.list.find(x => x.op === op) || { op, label: op };
+          return { op, label: (kind === 'date' && FilterOps._dateLabels[op]) || o.label };
+        })
+      : FilterOps.list.slice();
+    if (keepOp && !out.some(o => o.op === keepOp)) {
+      const o = FilterOps.list.find(x => x.op === keepOp);
+      if (o) out = out.concat([{ op: o.op, label: o.label + ' — not suited to this column' }]);
+    }
+    return out;
+  },
+
+  /* What an ordering comparison MEANS. A declared kind wins; otherwise the
+     filter's own bounds decide, so "between 01/01/2026 and 31/03/2026" on an
+     untyped or computed column compares days instead of letting parseFloat
+     reduce '05/01/2026' to the day-of-month number 5. */
+  _cmpMode(kind, a, b) {
+    if (kind === 'date') return 'date';
+    if (kind === 'value') return 'num';
+    const given = [a, b].filter(x => x != null && String(x).trim() !== '');
+    const dateish = x => !U.isNumeric(x) && U.looksLikeDate(x);
+    return given.length && given.every(dateish) ? 'date' : 'num';
+  },
+  /* One ordering test on the right basis. Blanks and values that will not
+     parse match nothing, exactly as the numeric comparison always behaved. */
+  _cmp(v, q, kind, test) {
+    if (FilterOps._cmpMode(kind, q) === 'date') {
+      const a = U.parseDate(v), b = U.parseDate(q);
+      return a && b ? test(a.getTime(), b.getTime()) : false;
+    }
+    return test(FilterOps._n(v), FilterOps._n(q));   // NaN fails every test
+  },
+  /* Inclusive range. Bounds given the wrong way round still mean the range. */
+  _between(v, lo, hi, kind) {
+    if (FilterOps._cmpMode(kind, lo, hi) === 'date') {
+      const a = U.parseDate(v), l = U.parseDate(lo), h = U.parseDate(hi);
+      if (!a || !l || !h) return false;
+      const t = a.getTime();
+      return t >= Math.min(l.getTime(), h.getTime()) && t <= Math.max(l.getTime(), h.getTime());
+    }
+    const a = FilterOps._n(v), l = FilterOps._n(lo), h = FilterOps._n(hi);
+    return a >= Math.min(l, h) && a <= Math.max(l, h);
+  },
+  /* Equality that means what the column's type implies: the same day on a
+     date column, the same amount on a value column ('1,234.50' matches the
+     typed 1234.5), the same text anywhere else. */
+  _eq(v, q, kind) {
+    if (kind === 'date') { const a = U.parseDate(v), b = U.parseDate(q); if (a && b) return a.getTime() === b.getTime(); }
+    else if (kind === 'value') { if (U.isNumeric(v) && U.isNumeric(q)) return U.num(v) === U.num(q); }
+    return String(v == null ? '' : v).toLowerCase() === String(q == null ? '' : q).toLowerCase();
+  },
+  _inList(v, val, kind) {
+    const list = String(val||'').split(',').map(s => s.trim()).filter(Boolean);
+    return list.some(q => FilterOps._eq(v, q, kind));
+  },
+
+  evaluate(rawVal, op, val, val2, kind) {
     const v = rawVal == null ? '' : String(rawVal);
     const lv = v.toLowerCase();
     const lqv = String(val||'').toLowerCase();
     switch(op) {
-      case 'equals':         return lv === lqv;
-      case 'not_equals':     return lv !== lqv;
+      case 'equals':         return FilterOps._eq(v, val, kind);
+      case 'not_equals':     return !FilterOps._eq(v, val, kind);
       case 'contains':       return lv.includes(lqv);
       case 'not_contains':   return !lv.includes(lqv);
       case 'starts_with':    return lv.startsWith(lqv);
       case 'not_starts_with':return !lv.startsWith(lqv);
       case 'ends_with':      return lv.endsWith(lqv);
       case 'not_ends_with':  return !lv.endsWith(lqv);
-      case 'greater':        return FilterOps._n(v) > FilterOps._n(val);
-      case 'greater_eq':     return FilterOps._n(v) >= FilterOps._n(val);
-      case 'less':           return FilterOps._n(v) < FilterOps._n(val);
-      case 'less_eq':        return FilterOps._n(v) <= FilterOps._n(val);
-      case 'between':        return FilterOps._n(v) >= FilterOps._n(val) && FilterOps._n(v) <= FilterOps._n(val2);
-      case 'not_between':    return !(FilterOps._n(v) >= FilterOps._n(val) && FilterOps._n(v) <= FilterOps._n(val2));
+      case 'greater':        return FilterOps._cmp(v, val, kind, (x,y) => x >  y);
+      case 'greater_eq':     return FilterOps._cmp(v, val, kind, (x,y) => x >= y);
+      case 'less':           return FilterOps._cmp(v, val, kind, (x,y) => x <  y);
+      case 'less_eq':        return FilterOps._cmp(v, val, kind, (x,y) => x <= y);
+      case 'between':        return FilterOps._between(v, val, val2, kind);
+      case 'not_between':    return !FilterOps._between(v, val, val2, kind);
       case 'before':         { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() < b.getTime() : false; }
       case 'after':          { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() > b.getTime() : false; }
       case 'on_or_before':   { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() <= b.getTime() : false; }
       case 'on_or_after':    { const a = U.parseDate(v); const b = U.parseDate(val); return a && b ? a.getTime() >= b.getTime() : false; }
       case 'empty':          return !v;
       case 'not_empty':      return !!v;
-      case 'in_list':        { const list = String(val||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean); return list.includes(lv); }
-      case 'not_in_list':    { const list = String(val||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean); return !list.includes(lv); }
+      case 'in_list':        return FilterOps._inList(v, val, kind);
+      case 'not_in_list':    return !FilterOps._inList(v, val, kind);
     }
     return true;
   },
@@ -5786,7 +5917,10 @@ const App = {
       if ((e.ctrlKey || e.metaKey) && e.key && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         if (typeof FindReplace !== 'undefined' && FindReplace.open) FindReplace.open();
+        return;
       }
+      // Page through a large extract from the keyboard.
+      if (typeof Reco !== 'undefined' && Reco._onGridKey) Reco._onGridKey(e);
     });
   },
 
@@ -6746,8 +6880,16 @@ defaultTemplate() {
           h += '<div style="display:flex;gap:4px;margin-bottom:4px;align-items:center;">';
           h += '<select onchange="RecoTemplate._editing.reports['+ri+'].summaryCards['+ci+'].col=this.value; RecoTemplate.renderEditor()" style="flex:1; max-width: 160px;">';
           h += '<option value="">— select col —</option>';
-          (rpt.columns||[]).forEach(c => { h += '<option value="'+U.escAttr(c)+'"'+(card.col===c?' selected':'')+'>'+U.esc(c)+'</option>'; });
-          (rpt.computedCols||[]).forEach(cc => { h += '<option value="'+U.escAttr(cc.name)+'"'+(card.col===cc.name?' selected':'')+'>'+U.esc(cc.name)+' (calc)</option>'; });
+          // Every column the report can reach, not only the ones it displays:
+          // "Sum of Amount" is a normal thing to want on a report that shows
+          // only the document number and the date.
+          const cardCols = [];
+          (rpt.columns||[]).forEach(c => cardCols.push([c, '']));
+          cols.forEach(c => { if (!cardCols.some(x => x[0] === c.name)) cardCols.push([c.name, '']); });
+          (t.additionalColumns||[]).forEach(ac => { if (!cardCols.some(x => x[0] === ac.name)) cardCols.push([ac.name, ' (extra)']); });
+          (rpt.computedCols||[]).forEach(cc => { if (!cardCols.some(x => x[0] === cc.name)) cardCols.push([cc.name, ' (calc)']); });
+          if (card.col && !cardCols.some(x => x[0] === card.col)) cardCols.push([card.col, ' — no longer in this template']);
+          cardCols.forEach(([n, sfx]) => { h += '<option value="'+U.escAttr(n)+'"'+(card.col===n?' selected':'')+'>'+U.esc(n+sfx)+'</option>'; });
           h += '</select>';
           
           // NEW: Custom Display Name Input
@@ -6801,7 +6943,7 @@ defaultTemplate() {
         h += '</div>';
 
         // Computed columns (formulas)
-        h += '<div class="help" style="margin-top:6px;">Computed columns (formulas):</div>';
+        h += '<div class="help" style="margin-top:6px;">Computed columns (formulas): wrap a formatted amount in <code>NUM()</code> — <code>NUM({Amount})*2</code>, not <code>{Amount}*2</code> — or the cell reads <code>#ERR</code>.</div>';
         (rpt.computedCols||[]).forEach((cc, cci) => {
           h += '<div style="display:flex;gap:4px;margin-bottom:4px;">';
           h += '<input type="text" value="'+U.escAttr(cc.name)+'" placeholder="Name" oninput="RecoTemplate._editing.reports['+ri+'].computedCols['+cci+'].name=this.value" style="flex:1;max-width:120px;" />';
@@ -6823,25 +6965,52 @@ defaultTemplate() {
     const cols = t.columns;
     const rpt = RecoTemplate._editing.reports[ri];
     let h = '<div style="display:flex; gap:4px; margin-bottom:4px; flex-wrap:wrap;">';
-    h += '<select onchange="RecoTemplate._editing.reports['+ri+'].filters['+fi+'].col=this.value; RecoTemplate.renderEditor()" style="flex:1; min-width:120px;">';
+    h += '<select onchange="RecoTemplate.setReportFilterCol('+ri+','+fi+',this.value)" style="flex:1; min-width:120px;">';
     h += '<option value="">— column —</option>';
     h += '<option value="_status"'+(f.col==='_status'?' selected':'')+'>Status (open/offset)</option>';
-    cols.forEach(c => { h += '<option value="'+U.escAttr(c.name)+'"'+(f.col===c.name?' selected':'')+'>'+U.esc(c.label||c.name)+'</option>'; });
+    cols.forEach(c => { h += '<option value="'+U.escAttr(c.name)+'"'+(f.col===c.name?' selected':'')+'>'+U.esc(c.label||c.name)+(c.isDate?' (date)':(c.isValue?' (value)':''))+'</option>'; });
     (t.additionalColumns||[]).forEach(ac => { h += '<option value="'+U.escAttr(ac.name)+'"'+(f.col===ac.name?' selected':'')+'>'+U.esc(ac.name)+' (extra)</option>'; });
     (rpt.computedCols||[]).forEach(cc => { h += '<option value="'+U.escAttr(cc.name)+'"'+(f.col===cc.name?' selected':'')+'>'+U.esc(cc.name)+' (Computed)</option>'; });
     h += '</select>';
+    // Operators the column's kind can actually honour. A date column no
+    // longer offers '>' (which compared day-of-month numbers); it offers
+    // before / after / between, which compare days.
+    const kind = FilterOps.kindOf(t, f.col, rpt);
     h += '<select onchange="RecoTemplate._editing.reports['+ri+'].filters['+fi+'].op=this.value; RecoTemplate.renderEditor()" style="min-width:130px;">';
-    FilterOps.list.forEach(o => { h += '<option value="'+o.op+'"'+(f.op===o.op?' selected':'')+'>'+o.label+'</option>'; });
+    FilterOps.opsFor(kind, f.op).forEach(o => { h += '<option value="'+o.op+'"'+(f.op===o.op?' selected':'')+'>'+U.esc(o.label)+'</option>'; });
     h += '</select>';
+    const ph = kind === 'date' ? 'dd/mm/yyyy' : 'value';
+    const set = (which) => 'RecoTemplate._editing.reports['+ri+'].filters['+fi+'].'+which+'=this.value';
     if (FilterOps.needsValue(f.op)) {
-      h += '<input type="text" value="'+U.escAttr(f.val||'')+'" placeholder="value" oninput="RecoTemplate._editing.reports['+ri+'].filters['+fi+'].val=this.value" style="flex:1; min-width:90px;" />';
+      if (kind === 'status') {
+        // Only two values exist; a free-text box here just invited typos.
+        h += '<select onchange="'+set('val')+'" style="flex:1; min-width:90px;">';
+        ['open','offset'].forEach(v => { h += '<option value="'+v+'"'+(String(f.val||'')===v?' selected':'')+'>'+v+'</option>'; });
+        h += '</select>';
+      } else {
+        h += '<input type="text" value="'+U.escAttr(f.val||'')+'" placeholder="'+ph+'" oninput="'+set('val')+'" style="flex:1; min-width:90px;" />';
+      }
     }
     if (FilterOps.needsSecondValue(f.op)) {
-      h += '<input type="text" value="'+U.escAttr(f.val2||'')+'" placeholder="and" oninput="RecoTemplate._editing.reports['+ri+'].filters['+fi+'].val2=this.value" style="flex:1; min-width:90px;" />';
+      h += '<input type="text" value="'+U.escAttr(f.val2||'')+'" placeholder="'+(kind==='date'?'and dd/mm/yyyy':'and')+'" oninput="'+set('val2')+'" style="flex:1; min-width:90px;" />';
     }
     h += '<button class="small danger" onclick="RecoTemplate._editing.reports['+ri+'].filters.splice('+fi+',1); RecoTemplate.renderEditor()">×</button>';
+    if (kind === 'date' && FilterOps.needsValue(f.op)) h += '<span class="text-muted" style="font-size:11px; width:100%;">Dates are compared as dates, so any notation works: 01/01/2026, 2026-01-01 or 1-Jan-26.</span>';
     h += '</div>';
     return h;
+  },
+
+  /* Changing a filter's column re-points the operator too: an operator the
+     new column cannot honour is reset to 'equals', which every kind offers.
+     Saved reports are left alone — opsFor() keeps an unsuitable operator in
+     the menu (flagged) so it can be seen and changed deliberately. */
+  setReportFilterCol(ri, fi, col) {
+    const f = RecoTemplate._editing.reports[ri].filters[fi];
+    f.col = col;
+    const kind = FilterOps.kindOf(RecoTemplate._editing, col, RecoTemplate._editing.reports[ri]);
+    if (!FilterOps.suits(kind, f.op)) f.op = 'equals';
+    if (kind === 'status' && ['open','offset'].indexOf(String(f.val||'')) < 0) f.val = 'open';
+    RecoTemplate.renderEditor();
   },
 
   /* ---------- Step 5: Review ---------- */
@@ -8131,7 +8300,7 @@ _xlOffsetSelectedRows(rowIds) {
   const mm = AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
   let n = 0;
   rowIds.forEach(rowId => {
-    const row = sess.data.find(r => r._id === rowId);
+    const row = Reco._rowById(sess, rowId);
     if (!row || sess.offsets[rowId]) return;
     sess.offsets[rowId] = true;
     row._recoId = rid;
@@ -8579,6 +8748,7 @@ ssAddRow(persistent) {
       .catch(e => console.error('appendUpload (added row)', e));
   }
   sess.data.push(row);
+  Reco._invalidateIdx();   // same array, one row longer
   // Jump to last page so the user sees the new row
   const filtered = Reco.applyTableFiltersSort(tpl, sess);
   const pageSize = sess.pageSize || 200;
@@ -8631,7 +8801,7 @@ ssCommitAddCol() {
 
 ssToggleRowSingleUse(rowId) {
   const sess = AppState.recoSessions[AppState.activeRecoId];
-  const row = sess && sess.data.find(r => r._id === rowId);
+  const row = sess && Reco._rowById(sess, rowId);
   if (!row) return;
   row._ssSingleUse = !row._ssSingleUse;
   AppState.save();
@@ -9629,7 +9799,10 @@ _ssEnsureVisible(fidx) {
   if (targetPage !== sess.page) {
     sess.page = targetPage;
     AppState.save();
-    App.navigate('reco');
+    // Arrow keys crossing a page boundary only need the grid redrawn; the
+    // topbar and tabs are unchanged, and at 200k rows a full screen render
+    // made the keystroke lag.
+    Reco.refreshGrid();
     setTimeout(() => Reco._ssScrollFidxIntoView(fidx), 60);
     return;
   }
@@ -9897,7 +10070,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) return null;
-    const row = sess.data.find(r => r._id === rowId);
+    const row = Reco._rowById(sess, rowId);
     if (!row) return null;
     const pk = Reco.getRowPK(tpl, row);
     return { tpl, sess, row, pk };
@@ -10067,9 +10240,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   // 4. End Drag (This was failing silently before)
   endDragSelect() {
     Reco._dragState.isDragging = false;
-    
-    // This perfectly triggers your summary, totals, and active state
-    App.navigate('reco');
+    // The rows were already repainted as the pointer crossed them; only the
+    // selection bar still needs the new total. A full re-render here cost a
+    // quarter of a second at 200k rows for nothing.
+    Reco._syncVisibleSelection();
+    Reco.updateSelSumBar();
   },
 
   // 5. Visual UI Update
@@ -10103,7 +10278,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       const rid = 'M' + Date.now().toString(36);
       const mm = AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
       selectedIds.forEach(rowId => {
-        const row = sess.data.find(r => r._id === rowId);
+        const row = Reco._rowById(sess, rowId);
         if (!row || sess.offsets[rowId]) return; // skip already offset
         sess.offsets[rowId] = true;
         row._manualOffset = true;
@@ -10133,7 +10308,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     // Group selected by _recoId
     const groups = {};
     selectedIds.forEach(rid => {
-      const row = sess.data.find(r => r._id === rid);
+      const row = Reco._rowById(sess, rid);
       if (!row) return;
       const key = row._recoId || '__nogroup__';
       groups[key] = groups[key] || [];
@@ -10357,7 +10532,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '<div class="section-tabs" style="margin:0;">';
     h += '<div class="section-tab '+(sec==='action'?'active':'')+'" onclick="Reco.setSection(\'action\')">Action</div>';
     if (tpl.enableCorrections) {
-      const hasErrors = Reco.countFormatErrors(tpl, sess) > 0;
+      const hasErrors = Reco.anyFormatErrors(tpl, sess);
       h += '<div class="section-tab '+(sec==='correction'?'active':'')+(hasErrors?' has-errors':' all-good')+'" onclick="Reco.setSection(\'correction\')">Correction</div>';
     }
     if (tpl.enableReporting) {
@@ -10642,7 +10817,10 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   },
 
   checkOffsetTolerance(tpl, sess, rowIds) {
-    const considered = (rowIds||[]).map(id => sess.data.find(r => r._id === id)).filter(Boolean);
+    // Indexed lookup: this used to scan the whole extract once per selected
+    // id, so checking tolerance over 10,000 of 200,000 rows was two billion
+    // comparisons before a single number was added up.
+    const considered = Reco._rowsByIds(sess, rowIds);
     const eligible = considered.filter(r => !sess.offsets[r._id]);
     if (!eligible.length) return { ok: false, sum: 0, considered: 0, msg: 'No eligible (open) rows in selection.' };
     const sum = eligible.reduce((s,r) => s + U.num(r[tpl.valueColumn]), 0);
@@ -10676,6 +10854,25 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       });
     });
     return count;
+  },
+
+  /* Is there at least one format error? The Correction tab is coloured from
+     this on every render of the screen, and it never needed the total — so it
+     stops at the first bad cell instead of validating every cell of every row
+     (about 60ms per render on a 500k-row extract, and all of it wasted once
+     the first error is found). Skips the walk entirely when no column has a
+     format to check. */
+  anyFormatErrors(tpl, sess) {
+    const checked = (tpl.columns || []).filter(c => c.formats && c.formats.length);
+    if (!checked.length) return false;
+    const data = sess.data || [];
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      for (const col of checked) {
+        if (!FMT.validate(row[col.name], col.formats) && !row['_corrected_' + col.name]) return true;
+      }
+    }
+    return false;
   },
 
   /* Doc match handling */
@@ -10727,8 +10924,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '</div>';
     h += ExcelLink.bannerHtml(tpl);
 
-    // Active slicers display
-    h += Reco.renderSlicers(tpl, sess);
+    // Active slicers display — in its own box so removing a chip can refresh
+    // just this strip and the table, not the whole screen.
+    h += '<div id="recoSlicerBar">' + Reco.renderSlicers(tpl, sess) + '</div>';
     h += '</div>';
 
     // Add Flex properties to #recoTableArea and the Pivot wrapper to force internal scrolling
@@ -10748,7 +10946,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     sess.statusFilter = s;
     sess.page = 0;
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
 
   _anyStatusFilterActive(sess) {
@@ -10983,9 +11181,12 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
         const conds = colFilters[col].filter(c => c.enabled !== false);
         if (!conds.length) return;
         const extraDef = Reco._extraDef(tpl, col);
+        // Same kind the column's operator menu was built from, so a date
+        // range typed in the grid means days here too.
+        const kind = FilterOps.kindOf(tpl, col);
         filtered = filtered.filter(row => {
           const val = extraDef ? Reco._extraValueForRow(tpl, sess, row, extraDef) : row[col];
-          return conds.every(c => FilterOps.evaluate(val, c.op, c.val, c.val2));
+          return conds.every(c => FilterOps.evaluate(val, c.op, c.val, c.val2, kind));
         });
       });
 
@@ -11004,16 +11205,58 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     // Sort
       if (sess.columnSorts && sess.columnSorts.col) {
         const { col, dir } = sess.columnSorts;
-        const colDef = tpl.columns.find(c => c.name === col);
         const extraDef = Reco._extraDef(tpl, col);
-        const isDate = colDef && colDef.isDate;
         const getVal = (r) => extraDef ? Reco._extraValueForRow(tpl, sess, r, extraDef) : r[col];
         const keyed = filtered.map(r => ({ r, v: getVal(r) }));   // compute each value once
-        keyed.sort((a, b) => Reco._compareValues(a.v, b.v, isDate, dir === 'desc' ? -1 : 1));
+        // Template columns answer from their isDate flag; an extra column
+        // holding dates is recognised from its values, so it no longer sorts
+        // as text with '04-Feb-26' before '31-Dec-25'.
+        const isDate = Reco.isDateColumn(tpl, col, null, i => keyed[i].v, keyed.length);
+        Reco._sortKeyed(keyed, isDate, dir === 'desc' ? -1 : 1);
         filtered = keyed.map(k => k.r);
       }
     return filtered;
   },
+
+  /* Sort `[{ r, v }]` in place, in exactly the order _compareValues gives,
+     but parsing each value once instead of once per comparison.
+     A 200k-row sort makes about 3.4 million comparisons; sorting a date
+     column used to call U.parseDate twice for each of them, and a text
+     column built a fresh collator per comparison. The keys below are
+     computed in one pass and the comparator only looks at numbers and
+     pre-made strings, so the cascade (blanks last, then dates, then
+     numbers, then natural text) is unchanged while the work is not. */
+_coll: null,
+
+_collator() {
+  if (Reco._coll) return Reco._coll;
+  try { Reco._coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }); }
+  catch (e) { Reco._coll = { compare: (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }) }; }
+  return Reco._coll;
+},
+
+_sortKeyed(keyed, isDate, dir) {
+  dir = dir || 1;
+  for (let i = 0; i < keyed.length; i++) {
+    const k = keyed[i], v = k.v;
+    if (v == null || v === '') { k._e = 1; continue; }
+    k._e = 0;
+    if (isDate) { const d = U.parseDate(v); k._d = d ? d.getTime() : null; }
+    else k._d = null;
+    if (U.isNumeric(v)) { k._q = 1; k._n = U.num(v); } else { k._q = 0; }
+  }
+  const cmp = Reco._collator().compare;
+  // The text key is only needed when the date and number paths both decline,
+  // so it is made on first use: a wholly numeric column never builds one.
+  const str = k => k._s !== undefined ? k._s : (k._s = typeof k.v === 'string' ? k.v : String(k.v));
+  keyed.sort((a, b) => {
+    if (a._e || b._e) return a._e === b._e ? 0 : (a._e ? 1 : -1);
+    if (isDate && a._d != null && b._d != null) return (a._d - b._d) * dir;
+    if (a._q && b._q) return (a._n - b._n) * dir;
+    return cmp(str(a), str(b)) * dir;
+  });
+  return keyed;
+},
 
   /* Sort comparator: dates (for date columns), then numbers (1,234.50 aware),
      then text. dir = 1 ascending / -1 descending; blanks always sort last. */
@@ -11027,6 +11270,43 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     }
     if (U.isNumeric(va) && U.isNumeric(vb)) return (U.num(va) - U.num(vb)) * dir;
     return String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' }) * dir;
+  },
+
+  /* Should this column sort as dates? A template column answers from its own
+     isDate flag (so nothing about the grid's existing behaviour changes); an
+     extra or computed column has no flag, so a date format on it or a sample
+     of its values decides. Without this, a computed date column sorts as
+     text and '04-Feb-26' lands before '31-Dec-25'.
+     `valueAt(i)` yields the i-th value of the column; `n` is how many there
+     are, so no intermediate array is built for a 200k-row report. */
+  isDateColumn(tpl, col, fmt, valueAt, n) {
+    const c = ((tpl && tpl.columns) || []).find(x => x.name === col);
+    if (c) return !!c.isDate;
+    if (fmt) return true;
+    if (typeof valueAt !== 'function') return false;
+    let seen = 0;
+    for (let i = 0; i < n && seen < 20; i++) {
+      const v = valueAt(i);
+      if (v == null || v === '') continue;
+      seen++;
+      if (!U.looksLikeDate(v)) return false;
+    }
+    return seen > 0;
+  },
+
+  /* One report cell as text. The table and the CSV export both go through
+     here, so an export can never show a different date than the screen. */
+  _reportCellText(tpl, rpt, col, val) {
+    if (val == null) return '';
+    const fmt = rpt && rpt.dateFormats && rpt.dateFormats[col];
+    if (fmt && val !== '') {
+      const d = (!isNaN(val) && Number(val) > 10000) ? U._excelSerialToDate(Number(val)) : U.parseDate(val);
+      if (d) return U.fmtDate(d, fmt);
+      return String(val);
+    }
+    const colDef = ((tpl && tpl.columns) || []).find(x => x.name === col);
+    if (colDef && colDef.isDate) { const out = U.formatExcelDate(val); return out == null ? '' : String(out); }
+    return String(val);
   },
 
   renderSlicers(tpl, sess) {
@@ -11056,14 +11336,14 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     else sess.slicers[col].push(val);
     sess.page = 0;
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
   clearAllSlicers() {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.slicers = {};
     sess.page = 0;
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
   // Build the effective ordered column list for the reco table.
   // Honours: tpl.displayColumns, AEG-injected To Account column, and sess.columnOrder.
@@ -11096,6 +11376,35 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   },
 
 
+/* Re-render only the grid (pager + table + the active-slicer chips) instead of
+   the whole Reconciliation screen.
+   Paging, sorting, filtering and slicing used to end in App.navigate('reco'),
+   which rebuilds the topbar, the row/offset/sum summary, the section tabs, the
+   filter-set menu and the format-error count as well — none of which a page
+   turn changes. Falls back to a full navigate whenever the grid is not the
+   thing on screen, so no caller has to know. */
+refreshGrid() {
+  const id = AppState.activeRecoId;
+  const tpl = AppState.recoTemplates.find(x => x.id === id);
+  const sess = AppState.recoSessions[id];
+  const area = document.getElementById('recoTableArea');
+  if (!tpl || !sess || !area || AppState.currentPage !== 'reco'
+      || (sess.activeSection || 'action') !== 'action'
+      || (AppState.activeSubSection || 'reco') !== 'reco') { App.navigate('reco'); return; }
+  const old = area.querySelector('.reco-table-wrap');
+  const top = old ? old.scrollTop : 0, left = old ? old.scrollLeft : 0;
+  area.innerHTML = Reco.renderRecoTable(tpl, sess);
+  const bar = document.getElementById('recoSlicerBar');
+  if (bar) bar.innerHTML = Reco.renderSlicers(tpl, sess);
+  const nw = area.querySelector('.reco-table-wrap');
+  if (nw) { nw.scrollTop = top; nw.scrollLeft = left; }
+  Reco.updateSelSumBar();
+},
+
+/* "All rows" in the page-size list. Virtualisation keeps the DOM at ~110 rows
+   whatever this is, so the only cost of a huge page is the spacer height. */
+PAGE_ALL: 1000000,
+
 /* ============== DOM VIRTUALIZATION ============== */
 _VIRT_WINDOW: 110,
 _VIRT_BUFFER: 20,
@@ -11120,10 +11429,86 @@ _computeVirtWindow(slice, sess) {
   };
 },
 
+/* _id → index in sess.data.
+   Every render used to rebuild this, and the virtualised scroll handler
+   rebuilt it on every frame: at 200k rows that is a 200k-entry Map per
+   scroll tick. The map only changes when the row array does, so it is
+   cached against the array's identity and length and handed out otherwise.
+   The cache lives on Reco, not on the session, because sessions are
+   JSON-serialised to the shared folder and a Map would be written as {}. */
+_idxCache: null,
+
 _buildRowIdxMap(sess) {
+  const data = sess.data || [];
+  const c = Reco._idxCache;
+  if (c && c.data === data && c.len === data.length) return c.map;
   const m = new Map();
-  sess.data.forEach((r, i) => m.set(r._id, i));
+  for (let i = 0; i < data.length; i++) m.set(data[i]._id, i);
+  Reco._idxCache = { data, len: data.length, map: m };
   return m;
+},
+
+/* Drop the cached index map. Called wherever rows are added, removed or
+   reordered in place — an array whose identity and length both survive a
+   mutation is the one case the identity check cannot see. */
+_invalidateIdx() { Reco._idxCache = null; },
+
+/* One row by _id, without walking the array. The old `sess.data.find(...)`
+   inside a loop over the selection is O(selected x rows): marking 10,000 of
+   200,000 rows offset meant two billion comparisons. */
+_rowById(sess, rowId) {
+  const i = Reco._buildRowIdxMap(sess).get(rowId);
+  return i === undefined ? null : sess.data[i];
+},
+
+/* Several rows by _id, in selection order, skipping ids that no longer exist. */
+_rowsByIds(sess, ids) {
+  const map = Reco._buildRowIdxMap(sess);
+  const out = [];
+  for (const id of ids || []) {
+    const i = map.get(id);
+    if (i !== undefined) out.push(sess.data[i]);
+  }
+  return out;
+},
+
+/* ---- busy overlay -------------------------------------------------------
+   Some work on a 200k-row extract cannot be made instant. It must at least
+   say what it is doing instead of freezing a blank window. Same shape as
+   ExcelLink._progress: the app modal with a bar, driven by plain calls. */
+BUSY_ROWS: 100000,         // below this, everything is fast enough to be silent
+
+_busy(text, pct) {
+  let el = document.getElementById('recoBusyText');
+  if (!el || !document.getElementById('appModal').classList.contains('show')) {
+    App.openModal('Working…', '<div style="font-size:12px;"><div id="recoBusyText"></div>'
+      + '<div class="xl-prog"><div id="recoBusyBar"></div></div></div>', '');
+    el = document.getElementById('recoBusyText');
+  }
+  if (el) el.textContent = text;
+  const bar = document.getElementById('recoBusyBar');
+  if (bar) bar.style.width = Math.max(2, Math.min(100, pct == null ? 100 : pct)) + '%';
+},
+
+_busyDone() {
+  if (document.getElementById('recoBusyText')) App.closeModal();
+},
+
+/* Let the browser paint before we block it again. */
+_yield() { return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0))); },
+
+/* Run `work` with the overlay up when there is enough data for the pause to
+   be noticeable, and without it otherwise. The overlay is painted before the
+   work starts, so the user sees "Sorting 200,000 rows…" rather than a dead
+   window. `cost` is in row-equivalents: a caller whose work is cheaper per
+   row than a sort scales it down, so a quarter-second operation does not
+   make a modal flash. */
+async _withBusy(cost, text, work) {
+  if (cost < Reco.BUSY_ROWS) return work();
+  Reco._busy(text, 100);
+  await Reco._yield();
+  try { return work(); }
+  finally { Reco._busyDone(); }
 },
 
 _attachVirtScroll() {
@@ -11147,6 +11532,23 @@ _measureVirtRow(sess) {
   if (sample && sample.offsetHeight) sess._virtRowHeight = sample.offsetHeight;
 },
 
+/* What the last render of the grid body computed. Scrolling a virtualised
+   table only moves the window: the filtered list, the column layout and the
+   _id index map are all still valid, so the scroll handler reuses them.
+   It used to re-run the whole filter/sort pipeline and rebuild a 200k-entry
+   Map on every animation frame, which is what made scrolling a large extract
+   stutter. Anything that changes membership or order re-renders the table
+   through renderRecoTable, which replaces this. */
+_virtState: null,
+
+_virtStateFor(tpl, sess) {
+  const pageSize = sess.pageSize || 200;
+  const s = Reco._virtState;
+  if (s && s.tplId === tpl.id && s.data === sess.data && s.page === sess.page
+      && s.pageSize === pageSize && Array.isArray(s.filtered)) return s;
+  return null;
+},
+
 _refreshVirtBody() {
   const id = AppState.activeRecoId;
   const tpl = AppState.recoTemplates.find(x => x.id === id);
@@ -11155,26 +11557,36 @@ _refreshVirtBody() {
   const tbody = document.querySelector('.reco-table-wrap tbody');
   if (!tbody) return;
 
-  const filtered = Reco.applyTableFiltersSort(tpl, sess);
   const pageSize = sess.pageSize || 200;
-  const start = sess.page * pageSize;
-  const slice = filtered.slice(start, start + pageSize);
-  if (!slice.length) return;
-  SpecialJV.resetOptions();
+  const cached = Reco._virtStateFor(tpl, sess);
+  let filtered, slice, displayCols, extraCols, idxMap;
+  if (cached) {
+    filtered = cached.filtered; slice = cached.slice;
+    displayCols = cached.displayCols; extraCols = cached.extraCols; idxMap = cached.idxMap;
+    if (!slice.length) return;
+    SpecialJV.resetOptions();
+  } else {
+    filtered = Reco.applyTableFiltersSort(tpl, sess);
+    const start = sess.page * pageSize;
+    slice = filtered.slice(start, start + pageSize);
+    if (!slice.length) return;
+    SpecialJV.resetOptions();
 
-  const displayCols = Reco.effectiveDisplayCols(tpl, sess);
-  const extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
-  if (tpl.aegIntegration && tpl.aegIntegration.enabled && tpl.aegIntegration.aegTemplateId) {
-    const aegTpl = AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId);
-    if (aegTpl && aegTpl.toAccount && (aegTpl.toAccount.mode === 'input' || aegTpl.toAccount.mode === 'inputOrSelect')) {
-      const reqCol = aegTpl.toAccount.inputColumn;
-      if (reqCol && !tpl.columns.find(c => c.name === reqCol) && !extraCols.find(c => c.name === reqCol)) {
-        extraCols.push({ name: reqCol, type: 'custom' });
+    displayCols = Reco.effectiveDisplayCols(tpl, sess);
+    extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
+    if (tpl.aegIntegration && tpl.aegIntegration.enabled && tpl.aegIntegration.aegTemplateId) {
+      const aegTpl = AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId);
+      if (aegTpl && aegTpl.toAccount && (aegTpl.toAccount.mode === 'input' || aegTpl.toAccount.mode === 'inputOrSelect')) {
+        const reqCol = aegTpl.toAccount.inputColumn;
+        if (reqCol && !tpl.columns.find(c => c.name === reqCol) && !extraCols.find(c => c.name === reqCol)) {
+          extraCols.push({ name: reqCol, type: 'custom' });
+        }
       }
     }
+    idxMap = Reco._buildRowIdxMap(sess);
+    Reco._virtState = { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
+                        filtered, slice, displayCols, extraCols, idxMap };
   }
-
-  const idxMap = Reco._buildRowIdxMap(sess);
   const win = Reco._computeVirtWindow(slice, sess);
   const colspan = 2 + displayCols.length + extraCols.length;
   let h = '';
@@ -11190,6 +11602,7 @@ _refreshVirtBody() {
   }
   tbody.innerHTML = h;
   Reco._ssApplyHighlight();
+  Reco._applyRowFlash();
   Reco._measureVirtRow(sess);
 },
 
@@ -11206,6 +11619,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
 
   h += '<tr class="' + rowClass + selClass + addedCls + '" '
      + 'data-pk="' + rowPkAttr + '" '
+     + 'data-rid="' + U.escAttr(row._id) + '" '
      + 'data-frow="' + filteredIdx + '" '
      + 'onmousedown="Reco.startDragSelect(event, \'' + U.jsq(row._id) + '\')" '
      + 'onmouseenter="Reco.dragOver(event, \'' + U.jsq(row._id) + '\')" '
@@ -11382,11 +11796,33 @@ renderRecoTable(tpl, sess) {
     h += '<div class="pager" style="padding: 6px 14px 0 14px; flex-shrink: 0;">';
     h += '<button class="small" onclick="Reco.setPage(0)" '+(sess.page===0?'disabled':'')+'>⏮</button>';
     h += '<button class="small" onclick="Reco.setPage('+(sess.page-1)+')" '+(sess.page===0?'disabled':'')+'>◀</button>';
-    h += '<span class="page-info">Page '+(sess.page+1)+' / '+pages+' &middot; Showing '+slice.length+' of '+filtered.length+' filtered ('+sess.data.length+' total)</span>';
+    // Counts are grouped: "Showing 200 of 200,000" reads at a glance where
+    // "200000" does not. The filtered figure is dropped when nothing is
+    // filtered out, so the line says less when there is less to say.
+    const rowFrom = filtered.length ? start + 1 : 0;
+    const rowTo = start + slice.length;
+    h += '<span class="page-info">Page '+U.fmtInt(sess.page+1)+' / '+U.fmtInt(pages)
+       + ' &middot; Rows '+U.fmtInt(rowFrom)+'–'+U.fmtInt(rowTo)+' of '+U.fmtInt(filtered.length)
+       + (filtered.length === sess.data.length ? '' : ' filtered (of '+U.fmtInt(sess.data.length)+')')
+       + '</span>';
     h += '<button class="small" onclick="Reco.setPage('+(sess.page+1)+')" '+(sess.page>=pages-1?'disabled':'')+'>▶</button>';
     h += '<button class="small" onclick="Reco.setPage('+(pages-1)+')" '+(sess.page>=pages-1?'disabled':'')+'>⏭</button>';
-    h += '<select onchange="Reco.setPageSize(+this.value)">';
-    [100,200,500,1000,5000,10000].forEach(s => { h += '<option value="'+s+'"'+(sess.pageSize===s?' selected':'')+'>'+s+' / page</option>'; });
+    // Jump straight to a page or a row instead of clicking through hundreds.
+    if (pages > 1) {
+      h += '<input type="text" class="goto-box" id="recoGotoPage" placeholder="page" title="Type a page number and press Enter"'
+         + ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();Reco.gotoPageInput(this);}" />';
+    }
+    if (filtered.length > (sess.pageSize || 200)) {
+      h += '<input type="text" class="goto-box" id="recoGotoRow" placeholder="row #" title="Type a row number and press Enter to jump to it"'
+         + ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();Reco.gotoRowInput(this);}" />';
+    }
+    h += '<select onchange="Reco.setPageSize(+this.value)" title="Rows per page">';
+    const sizes = [100,200,500,1000,5000,10000,25000,50000,Reco.PAGE_ALL];
+    if (sess.pageSize && sizes.indexOf(sess.pageSize) < 0) sizes.push(sess.pageSize);
+    sizes.sort((a,b) => a-b).forEach(s => {
+      const label = s >= Reco.PAGE_ALL ? 'All rows (no paging)' : U.fmtInt(s) + ' / page';
+      h += '<option value="'+s+'"'+(sess.pageSize===s?' selected':'')+'>'+label+'</option>';
+    });
     h += '</select>';
     h += '<div style="flex:1"></div>';
     
@@ -11410,7 +11846,10 @@ renderRecoTable(tpl, sess) {
     if (sess.spreadsheetMode) h += Reco._ssRenderFormulaBar(sess);
     if (sess.spreadsheetMode && sess.formatToolbarOpen) h += Reco._ssRenderFormatToolbar(sess);
     h += '<div class="reco-table-wrap"><table><thead><tr>';
-    h += '<th style="width:30px;"><input type="checkbox" onchange="Reco.toggleAllRows(this.checked)" /></th>';
+    // The box is set from the real selection after the render (see
+    // _syncSelectAllBox): it used to draw unchecked every time, so after
+    // selecting every row the header still said nothing was selected.
+    h += '<th style="width:30px;"><input type="checkbox" id="recoSelectAll" title="Select every row the filters leave" onchange="Reco.toggleAllRows(this.checked)" /></th>';
           h += '<th class="status-th" style="min-width:130px; white-space:nowrap;">Status<span class="col-filter-btn'+(Reco._anyStatusFilterActive(sess)?' active':'')+'" onclick="Reco.openStatusFilter(this, event)">▼</span></th>';
     displayCols.forEach((col, ci) => {
       const cf = (sess.columnFilters[col]||[]).filter(c => c.enabled !== false);
@@ -11456,6 +11895,10 @@ renderRecoTable(tpl, sess) {
 
 
     const idxMap = Reco._buildRowIdxMap(sess);
+      // Publish what this render computed so the scroll handler can move the
+      // virtual window without re-running the pipeline (see _virtState).
+      Reco._virtState = { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
+                          filtered, slice, displayCols, extraCols, idxMap };
       const win = Reco._computeVirtWindow(slice, sess);
       const colspan = 2 + displayCols.length + extraCols.length;
       if (win.topPx > 0) {
@@ -11483,8 +11926,27 @@ renderRecoTable(tpl, sess) {
       Reco._measureVirtRow(sess);
       Reco._ssAttachHandlers();
       Reco._ssApplyHighlight();
+      Reco._syncSelectAllBox();
     }, 0);
     return h;
+  },
+
+  /* Show the header box as ticked when everything the filters leave is
+     selected, half-ticked when only some of it is, and empty when none is.
+     Counted against the filtered list the render just produced, so it costs
+     nothing extra. */
+  _syncSelectAllBox() {
+    const box = document.getElementById('recoSelectAll');
+    if (!box) return;
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    const st = Reco._virtStateFor(tpl, sess);
+    const total = st ? st.filtered.length : null;
+    const sel = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]).length;
+    box.checked = total != null && total > 0 && sel >= total;
+    box.indeterminate = sel > 0 && !box.checked;
   },
 
 
@@ -11570,7 +12032,7 @@ renderRecoTable(tpl, sess) {
     }
     sess.columnOrder = order;
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();   // only the table's columns moved
   },
 
   onColDragEnd(ev) {
@@ -11659,15 +12121,121 @@ renderRecoTable(tpl, sess) {
 
   setPage(p) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
-    sess.page = p;
-    App.navigate('reco');
+    if (!sess) return;
+    sess.page = Math.max(0, p | 0);
+    Reco.refreshGrid();
   },
   setPageSize(s) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.pageSize = s;
     sess.page = 0;
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
+  },
+
+  /* Type a page number. At 200k rows and 200 to a page there are 1,000 pages;
+     the ◀ ▶ ⏮ ⏭ buttons alone mean clicking five hundred times to reach the
+     middle of the extract. */
+  gotoPageInput(el) {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    const n = parseInt(String(el && el.value != null ? el.value : '').replace(/[^0-9]/g, ''), 10);
+    if (!isFinite(n) || n < 1) { U.toast('Enter a page number', 'error'); return; }
+    const pages = Reco._pageCount(tpl, sess);
+    if (n > pages) { U.toast('There are only ' + U.fmtInt(pages) + ' pages', 'error'); return; }
+    Reco.setPage(n - 1);
+  },
+
+  /* Jump to the nth row of the filtered list: turn to its page, scroll the
+     virtual window to it and flash it, so "go and look at row 148,230" is one
+     action instead of a hunt. */
+  gotoRowInput(el) {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    const n = parseInt(String(el && el.value != null ? el.value : '').replace(/[^0-9]/g, ''), 10);
+    if (!isFinite(n) || n < 1) { U.toast('Enter a row number', 'error'); return; }
+    const total = Reco._filteredCount(tpl, sess);
+    if (n > total) { U.toast('Only ' + U.fmtInt(total) + ' rows match the current filters', 'error'); return; }
+    const pageSize = sess.pageSize || 200;
+    const fidx = n - 1;
+    sess.page = Math.floor(fidx / pageSize);
+    Reco.refreshGrid();
+    Reco.scrollToFilteredRow(fidx);
+  },
+
+  /* Put the given row of the filtered list in view inside the virtualised
+     body and highlight it briefly. */
+  scrollToFilteredRow(fidx) {
+    const sess = AppState.recoSessions[AppState.activeRecoId];
+    if (!sess) return;
+    const pageSize = sess.pageSize || 200;
+    const within = fidx - sess.page * pageSize;
+    const wrap = document.querySelector('.reco-table-wrap');
+    if (!wrap) return;
+    const rowH = sess._virtRowHeight || Reco._VIRT_DEFAULT_H;
+    // Remembered rather than set once: moving the scrollbar fires the virtual
+    // scroll handler, which rebuilds the body on a later frame and would throw
+    // the class away. The marker survives the handful of rebuilds the scroll
+    // takes to settle and is then dropped, so the row is not re-flashed when
+    // the user scrolls past it again. Counted rather than timed, because a
+    // frame can be seconds late while a large session is being written out.
+    Reco._flashFrow = fidx;
+    Reco._flashLeft = 4;
+    wrap.scrollTop = Math.max(0, within * rowH - wrap.clientHeight / 2);
+    Reco._refreshVirtBody();
+    Reco._applyRowFlash();
+  },
+
+  _flashFrow: null,
+  _flashLeft: 0,
+
+  _applyRowFlash() {
+    if (Reco._flashFrow == null) return;
+    const tr = document.querySelector('.reco-table-wrap tbody tr[data-frow="' + Reco._flashFrow + '"]');
+    if (tr) tr.classList.add('row-flash');
+    if (--Reco._flashLeft <= 0) Reco._flashFrow = null;
+  },
+
+  /* PageDown / PageUp / Ctrl+Home / Ctrl+End move through the pages while the
+     grid has focus. Typing in a cell, a filter box or sheet mode keeps the
+     keys, so nothing a user already relies on changes. */
+  _onGridKey(e) {
+    if (AppState.currentPage !== 'reco') return;
+    const sess = AppState.recoSessions[AppState.activeRecoId];
+    if (!sess || !sess.data.length || sess.spreadsheetMode) return;
+    if (document.getElementById('appModal').classList.contains('show')) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const paging = e.key === 'PageDown' || e.key === 'PageUp'
+                || ((e.key === 'Home' || e.key === 'End') && mod);
+    if (!paging) return;      // decided before any counting: every other
+                              // keystroke must cost nothing at all
+    const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+    if (!tpl) return;
+    const pages = Reco._pageCount(tpl, sess);
+    e.preventDefault();
+    if (e.key === 'PageDown')    Reco.setPage(Math.min(pages - 1, sess.page + 1));
+    else if (e.key === 'PageUp') Reco.setPage(Math.max(0, sess.page - 1));
+    else if (e.key === 'Home')   Reco.setPage(0);
+    else                         Reco.setPage(pages - 1);
+  },
+
+  /* How many rows the current filters leave, and how many pages that is.
+     Reuses the list the last render computed when it is still valid, so
+     asking "how many pages are there?" does not re-filter and re-sort a
+     quarter of a million rows. */
+  _filteredCount(tpl, sess) {
+    const st = Reco._virtStateFor(tpl, sess);
+    return st ? st.filtered.length : Reco.applyTableFiltersSort(tpl, sess).length;
+  },
+
+  _pageCount(tpl, sess) {
+    return Math.max(1, Math.ceil(Reco._filteredCount(tpl, sess) / (sess.pageSize || 200)));
   },
 
   /* Column header dropdown: filters, sort, slicer */
@@ -11693,7 +12261,9 @@ renderRecoTable(tpl, sess) {
     conds.forEach((c, ci) => {
       h += '<div style="display:flex; gap:3px; margin-bottom:3px; flex-wrap:wrap;">';
       h += '<select onchange="Reco.updateColFilter(\''+U.jsq(col)+'\','+ci+',\'op\',this.value)" style="flex:1; min-width:80px;">';
-      FilterOps.list.forEach(o => { h += '<option value="'+o.op+'"'+(c.op===o.op?' selected':'')+'>'+o.label+'</option>'; });
+      // Only the operators that suit this column's kind (FilterOps is the one
+      // table both this menu and the evaluation read).
+      FilterOps.opsFor(FilterOps.kindOf(tpl, col), c.op).forEach(o => { h += '<option value="'+o.op+'"'+(c.op===o.op?' selected':'')+'>'+U.esc(o.label)+'</option>'; });
       h += '</select>';
       if (FilterOps.needsValue(c.op)) h += '<input type="text" value="'+U.escAttr(c.val||'')+'" placeholder="value" oninput="Reco.updateColFilter(\''+U.jsq(col)+'\','+ci+',\'val\',this.value)" style="flex:1; min-width:60px;" />';
       if (FilterOps.needsSecondValue(c.op)) h += '<input type="text" value="'+U.escAttr(c.val2||'')+'" placeholder="and" oninput="Reco.updateColFilter(\''+U.jsq(col)+'\','+ci+',\'val2\',this.value)" style="flex:1; min-width:60px;" />';
@@ -11727,24 +12297,32 @@ renderRecoTable(tpl, sess) {
     const close = e => { if (!dd.contains(e.target)) { dd.remove(); document.removeEventListener('click', close); } };
     setTimeout(() => document.addEventListener('click', close), 0);
   },
-  applySort(col, dir) {
+  /* Sorting a few hundred thousand rows takes long enough to notice, so say
+     what is happening instead of letting the window go dead. */
+  async applySort(col, dir) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
+    if (!sess) return;
     sess.columnSorts = { col, dir };
     AppState.save();
-    App.navigate('reco');
+    try {
+      await Reco._withBusy(sess.data.length,
+        'Sorting ' + U.fmtInt(sess.data.length) + ' rows by ' + col + '…',
+        () => Reco.refreshGrid());
+    } catch (e) { Reco._busyDone(); U.toast('Could not sort: ' + e.message, 'error'); }
   },
   clearSort() {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.columnSorts = null;
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
   addColFilter(col) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.columnFilters[col] = sess.columnFilters[col] || [];
     sess.columnFilters[col].push({ op: 'contains', val: '', val2: '', enabled: true });
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
+    Reco._reopenColDropdown(col);
   },
   updateColFilter(col, idx, key, val) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
@@ -11758,108 +12336,318 @@ renderRecoTable(tpl, sess) {
     sess.columnFilters[col].splice(idx, 1);
     if (!sess.columnFilters[col].length) delete sess.columnFilters[col];
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
+    Reco._reopenColDropdown(col);
   },
   clearColFilters(col) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     delete sess.columnFilters[col];
     AppState.save();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
   applyColFilters() {
     document.querySelectorAll('.col-dropdown').forEach(d => d.remove());
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
 
-  /* Slicer modal: pick distinct values for a column */
-  openSlicer(col) {
+  /* Re-renders of the header throw the open column menu away. Adding or
+     removing one condition used to close the menu, so building a two-part
+     filter meant reopening it between every step. */
+  _reopenColDropdown(col) {
+    setTimeout(() => {
+      // Matched by dataset rather than a built selector so a column name with
+      // a quote or a bracket in it cannot break the lookup.
+      const th = [...document.querySelectorAll('.reco-table-wrap thead th')].find(x => x.dataset.col === col);
+      const btn = th && th.querySelector('.col-filter-btn');
+      if (btn) btn.click();
+    }, 0);
+  },
+
+  /* ============== SLICER ==============
+     Pick distinct values for a column.
+
+     This used to build one DOM node per distinct value with no cap. On a
+     200k-row extract with a near-unique reference column that is 200,000
+     nodes and 19 MB of HTML — a 5.8-second freeze and a modal nobody can
+     use; at 500k rows, 48 MB and 15.5 seconds. Searching it then walked
+     every one of those nodes on each keystroke.
+
+     Now the distinct scan runs in chunks (with a progress bar when there is
+     enough data for the pause to show), the list is held in memory and only
+     a capped window of it is ever rendered, the modal says plainly how many
+     values there are and how many it is showing, and search re-renders that
+     small window instead of touching the whole list.
+
+     The selection lives in _slicerState.sel, not in the DOM: with a cap, a
+     value a user had already picked may not be on screen, and reading the
+     selection back off the DOM would silently drop it. */
+  SLICER_CAP: 500,           // values rendered at once
+  SLICER_CHUNK: 20000,       // rows scanned between yields
+
+  _slicerState: null,
+
+  /* Distinct values of a column with a row count each.
+     The scan yields to the browser only once it has held the thread for
+     SLICER_SLICE_MS, so a plain column — where counting 200k values takes a
+     few tens of milliseconds — opens straight away, while a column whose
+     value has to be computed per row (a formula or a master lookup) hands
+     the frame back often enough to keep the window alive.
+     `onProgress(done, total)` is called each time it yields. */
+  SLICER_SLICE_MS: 60,
+
+  async _slicerDistinct(tpl, sess, col, onProgress) {
+    const extraDef = Reco._extraDef(tpl, col);
+    const data = sess.data || [];
+    const counts = new Map();
+    let mark = performance.now();
+    for (let i = 0; i < data.length; i += Reco.SLICER_CHUNK) {
+      const end = Math.min(data.length, i + Reco.SLICER_CHUNK);
+      for (let j = i; j < end; j++) {
+        const r = data[j];
+        const val = extraDef ? Reco._extraValueForRow(tpl, sess, r, extraDef) : r[col];
+        // Exactly the coercion applyTableFiltersSort uses to match a slicer
+        // value (`String(val||'')`). Anything else and a value could be
+        // offered in the list that the filter then matches no row against —
+        // a formula column returning the number 0 is grouped as blank on both
+        // sides, so picking it still works.
+        const s = String(val || '');
+        counts.set(s, (counts.get(s) || 0) + 1);
+      }
+      if (end < data.length && performance.now() - mark >= Reco.SLICER_SLICE_MS) {
+        if (onProgress) onProgress(end, data.length);
+        await Reco._yield();
+        mark = performance.now();
+      }
+    }
+    // Same ordering the old list had: plain ascending string order.
+    const values = Array.from(counts.keys()).sort();
+    return { values, counts };
+  },
+
+  async openSlicer(col) {
     document.querySelectorAll('.col-dropdown').forEach(d => d.remove());
     const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
     const sess = AppState.recoSessions[AppState.activeRecoId];
-    const extraDef = Reco._extraDef(tpl, col);
-    const distinct = Array.from(new Set(sess.data.map(r => {
-     const val = extraDef ? Reco._extraValueForRow(tpl, sess, r, extraDef) : r[col];
-     return String(val||'');
-    }))).sort();
-    const sel = sess.slicers[col] || [];
-    let h = '<div class="help">Pick one or more values to filter the table by <b>'+U.esc(col)+'</b>. Multiple values are combined as OR.</div>';
-    h += '<div class="toolbar"><input type="text" id="slicerSearch" placeholder="Search values…" oninput="Reco._slicerSearch(this.value)" /></div>';
-    h += '<div id="slicerItems" class="slicer-panel" style="margin-top:6px; max-height:300px; overflow-y:auto;">';
-    h += '<div class="slicer-items">';
-    distinct.forEach(v => {
-      const isSel = sel.includes(v);
-      h += '<div class="slicer-item '+(isSel?'selected':'')+'" data-val="'+U.escAttr(v)+'" onclick="Reco._slicerToggleItem(this)">'+U.esc(v||'(empty)')+'</div>';
-    });
-    h += '</div></div>';
+    if (!tpl || !sess) return;
+    // The bar appears only once the scan has already taken long enough to
+    // feel like a wait, so a fast column opens silently.
+    const t0 = performance.now();
+    let shown = false;
+    const report = (done, total) => {
+      if (!shown && performance.now() - t0 < 250) return;
+      shown = true;
+      Reco._busy('Reading values of ' + col + '… ' + U.fmtInt(done) + ' / ' + U.fmtInt(total),
+                 2 + 90 * done / total);
+    };
+    let got;
+    try { got = await Reco._slicerDistinct(tpl, sess, col, report); }
+    catch (e) { Reco._busyDone(); U.toast('Could not read the values of ' + col + ': ' + e.message, 'error'); return; }
+    finally { if (shown) Reco._busyDone(); }
+
     Reco._slicerCol = col;
-    App.openModal('Slicer: ' + col, h, '<button onclick="App.closeModal()">Cancel</button><button class="primary" onclick="Reco._slicerApply()">Apply</button><button onclick="Reco._slicerClear()">Clear</button>');
+    Reco._slicerState = {
+      col,
+      values: got.values,
+      counts: got.counts,
+      sel: new Set(sess.slicers[col] || []),
+      q: ''
+    };
+    const h = '<div class="help">Pick one or more values to filter the table by <b>' + U.esc(col)
+      + '</b>. Multiple values are combined as OR.</div>'
+      + '<div class="toolbar"><input type="text" id="slicerSearch" placeholder="Search values…" oninput="Reco._slicerSearch(this.value)" style="flex:1;" />'
+      + '<button class="small" onclick="Reco._slicerSelectMatching()" title="Select every value matching the search">Select matching</button>'
+      + '<button class="small" onclick="Reco._slicerDeselectAll()">Deselect all</button></div>'
+      + '<div id="slicerCount" class="text-muted" style="font-size:11px; margin-top:6px;"></div>'
+      + '<div id="slicerItems" class="slicer-panel" style="margin-top:6px; max-height:300px; overflow-y:auto;"></div>';
+    App.openModal('Slicer: ' + col, h,
+      '<button onclick="App.closeModal()">Cancel</button><button class="primary" onclick="Reco._slicerApply()">Apply</button><button onclick="Reco._slicerClear()">Clear</button>');
+    Reco._slicerRender();
   },
+
+  /* Values matching the current search, selected ones first so a pick is
+     never hidden behind the cap. */
+  _slicerMatches() {
+    const st = Reco._slicerState;
+    if (!st) return [];
+    const q = (st.q || '').toLowerCase();
+    const sel = [], rest = [];
+    for (const v of st.values) {
+      if (q && v.toLowerCase().indexOf(q) < 0) continue;
+      (st.sel.has(v) ? sel : rest).push(v);
+    }
+    return sel.concat(rest);
+  },
+
+  _slicerRender() {
+    const st = Reco._slicerState;
+    const box = document.getElementById('slicerItems');
+    if (!st || !box) return;
+    const matches = Reco._slicerMatches();
+    const shown = matches.slice(0, Reco.SLICER_CAP);
+    let h = '<div class="slicer-items">';
+    for (const v of shown) {
+      const n = st.counts.get(v) || 0;
+      h += '<div class="slicer-item' + (st.sel.has(v) ? ' selected' : '') + '" data-val="' + U.escAttr(v)
+         + '" title="' + U.escAttr(U.fmtInt(n) + ' row' + (n === 1 ? '' : 's')) + '" onclick="Reco._slicerToggleItem(this)">'
+         + U.esc(v || '(empty)') + ' <span style="opacity:.6;">' + U.fmtInt(n) + '</span></div>';
+    }
+    if (!shown.length) h += '<span class="text-muted" style="font-size:11px;">No value matches this search.</span>';
+    h += '</div>';
+    box.innerHTML = h;
+
+    // Say honestly what is on screen and what is not.
+    const cnt = document.getElementById('slicerCount');
+    if (cnt) {
+      const total = st.values.length, selN = st.sel.size;
+      let t;
+      if (st.q) t = U.fmtInt(matches.length) + ' of ' + U.fmtInt(total) + ' values match “' + st.q + '”';
+      else t = U.fmtInt(total) + ' distinct value' + (total === 1 ? '' : 's');
+      if (matches.length > shown.length) {
+        t += ' · showing the first ' + U.fmtInt(shown.length) + ' — type to narrow the list';
+      }
+      if (selN) t += ' · ' + U.fmtInt(selN) + ' selected';
+      cnt.textContent = t;
+    }
+  },
+
   _slicerSearch(q) {
-    q = (q||'').toLowerCase();
-    document.querySelectorAll('#slicerItems .slicer-item').forEach(el => {
-      const v = (el.dataset.val||'').toLowerCase();
-      el.style.display = (!q || v.includes(q)) ? '' : 'none';
-    });
+    const st = Reco._slicerState;
+    if (!st) return;
+    st.q = q || '';
+    clearTimeout(Reco._slicerSearchTimer);
+    Reco._slicerSearchTimer = setTimeout(() => Reco._slicerRender(), 60);
   },
-  _slicerToggleItem(el) { el.classList.toggle('selected'); },
+
+  _slicerToggleItem(el) {
+    const st = Reco._slicerState;
+    const v = el.dataset.val || '';
+    if (st) {
+      if (st.sel.has(v)) st.sel.delete(v); else st.sel.add(v);
+      el.classList.toggle('selected', st.sel.has(v));
+      Reco._slicerRenderCountOnly();
+    } else el.classList.toggle('selected');
+  },
+
+  /* Selecting a chip must not reshuffle the list under the cursor, so only
+     the count line is refreshed on a click. */
+  _slicerRenderCountOnly() {
+    const st = Reco._slicerState;
+    const cnt = document.getElementById('slicerCount');
+    if (!st || !cnt) return;
+    const base = cnt.textContent.split(' · ').filter(p => !/\bselected$/.test(p)).join(' · ');
+    cnt.textContent = st.sel.size ? base + ' · ' + U.fmtInt(st.sel.size) + ' selected' : base;
+  },
+
+  /* Pick every value the search matches — the only practical way to select a
+     few hundred references out of two hundred thousand. */
+  _slicerSelectMatching() {
+    const st = Reco._slicerState;
+    if (!st) return;
+    const matches = Reco._slicerMatches();
+    matches.forEach(v => st.sel.add(v));
+    Reco._slicerRender();
+    U.toast('Selected ' + U.fmtInt(matches.length) + ' value(s)', 'success');
+  },
+
+  _slicerDeselectAll() {
+    const st = Reco._slicerState;
+    if (!st) return;
+    st.sel.clear();
+    Reco._slicerRender();
+  },
+
   _slicerApply() {
     const col = Reco._slicerCol;
     const sess = AppState.recoSessions[AppState.activeRecoId];
-    const selected = [];
-    document.querySelectorAll('#slicerItems .slicer-item.selected').forEach(el => selected.push(el.dataset.val));
+    const st = Reco._slicerState;
+    // From the state, not the DOM: a selected value outside the rendered cap
+    // must survive Apply.
+    const selected = st && st.col === col
+      ? st.values.filter(v => st.sel.has(v))
+      : [...document.querySelectorAll('#slicerItems .slicer-item.selected')].map(el => el.dataset.val);
     sess.slicers[col] = selected;
     sess.page = 0;
+    Reco._slicerState = null;
     AppState.save();
     App.closeModal();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
   _slicerClear() {
     const col = Reco._slicerCol;
     const sess = AppState.recoSessions[AppState.activeRecoId];
     delete sess.slicers[col];
     sess.page = 0;
+    Reco._slicerState = null;
     AppState.save();
     App.closeModal();
-    App.navigate('reco');
+    Reco.refreshGrid();
   },
 
   /* Row selection + sum bar */
 
+  /* One rendered row, by its _id. Only the virtualised window is in the DOM,
+     so this is a lookup over ~110 nodes. */
+  _rowEl(rowId) {
+    return [...document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]')]
+      .find(tr => tr.dataset.rid === rowId) || null;
+  },
+
+  /* Bring every rendered row's tick and highlight back in line with
+     sess.selectedRows. Touches only what is on screen. */
+  _syncVisibleSelection() {
+    const sess = AppState.recoSessions[AppState.activeRecoId];
+    if (!sess) return;
+    const sel = sess.selectedRows || {};
+    document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]').forEach(tr => {
+      Reco._updateVisualRow(tr, !!sel[tr.dataset.rid]);
+    });
+    Reco._syncSelectAllBox();
+  },
+
+  /* Ticking one checkbox used to re-render the entire Reconciliation screen —
+     a fifth of a second at 200k rows and half a second at 500k, for a change
+     that affects one row and the selection bar. Now it updates that row and
+     the bar, and nothing else. */
   toggleRowSelect(rowId, checked) {
     const id = AppState.activeRecoId;
     const sess = AppState.recoSessions[id];
     if (!sess) return;
-    
+
     sess.selectedRows = sess.selectedRows || {};
-    
-    // Explicitly add or delete the row from the tracking object
-    if (checked) {
-      sess.selectedRows[rowId] = true;
-    } else {
-      delete sess.selectedRows[rowId]; 
-    }
-    
-    // Trigger a full app render so your summary bar, totals, and action buttons 
-    // instantly recalculate based on the new selection.
-    App.navigate('reco'); 
+    if (checked) sess.selectedRows[rowId] = true;
+    else delete sess.selectedRows[rowId];
+
+    const tr = Reco._rowEl(rowId);
+    if (tr) Reco._updateVisualRow(tr, !!checked);
+    Reco._syncSelectAllBox();
+    Reco.updateSelSumBar();
   },
 
-  toggleAllRows(checked) {
+  async toggleAllRows(checked) {
     const id = AppState.activeRecoId;
     const sess = AppState.recoSessions[id];
     if (!sess) return;
-    
-    sess.selectedRows = {};
-    
-    if (checked) {
-      // If "select all" is checked, select all rows currently matching the filter
-      const tpl = AppState.recoTemplates.find(t => t.id === id);
-      const filtered = Reco.applyTableFiltersSort(tpl, sess);
-      filtered.forEach(r => { sess.selectedRows[r._id] = true; });
-    }
-    
-    // Full re-render to update all visible checkboxes
-    App.navigate('reco'); 
+    const tpl = AppState.recoTemplates.find(t => t.id === id);
+
+    // Half weight: writing one key per row is far cheaper than sorting, so the
+    // overlay only earns its place on the really large extracts. Totalling the
+    // selection runs inside the same overlay, so there is no second silent
+    // pause after the bar disappears.
+    try {
+      await Reco._withBusy(checked ? sess.data.length / 2 : 0,
+        'Selecting ' + U.fmtInt(sess.data.length) + ' rows…', () => {
+          sess.selectedRows = {};
+          if (checked) {
+            // Everything the current filters leave visible, as before — from
+            // the list the last render already produced where that is valid.
+            const st = Reco._virtStateFor(tpl, sess);
+            const filtered = st ? st.filtered : Reco.applyTableFiltersSort(tpl, sess);
+            for (const r of filtered) sess.selectedRows[r._id] = true;
+          }
+          Reco._syncVisibleSelection();
+          Reco.updateSelSumBar();
+        });
+    } catch (e) { Reco._busyDone(); U.toast('Could not change the selection: ' + e.message, 'error'); }
   },
 
   updateSelSumBar() {
@@ -11868,11 +12656,14 @@ renderRecoTable(tpl, sess) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
     if (!sess || !tpl) { bar.classList.remove('show'); return; }
-    const ids = Object.keys(sess.selectedRows || {});
+    const ids = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]);
     if (!ids.length) { bar.classList.remove('show'); bar.innerHTML=''; return; }
-    let sum = 0; let count = 0;
-    const selRows = [];
-    sess.data.forEach(r => { if (sess.selectedRows[r._id]) { sum += U.num(r[tpl.valueColumn]); count++; selRows.push(r); } });
+    // Walk the selection, not the whole extract. This runs on every tick of a
+    // checkbox; scanning 200,000 rows to add up three of them is what made
+    // selecting feel sticky.
+    const selRows = Reco._rowsByIds(sess, ids);
+    let sum = 0; let count = selRows.length;
+    for (const r of selRows) sum += U.num(r[tpl.valueColumn]);
     const tol = tpl.toleranceValue || 0;
     const within = Reco.isWithinTolerance(tpl, sum, selRows);
     const tolLabel = tpl.toleranceMode === 'percentage' ? tol + '%' : tol;
@@ -11888,8 +12679,8 @@ renderRecoTable(tpl, sess) {
   clearSelection() {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.selectedRows = {};
+    Reco._syncVisibleSelection();
     Reco.updateSelSumBar();
-    App.navigate('reco');
   },
 
   offsetSelected() {
@@ -11908,7 +12699,7 @@ renderRecoTable(tpl, sess) {
     const mm = AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
     let n = 0;
     selectedIds.forEach(rowId => {
-      const row = sess.data.find(r => r._id === rowId);
+      const row = Reco._rowById(sess, rowId);
       if (!row || sess.offsets[row._id]) return;
       sess.offsets[row._id] = true;
       row._recoId = rid;
@@ -12068,7 +12859,7 @@ renderRecoTable(tpl, sess) {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) return;
-    const row = sess.data.find(r => r._id === rowId);
+    const row = Reco._rowById(sess, rowId);
     if (row) { Reco.applyEdits(tpl, sess, [{ row, col: tagName, value: val }], { source: 'grid', trusted: true }); return; }
     sess.manualTags = sess.manualTags || {};
     sess.manualTags[rowId + '||' + tagName] = val;
@@ -12427,18 +13218,22 @@ renderRecoTable(tpl, sess) {
     const openRows = sess.data.filter(r => !sess.offsets?.[r._id]);
     if (!openRows.length) return '<div class="empty" style="color:var(--success, #059669);">All items are offset!</div>';
     const cols = tpl.columns.map(c => c.name);
-    let h = '<h3>Open Items ('+openRows.length+')</h3>';
+    const CAP = Reco.REPORT_ROW_CAP;
+    let h = '<h3>Open Items ('+openRows.length.toLocaleString()+')</h3>';
     h += '<button class="success small" onclick="Reco.exportRowsCsv(\'open_items\','+U.esc(JSON.stringify(cols))+')">Export CSV</button>';
+    if (openRows.length > CAP) h += ' <span class="tag">showing the first '+CAP.toLocaleString()+' of '
+      +openRows.length.toLocaleString()+' — Export CSV gives all '+openRows.length.toLocaleString()+'</span>';
     h += '<div style="overflow-x:auto; max-height:400px; overflow-y:auto"><table><thead><tr>';
     cols.forEach(c => { h += '<th>'+U.esc(c)+'</th>'; });
     h += '</tr></thead><tbody>';
-    openRows.slice(0, 5000).forEach(r => {
+    openRows.slice(0, CAP).forEach(r => {
       h += '<tr>';
       cols.forEach(c => { h += '<td>'+U.esc(r[c])+'</td>'; });
       h += '</tr>';
     });
     h += '</tbody></table></div>';
-    if (openRows.length > 5000) h += '<div class="text-muted">Showing 5000 of '+openRows.length+'. Export to CSV for full list.</div>';
+    if (openRows.length > CAP) h += '<div class="text-muted">Showing the first '+CAP.toLocaleString()+' of '
+      +openRows.length.toLocaleString()+' open items. <b>Export CSV</b> writes all '+openRows.length.toLocaleString()+'.</div>';
     return h;
   },
 
@@ -12449,37 +13244,58 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const cols = (rpt.columns||[]).length ? [...rpt.columns] : tpl.columns.map(c=>c.name);
     (rpt.computedCols||[]).forEach(cc => { if (!cols.includes(cc.name)) cols.push(cc.name); });
     
+    const CAP = Reco.REPORT_ROW_CAP;
+    const capped = rows.length > CAP;
     let h = '';
 
     // 1. Title & Toolbar
     h += '<h3>'+U.esc(rpt.name)+'</h3>';
-    h += '<div class="toolbar"><span class="text-muted">'+rows.length+' rows · logic: '+(rpt.logic||'AND')+'</span>';
+    h += '<div class="toolbar"><span class="text-muted">'+rows.length.toLocaleString()+' rows · logic: '+(rpt.logic||'AND')+'</span>';
+    // Say up front how much of the result is on screen. The cards and the
+    // total row below always cover all of it, and so does the CSV.
+    if (capped) h += '<span class="tag" title="The summary cards, the total row and the CSV export all cover every row.">showing the first '
+      +CAP.toLocaleString()+' of '+rows.length.toLocaleString()+' rows — Export CSV gives all '+rows.length.toLocaleString()+'</span>';
     h += '<button class="success small" onclick="Reco.exportCustomReport('+idx+')">Export CSV</button></div>';
 
     // 2. Render Summary Cards
     if (rpt.summaryCards && rpt.summaryCards.length > 0) {
-        h += '<div class="report-cards" style="display:flex; gap:10px; margin-bottom:15px;">';
+        h += '<div class="report-cards" style="display:flex; gap:10px; margin-bottom:15px; flex-wrap:wrap;">';
         rpt.summaryCards.forEach(card => {
             if (!card.col) return;
             const func = card.func || 'Sum';
             const cardTitle = card.displayName || (func + ' of ' + card.col);
-            const filled = rows.map(r => r[card.col]).filter(v => v != null && v !== '');
-            const nums = filled.filter(v => U.isNumeric(v)).map(v => U.num(v));
+            // One pass, no Math.min(...nums): spreading a 200k-value array
+            // threw "Maximum call stack size exceeded" and took the whole
+            // report down with it.
+            let filled = 0, n = 0, sum = 0, mn = Infinity, mx = -Infinity;
+            for (let i = 0; i < rows.length; i++) {
+              const v = rows[i][card.col];
+              if (v == null || v === '') continue;
+              filled++;
+              if (!U.isNumeric(v)) continue;
+              const x = U.num(v);
+              n++; sum += x;
+              if (x < mn) mn = x;
+              if (x > mx) mx = x;
+            }
             let cardValue;
-            if (func === 'Count') cardValue = filled.length.toLocaleString();
-            else if (!nums.length) cardValue = '—';
-            else if (func === 'Avg') cardValue = U.fmtNum(nums.reduce((a, b) => a + b, 0) / nums.length);
-            else if (func === 'Min') cardValue = U.fmtNum(Math.min(...nums));
-            else if (func === 'Max') cardValue = U.fmtNum(Math.max(...nums));
-            else cardValue = U.fmtNum(nums.reduce((a, b) => a + b, 0));
-            
+            if (func === 'Count') cardValue = filled.toLocaleString();
+            // Sum of nothing is zero; an average, minimum or maximum of
+            // nothing has no answer, so those stay blank.
+            else if (func === 'Sum') cardValue = (n || !rows.length) ? U.fmtNum(sum) : '—';
+            else if (!n) cardValue = '—';
+            else if (func === 'Avg') cardValue = U.fmtNum(sum / n);
+            else if (func === 'Min') cardValue = U.fmtNum(mn);
+            else if (func === 'Max') cardValue = U.fmtNum(mx);
+            else cardValue = U.fmtNum(sum);
+
             h += `<div class="card" style="padding:10px; border:1px solid var(--border, #ccc); border-radius:5px;">
                     <div class="card-title text-muted">${U.esc(cardTitle)}</div>
                     <div class="card-value"><strong>${U.esc(cardValue)}</strong></div>
                   </div>`;
         });
         h += '</div>';
-    }  
+    }
 
     h += '<div style="overflow-x:auto; max-height:500px; overflow-y:auto"><table>';
     
@@ -12492,25 +13308,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     h += '<tbody>';
     
-    rows.slice(0, 5000).forEach(r => {
+    const shown = capped ? rows.slice(0, CAP) : rows;
+    shown.forEach(r => {
       h += '<tr>';
-      cols.forEach(c => { 
-        let val = r[c];
-        if (val == null) val = '';
-        const colDef = tpl.columns.find(x => x.name === c);
-        
-        // Date format override
-        if (rpt.dateFormats && rpt.dateFormats[c] && val !== '') {
-            const parsedDate = (!isNaN(val) && Number(val) > 10000) ? U._excelSerialToDate(Number(val)) : U.parseDate(val);
-            if (parsedDate) val = U.fmtDate(parsedDate, rpt.dateFormats[c]);
-        } 
-        // Fallback to standard date formatting
-        else if (colDef && colDef.isDate) {
-            val = U.formatExcelDate(val);
-        }
-
-        h += '<td>'+U.esc(val)+'</td>'; 
-      });
+      // Exactly the text the CSV export writes (Reco._reportCellText).
+      cols.forEach(c => { h += '<td>'+U.esc(Reco._reportCellText(tpl, rpt, c, r[c]))+'</td>'; });
       h += '</tr>';
     });
 
@@ -12524,13 +13326,15 @@ renderCustomReport(tpl, sess, rpt, idx) {
             if (selectedTotals.includes(c)) {
                 let sum = 0;
                 rows.forEach(r => {
+                    // U.isNumeric, the same test the Sum card uses. The old
+                    // parseFloat guard rejected accounting negatives, so
+                    // '(50)' was dropped from the total while the Sum card
+                    // counted it as -50 and the two disagreed.
                     const v = r[c];
-                    if (v !== '' && v != null && !isNaN(parseFloat(String(v).replace(/,/g, '')))) {
-                        sum += U.num(v);
-                    }
+                    if (U.isNumeric(v)) sum += U.num(v);
                 });
                 h += '<td>'+U.fmtNum(sum)+'</td>';
-            } 
+            }
             // If it's the first column and not a total, label it "Total"
             else if (idx === 0) { 
                 h += '<td>Total</td>'; 
@@ -12544,12 +13348,16 @@ renderCustomReport(tpl, sess, rpt, idx) {
     }
 
     h += '</tbody></table></div>';
-    if (rows.length > 5000) h += '<div class="text-muted">Showing 5000 of '+rows.length+'. Export to CSV for full list.</div>';
+    if (capped) h += '<div class="text-muted">Showing the first '+CAP.toLocaleString()+' of '+rows.length.toLocaleString()
+      +' rows. The summary cards and the total row above cover all '+rows.length.toLocaleString()
+      +'; <b>Export CSV</b> writes all '+rows.length.toLocaleString()+'.</div>';
     return h;
   },
 
-
-
+  /* Rows the report table draws at once. Everything else about a report —
+     the summary cards, the total row, the CSV export — covers every row; only
+     the on-screen table stops here so the browser stays responsive. */
+  REPORT_ROW_CAP: 5000,
 
   /* Run a custom report definition against the data */
   runReport(tpl, sess, rpt) {
@@ -12567,15 +13375,21 @@ renderCustomReport(tpl, sess, rpt, idx) {
     });
 
     // 2. Apply Filters
-    const filters = (rpt.filters||[]);
+    //    A filter row with no column chosen yet is skipped: counting it as a
+    //    match made every row pass under OR logic, which silently voided
+    //    every other condition in the report.
+    const filters = (rpt.filters||[]).filter(f => f && f.col);
     const logic = rpt.logic || 'AND';
     if (filters.length) {
+      // The column's kind decides what each operator means — resolved once,
+      // not per row, and from the same table the editor's operator menu uses.
+      const kinds = filters.map(f => FilterOps.kindOf(tpl, f.col, rpt));
       rows = rows.filter(row => {
-        const tester = (f) => {
+        const tester = (f, i) => {
           let val;
           if (f.col === '_status') val = sess.offsets?.[row._id] ? 'offset' : 'open';
           else val = row[f.col];
-          return FilterOps.evaluate(val, f.op, f.val, f.val2);
+          return FilterOps.evaluate(val, f.op, f.val, f.val2, kinds[i]);
         };
         return logic === 'OR' ? filters.some(tester) : filters.every(tester);
       });
@@ -12584,8 +13398,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
     // 3. Apply Sort
     if (rpt.sortCol) {
       const sc = rpt.sortCol, dir = rpt.sortDir === 'desc' ? -1 : 1;
-      const colDef = tpl.columns.find(c => c.name === sc);
-      rows = rows.slice().sort((a,b) => Reco._compareValues(a[sc], b[sc], colDef && colDef.isDate, dir));
+      const isDate = Reco.isDateColumn(tpl, sc, rpt.dateFormats && rpt.dateFormats[sc],
+                                       i => rows[i][sc], rows.length);
+      rows = rows.slice().sort((a,b) => Reco._compareValues(a[sc], b[sc], isDate, dir));
     }
     return rows;
   },
@@ -12598,9 +13413,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
     if (!rpt) return;
     const cols = (rpt.columns||[]).length ? rpt.columns.slice() : tpl.columns.map(c=>c.name);
     (rpt.computedCols||[]).forEach(cc => { if (!cols.includes(cc.name)) cols.push(cc.name); });
+    // Same text as the table: without this the screen honoured the report's
+    // date-format overrides and the CSV did not.
     const rows = Reco.runReport(tpl, sess, rpt).map(r => {
       const o = {};
-      cols.forEach(c => o[c] = r[c] != null ? r[c] : '');
+      cols.forEach(c => o[c] = Reco._reportCellText(tpl, rpt, c, r[c]));
       return o;
     });
     U.download(Versioning._safe(rpt.name||'report')+'_'+U.todayStr()+'.csv', Papa.unparse({ fields: cols, data: rows }), 'text/csv');
@@ -12757,7 +13574,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
     cols.forEach(c => { h += '<th>'+U.esc(c)+'</th>'; });
     h += '</tr></thead><tbody>';
     (entry.sourceRowIds||[]).forEach(rid => {
-      const row = sess.data.find(r => r._id === rid);
+      const row = Reco._rowById(sess, rid);
       if (!row) return;
       h += '<tr>';
       cols.forEach(c => { h += '<td>'+U.esc(row[c] != null ? row[c] : '')+'</td>'; });
@@ -13252,7 +14069,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const pks = [];
     Object.keys(sess.selectedRows||{}).forEach(rid => {
       if (!sess.selectedRows[rid]) return;
-      const row = sess.data.find(r => r._id === rid);
+      const row = Reco._rowById(sess, rid);
       if (!row) return;
       const pk = Reco.getRowPK(tpl, row);
       if (pk && !pks.includes(pk)) pks.push(pk);

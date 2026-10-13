@@ -123,7 +123,7 @@ async function bootApp() {
 | 1 | 769 | `U` — uid, esc, **jsq** (safe JS string in an attribute), **num** (`(1,234.50)`, `1,234.50-`), isNumeric, **parseDate** (validates, MM/DD fallback, serial-as-text, DD-MMM-YY), fmtDate, **download** (save dialog), downloadWorkbook |
 | 2 | 959 | `FMT` — format-pattern validation (D/N/A/T/S) |
 | 2b | 999 | `Formula` — helpers + `{Col}` tokens, **compiled once per formula**; new `NUM()` helper |
-| 2c | 1265 | `FilterOps` — 21 operators; numeric ops understand `1,234.50` |
+| 2c | 1265 | `FilterOps` — 22 operators; **the one table of which operators suit which column kind** (`kindOf` / `opsFor` / `suits`), and the one evaluator (§7a) |
 | 3 | 1335 | `Store` — bridge router, write queue, load-problem tracking |
 | 3aa | 1559 | `Masters` — Accounts / Doc Numbers / Corrections / Custom masters |
 | 3b | 1665 | `Versioning` — the `reco_data/` CSV store (§5) |
@@ -236,6 +236,149 @@ Submit validates **every** section's period (and From ≤ To), asks once about e
 
 ---
 
+## 6a. Filters and custom reports — what an operator means
+
+**One table, used everywhere.** `FilterOps` owns both halves of a filter, so a
+menu can never offer something the arithmetic will not honour:
+
+- `FilterOps.kindOf(tpl, col)` → `'date'` (column `isDate`), `'value'`
+  (`isValue`), `'status'` (the `_status` pseudo-column) or `'text'`.
+  Extras and computed columns are `'text'`: they carry no type flag.
+- `FilterOps.opsFor(kind, keepOp)` → the operators to offer. A date column gets
+  `before / after / on or before / on or after / between / not between` and no
+  `>`; a value column gets `> >= < <=` and no date operators; `_status` gets
+  only equality and list operators; `'text'` keeps all 22. `keepOp` keeps an
+  operator a *saved* filter already uses in the menu, flagged *not suited to
+  this column*, so an old report can be read and corrected instead of silently
+  losing a condition.
+- `FilterOps.evaluate(value, op, val, val2, kind)` is given the **same kind**.
+  On a date column a range compares days; on a value column it compares
+  amounts, so `1234.5` matches a stored `1,234.50` and `-50` matches `(50)`.
+
+Both operator menus — the report filter editor (`RecoTemplate._renderReportFilter`)
+and the grid's column dropdown (`Reco.toggleColDropdown`) — are built from
+`opsFor`, and both evaluation sites (`Reco.runReport`, `Reco.applyTableFiltersSort`)
+pass the kind, so the grid and the reports cannot drift apart.
+
+**Untyped columns.** When the kind is `'text'`, the ordering operators let the
+filter's own bounds decide: bounds that are dates and not numbers mean a date
+comparison, anything else means an amount comparison. That is what makes
+`between` work on a computed column holding dates. Equality on an untyped
+column stays exact text. `U.looksLikeDate` is the strict sniffer behind this —
+unlike `U.parseDate` it never falls through to `new Date(text)`.
+
+**Reports.** `Reco.runReport` computes extras, then the report's computed
+columns (which may reference extras and earlier computed columns), then filters,
+then sorts. A filter row with no column chosen is skipped — counted as a match
+it made every row pass under OR logic. The sort resolves its column with
+`Reco.isDateColumn`, which reads a template column's `isDate` flag and
+otherwise samples the values, so a computed date column no longer sorts as text.
+
+`Reco.renderCustomReport` computes each summary card in one pass (never
+`Math.min(...nums)` — spreading 200k values threw *Maximum call stack size
+exceeded* and took the whole report down). `Sum` of an empty result is `0.00`;
+`Avg`/`Min`/`Max` with no numbers are `—`. The total row tests cells with
+`U.isNumeric`, the same test the `Sum` card uses, so the two agree on
+accounting negatives.
+
+`Reco.REPORT_ROW_CAP` (5,000) limits **only the on-screen table**. The cards,
+the total row and the CSV export always cover every row, and the toolbar says
+so: *showing the first 5,000 of 200,006 rows — Export CSV gives all 200,006*.
+Table and CSV share `Reco._reportCellText`, so an export can never show a
+different date than the screen.
+
+---
+
+## 6b. The grid on a large extract — what keeps it responsive
+
+A finance user loads tens of thousands of rows, often a few hundred thousand.
+Four rules hold the grid together at that size. Break one and the window
+starts freezing again.
+
+**1. Work is proportional to what is on screen, not to `sess.data.length`.**
+The table is virtualised to ~110 rows (`Reco._VIRT_WINDOW`) whatever the page
+size, including `Reco.PAGE_ALL` ("All rows (no paging)" in the page-size list).
+The slicer follows the same rule: `Reco._slicerDistinct` scans every row to
+count the distinct values honestly, but `Reco._slicerRender` only ever draws
+`Reco.SLICER_CAP` (500) of them and the count line says what it is showing —
+*200,000 distinct values · showing the first 500 — type to narrow the list*.
+Search filters the in-memory list and redraws that small window; it does not
+touch the undrawn values. **The selection lives in `Reco._slicerState.sel`,
+never in the DOM**, because a value a user already picked may be outside the
+cap, and reading the selection back off the DOM would silently drop it
+(`_slicerMatches` also pulls picked values to the front). `_slicerDistinct`
+coerces a value with `String(val||'')` — *exactly* what `applyTableFiltersSort`
+uses to match a slicer value. Change one side only and the list will offer a
+value (e.g. a formula column's `0`) that matches no row.
+
+**2. A click that changes one thing does not re-render everything.**
+`Reco.refreshGrid()` redraws only `#recoTableArea` and `#recoSlicerBar`, and
+falls back to `App.navigate('reco')` whenever the grid is not what is on
+screen — so no caller has to know. Paging, page size, sorting, column filters,
+slicers, the status filter, a column reorder and sheet-mode page crossing all
+go through it. Selection goes further and touches no markup at all:
+`toggleRowSelect` / `toggleAllRows` / `clearSelection` / `endDragSelect` update
+the rendered rows with `_updateVisualRow` (`_syncVisibleSelection` for a bulk
+change), refresh the header tick with `_syncSelectAllBox` (empty / half /
+full) and recompute the bar. `updateSelSumBar` walks **the selection**, not the
+extract. Things that change the topbar — filter sets, hide/unhide a column,
+zoom, reset view, anything that changes offsets — must still use
+`App.navigate`, because `refreshGrid` leaves the topbar alone.
+
+**3. Keys are computed once, not per comparison.** `Reco._sortKeyed` makes one
+pass over the rows for blank / date / number / text keys and then sorts on
+those, reusing one `Intl.Collator`. It reproduces `_compareValues` exactly —
+blanks last, then dates, then numbers, then natural text — and
+`run_grid_scale_e2e.mjs` §5 asserts that against a copy of the original
+comparator for six value shapes in both directions. **Any change here must keep
+that test green: the order rows appear in is something users read.**
+`Reco._buildRowIdxMap` caches the `_id → index` map against the row array's
+identity and length (`_invalidateIdx` for an in-place push), and `_rowById` /
+`_rowsByIds` use it — the bulk-offset and tolerance paths used to scan the
+whole extract once per selected id. `Reco._virtState` holds what the last
+render computed so the scroll handler can move the window without re-running
+the pipeline, and `_filteredCount` / `_pageCount` reuse it. Caches live on
+`Reco`, **not on the session**: sessions are JSON-serialised to the shared
+folder, where a `Map` would be written as `{}`.
+
+**4. What cannot be made fast says so.** `Reco._withBusy(cost, text, work)`
+paints a progress panel, yields a frame so it appears, then does the work;
+below `Reco.BUSY_ROWS` (100,000 row-equivalents) it stays silent, so a small
+session never flashes a modal. `cost` is in row-equivalents, so a caller whose
+work is cheaper per row scales it down (select-all passes half). The slicer's
+scan yields every `SLICER_SLICE_MS` (60ms) of held thread and only raises the
+bar once the scan has already run for 250ms — a plain column opens instantly,
+a formula column reports progress. Shape copied from `ExcelLink._progress`.
+
+**Navigation.** The pager states the page, the row range and the true totals
+with thousands separators (`U.fmtInt`), drops the "filtered" figure when
+nothing is filtered out, and offers a page box and a row box (Enter to jump;
+`gotoRowInput` turns to the page, scrolls the virtual window and flashes the
+row — `_flashFrow` survives a counted number of body rebuilds rather than a
+wall-clock timeout, because a frame can be seconds late while a large session
+is being written out). `PageDown` / `PageUp` / `Ctrl+Home` / `Ctrl+End` page
+the grid; `Reco._onGridKey` decides it is a paging key **before** counting
+anything, bows out inside an input, a modal or sheet mode, and the header is
+`position: sticky`.
+
+**Measured, 200k rows × 6 columns + 2 extras, Chromium** (before → after):
+slicer on a 200k-distinct column 5,819 → 83 ms and 200,000 → 500 DOM nodes
+(19.2 MB → 72 KB of markup); slicer search 1,901 → 11 ms; sort by date
+1,747 → 192 ms; sort by text 1,623 → 71 ms; tick one row 221 → 34 ms; clear a
+200k selection 120 → 33 ms; page turn 150 → 45 ms; longest blocking task
+5,800 → 244 ms. At 500k rows the slicer was a 15.5-second freeze building
+48 MB of markup; it is now 237 ms.
+
+**Not fixed (known).** `Store.serialize('recoSessions')` is one
+`JSON.stringify` of the whole session on the main thread: 141 ms / 16 MB at
+200k rows, 238 ms / 42 MB at 500k, and the full `AppState.flush` round trip
+(serialise + write through the bridge) is 668 ms at 200k and 2.7 s at 500k.
+It is debounced 250 ms, so a burst of clicks pays it once, but a save of a
+very large session still hitches the window. That is the persistence layer,
+shared with the Excel link, and was left alone.
+
+---
+
 ## 7. Issues from the previous handover — resolution
 
 | # | Issue | Resolution |
@@ -258,6 +401,40 @@ Submit validates **every** section's period (and From ≤ To), asks once about e
 - **Data integrity:** concurrent edits overwrote each other's version rows (read-modify-write race); `Papa.unparse` dropped columns not in the first row; corrupt `reco/*.json` was silently replaced by an empty file on the next save (now preserved in `reco/_corrupt/`); an unreachable share at load could lead to empty data being saved over the real file; renaming a template orphaned its history; PK-less templates duplicated rows on reload; edits saved on a later day were invisible when reopening the upload file; Excel-view "number format" wrote formatted text (`(1,234.56)`, `AED 1,234.56`) into the data; the preview wrote computed/stale lookup values into session rows.
 - **Special JV / entries:** cancelling the JV recorded an empty JV and unblocked Generate; a stale listener from a closed JV modal could fire on the next JV; `_fromCurrentSelection` was persisted as `true`, so an old JV for different rows could satisfy a new preview; rows sent to a JV but not consumed were marked as posted; the top **Preview Entry** button ignored the selection.
 - **Crashes / wrong results:** right-click row menu crashed (`sess` undefined); Find & Replace missed matches (global regex `lastIndex`) and treated `$&` in plain-text replacements as a pattern; **Clear Loaded Data** immediately re-loaded the latest file; a slow auto-load could land in another template; selection bar/Excel view ignored *percentage* tolerance; custom report cards showed "undefined" and always summed; report computed columns could not use extra columns; export/pivot/report ignored `master_lookup` columns and values typed into extra columns; exports turned `0` into blank; numbers like `(1,234.50)` and `1,234.50-` counted as 0; `{A}-{B}` with negative `B` gave `#ERR`; numeric sort/filters read `1,234` as 1; `31/02/2026` rolled into March; Excel serials stored as text were not dates; Excel dates shifted a day west of UTC; values containing `'` broke buttons (103 handlers now use `U.jsq`); quick-edit mode leaked into the next template edit (could lose a new template); deleting a template left its groups, comments, attachments and pending JVs behind; step 3 of the wizard had a duplicate, lossy copy of the additional-columns editor; AEG had five duplicate method definitions (dead code removed); `aegSettings.currentUser` was shared by everyone on the folder (identity is now per session from the launcher).
+
+### Custom reports — defects found and fixed in this build
+
+Found by a matrix probe over every report feature crossed with every column
+kind (text, `isDate`, `isValue`, computed extra, master lookup, free tag,
+`_status`) and all 22 operators; locked in by `tests/e2e/run_reports_e2e.mjs`.
+
+- **A date range was wrong, not merely unsupported.** `between` ran through
+  `parseFloat`, so `'05/01/2026'` compared as the number **5** — the
+  day-of-month. *Date between 01/01/2026 and 31/03/2026* returned every row,
+  including December 2025 and June 2026. `>`, `>=`, `<`, `<=` had the same
+  fault, and there was no date-range operator at all. Every operator menu
+  offered all 22 operators for every column.
+- **`Min`/`Max` summary cards broke a large report outright** —
+  `Math.min(...nums)` threw *Maximum call stack size exceeded* above roughly
+  125,000 values, taking the whole report render down with it.
+- **The total row silently dropped accounting negatives.** Its `parseFloat`
+  guard rejected `(50)`, so the total read 1,834.50 where the `Sum` card on the
+  same column read 1,784.50.
+- **The report sort looked the column up only in `tpl.columns`**, so a computed
+  or extra date column sorted as text — `04-Feb-26` before `31-Dec-25`. The
+  grid's column sort had the same fault.
+- **The CSV export ignored the report's date-format overrides**, so the file
+  disagreed with the screen.
+- **An unfinished filter row (no column chosen) counted as a match**, which
+  made an OR report return every row and silently voided its other conditions.
+- **`Sum` over an empty result read `—`** rather than `0.00`.
+- **A formula that could not work printed `NaN`** (or `Infinity`), which reads
+  like a value yet is skipped by totals and cards and sorts as text. It now
+  reads `#ERR`, and the editor says to wrap a formatted amount in `NUM()`.
+- **The 5,000-row table cap was effectively invisible** — one line below 5,000
+  rows of table. It is now stated in the toolbar, above the table.
+- A summary card could only name a column the report displayed; cards may now
+  name any column the report can reach, and one naming a deleted column says so.
 
 ### Known limitations (not changed)
 
@@ -284,7 +461,10 @@ Submit validates **every** section's period (and From ≤ To), asks once about e
 - **"Why can't I click Generate?"** → `canGenerate` in `_renderPreviewModal`: every bucket needs a completed JV for exactly those rows (`SpecialJV.matchesRows`).
 - **"Where is the row data on disk?"** → `reco_data/<tpl.dataFolder>/<MMM-YY>/<DD>.csv`; active view = `Versioning.loadActive`.
 - **"How do I test without the launcher?"** → open `Reco.html` directly (localStorage mode), or run the e2e suite which drives the real bridge.
-- **Tests:** `python -m pytest tests/` (launcher + migration engine) and `node tests/e2e/run_e2e.mjs` (Reco, TCH and the hub in Chromium against the real `LauncherAPI`, including an "older launcher" mode).
+- **"The grid feels heavy on a big file"** → §6b. Check first whether the
+  action went through `Reco.refreshGrid()` or a full `App.navigate('reco')`,
+  and whether anything is iterating `sess.data` per click.
+- **Tests:** `python -m pytest tests/` (launcher + migration engine) and `node tests/e2e/run_e2e.mjs` (Reco, TCH and the hub in Chromium against the real `LauncherAPI`, including an "older launcher" mode). `run_reports_e2e.mjs` covers filters and custom reports (§6a); `run_grid_scale_e2e.mjs` covers the grid on a 200k-row extract (§6b). Run one at a time — each binds fixed ports.
 
 ---
 
