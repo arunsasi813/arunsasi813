@@ -73,7 +73,11 @@ def resolve_url(rel):
 
 
 def show_save_dialog(filename="", file_types=None):
-    return str(downloads / (filename or "download.bin"))
+    # Stands in for the native dialog. It must register the chosen path the way
+    # the real one does, or write_file_abs refuses it (no-dialog guard).
+    path = str(downloads / (filename or "download.bin"))
+    api._remember_save_target(path)
+    return path
 
 
 def return_to_hub():

@@ -240,6 +240,51 @@ def test_browse_folder_dialog_constants(api, root, monkeypatch, with_enum, expec
     assert win.calls[0][0] == expected
 
 
+def test_admin_password_is_not_reachable_through_the_file_bridge(api, root):
+    """pwd.txt gates the base-folder change. If page JS could read it, the gate
+    would be worthless, so the generic file bridge must refuse it."""
+    (root / "pwd.txt").write_text("superSecret123")
+    for call in (lambda: api.read_file("pwd.txt"),
+                 lambda: api.read_file("./pwd.txt"),
+                 lambda: api.read_file("PWD.TXT"),
+                 lambda: api.write_file("pwd.txt", "hijacked")):
+        with pytest.raises(ValueError):
+            call()
+    assert api.verify_admin_password("superSecret123")        # the real check still works
+    assert (root / "pwd.txt").read_text() == "superSecret123"
+
+
+def test_relative_paths_may_not_contain_dotdot(api, root):
+    # The jail already blocks escaping ROOT; '..' inside it would still let a
+    # crafted name (e.g. a Special JV ref) reach a sibling folder.
+    (root / "apps").mkdir(exist_ok=True)
+    with pytest.raises(ValueError):
+        api.write_file("special_jv_mapping/../apps/Reco.html", "clobbered")
+    assert api.read_file("apps/Reco.html") == "<html></html>"
+    with pytest.raises(ValueError):
+        api.read_file("reco/../pwd.txt")
+
+
+def test_absolute_write_needs_a_save_dialog(api, monkeypatch, tmp_path):
+    # write_file_abs exists for the native Save-as flow. Nothing may write an
+    # arbitrary path without the user having pointed a dialog at it.
+    victim = tmp_path / "outside.txt"
+    with pytest.raises(ValueError):
+        api.write_file_abs(str(victim), "no dialog")
+    with pytest.raises(ValueError):
+        api.write_file_b64_abs(str(victim), base64.b64encode(b"no dialog").decode())
+    assert not victim.exists()
+    _fake_webview(monkeypatch, True)
+    api._set_window(_FakeWindow(str(victim)))
+    assert api.show_save_dialog("outside.txt").endswith("outside.txt")
+    assert api.write_file_abs(str(victim), "chosen by the user")
+    assert victim.read_text() == "chosen by the user"
+    # a second write to the same chosen path is fine (retry), a different one is not
+    assert api.write_file_abs(str(victim), "again")
+    with pytest.raises(ValueError):
+        api.write_file_abs(str(tmp_path / "other.txt"), "x")
+
+
 def test_save_dialog_returns_plain_path(api, monkeypatch, tmp_path):
     _fake_webview(monkeypatch, True)
     api._set_window(_FakeWindow(str(tmp_path / "out.csv")))   # some platforms return a str

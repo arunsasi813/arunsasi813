@@ -47,6 +47,10 @@ APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
 CONFIG_PATH = APP_DIR / "launcher_config.json"
 STORAGE_DIR = APP_DIR / "webview_storage"
 DEFAULT_ADMIN_PASSWORD = "admin123"
+
+# Never reachable through read_file/write_file: the admin password gates the
+# base-folder change, so handing it to page JS would defeat that gate.
+PROTECTED_NAMES = {"pwd.txt"}
 LEGACY_FOLDER_KEYS = ("folder_path", "folder", "base_folder", "root", "path")
 ACCESS_TRUE = {"1", "y", "yes", "true", "x"}
 
@@ -176,6 +180,8 @@ class LauncherAPI:
         self._migration: fm.MigrationJob | None = None
         self._auto_login = True
         self._xl = None  # excel_link.ExcelLinkEngine, created on first use
+        self._save_targets: set[str] = set()   # paths the user picked in a Save dialog
+        self._save_targets_lock = threading.Lock()
         cfg = self._load_cfg()
         folder = config_folder(cfg)
         self.folder_path = fm.norm(folder) if folder else None
@@ -254,9 +260,19 @@ class LauncherAPI:
         return Path(self.folder_path)
 
     def _abs(self, rel) -> Path:
-        """Resolve a relative path inside ROOT; refuse anything that escapes it."""
+        """Resolve a relative path inside ROOT; refuse anything that escapes it.
+
+        Also refuses "..", so a crafted name cannot reach a sibling folder from
+        inside the jail, and refuses the files that must never travel through
+        the generic file bridge (the admin password).
+        """
         root = self._root()
         r = str(rel or "").replace("\\", "/").strip()
+        parts = [p for p in r.split("/") if p and p != "."]
+        if any(p == ".." for p in parts):
+            raise ValueError(f"Path may not contain '..': {rel}")
+        if parts and parts[-1].lower() in PROTECTED_NAMES and len(parts) == 1:
+            raise ValueError(f"{parts[-1]} is not readable or writable through the app.")
         if re.match(r"^[A-Za-z]:", r) or r.startswith("//") or r.startswith("/"):
             # Absolute paths are accepted only when they already point inside
             # ROOT (legacy attachment records stored absolute paths).
@@ -820,15 +836,40 @@ class LauncherAPI:
             return ""
         if not res:
             return ""
-        return str(res[0] if isinstance(res, (list, tuple)) else res)
+        chosen = str(res[0] if isinstance(res, (list, tuple)) else res)
+        self._remember_save_target(chosen)
+        return chosen
+
+    def _remember_save_target(self, path: str) -> None:
+        """Record a path the user chose in a Save dialog (see _saved_target)."""
+        with self._save_targets_lock:
+            self._save_targets.add(os.path.normcase(os.path.abspath(path)))
+            if len(self._save_targets) > 64:
+                self._save_targets.pop()
+
+    def _saved_target(self, path: str) -> Path:
+        """An absolute write is allowed only where the user pointed it.
+
+        The Save-as flow is show_save_dialog() then write_file_*_abs(path).
+        Without this check any script in the window could overwrite any file
+        the user can write, with no dialog at all.
+        """
+        p = os.path.normcase(os.path.abspath(str(path or "")))
+        with self._save_targets_lock:
+            known = p in self._save_targets
+        if not known:
+            raise ValueError("This path was not chosen in a Save dialog.")
+        return Path(os.path.abspath(str(path)))
 
     def write_file_abs(self, path: str, data) -> bool:
+        target = self._saved_target(path)
         text = data if isinstance(data, str) else json.dumps(data, indent=2, ensure_ascii=False)
-        _atomic_write_text(Path(path), text)
+        _atomic_write_text(target, text)
         return True
 
     def write_file_b64_abs(self, path: str, b64: str) -> bool:
-        _atomic_write_bytes(Path(path), base64.b64decode(b64 or ""))
+        target = self._saved_target(path)
+        _atomic_write_bytes(target, base64.b64decode(b64 or ""))
         return True
 
     def launch_file(self, rel: str) -> bool:
