@@ -695,6 +695,63 @@ def _age_closed(root, eid, days):
     edit_head(root, eid, lambda h: h.update(closedAt=stamp))
 
 
+def test_manifest_cannot_name_a_non_workbook_for_deletion(api, root):
+    """close() and sweep() delete what the manifest's file.rel names. Reco's own
+    data lives inside the base folder too, so the path jail is no protection:
+    only .xlsx/.xlsm under reco_excel/ may ever be a delete target."""
+    eng = engine(api)
+    victim = root / "reco_data" / "bank_reco" / "Oct-26" / "07.csv"
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_text("_pk,_ver,_ts\nD1,upload,2026-10-07\n")
+    sess = root / "reco" / "recoSessions.json"
+    sess.parent.mkdir(parents=True, exist_ok=True)
+    sess.write_text('{"real":"state"}')
+    stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)).isoformat().replace("+00:00", "Z")
+    ld = links_dir(root)
+    ld.mkdir(parents=True, exist_ok=True)
+    for name, rel in [("X20200101T000000-zzzz.json", "reco_data/bank_reco/Oct-26/07.csv"),
+                      ("thumbs.json", "reco/recoSessions.json"),            # not even an export id
+                      ("X20200102T000000-zzzz.json", "../outside.xlsx"),
+                      ("X20200103T000000-zzzz.json", "reco_excel/../reco/recoSessions.json")]:
+        (ld / name).write_text(json.dumps({"status": "closed", "closedAt": stamp, "exportId": name[:-5],
+                                           "file": {"area": "shared", "rel": rel}}))
+    eng.sweep()
+    assert victim.exists() and sess.exists()
+    assert api.excel_link_close("X20200101T000000-zzzz") == {"ok": True, "deleted": False, "deferred": False}
+    assert victim.exists() and sess.exists()
+    # A real workbook is still deleted normally.
+    _, pa = do_export(api, root, 2)
+    assert api.excel_link_close(EID)["deleted"] is True and not pa.exists()
+
+
+def test_damaged_manifest_does_not_hide_other_links(api, root):
+    do_export(api, root, 2)
+    bad = links_dir(root) / "X20200101T000000-bad1.json"
+    bad.write_text(json.dumps({"status": "open", "exportId": "X20200101T000000-bad1",
+                               "file": {"area": "shared", "rel": "reco_excel/a\x00b.xlsx"}}))
+    (links_dir(root) / "X20200101T000000-bad2.json").write_text("{not json")
+    r = api.excel_link_list("bank_reco")
+    assert r["ok"] and EID in [x["exportId"] for x in r["links"]]
+    assert api.excel_link_status(EID)["ok"]
+
+
+def test_open_local_workbook_survives_a_folder_switch(api, root, tmp_path):
+    # The orphan sweep may only delete when it can account for every local
+    # workbook. After a folder switch there is no _links/ folder to ask.
+    eng = engine(api)
+    wd = Path(os.environ["RECO_XL_WORK_DIR"])
+    wd.mkdir(parents=True, exist_ok=True)
+    wb = wd / "Bank_Reco_20261006-1042_k3f9.xlsx"
+    wb.write_bytes(b"PK\x03\x04 pretend workbook")
+    old = time.time() - 40 * 86400
+    os.utime(wb, (old, old))
+    other = tmp_path / "root2"
+    (other / "master").mkdir(parents=True)
+    api.folder_path = str(other)                 # switched, no reco_excel/ here
+    eng.sweep()
+    assert wb.exists()
+
+
 def test_close_and_sweep(api, root):
     eng = engine(api)
     res_a, pa = do_export(api, root, 3)

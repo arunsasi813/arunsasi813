@@ -215,6 +215,9 @@ class LauncherAPI:
         cfg["updated_at"] = fm._now_iso()
         self._save_cfg(cfg)
         self.folder_path = folder
+        # Start the Excel-link engine again: its cached manifest paths, tokens
+        # and "already swept" flag all belong to the folder we just left.
+        self._xl = None
 
     # ---- window --------------------------------------------------------------
     def _set_window(self, window) -> None:

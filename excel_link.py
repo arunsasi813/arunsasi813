@@ -1513,7 +1513,14 @@ class ExcelLinkEngine:
     def _find_head(self, export_id: str) -> Path | None:
         p = self._head_paths.get(export_id)
         if p is not None and p.is_file():
-            return p
+            # The base folder can change inside one session: a path cached
+            # against the old root must not be written to or deleted.
+            try:
+                if fm.is_inside(fm.norm(str(p)), str(self._root_dir())):
+                    return p
+            except LinkError:
+                return None
+        self._head_paths.pop(export_id, None)
         try:
             dirs = self._link_dirs()
         except LinkError:
@@ -1549,7 +1556,14 @@ class ExcelLinkEngine:
         area = f.get("area")
         try:
             if area == "shared" and f.get("rel"):
-                return self._resolve(str(f["rel"])), ""
+                # Only ever a workbook under the export tree. The path jail alone
+                # is no protection here: close() and sweep() delete what this
+                # returns, and all of Reco's own data lives inside ROOT too.
+                rel = str(f["rel"]).replace("\\", "/").strip().lstrip("/")
+                low = rel.lower()
+                if not low.startswith("reco_excel/") or not low.endswith((".xlsx", ".xlsm")):
+                    return None, "bad_spec"
+                return self._resolve(rel), ""
             if area == "local":
                 machine = f.get("machine")
                 if machine and machine != platform.node():
@@ -1569,7 +1583,7 @@ class ExcelLinkEngine:
             return st
         try:
             s = os.stat(path)
-        except OSError:
+        except (OSError, ValueError):      # ValueError: a NUL in a manifest's rel
             return st
         sig = (str(s.st_mtime_ns), int(s.st_size))
         saved = sig != (str(head.get("exportMtimeNs") or ""), _int(head.get("exportSize"), -1))
@@ -2116,13 +2130,13 @@ class ExcelLinkEngine:
             for hp in self._head_files(d):
                 try:
                     head = _read_json(hp)
-                except (OSError, ValueError):
-                    continue
-                if not isinstance(head, dict):
-                    continue
-                eid = str(head.get("exportId") or hp.stem)
-                self._head_paths.setdefault(eid, hp)
-                st = self._file_state(head)
+                    if not isinstance(head, dict):
+                        continue
+                    eid = str(head.get("exportId") or hp.stem)
+                    self._head_paths[eid] = hp
+                    st = self._file_state(head)
+                except (OSError, ValueError, LinkError):
+                    continue        # one damaged record must not hide the rest
                 f = head.get("file") if isinstance(head.get("file"), dict) else {}
                 session = head.get("session") if isinstance(head.get("session"), dict) else {}
                 links.append({
@@ -2183,6 +2197,10 @@ class ExcelLinkEngine:
                     continue
                 if not isinstance(head, dict) or head.get("status") != "closed":
                     continue
+                try:                        # ignore foreign JSON that happens to sit in _links/
+                    _check_id(head.get("exportId") or hp.stem)
+                except LinkError:
+                    continue
                 closed = _parse_iso(head.get("closedAt"))
                 if closed is None:
                     with contextlib.suppress(OSError):
@@ -2232,6 +2250,10 @@ class ExcelLinkEngine:
             self._root_dir()
             dirs = self._link_dirs()
         except LinkError:
+            return None
+        if not dirs:
+            # No _links/ folder to account for anything: the base folder may
+            # have been switched or restored. Never delete on a hunch.
             return None
         names = set()
         for d in dirs:
