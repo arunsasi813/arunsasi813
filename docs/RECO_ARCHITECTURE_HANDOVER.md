@@ -365,15 +365,24 @@ Without `excel_link_*` (or without openpyxl) the workbook is built with SheetJS 
 
 Template wizard → step "Columns & display" → **Excel view & Excel link**: default rows/columns/protection/date format/area, stale days, identity columns (`tpl.excelLink`), and the in-app Excel view's edit scope, key-column policy and display defaults (`tpl.excelView`). Users override the view defaults for themselves with **⚙ View** (stored in their browser profile; they can only *narrow* the edit scope).
 
-### 11.8 Known limitations
+### 11.8 Review findings worth knowing about
+
+The feature was reviewed across eight dimensions with every finding independently verified; 26 defects were fixed, 6 were refuted. Four shaped the design and are worth remembering:
+
+- **A link manifest is not trusted as a path.** `close()` and `sweep()` delete what a manifest's `file.rel` names. The path jail keeps that inside ROOT, but all of Reco's data is inside ROOT too, and `_links/` sits on the shared folder where anything can write a file. `_workbook_path` therefore accepts only `.xlsx`/`.xlsm` under `reco_excel/`, and the sweep ignores JSON that is not a Reco manifest. Never widen that.
+- **A cell swallowed by a merge reads as empty**, which is indistinguishable from a deliberate clear. The merge check must run *before* the value is looked at.
+- **An explicit decision is written even when the value already matches** (`edits[].force`). The version row is the record of the decision and carries the pulled history values with it; dropping it as a no-op silently reverted the user on the next reopen.
+- **The version CSV's control columns are fixed** (`_pk,_ver,_ts,_src,_by`). A header that grows later turns an append into a whole-file rewrite, and that rewrite can lose a colleague's concurrent append.
+
+### 11.9 Known limitations
 
 - Tag and To-Account extra columns are session-only, as before (lost when data is reopened). `recoSessions.json` remains last-writer-wins across users.
 - Duplicate primary keys collapse to one row per key in history; a change to one duplicate is applied to all rows with that key.
 - New rows typed in Excel are not imported (v1).
 - openpyxl cannot write "ignore error" flags: text cells holding digits show Excel's green triangle (harmless, explained on *How to use*).
-- Real Excel behaviour (repair prompts, owner-file naming on the share, Protected View, export time on a slow share) cannot be tested in CI — see the manual checklist in §11.9.
+- Real Excel behaviour (repair prompts, owner-file naming on the share, Protected View, export time on a slow share) cannot be tested in CI — see the manual checklist in §11.10.
 
-### 11.9 Manual checks on a Windows PC with Excel
+### 11.10 Manual checks on a Windows PC with Excel
 
 1. Guarded mode: sorting works; typing in a grey column is refused (paste is not — expected). Locked mode: filtering works, sorting is refused.
 2. After a save in Excel: no repair prompt; hidden sheets, dropdowns and comments survive.

@@ -38,3 +38,5 @@ node tests/e2e/run_e2e.mjs              # Reco, TCH and the hub in Chromium agai
 node tests/e2e/run_xllink_e2e.mjs       # Edit in Excel → edit (openpyxl) → Load back → review → apply
 node tests/e2e/run_xlview_e2e.mjs       # the in-app Excel view (jspreadsheet CE 5, from tests/e2e/vendor)
 ```
+
+All four must pass: 72 pytest cases and 73 + 63 + 92 end-to-end checks.
