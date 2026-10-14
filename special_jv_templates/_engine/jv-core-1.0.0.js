@@ -47,6 +47,10 @@
 
   var has = function (o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); };
   var str = function (v) { return String(v == null ? '' : v); };
+  /* Array or nothing. Every list in a spec comes out of a JSON file a person
+     can hand-edit on the share, so a shape that is neither falsy nor an array
+     has to degrade to "empty" and be reported, not throw. */
+  var arr = function (v) { return Array.isArray(v) ? v : []; };
 
   /* ── numbers ───────────────────────────────────────────────────────────────
      1,234.50 · (1,234.50) accounting negative · 1,234.50- trailing minus (SAP)
@@ -340,7 +344,7 @@
   function names(c) {
     var out = [];
     if (c && c.label) out.push(c.label);
-    ((c && c.accept) || []).forEach(function (n) { if (n) out.push(n); });
+    arr(c && c.accept).forEach(function (n) { if (n) out.push(n); });
     return out;
   }
   function raw(row, c) {
@@ -357,7 +361,7 @@
   }
   function normalizeText(c, v) {
     var s = str(v);
-    ((c && c.normalize) || []).forEach(function (n) {
+    arr(c && c.normalize).forEach(function (n) {
       if (n === 'trim') s = s.trim();
       else if (n === 'upper') s = s.toUpperCase();
       else if (n === 'lower') s = s.toLowerCase();
@@ -568,7 +572,7 @@
 
   function newSection(spec, n) {
     var fields = {};
-    ((spec && spec.fields) || []).forEach(function (f) { fields[f.id] = f['default'] != null ? str(f['default']) : ''; });
+    arr(spec && spec.fields).forEach(function (f) { fields[f.id] = f['default'] != null ? str(f['default']) : ''; });
     return { id: n, n: n, group: '', preset: '', fields: fields };
   }
 
@@ -624,7 +628,7 @@
     (rows || []).forEach(function (row, i) {
       if (assignments[i] === sectionId && classes[i].kind !== '@skip') used.push(i);
     });
-    ((spec && spec.aggregates) || []).forEach(function (ag) {
+    arr(spec && spec.aggregates).forEach(function (ag) {
       var vals = [];
       used.forEach(function (i) {
         if (matchWhere(spec, rows[i], classes[i], ag.where)) vals.push(ag.of ? num(cell(spec, rows[i], ag.of)) : 1);
@@ -681,7 +685,7 @@
      lines discovered at run time could be neither. */
   function expandEntries(spec) {
     var out = [];
-    ((spec && spec.entries) || []).forEach(function (en) {
+    arr(spec && spec.entries).forEach(function (en) {
       var list = en.forEachCurrency;
       if (!Array.isArray(list) || !list.length) { out.push(en); return; }
       list.forEach(function (cur) {
@@ -749,7 +753,7 @@
     var reco = str(section.fields[rf.field]).trim() || str(rf['default']).split('{n}').join(String(n));
     var scope = {};
     Object.keys(ag.values).forEach(function (k) { scope[k] = ag.values[k]; });
-    ((spec && spec.fields) || []).forEach(function (f) { scope[f.id] = num(section.fields[f.id]); });
+    arr(spec && spec.fields).forEach(function (f) { scope[f.id] = num(section.fields[f.id]); });
     var ctx = {
       n: n,
       sectionTitle: str(sec.title || '{n}').split('{n}').join(String(n)),
@@ -785,8 +789,20 @@
              section: ctx.token, title: ctx.sectionTitle, fields: fields };
   }
   function buildAll(def, spec, rows, classes, assignments, sections) {
-    var lines = [], pks = [], seen = {}, out = [];
-    (sections || []).forEach(function (s, i) {
+    var lines = [], pks = [], seen = Object.create(null), out = [];
+    /* Every figure in a section is selected by `assignments[i] === section.id`,
+       so distinct ids are the invariant the whole build rests on - and nothing
+       stated it. Two sections sharing one id post each of its rows twice, as
+       balanced pairs, so no balance check can notice. Refuse instead. */
+    var ids = Object.create(null);
+    arr(sections).forEach(function (s) {
+      var id = s && s.id;
+      if (id == null) throw new Error('a section has no id');
+      if (ids[id]) throw new Error('two sections share the id "' + str(id)
+        + '" - every amount assigned to it would be posted twice');
+      ids[id] = 1;
+    });
+    arr(sections).forEach(function (s, i) {
       var r = buildSection(def, spec, rows, classes, assignments, s, i);
       r.lines.forEach(function (l) { lines.push(l); });
       r.primaryKeys.forEach(function (p) { if (!seen[p]) { seen[p] = 1; pks.push(p); } });
@@ -807,7 +823,7 @@
 
   /* ── the checks the page runs before it posts back ──────────────────────── */
   function fieldDef(spec, id) {
-    var fs = (spec && spec.fields) || [];
+    var fs = arr(spec && spec.fields);
     for (var i = 0; i < fs.length; i++) if (fs[i].id === id) return fs[i];
     return null;
   }
@@ -837,13 +853,13 @@
        declares a fieldValid check for it: the flag has to mean something, or
        the creator's star beside the label is a lie. */
     (sections || []).forEach(function (s, idx) {
-      ((spec && spec.fields) || []).forEach(function (f) {
+      arr(spec && spec.fields).forEach(function (f) {
         if (!f.required || str(s.fields[f.id]).trim()) return;
         blocks.push(sectionTitle(spec, idx) + ': "' + str(f.label || f.id) + '" is required.');
       });
     });
 
-    ((spec && spec.validate) || []).forEach(function (v) {
+    arr(spec && spec.validate).forEach(function (v) {
       var level = v.level === 'confirm' ? 'confirm' : 'block';
       var msg = str(v.message);
       if (v.kind === 'fieldValid') {
@@ -909,9 +925,11 @@
     if (!REF_RE.test(refStr)) errors.push('"ref" must be 1–24 characters of letters, digits, _ or -, starting with a letter (got "' + refStr + '")');
     else if (RESERVED_REF.test(refStr)) errors.push('"ref" is a reserved Windows device name ("' + refStr + '")');
 
-    var colIds = {}, kinds = { '@skip': 1 }, aggIds = {}, fieldIds = {}, slotIds = {};
-    var roles = {};
-    ((spec.columns) || []).forEach(function (c) {
+    var colIds = Object.create(null), kinds = Object.create(null), aggIds = Object.create(null),
+        fieldIds = Object.create(null), slotIds = Object.create(null);
+    kinds['@skip'] = 1;
+    var roles = Object.create(null);
+    arr(spec.columns).forEach(function (c) {
       if (!c || !c.id || !c.label) { errors.push('every column needs an id and a label'); return; }
       if (colIds[c.id]) errors.push('two columns share the id "' + c.id + '"');
       colIds[c.id] = 1;
@@ -922,12 +940,12 @@
       }
     });
     if (!roles.amount) warnings.push('no column is marked as the amount, so the row amounts cannot be shown');
-    ((spec.kinds) || []).forEach(function (k) {
+    arr(spec.kinds).forEach(function (k) {
       if (!k || !k.id) { errors.push('every row type needs an id'); return; }
       if (k.id === '@skip') errors.push('"@skip" is reserved and cannot be a row type id');
       kinds[k.id] = 1;
     });
-    (((spec.classify) || {}).rules || []).forEach(function (r, i) {
+    arr(((spec.classify) || {}).rules).forEach(function (r, i) {
       var where = 'rule ' + (i + 1);
       if (!kinds[r.kind]) errors.push(where + ' targets unknown row type "' + str(r.kind) + '"');
       if (r.kind === '@skip' && !r.reason) warnings.push(where + ' ignores rows without saying why');
@@ -937,12 +955,12 @@
         else if (OPS.indexOf(c.op) < 0) errors.push(where + ': unknown operator "' + str(c.op) + '"');
       });
     });
-    ((spec.fields) || []).forEach(function (f) {
+    arr(spec.fields).forEach(function (f) {
       if (!f || !f.id) { errors.push('every section field needs an id'); return; }
       if (fieldIds[f.id] || colIds[f.id]) errors.push('field id "' + f.id + '" is already used');
       fieldIds[f.id] = 1;
     });
-    ((spec.aggregates) || []).forEach(function (a) {
+    arr(spec.aggregates).forEach(function (a) {
       if (!a || !a.id) { errors.push('every total needs an id'); return; }
       if (aggIds[a.id] || fieldIds[a.id] || colIds[a.id]) errors.push('total id "' + a.id + '" is already used');
       aggIds[a.id] = 1;
@@ -957,7 +975,7 @@
         }
       });
     });
-    ((spec.slots) || []).forEach(function (s) {
+    arr(spec.slots).forEach(function (s) {
       if (!s || !s.id) { errors.push('every account slot needs an id'); return; }
       slotIds[s.id] = 1;
       var acc = (def.accounts || {})[s.id];
@@ -965,7 +983,7 @@
          block, so the chart of accounts is changed there and nowhere else. */
       if (!acc || !acc.nominal) errors.push('account slot "' + s.id + '" has no nominal in the mapping\'s "accounts" block');
     });
-    var scopeNames = {};
+    var scopeNames = Object.create(null);
     Object.keys(aggIds).forEach(function (k) { scopeNames[k] = 1; });
     Object.keys(fieldIds).forEach(function (k) { scopeNames[k] = 1; });
     scopeNames['@rowsUsed'] = 1;
@@ -988,8 +1006,14 @@
     try { entries = expandEntries(spec); }
     catch (e) { errors.push('the entries could not be read: ' + e.message); }
     if (!entries.length) errors.push('the JV has no entries — it would post nothing');
+    var seenEntry = Object.create(null);
     entries.forEach(function (en, i) {
       var where = 'entry ' + (i + 1) + ' (' + str(en.label || en.id) + ')';
+      if (en.id) {
+        if (seenEntry[en.id]) errors.push(where + ': two entries share the id "' + str(en.id)
+          + '" — the posting would be made twice');
+        seenEntry[en.id] = 1;
+      }
       try {
         Expr.refs(Expr.parse(en.amount)).forEach(function (r) {
           if (!scopeNames[r]) errors.push(where + ': the amount uses unknown name "' + r + '"');
@@ -1002,7 +1026,7 @@
       if (!(((spec.remarks || {}).templates || {})[en.remark])) errors.push(where + ': unknown narration "' + str(en.remark) + '"');
     });
 
-    ((spec.validate) || []).forEach(function (v) {
+    arr(spec.validate).forEach(function (v) {
       if (CHECK_KINDS.indexOf(v.kind) < 0) { errors.push('unknown check "' + str(v.kind) + '"'); return; }
       var named = (v.fields || []).slice();
       if (v.field) named.push(v.field);
@@ -1011,15 +1035,15 @@
       named.forEach(function (f) { if (!fieldIds[f]) errors.push('check "' + v.kind + '" names unknown field "' + str(f) + '"'); });
     });
     var hasBalance = false;
-    ((spec.validate) || []).forEach(function (v) { if (v.kind === 'balancePerCurrency') hasBalance = true; });
+    arr(spec.validate).forEach(function (v) { if (v.kind === 'balancePerCurrency') hasBalance = true; });
     if (!hasBalance) warnings.push('no per-currency balance check — strongly recommended');
 
     /* Reco projects ONLY the names in inputColumns, so a spelling the spec
        accepts but the mapping does not declare would arrive blank and the
        maths would silently read zero. Refuse, rather than post that. */
     var declared = {}, missing = [];
-    ((spec.columns) || []).forEach(function (c) { names(c).forEach(function (n) { declared[normKey(n)] = n; }); });
-    ((def.inputColumns) || []).forEach(function (ic) { delete declared[normKey(ic && ic.name)]; });
+    arr(spec.columns).forEach(function (c) { names(c).forEach(function (n) { declared[normKey(n)] = n; }); });
+    arr(def.inputColumns).forEach(function (ic) { delete declared[normKey(ic && ic.name)]; });
     Object.keys(declared).forEach(function (k) { missing.push(declared[k]); });
     if (missing.length) {
       errors.push('inputColumns is missing ' + missing.length + ' accepted column name(s) — Reco only sends the columns listed there: '

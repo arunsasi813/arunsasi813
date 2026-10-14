@@ -107,6 +107,14 @@
   function start() {
     if (S.started) return;
     S.started = true;
+    try { startInner(); }
+    catch (e) {
+      S.errors = S.errors.concat(['this JV definition could not be read: ' + ((e && e.message) || e)]);
+      try { render(); } catch (e2) { /* the panel is all that is left */ }
+    }
+  }
+
+  function startInner() {
     S.island = readIsland();
 
     /* A host can never make this page compute another JV's maths. */
