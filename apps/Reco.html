@@ -1531,6 +1531,1886 @@ const FilterOps = {
   needsValue(op) { return !['empty','not_empty'].includes(op); },
   needsSecondValue(op) { return ['between','not_between'].includes(op); }
 };
+</script>
+
+<!-- ================================================================
+     MODULE 2d — JV ENGINE SOURCE
+     The three files of special_jv_templates/_engine/, verbatim, as inert
+     text. The browser does not run them from here: these are the bytes the
+     Special JV creator writes to the shared folder, and the compute core is
+     read out of the first island by MODULE 2d just below.
+     Each island holds its file byte for byte, with no newline of its own
+     before or after; tests/e2e/run_jv_core_unit.mjs [M] asserts that, and
+     that no island contains the character sequence that would close this
+     element early.
+     ================================================================ -->
+<script type="text/plain" id="jvCoreSrc">/* ============================================================================
+   jv-core-1.0.0.js — the Special JV compute core.
+
+   One generic interpreter for a declarative JV spec (the "jvSpec" block of
+   special_jv_mapping/<REF>.json). It is the ONLY place the maths of a
+   creator-built Special JV lives, so a new JV is a JSON record rather than new
+   JavaScript on a shared network folder.
+
+   Three rules govern this file, and a test asserts each of them:
+     1. No DOM. It runs in the generated calculator page, inside Reco (so the
+        creator's preview is the same arithmetic the page will do) and under
+        node (so the fast unit tests need no browser).
+     2. No compiling of text. Amounts are a closed grammar parsed by hand
+        (Expr, below): no eval, no compiled functions, no property paths, no
+        strings. A spec can never run code on a colleague's machine.
+     3. Fail closed. A malformed, unknown-version or self-contradicting spec
+        produces errors from validateSpec and nothing is computed; a formula
+        that cannot be evaluated throws with the entry's label in the message.
+        Never a silently wrong posting.
+
+   The value helpers (num, parseRowDate, parsePeriod, fmtMMDDYY, fmtNum) are
+   lifted from special_jv_templates/TCH.html so a spec-driven JV and the
+   hand-written reference calculator read the same spreadsheet identically.
+
+   Version: the filename carries it. 1.1.0 lands beside 1.0.0 and never
+   overwrites it, so a JV keeps running on the engine it was validated against.
+   ========================================================================= */
+(function (root) {
+  'use strict';
+
+  var VERSION = '1.0.0';
+  var SPEC_MIN = 1, SPEC_MAX = 1;
+  var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  /* The AEG output column order. Every line carries exactly these 12 keys in
+     exactly this order, so a JV's lines drop into the entry preview beside
+     generated ones without reordering. */
+  var LINE_ORDER = ['Reference', 'RC', 'Nominal', 'SubNominal', 'Analysis Key',
+                    'LOB', 'Cur', 'Reco', 'Dr', 'Cr', 'Doc', 'Desc'];
+
+  var AGG_FNS = ['sum', 'absSum', 'count', 'min', 'max'];
+  var CHECK_KINDS = ['fieldValid', 'fieldOrder', 'fieldEmpty', 'unassignedRows',
+                     'noLines', 'balancePerCurrency'];
+  var COL_TYPES = ['text', 'number', 'date'];
+  var REF_RE = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/;
+  var RESERVED_REF = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+  var has = function (o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); };
+  var str = function (v) { return String(v == null ? '' : v); };
+
+  /* ── numbers ───────────────────────────────────────────────────────────────
+     1,234.50 · (1,234.50) accounting negative · 1,234.50- trailing minus (SAP)
+     · spaces and no-break spaces as thousands separators. */
+  function num(v) {
+    if (v == null || v === '') return 0;
+    if (typeof v === 'number') return isFinite(v) ? v : 0;
+    var s = String(v).trim(), neg = false;
+    if (!s) return 0;
+    if (s.length > 2 && s.charAt(0) === '(' && s.charAt(s.length - 1) === ')') { neg = true; s = s.slice(1, -1).trim(); }
+    if (s.length > 1 && s.charAt(s.length - 1) === '-' && s.charAt(0) !== '-') { neg = !neg; s = s.slice(0, -1).trim(); }
+    var n = parseFloat(s.replace(/[,\s]/g, ''));   /* \s covers the no-break spaces too */
+    if (isNaN(n) || !isFinite(n)) return 0;
+    return neg ? -n : n;
+  }
+  function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function roundN(n, d) {
+    var f = Math.pow(10, d | 0);
+    return Math.round((Number(n) || 0) * f) / f;
+  }
+  /* 1,234.50 — grouped by hand so the digits never change with the machine's
+     locale (toLocaleString was the one place a European Windows differed). */
+  function fmtNum(n) {
+    var v = Number(n);
+    if (!isFinite(v)) v = 0;
+    var neg = v < 0;
+    var s = Math.abs(v).toFixed(2);
+    var dot = s.indexOf('.');
+    var whole = s.slice(0, dot), frac = s.slice(dot);
+    return (neg ? '-' : '') + whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + frac;
+  }
+  function fmtInt(n) {
+    var v = Math.round(Number(n));
+    if (!isFinite(v)) return '0';
+    return (v < 0 ? '-' : '') + Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  /* True when a value looks like a number — the same test Reco's FilterOps
+     uses, so a condition means the same thing in both places. */
+  function isNumeric(v) {
+    if (v == null) return false;
+    if (typeof v === 'number') return isFinite(v);
+    var s = String(v).trim();
+    return /^\(?[-+]?[\d,\s]*\.?\d+\)?-?$/.test(s) && /\d/.test(s);
+  }
+
+  /* ── dates ──────────────────────────────────────────────────────────────── */
+  function mkDate(y, m, d) {
+    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+    var dt = new Date(y, m - 1, d);
+    return (dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d) ? dt : null;
+  }
+  function excelSerial(n) {
+    if (!isFinite(n)) return null;
+    var d = new Date(1899, 11, 30);
+    d.setDate(d.getDate() + Math.floor(n));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  /* A date in a source row: day-first like Reco (DD/MM/YY), falling back to
+     MM/DD when the first part cannot be a day; ISO; DD-MMM-YY; Excel serials,
+     including a serial that came back from a CSV as text. Impossible dates
+     (31/02) are null rather than rolling into March. Deliberately strict: it
+     never guesses with the platform date parser, so "is this a date?" has one
+     answer everywhere. */
+  function parseRowDate(v) {
+    if (v == null || v === '') return null;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+    if (typeof v === 'number') return excelSerial(v);
+    var s = String(v).trim(), m;
+    if (!s) return null;
+    if (/^\d{5}(\.\d+)?$/.test(s)) { var n = parseFloat(s); if (n > 20000 && n < 80000) return excelSerial(n); }
+    m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return mkDate(+m[1], +m[2], +m[3]);
+    m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+    if (m) { var y = +m[3]; if (y < 100) y += 2000; return mkDate(y, +m[2], +m[1]) || mkDate(y, +m[1], +m[2]); }
+    m = s.match(/^(\d{1,2})[\s\-\/]([A-Za-z]{3})[A-Za-z]*\.?[\s\-\/,]+(\d{2,4})$/);
+    if (m) {
+      var mi = -1;
+      for (var i = 0; i < 12; i++) if (MONTHS[i].toLowerCase() === m[2].toLowerCase()) mi = i;
+      if (mi >= 0) { var y2 = +m[3]; if (y2 < 100) y2 += 2000; return mkDate(y2, mi + 1, +m[1]); }
+    }
+    return null;
+  }
+  /* The looser parse Reco's U.parseDate performs, used ONLY by date
+     conditions so that `op: 'before'` here and in a Reco report filter agree
+     on exotic notations too. Row arithmetic (classification, auto-assign,
+     presets) uses parseRowDate, which is what TCH.html does. */
+  function parseAnyDate(v) {
+    var d = parseRowDate(v);
+    if (d) return d;
+    if (v == null || v === '' || typeof v === 'number' || v instanceof Date) return null;
+    var g = new Date(String(v).trim());
+    return isNaN(g.getTime()) ? null : g;
+  }
+  /* Strict sniffer, matching Reco's U.looksLikeDate: true only for the
+     notations parseRowDate recognises explicitly. */
+  function looksLikeDate(v) {
+    if (v == null || v === '') return false;
+    if (v instanceof Date) return !isNaN(v.getTime());
+    if (typeof v === 'number') return v > 20000 && v < 80000;
+    var s = String(v).trim();
+    if (!s) return false;
+    if (/^\d{5}(\.\d+)?$/.test(s)) { var n = parseFloat(s); return n > 20000 && n < 80000; }
+    if (!/^\d{4}-\d{1,2}-\d{1,2}/.test(s)
+        && !/^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$/.test(s)
+        && !/^\d{1,2}[\s\-\/][A-Za-z]{3}[A-Za-z]*\.?[\s\-\/,]+\d{2,4}$/.test(s)) return false;
+    return !!parseRowDate(s);
+  }
+  /* What the user types into a period field: MM/DD/YY (what the presets
+     write), or ISO. Month-first, unlike a row date — this is the declared
+     format of the field, not a guess about someone's spreadsheet. */
+  function parsePeriod(v, fmt) {
+    var s = str(v).trim(), m;
+    if (!s) return null;
+    m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (m) return mkDate(+m[1], +m[2], +m[3]);
+    m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})$/);
+    if (m) {
+      var y = +m[3]; if (y < 100) y += 2000;
+      if (fmt === 'DD/MM/YY') return mkDate(y, +m[2], +m[1]);
+      return mkDate(y, +m[1], +m[2]);
+    }
+    return null;
+  }
+  function p2(n) { var s = String(n); return s.length < 2 ? '0' + s : s; }
+  function fmtMMDDYY(d) {
+    return d ? p2(d.getMonth() + 1) + '/' + p2(d.getDate()) + '/' + String(d.getFullYear()).slice(-2) : '';
+  }
+  function fmtDateFmt(d, fmt) {
+    if (!d) return '';
+    if (fmt === 'DD/MM/YY') return p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + String(d.getFullYear()).slice(-2);
+    if (fmt === 'YYYY-MM-DD') return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+    return fmtMMDDYY(d);
+  }
+  /* "DD MMM YY" style patterns for narration. */
+  function fmtDatePattern(d, pat) {
+    if (!d) return '';
+    return str(pat).replace(/YYYY|MMM|DD|YY/g, function (t) {
+      if (t === 'DD') return p2(d.getDate());
+      if (t === 'MMM') return MONTHS[d.getMonth()];
+      if (t === 'YYYY') return String(d.getFullYear());
+      return String(d.getFullYear()).slice(-2);
+    });
+  }
+  function lastDay(y, mi) { return new Date(y, mi + 1, 0).getDate(); }
+
+  /* ── Expr — the formula language ────────────────────────────────────────────
+     expr    := term (('+'|'-') term)*
+     term    := unary (('*'|'/') unary)*
+     unary   := ('-'|'+')? primary
+     primary := number | '(' expr ')' | fn '(' args ')' | NAME
+     NAME    := [A-Za-z_][A-Za-z0-9_]*     -- no dots, no brackets, no strings
+     fn      := abs min max round round2 neg ifpos ifneg
+
+     A NAME is resolved against a scope built from the spec's own declarations
+     (every aggregate id, every field id, @rowsUsed). An unknown name is an
+     error at save time (validateSpec walks Expr.refs) and again at run time.
+     There is no way to reach a host object, a property or a string from here,
+     which is the whole safety argument for letting a user type an amount. */
+  var FUNCS = {
+    abs:    function (a) { return Math.abs(a[0]); },
+    min:    function (a) { return Math.min.apply(null, a); },
+    max:    function (a) { return Math.max.apply(null, a); },
+    round:  function (a) { return roundN(a[0], a.length > 1 ? a[1] : 0); },
+    round2: function (a) { return round2(a[0]); },
+    neg:    function (a) { return -a[0]; },
+    ifpos:  function (a) { return a[0] > 0 ? a[0] : 0; },
+    ifneg:  function (a) { return a[0] < 0 ? a[0] : 0; }
+  };
+  var FUNC_ARITY = { abs: 1, min: 0, max: 0, round: 2, round2: 1, neg: 1, ifpos: 1, ifneg: 1 };
+  var MAX_FORMULA = 500, MAX_TOKENS = 400;
+
+  var Expr = {
+    funcs: Object.keys(FUNCS),
+    tokenize: function (src) {
+      if (typeof src !== 'string') throw new Error('the amount must be text');
+      if (!src.trim()) throw new Error('the amount is empty');
+      if (src.length > MAX_FORMULA) throw new Error('formula longer than ' + MAX_FORMULA + ' characters');
+      var out = [], i = 0;
+      var re = /\s+|(\d+(?:\.\d+)?)|([A-Za-z_][A-Za-z0-9_]*)|([+\-*/(),])/g;
+      while (i < src.length) {
+        re.lastIndex = i;
+        var m = re.exec(src);
+        if (!m || m.index !== i) throw new Error('unexpected character "' + src.charAt(i) + '" at ' + i);
+        i = re.lastIndex;
+        if (m[1] != null) out.push({ t: 'num', v: parseFloat(m[1]) });
+        else if (m[2] != null) out.push({ t: 'id', v: m[2] });
+        else if (m[3] != null) out.push({ t: m[3] });
+        if (out.length > MAX_TOKENS) throw new Error('formula too complex (over ' + MAX_TOKENS + ' tokens)');
+      }
+      return out;
+    },
+    parse: function (src) {
+      var tk = Expr.tokenize(src), p = 0;
+      function peek() { return tk[p]; }
+      function eat(t) { if (!tk[p] || tk[p].t !== t) throw new Error('expected "' + t + '"'); return tk[p++]; }
+      function expr() {
+        var n = term();
+        while (peek() && (peek().t === '+' || peek().t === '-')) { var op = tk[p++].t; n = { op: op, l: n, r: term() }; }
+        return n;
+      }
+      function term() {
+        var n = unary();
+        while (peek() && (peek().t === '*' || peek().t === '/')) { var op = tk[p++].t; n = { op: op, l: n, r: unary() }; }
+        return n;
+      }
+      function unary() {
+        if (peek() && (peek().t === '-' || peek().t === '+')) { var op = tk[p++].t; return { op: op === '-' ? 'neg' : 'pos', l: unary() }; }
+        return primary();
+      }
+      function primary() {
+        var t = peek();
+        if (!t) throw new Error('unexpected end of formula');
+        if (t.t === 'num') { p++; return { op: 'num', v: t.v }; }
+        if (t.t === '(') { p++; var n = expr(); eat(')'); return n; }
+        if (t.t === 'id') {
+          p++;
+          if (peek() && peek().t === '(') {
+            var fn = t.v;
+            if (!has(FUNCS, fn)) throw new Error('unknown function "' + fn + '"');
+            p++;
+            var args = [];
+            if (peek() && peek().t !== ')') {
+              args.push(expr());
+              while (peek() && peek().t === ',') { p++; args.push(expr()); }
+            }
+            eat(')');
+            if (!args.length) throw new Error('"' + fn + '" needs at least one value');
+            if (FUNC_ARITY[fn] && args.length > FUNC_ARITY[fn]) throw new Error('"' + fn + '" takes at most ' + FUNC_ARITY[fn] + ' value(s)');
+            return { op: 'call', fn: fn, args: args };
+          }
+          return { op: 'ref', v: t.v };
+        }
+        throw new Error('unexpected "' + t.t + '" in formula');
+      }
+      var node = expr();
+      if (p !== tk.length) throw new Error('trailing input in formula');
+      return node;
+    },
+    /* Every name the formula mentions, without evaluating it: this is what
+       validateSpec checks against the spec's own declarations. */
+    refs: function (n, out) {
+      out = out || [];
+      if (!n) return out;
+      if (n.op === 'ref') out.push(n.v);
+      if (n.l) Expr.refs(n.l, out);
+      if (n.r) Expr.refs(n.r, out);
+      for (var i = 0; i < (n.args || []).length; i++) Expr.refs(n.args[i], out);
+      return out;
+    },
+    evalNode: function (n, scope) {
+      switch (n.op) {
+        case 'num': return n.v;
+        case 'neg': return -Expr.evalNode(n.l, scope);
+        case 'pos': return +Expr.evalNode(n.l, scope);
+        case '+': return Expr.evalNode(n.l, scope) + Expr.evalNode(n.r, scope);
+        case '-': return Expr.evalNode(n.l, scope) - Expr.evalNode(n.r, scope);
+        case '*': return Expr.evalNode(n.l, scope) * Expr.evalNode(n.r, scope);
+        case '/': {
+          var d = Expr.evalNode(n.r, scope);
+          /* A silently-zero charge line is a wrong posting, which is worse
+             than a refusal. */
+          if (d === 0) throw new Error('division by zero');
+          return Expr.evalNode(n.l, scope) / d;
+        }
+        case 'call': {
+          var args = [];
+          for (var i = 0; i < n.args.length; i++) args.push(Expr.evalNode(n.args[i], scope));
+          return FUNCS[n.fn](args);
+        }
+        case 'ref': {
+          if (!has(scope, n.v)) throw new Error('unknown name "' + n.v + '"');
+          var v = scope[n.v];
+          return typeof v === 'number' ? v : num(v);
+        }
+      }
+      throw new Error('bad formula node');
+    },
+    evaluate: function (src, scope) { return Expr.evalNode(Expr.parse(src), scope); }
+  };
+
+  /* ── reading a column off a row ─────────────────────────────────────────── */
+  var normKey = function (s) { return String(s).toLowerCase().replace(/[\s_\-]/g, ''); };
+  function colDef(spec, id) {
+    var cols = (spec && spec.columns) || [];
+    for (var i = 0; i < cols.length; i++) if (cols[i].id === id) return cols[i];
+    return null;
+  }
+  /* Every spelling this column accepts. ALL of them must also be in the
+     mapping's inputColumns, because Reco projects only the names declared
+     there — an alias that is missing arrives blank (validateSpec refuses it). */
+  function names(c) {
+    var out = [];
+    if (c && c.label) out.push(c.label);
+    ((c && c.accept) || []).forEach(function (n) { if (n) out.push(n); });
+    return out;
+  }
+  function raw(row, c) {
+    var cand = names(c), i, k;
+    for (i = 0; i < cand.length; i++) if (row[cand[i]] != null && row[cand[i]] !== '') return row[cand[i]];
+    var keys = Object.keys(row || {});
+    for (i = 0; i < cand.length; i++) {
+      var want = normKey(cand[i]);
+      for (k = 0; k < keys.length; k++) {
+        if (normKey(keys[k]) === want && row[keys[k]] != null && row[keys[k]] !== '') return row[keys[k]];
+      }
+    }
+    return '';
+  }
+  function normalizeText(c, v) {
+    var s = str(v);
+    ((c && c.normalize) || []).forEach(function (n) {
+      if (n === 'trim') s = s.trim();
+      else if (n === 'upper') s = s.toUpperCase();
+      else if (n === 'lower') s = s.toLowerCase();
+    });
+    return s;
+  }
+  /* The typed value: a number for a number column, a Date (or null) for a date
+     column, the normalized string otherwise. */
+  function cell(spec, row, id) {
+    var c = colDef(spec, id);
+    if (!c) return '';
+    var v = raw(row, c);
+    if (c.type === 'number') return num(v);
+    if (c.type === 'date') return parseRowDate(v);
+    return normalizeText(c, v);
+  }
+  /* The same value as text, for the condition evaluator and for display. */
+  function cellText(spec, row, id) {
+    var c = colDef(spec, id);
+    if (!c) return '';
+    var v = raw(row, c);
+    if (c.type === 'text') return normalizeText(c, v);
+    return str(v).trim();
+  }
+  function kindOfCol(c) { return !c ? 'text' : (c.type === 'number' ? 'value' : (c.type === 'date' ? 'date' : 'text')); }
+
+  /* ── conditions: FilterOps' 22 operators, same semantics ────────────────────
+     Reco's FilterOps (MODULE 2c) is the single source of truth for what an
+     operator means; it cannot be loaded here (the page has no Reco), so its
+     algorithm is reproduced: the declared column type decides whether a
+     comparison is a date, an amount or text, exactly as FilterOps.kindOf +
+     _cmpMode do. A test drives this core and the real FilterOps over the same
+     corpus and asserts they agree. */
+  function cmpMode(kind, a, b) {
+    if (kind === 'date') return 'date';
+    if (kind === 'value') return 'num';
+    var given = [], i;
+    [a, b].forEach(function (x) { if (x != null && String(x).trim() !== '') given.push(x); });
+    if (!given.length) return 'num';
+    for (i = 0; i < given.length; i++) if (isNumeric(given[i]) || !looksLikeDate(given[i])) return 'num';
+    return 'date';
+  }
+  function nOf(x) {
+    if (x == null || String(x).trim() === '') return NaN;
+    return isNumeric(x) ? num(x) : parseFloat(x);
+  }
+  function cmp(v, q, kind, test) {
+    if (cmpMode(kind, q) === 'date') {
+      var a = parseAnyDate(v), b = parseAnyDate(q);
+      return a && b ? test(a.getTime(), b.getTime()) : false;
+    }
+    if (!isNumeric(v) && looksLikeDate(v)) return false;
+    return test(nOf(v), nOf(q));
+  }
+  function between(v, lo, hi, kind) {
+    if (cmpMode(kind, lo, hi) === 'date') {
+      var a = parseAnyDate(v), l = parseAnyDate(lo), h = parseAnyDate(hi);
+      if (!a || !l || !h) return false;
+      var t = a.getTime();
+      return t >= Math.min(l.getTime(), h.getTime()) && t <= Math.max(l.getTime(), h.getTime());
+    }
+    if (!isNumeric(v) && looksLikeDate(v)) return false;
+    var an = nOf(v), ln = nOf(lo), hn = nOf(hi);
+    return an >= Math.min(ln, hn) && an <= Math.max(ln, hn);
+  }
+  function eq(v, q, kind) {
+    var dateish = function (x) { return !isNumeric(x) && looksLikeDate(x); };
+    if (kind === 'date' || (kind !== 'value' && dateish(v) && dateish(q))) {
+      var a = parseAnyDate(v), b = parseAnyDate(q);
+      if (a && b) return a.getTime() === b.getTime();
+    } else if (kind === 'value') {
+      if (isNumeric(v) && isNumeric(q)) return num(v) === num(q);
+    }
+    return str(v).toLowerCase() === str(q).toLowerCase();
+  }
+  function inList(v, val, kind) {
+    var raws = str(val);
+    /* On an amount column a comma can be a thousands separator OR a list
+       separator: '1,234.50' is one amount, '1,234.50, -50' is two. */
+    var parts = (kind === 'value' ? raws.split(/,(?!\d{3}(?:\D|$))/) : raws.split(','));
+    for (var i = 0; i < parts.length; i++) {
+      var q = parts[i].trim();
+      if (q && eq(v, q, kind)) return true;
+    }
+    return false;
+  }
+  var OPS = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'not_starts_with',
+             'ends_with', 'not_ends_with', 'greater', 'greater_eq', 'less', 'less_eq',
+             'between', 'not_between', 'before', 'after', 'on_or_before', 'on_or_after',
+             'empty', 'not_empty', 'in_list', 'not_in_list', 'date_between'];
+  /* One condition against one row. {kind}/{kindIn} conditions are the
+     classification filter and are handled by the caller (they do not read a
+     column), so they answer true here. */
+  function testCond(spec, row, cond) {
+    if (!cond) return true;
+    if (cond.kind != null || cond.kindIn) return true;
+    var c = colDef(spec, cond.col);
+    if (!c) throw new Error('condition names unknown column "' + str(cond.col) + '"');
+    var kind = kindOfCol(c);
+    var v = cellText(spec, row || {}, cond.col);
+    var a = cond.val, a2 = cond.val2;
+    var lv = v.toLowerCase(), lq = str(a).toLowerCase();
+    switch (cond.op) {
+      case 'equals':           return eq(v, a, kind);
+      case 'not_equals':       return !eq(v, a, kind);
+      case 'contains':         return lv.indexOf(lq) >= 0;
+      case 'not_contains':     return lv.indexOf(lq) < 0;
+      case 'starts_with':      return lv.lastIndexOf(lq, 0) === 0;
+      case 'not_starts_with':  return lv.lastIndexOf(lq, 0) !== 0;
+      case 'ends_with':        return lq.length <= lv.length && lv.indexOf(lq, lv.length - lq.length) !== -1;
+      case 'not_ends_with':    return !(lq.length <= lv.length && lv.indexOf(lq, lv.length - lq.length) !== -1);
+      case 'greater':          return cmp(v, a, kind, function (x, y) { return x > y; });
+      case 'greater_eq':       return cmp(v, a, kind, function (x, y) { return x >= y; });
+      case 'less':             return cmp(v, a, kind, function (x, y) { return x < y; });
+      case 'less_eq':          return cmp(v, a, kind, function (x, y) { return x <= y; });
+      case 'between':          return between(v, a, a2, kind);
+      case 'not_between':      return !between(v, a, a2, kind);
+      case 'before':           { var d1 = parseAnyDate(v), b1 = parseAnyDate(a); return !!(d1 && b1) && d1.getTime() < b1.getTime(); }
+      case 'after':            { var d2 = parseAnyDate(v), b2 = parseAnyDate(a); return !!(d2 && b2) && d2.getTime() > b2.getTime(); }
+      case 'on_or_before':     { var d3 = parseAnyDate(v), b3 = parseAnyDate(a); return !!(d3 && b3) && d3.getTime() <= b3.getTime(); }
+      case 'on_or_after':      { var d4 = parseAnyDate(v), b4 = parseAnyDate(a); return !!(d4 && b4) && d4.getTime() >= b4.getTime(); }
+      case 'empty':            return !v;
+      case 'not_empty':        return !!v;
+      case 'in_list':          return inList(v, a, kind);
+      case 'not_in_list':      return !inList(v, a, kind);
+      case 'date_between':     return between(v, a, a2, 'date');
+    }
+    throw new Error('unknown operator "' + str(cond.op) + '"');
+  }
+
+  /* "{currency|no currency}" — a column value, or the fallback when it is
+     empty. Used by the ignore reasons, which the user writes. */
+  function fillRowTokens(spec, tpl, row) {
+    return str(tpl).replace(/\{([A-Za-z0-9_]+)(\|([^}]*))?\}/g, function (m, id, _x, fb) {
+      var c = colDef(spec, id);
+      if (!c) return m;
+      var v = cell(spec, row, id);
+      if (c.type === 'date') v = v ? fmtMMDDYY(v) : '';
+      if (v === '' || v == null || (typeof v === 'number' && !isFinite(v))) return fb != null ? fb : '';
+      return String(v);
+    });
+  }
+
+  /* ── classification: a flat ordered rule list, first match wins ─────────── */
+  function classify(spec, row) {
+    var cols = (spec && spec.columns) || [], i;
+    var curCol = null, amtCol = null;
+    for (i = 0; i < cols.length; i++) {
+      if (cols[i].role === 'currency' && !curCol) curCol = cols[i];
+      if (cols[i].role === 'amount' && !amtCol) amtCol = cols[i];
+    }
+    var cur = curCol ? str(cell(spec, row, curCol.id)) : '';
+    var amt = amtCol ? num(cell(spec, row, amtCol.id)) : 0;
+    var rules = ((spec && spec.classify) || {}).rules || [];
+    for (i = 0; i < rules.length; i++) {
+      var r = rules[i], all = r.all || [], ok = true;
+      for (var j = 0; j < all.length; j++) { if (!testCond(spec, row, all[j])) { ok = false; break; } }
+      if (!ok) continue;
+      if (r.kind === '@skip') {
+        return { kind: '@skip', why: fillRowTokens(spec, r.reason || 'ignored', row), rule: r.id || null, cur: cur, amt: amt };
+      }
+      return { kind: r.kind, label: kindLabel(spec, r.kind), why: '', rule: r.id || null, cur: cur, amt: amt };
+    }
+    var fb = ((spec && spec.classify) || {}).fallbackReason || 'no rule matched';
+    return { kind: '@skip', why: fillRowTokens(spec, fb, row), rule: null, cur: cur, amt: amt };
+  }
+  function kindLabel(spec, id) {
+    var ks = (spec && spec.kinds) || [];
+    for (var i = 0; i < ks.length; i++) if (ks[i].id === id) return ks[i].label || ks[i].id;
+    return id;
+  }
+  function kindStyle(spec, id) {
+    var ks = (spec && spec.kinds) || [];
+    for (var i = 0; i < ks.length; i++) if (ks[i].id === id) return ks[i].style || '';
+    return '';
+  }
+
+  /* ── presets: date slots per month found in the data ───────────────────── */
+  function presets(spec, rows) {
+    var p = ((spec && spec.sections) || {}).presets;
+    if (!p || p.kind !== 'dateSlots') return [];
+    var seen = {}, keys = [];
+    (rows || []).forEach(function (r) {
+      var d = cell(spec, r, p.column);
+      if (d) { var k = d.getFullYear() + '-' + d.getMonth(); if (!seen[k]) { seen[k] = 1; keys.push(k); } }
+    });
+    keys = keys.map(function (s) { var a = s.split('-'); return [+a[0], +a[1]]; })
+               .sort(function (a, b) { return (a[0] - b[0]) || (a[1] - b[1]); });
+    var out = [];
+    keys.forEach(function (ym) {
+      var y = ym[0], mi = ym[1], eom = lastDay(y, mi);
+      (p.slots || []).forEach(function (sl) {
+        var end = sl.end === 'eom' ? eom : sl.end;
+        var start = sl.start === 'eom' ? eom : sl.start;
+        var slot = str(sl.label).split('{eom}').join(String(eom));
+        out.push({
+          label: str(p.optionLabel || '{slot} {MMM} {YYYY}')
+                   .split('{slot}').join(slot)
+                   .split('{MMM}').join(MONTHS[mi])
+                   .split('{YYYY}').join(String(y)),
+          from: fmtDateFmt(new Date(y, mi, start), p.valueFormat),
+          to: fmtDateFmt(new Date(y, mi, end), p.valueFormat)
+        });
+      });
+    });
+    return out;
+  }
+
+  function newSection(spec, n) {
+    var fields = {};
+    ((spec && spec.fields) || []).forEach(function (f) { fields[f.id] = f['default'] != null ? str(f['default']) : ''; });
+    return { id: n, n: n, group: '', preset: '', fields: fields };
+  }
+
+  /* The "Auto-assign by period" button: every classified row goes into the
+     section whose period contains its date. Rows with no readable date are
+     left where they are and counted, so nothing moves silently. */
+  function autoAssign(spec, rows, classes, sections, assignments) {
+    var a = ((spec && spec.sections) || {}).autoAssign;
+    if (!a) return { assigned: 0, nodate: 0 };
+    var fmt = (((spec.sections || {}).presets) || {}).valueFormat;
+    var ranges = [];
+    (sections || []).forEach(function (s) {
+      var f = parsePeriod(s.fields[a.from], fmt), t = parsePeriod(s.fields[a.to], fmt);
+      if (f && t) ranges.push({ id: s.id, f: f, t: t });
+    });
+    if (!ranges.length) return { noRange: true, assigned: 0, nodate: 0 };
+    var assigned = 0, nodate = 0;
+    (rows || []).forEach(function (row, i) {
+      if (classes[i].kind === '@skip') return;
+      var d = cell(spec, row, a.column);
+      if (!d) { nodate++; return; }
+      var hit = null;
+      for (var k = 0; k < ranges.length; k++) if (d >= ranges[k].f && d <= ranges[k].t) { hit = ranges[k]; break; }
+      assignments[i] = hit ? hit.id : 0;
+      if (hit) assigned++;
+    });
+    return { assigned: assigned, nodate: nodate };
+  }
+  /* Takes the spec it does not read yet, so every entry point here has the
+     same shape; eligibility is "a rule classified it", which classes says. */
+  function assignAll(spec, rows, classes, assignments, sectionId) {
+    var n = 0;
+    (rows || []).forEach(function (row, i) {
+      if (classes[i].kind === '@skip') return;
+      assignments[i] = sectionId || 0; n++;
+    });
+    return n;
+  }
+
+  /* ── aggregates: the figures computed from the rows, per section ────────── */
+  function matchWhere(spec, row, cls, where) {
+    var w = where || [];
+    for (var i = 0; i < w.length; i++) {
+      var c = w[i];
+      if (c.kind != null) { if (cls.kind !== c.kind) return false; continue; }
+      if (c.kindIn) { if (c.kindIn.indexOf(cls.kind) < 0) return false; continue; }
+      if (!testCond(spec, row, c)) return false;
+    }
+    return true;
+  }
+  function aggregates(spec, rows, classes, assignments, sectionId) {
+    var out = {}, used = [];
+    (rows || []).forEach(function (row, i) {
+      if (assignments[i] === sectionId && classes[i].kind !== '@skip') used.push(i);
+    });
+    ((spec && spec.aggregates) || []).forEach(function (ag) {
+      var vals = [];
+      used.forEach(function (i) {
+        if (matchWhere(spec, rows[i], classes[i], ag.where)) vals.push(ag.of ? num(cell(spec, rows[i], ag.of)) : 1);
+      });
+      var v = 0, k;
+      switch (ag.fn) {
+        case 'sum':    for (k = 0; k < vals.length; k++) v += vals[k]; break;
+        case 'absSum': for (k = 0; k < vals.length; k++) v += Math.abs(vals[k]); break;
+        case 'count':  v = vals.length; break;
+        case 'min':    v = vals.length ? Math.min.apply(null, vals) : 0; break;
+        case 'max':    v = vals.length ? Math.max.apply(null, vals) : 0; break;
+        default: throw new Error('unknown aggregate function "' + str(ag.fn) + '"');
+      }
+      out[ag.id] = v;
+    });
+    out['@rowsUsed'] = used.length;
+    return { values: out, rowIdx: used };
+  }
+
+  /* ── narration ─────────────────────────────────────────────────────────── */
+  function remark(spec, name, section, ctx) {
+    var t = (((spec && spec.remarks) || {}).templates || {})[name];
+    if (t == null) throw new Error('unknown narration "' + str(name) + '"');
+    var s = str(t);
+    var ranges = ((spec.remarks || {}).ranges) || {};
+    var fmt = (((spec.sections || {}).presets) || {}).valueFormat;
+    Object.keys(ranges).forEach(function (rid) {
+      var r = ranges[rid];
+      var f = parsePeriod(section.fields[r.from], fmt), to = parsePeriod(section.fields[r.to], fmt);
+      var txt = r.invalid != null ? r.invalid : '<period>';
+      if (f && to) {
+        txt = str(r.pattern)
+          .replace(/\{from:([^}]+)\}/g, function (m, p) { return fmtDatePattern(f, p); })
+          .replace(/\{to:([^}]+)\}/g, function (m, p) { return fmtDatePattern(to, p); });
+      }
+      s = s.split('{' + rid + '}').join(txt);
+    });
+    s = s.replace(/\{([A-Za-z0-9_@]+)\}/g, function (m, k) {
+      if (k === 'n') return String(ctx.n);
+      if (k === 'section') return ctx.sectionTitle;
+      if (k === 'token') return ctx.token;
+      if (k === 'reco') return ctx.reco;
+      if (k === 'cur') return ctx.cur || '';
+      if (has(section.fields, k)) return str(section.fields[k]);
+      if (has(ctx.agg, k)) return fmtNum(ctx.agg[k]);
+      return m;
+    });
+    return s;
+  }
+
+  /* ── entry expansion: forEachCurrency is a STATIC pre-pass ──────────────────
+     One entry becomes N entries before anything is evaluated or linted, so the
+     creator can lint and preview a fixed set of postings. A variable number of
+     lines discovered at run time could be neither. */
+  function expandEntries(spec) {
+    var out = [];
+    ((spec && spec.entries) || []).forEach(function (en) {
+      var list = en.forEachCurrency;
+      if (!Array.isArray(list) || !list.length) { out.push(en); return; }
+      list.forEach(function (cur) {
+        var sub = function (s) { return str(s).split('{cur}').join(cur); };
+        var copy = {};
+        Object.keys(en).forEach(function (k) { copy[k] = en[k]; });
+        copy.id = en.id + '_' + cur;
+        copy.label = sub(en.label);
+        copy.amount = sub(en.amount);
+        copy.dr = sub(en.dr);
+        copy.cr = sub(en.cr);
+        copy.cur = cur;
+        copy._from = en.id;
+        delete copy.forEachCurrency;
+        out.push(copy);
+      });
+    });
+    return out;
+  }
+
+  /* ── lines ─────────────────────────────────────────────────────────────── */
+  function slotOf(def, id) {
+    var a = (def && def.accounts) || {};
+    var s = has(a, id) ? a[id] : null;
+    if (!s || !s.nominal) throw new Error('account slot "' + str(id) + '" has no nominal in the mapping\'s "accounts" block');
+    return { nominal: str(s.nominal), rc: str(s.rc) };
+  }
+  function mkLine(def, acct, cur, dr, cr, reco, desc) {
+    var a = (def && def.accounts) || {};
+    var o = {};
+    o.Reference = str(a.reference);
+    o.RC = acct.rc;
+    o.Nominal = acct.nominal;
+    o.SubNominal = str(a.subNominal);
+    o['Analysis Key'] = str(a.analysisKey);
+    o.LOB = str(a.lob);
+    o.Cur = cur;
+    o.Reco = reco;
+    o.Dr = dr;
+    o.Cr = cr;
+    o.Doc = str(a.doc);
+    o.Desc = desc;
+    return o;
+  }
+  /* The whole posting contract, in one place:
+       1. the section's aggregates, plus every field as a number, plus
+          @rowsUsed, make the scope a formula may read.
+       2. each expanded entry's amount is parsed and evaluated; a parse, name
+          or arithmetic error throws with the entry's label.
+       3. |amount| is rounded, and an entry below minAbs posts NOTHING.
+       4. a negative amount swaps the two accounts (swapOnNegative).
+       5. two lines are pushed, with the 12 AEG keys in order.
+       6. primaryKeys = the rows assigned to this section that a rule actually
+          classified. A row dropped into a section by hand that the rules
+          ignore contributes nothing, so it is NOT reported as used — the docs
+          say only rows a JV actually used may be closed. */
+  function buildSection(def, spec, rows, classes, assignments, section, idx) {
+    var ed = (spec && spec.entryDefaults) || {};
+    var dp = ed.round == null ? 2 : (ed.round | 0);
+    var minAbs = ed.minAbs == null ? 0.01 : Number(ed.minAbs);
+    var ag = aggregates(spec, rows, classes, assignments, section.id);
+    var n = idx + 1;
+    var sec = (spec && spec.sections) || {};
+    var rf = sec.recoFrom || {};
+    var reco = str(section.fields[rf.field]).trim() || str(rf['default']).split('{n}').join(String(n));
+    var scope = {};
+    Object.keys(ag.values).forEach(function (k) { scope[k] = ag.values[k]; });
+    ((spec && spec.fields) || []).forEach(function (f) { scope[f.id] = num(section.fields[f.id]); });
+    var ctx = {
+      n: n,
+      sectionTitle: str(sec.title || '{n}').split('{n}').join(String(n)),
+      token: str(sec.token || 'T{n}').split('{n}').join(String(n)),
+      reco: reco,
+      agg: ag.values
+    };
+    var lines = [];
+    expandEntries(spec).forEach(function (en) {
+      var amt;
+      try { amt = Expr.evalNode(Expr.parse(en.amount), scope); }
+      catch (e) { throw new Error('entry "' + str(en.label || en.id) + '": ' + e.message); }
+      if (typeof amt !== 'number' || !isFinite(amt)) throw new Error('entry "' + str(en.label || en.id) + '": the amount is not a finite number');
+      var a = roundN(Math.abs(amt), dp);
+      if (!(a >= minAbs)) return;
+      var swap = (ed.swapOnNegative !== false) && amt < 0;
+      var drS = slotOf(def, swap ? en.cr : en.dr);
+      var crS = slotOf(def, swap ? en.dr : en.cr);
+      var txt = a.toFixed(dp);
+      var desc = remark(spec, en.remark, section, { n: ctx.n, sectionTitle: ctx.sectionTitle, token: ctx.token, reco: ctx.reco, agg: ctx.agg, cur: en.cur });
+      lines.push(mkLine(def, drS, en.cur, txt, '', reco, desc));
+      lines.push(mkLine(def, crS, en.cur, '', txt, reco, desc));
+    });
+    var pks = [], seen = {};
+    (rows || []).forEach(function (r, i) {
+      if (assignments[i] === section.id && classes[i].kind !== '@skip' && r && r._pk && !seen[r._pk]) {
+        seen[r._pk] = 1; pks.push(r._pk);
+      }
+    });
+    var fields = {};
+    Object.keys(section.fields || {}).forEach(function (k) { fields[k] = section.fields[k]; });
+    return { lines: lines, primaryKeys: pks, aggregates: ag.values, reco: reco, n: n,
+             section: ctx.token, title: ctx.sectionTitle, fields: fields };
+  }
+  function buildAll(def, spec, rows, classes, assignments, sections) {
+    var lines = [], pks = [], seen = {}, out = [];
+    (sections || []).forEach(function (s, i) {
+      var r = buildSection(def, spec, rows, classes, assignments, s, i);
+      r.lines.forEach(function (l) { lines.push(l); });
+      r.primaryKeys.forEach(function (p) { if (!seen[p]) { seen[p] = 1; pks.push(p); } });
+      out.push(r);
+    });
+    return { lines: lines, primaryKeys: pks, sections: out };
+  }
+  function balances(lines) {
+    var b = {};
+    (lines || []).forEach(function (l) {
+      var c = l.Cur || '';
+      if (!b[c]) b[c] = { dr: 0, cr: 0 };
+      b[c].dr += num(l.Dr);
+      b[c].cr += num(l.Cr);
+    });
+    return b;
+  }
+
+  /* ── the checks the page runs before it posts back ──────────────────────── */
+  function fieldDef(spec, id) {
+    var fs = (spec && spec.fields) || [];
+    for (var i = 0; i < fs.length; i++) if (fs[i].id === id) return fs[i];
+    return null;
+  }
+  function sectionTitle(spec, idx) {
+    return str(((spec && spec.sections) || {}).title || '{n}').split('{n}').join(String(idx + 1));
+  }
+  function defaultReco(spec, idx) {
+    var rf = ((spec && spec.sections) || {}).recoFrom || {};
+    return str(rf['default']).split('{n}').join(String(idx + 1));
+  }
+  /* -> { blocks:[msg], confirms:[msg], built }
+     blocks stop the submit (the page shows the first one); confirms are asked
+     in order and any "no" abandons the submit. The checks run in the order the
+     spec declares them, which is the order the hand-written TCH page uses. */
+  function runChecks(def, spec, rows, classes, assignments, sections) {
+    var blocks = [], confirms = [], built = null, buildError = null;
+    var fmt = (((spec.sections || {}).presets) || {}).valueFormat;
+    function ensureBuilt() {
+      if (built || buildError) return built;
+      try { built = buildAll(def, spec, rows, classes, assignments, sections); }
+      catch (e) { buildError = e; blocks.push('This JV could not be computed:\n' + e.message); }
+      return built;
+    }
+    function push(level, msg) { (level === 'confirm' ? confirms : blocks).push(msg); }
+
+    /* A field marked required is enforced whether or not the spec also
+       declares a fieldValid check for it: the flag has to mean something, or
+       the creator's star beside the label is a lie. */
+    (sections || []).forEach(function (s, idx) {
+      ((spec && spec.fields) || []).forEach(function (f) {
+        if (!f.required || str(s.fields[f.id]).trim()) return;
+        blocks.push(sectionTitle(spec, idx) + ': "' + str(f.label || f.id) + '" is required.');
+      });
+    });
+
+    ((spec && spec.validate) || []).forEach(function (v) {
+      var level = v.level === 'confirm' ? 'confirm' : 'block';
+      var msg = str(v.message);
+      if (v.kind === 'fieldValid') {
+        (sections || []).forEach(function (s, idx) {
+          (v.fields || []).forEach(function (fid) {
+            var f = fieldDef(spec, fid);
+            var raws = str(s.fields[fid]).trim();
+            var bad = (f && (f.type === 'period' || f.type === 'date')) ? !parsePeriod(raws, fmt) : !raws;
+            if (bad) push(level, msg.split('{section}').join(sectionTitle(spec, idx))
+                                   .split('{field}').join(str((f && f.label) || fid)));
+          });
+        });
+      } else if (v.kind === 'fieldOrder') {
+        (sections || []).forEach(function (s, idx) {
+          var a = parsePeriod(s.fields[v.from], fmt), b = parsePeriod(s.fields[v.to], fmt);
+          if (a && b && a > b) push(level, msg.split('{section}').join(sectionTitle(spec, idx)));
+        });
+      } else if (v.kind === 'fieldEmpty') {
+        var list = [];
+        (sections || []).forEach(function (s, idx) { if (!str(s.fields[v.field]).trim()) list.push(defaultReco(spec, idx) || sectionTitle(spec, idx)); });
+        if (list.length) push(level, msg.split('{list}').join(list.join(', ')).split('{n}').join(String(list.length)));
+      } else if (v.kind === 'unassignedRows') {
+        var un = 0;
+        (rows || []).forEach(function (r, i) { if (classes[i].kind !== '@skip' && !assignments[i]) un++; });
+        if (un) push(level, msg.split('{n}').join(String(un)));
+      } else if (v.kind === 'noLines') {
+        var b1 = ensureBuilt();
+        if (b1 && !b1.lines.length) push(level, msg);
+      } else if (v.kind === 'balancePerCurrency') {
+        var b2 = ensureBuilt();
+        if (b2) {
+          var tol = v.tolerance == null ? 0.01 : Number(v.tolerance);
+          var bal = balances(b2.lines);
+          Object.keys(bal).forEach(function (c) {
+            var diff = Math.round((bal[c].dr - bal[c].cr) * 100) / 100;
+            if (Math.abs(diff) > tol) {
+              push(level, msg.split('{cur}').join(c || '(no currency)')
+                             .split('{dr}').join(fmtNum(bal[c].dr))
+                             .split('{cr}').join(fmtNum(bal[c].cr))
+                             .split('{diff}').join(fmtNum(diff)));
+            }
+          });
+        }
+      }
+    });
+    if (!built && !buildError) ensureBuilt();
+    return { blocks: blocks, confirms: confirms, built: built };
+  }
+
+  /* ── spec validation: run at save time by the creator AND at boot by the
+     page, so a mapping edited by hand on the share still cannot post. ────── */
+  function validateSpec(def) {
+    var errors = [], warnings = [];
+    var spec = def && def.jvSpec;
+    if (!def || typeof def !== 'object') return { errors: ['the JV definition is missing'], warnings: warnings };
+    if (!spec) return { errors: ['the mapping has no "jvSpec" block — it is not a spec-driven JV'], warnings: warnings };
+    var sv = spec.specVersion;
+    if (!(sv >= SPEC_MIN && sv <= SPEC_MAX)) {
+      return { errors: ['this JV needs spec version ' + str(sv) + '; this calculator understands '
+                        + SPEC_MIN + '–' + SPEC_MAX + '. Update Reco on this PC.'], warnings: warnings };
+    }
+    var refStr = str(def.ref);
+    if (!REF_RE.test(refStr)) errors.push('"ref" must be 1–24 characters of letters, digits, _ or -, starting with a letter (got "' + refStr + '")');
+    else if (RESERVED_REF.test(refStr)) errors.push('"ref" is a reserved Windows device name ("' + refStr + '")');
+
+    var colIds = {}, kinds = { '@skip': 1 }, aggIds = {}, fieldIds = {}, slotIds = {};
+    var roles = {};
+    ((spec.columns) || []).forEach(function (c) {
+      if (!c || !c.id || !c.label) { errors.push('every column needs an id and a label'); return; }
+      if (colIds[c.id]) errors.push('two columns share the id "' + c.id + '"');
+      colIds[c.id] = 1;
+      if (COL_TYPES.indexOf(c.type) < 0) errors.push('column "' + c.id + '": type must be text, number or date');
+      if (c.role) {
+        if (roles[c.role]) errors.push('two columns claim the role "' + c.role + '"');
+        roles[c.role] = 1;
+      }
+    });
+    if (!roles.amount) warnings.push('no column is marked as the amount, so the row amounts cannot be shown');
+    ((spec.kinds) || []).forEach(function (k) {
+      if (!k || !k.id) { errors.push('every row type needs an id'); return; }
+      if (k.id === '@skip') errors.push('"@skip" is reserved and cannot be a row type id');
+      kinds[k.id] = 1;
+    });
+    (((spec.classify) || {}).rules || []).forEach(function (r, i) {
+      var where = 'rule ' + (i + 1);
+      if (!kinds[r.kind]) errors.push(where + ' targets unknown row type "' + str(r.kind) + '"');
+      if (r.kind === '@skip' && !r.reason) warnings.push(where + ' ignores rows without saying why');
+      if (!(r.all || []).length) warnings.push(where + ' has no conditions, so it matches every row');
+      (r.all || []).forEach(function (c) {
+        if (!colIds[c.col]) errors.push(where + ' tests unknown column "' + str(c.col) + '"');
+        else if (OPS.indexOf(c.op) < 0) errors.push(where + ': unknown operator "' + str(c.op) + '"');
+      });
+    });
+    ((spec.fields) || []).forEach(function (f) {
+      if (!f || !f.id) { errors.push('every section field needs an id'); return; }
+      if (fieldIds[f.id] || colIds[f.id]) errors.push('field id "' + f.id + '" is already used');
+      fieldIds[f.id] = 1;
+    });
+    ((spec.aggregates) || []).forEach(function (a) {
+      if (!a || !a.id) { errors.push('every total needs an id'); return; }
+      if (aggIds[a.id] || fieldIds[a.id] || colIds[a.id]) errors.push('total id "' + a.id + '" is already used');
+      aggIds[a.id] = 1;
+      if (AGG_FNS.indexOf(a.fn) < 0) errors.push('total "' + a.id + '": unknown function "' + str(a.fn) + '"');
+      if (a.fn !== 'count' && !colIds[a.of]) errors.push('total "' + a.id + '" sums unknown column "' + str(a.of) + '"');
+      (a.where || []).forEach(function (c) {
+        if (c.kind != null && !kinds[c.kind]) errors.push('total "' + a.id + '" filters on unknown row type "' + str(c.kind) + '"');
+        if (c.kindIn) (c.kindIn || []).forEach(function (k) { if (!kinds[k]) errors.push('total "' + a.id + '" filters on unknown row type "' + str(k) + '"'); });
+        if (c.kind == null && !c.kindIn) {
+          if (!colIds[c.col]) errors.push('total "' + a.id + '" tests unknown column "' + str(c.col) + '"');
+          else if (OPS.indexOf(c.op) < 0) errors.push('total "' + a.id + '": unknown operator "' + str(c.op) + '"');
+        }
+      });
+    });
+    ((spec.slots) || []).forEach(function (s) {
+      if (!s || !s.id) { errors.push('every account slot needs an id'); return; }
+      slotIds[s.id] = 1;
+      var acc = (def.accounts || {})[s.id];
+      /* Account codes live in exactly one place: the mapping's own "accounts"
+         block, so the chart of accounts is changed there and nowhere else. */
+      if (!acc || !acc.nominal) errors.push('account slot "' + s.id + '" has no nominal in the mapping\'s "accounts" block');
+    });
+    var scopeNames = {};
+    Object.keys(aggIds).forEach(function (k) { scopeNames[k] = 1; });
+    Object.keys(fieldIds).forEach(function (k) { scopeNames[k] = 1; });
+    scopeNames['@rowsUsed'] = 1;
+
+    var sec = spec.sections || {};
+    if (sec.mode && ['manual', 'byColumn', 'single'].indexOf(sec.mode) < 0) errors.push('sections.mode must be manual, byColumn or single');
+    if (sec.mode === 'byColumn' && !colIds[sec.valueColumn]) errors.push('sections: "one section per value of" names unknown column "' + str(sec.valueColumn) + '"');
+    if (sec.recoFrom && sec.recoFrom.field && !fieldIds[sec.recoFrom.field]) errors.push('sections: the Reco field "' + str(sec.recoFrom.field) + '" is not a declared field');
+    if (sec.presets) {
+      if (!colIds[sec.presets.column]) errors.push('sections.presets reads unknown column "' + str(sec.presets.column) + '"');
+      var w = sec.presets.writes || {};
+      ['from', 'to'].forEach(function (k) { if (w[k] && !fieldIds[w[k]]) errors.push('sections.presets writes unknown field "' + str(w[k]) + '"'); });
+    }
+    if (sec.autoAssign) {
+      if (!colIds[sec.autoAssign.column]) errors.push('sections.autoAssign reads unknown column "' + str(sec.autoAssign.column) + '"');
+      ['from', 'to'].forEach(function (k) { if (sec.autoAssign[k] && !fieldIds[sec.autoAssign[k]]) errors.push('sections.autoAssign names unknown field "' + str(sec.autoAssign[k]) + '"'); });
+    }
+
+    var entries = [];
+    try { entries = expandEntries(spec); }
+    catch (e) { errors.push('the entries could not be read: ' + e.message); }
+    if (!entries.length) errors.push('the JV has no entries — it would post nothing');
+    entries.forEach(function (en, i) {
+      var where = 'entry ' + (i + 1) + ' (' + str(en.label || en.id) + ')';
+      try {
+        Expr.refs(Expr.parse(en.amount)).forEach(function (r) {
+          if (!scopeNames[r]) errors.push(where + ': the amount uses unknown name "' + r + '"');
+        });
+      } catch (e) { errors.push(where + ': ' + e.message); }
+      if (!slotIds[en.dr]) errors.push(where + ': Dr account "' + str(en.dr) + '" is not declared');
+      if (!slotIds[en.cr]) errors.push(where + ': Cr account "' + str(en.cr) + '" is not declared');
+      if (en.dr && en.dr === en.cr) errors.push(where + ': Dr and Cr are the same account — the entry would cancel itself');
+      if (!en.cur) errors.push(where + ': no currency');
+      if (!(((spec.remarks || {}).templates || {})[en.remark])) errors.push(where + ': unknown narration "' + str(en.remark) + '"');
+    });
+
+    ((spec.validate) || []).forEach(function (v) {
+      if (CHECK_KINDS.indexOf(v.kind) < 0) { errors.push('unknown check "' + str(v.kind) + '"'); return; }
+      var named = (v.fields || []).slice();
+      if (v.field) named.push(v.field);
+      if (v.from) named.push(v.from);
+      if (v.to) named.push(v.to);
+      named.forEach(function (f) { if (!fieldIds[f]) errors.push('check "' + v.kind + '" names unknown field "' + str(f) + '"'); });
+    });
+    var hasBalance = false;
+    ((spec.validate) || []).forEach(function (v) { if (v.kind === 'balancePerCurrency') hasBalance = true; });
+    if (!hasBalance) warnings.push('no per-currency balance check — strongly recommended');
+
+    /* Reco projects ONLY the names in inputColumns, so a spelling the spec
+       accepts but the mapping does not declare would arrive blank and the
+       maths would silently read zero. Refuse, rather than post that. */
+    var declared = {}, missing = [];
+    ((spec.columns) || []).forEach(function (c) { names(c).forEach(function (n) { declared[normKey(n)] = n; }); });
+    ((def.inputColumns) || []).forEach(function (ic) { delete declared[normKey(ic && ic.name)]; });
+    Object.keys(declared).forEach(function (k) { missing.push(declared[k]); });
+    if (missing.length) {
+      errors.push('inputColumns is missing ' + missing.length + ' accepted column name(s) — Reco only sends the columns listed there: '
+                  + missing.join(', '));
+    }
+    return { errors: errors, warnings: warnings };
+  }
+
+  /* ── canonical form + hash: what makes a hand-edited page detectable ────── */
+  function canonical(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+    if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
+    var keys = Object.keys(v).sort();
+    var parts = [];
+    keys.forEach(function (k) {
+      if (v[k] === undefined) return;
+      parts.push(JSON.stringify(k) + ':' + canonical(v[k]));
+    });
+    return '{' + parts.join(',') + '}';
+  }
+  function canonicalDef(def) {
+    var copy = {};
+    Object.keys(def || {}).forEach(function (k) { if (k !== 'audit' && k !== 'htmlPath' && k !== '_file') copy[k] = def[k]; });
+    return canonical(copy);
+  }
+  /* 64-bit FNV-1a over the canonical JSON, as 16 hex digits. Not a security
+     hash — a fingerprint that answers "is this page still the one the creator
+     wrote?" without parsing the island. */
+  function specHash(def) {
+    var s = canonicalDef(def);
+    var h1 = 0x811c9dc5, h2 = 0xcbf29ce4;          // low, high halves
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      h1 = (h1 ^ (c & 0xff)) >>> 0;
+      h2 = (h2 ^ ((c >>> 8) & 0xff)) >>> 0;
+      h1 = Math.imul(h1, 16777619) >>> 0;
+      h2 = Math.imul(h2, 16777619) >>> 0;
+    }
+    var hex = function (n) { var x = (n >>> 0).toString(16); while (x.length < 8) x = '0' + x; return x; };
+    return 'fnv1a:' + hex(h2) + hex(h1);
+  }
+
+  var JVCore = {
+    version: VERSION,
+    SPEC_MIN: SPEC_MIN,
+    SPEC_MAX: SPEC_MAX,
+    LINE_ORDER: LINE_ORDER,
+    MONTHS: MONTHS,
+    OPS: OPS,
+    REF_RE: REF_RE,
+    /* values */
+    num: num, round2: round2, roundN: roundN, fmtNum: fmtNum, fmtInt: fmtInt, isNumeric: isNumeric,
+    /* dates */
+    parseRowDate: parseRowDate, parseAnyDate: parseAnyDate, parsePeriod: parsePeriod,
+    looksLikeDate: looksLikeDate, fmtMMDDYY: fmtMMDDYY, fmtDateFmt: fmtDateFmt,
+    fmtDatePattern: fmtDatePattern, excelSerial: excelSerial,
+    /* rows */
+    colDef: colDef, names: names, raw: raw, cell: cell, cellText: cellText,
+    testCond: testCond, fillRowTokens: fillRowTokens,
+    classify: classify, kindLabel: kindLabel, kindStyle: kindStyle,
+    /* sections */
+    presets: presets, newSection: newSection, autoAssign: autoAssign, assignAll: assignAll,
+    fieldDef: fieldDef, sectionTitle: sectionTitle, defaultReco: defaultReco,
+    /* maths */
+    aggregates: aggregates, Expr: Expr, expandEntries: expandEntries, remark: remark,
+    slotOf: slotOf, buildSection: buildSection, buildAll: buildAll, balances: balances,
+    runChecks: runChecks,
+    /* integrity */
+    validateSpec: validateSpec, canonical: canonical, canonicalDef: canonicalDef, specHash: specHash
+  };
+
+  root.JVCore = JVCore;
+  if (typeof module !== 'undefined' && module.exports) module.exports = JVCore;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+<script type="text/plain" id="jvPageSrc">/* ============================================================================
+   jv-page-1.0.0.js — the page half of the generic Special JV calculator.
+
+   A generated special_jv_templates/<REF>.html carries NO script of its own:
+   a title, a stylesheet link, a mount <div>, an inert
+   <script type="application/json" id="jvDef"> copy of its mapping, and two
+   <script src> tags — the core, then this file. Everything on screen is built
+   here, from the spec, at run time.
+
+   What this file is responsible for:
+     · the handshake with Reco (same-origin globals when they are readable,
+       postMessage when the host page is isolated, as file:// pages are);
+     · refusing to start when the engine core is missing, or when the spec is
+       malformed, of an unknown version, or addressed to another JV — always
+       with a sentence on screen and never a half-working form;
+     · the DOM, using the same hooks and class names the hand-written
+       special_jv_templates/TCH.html exposes, so the TCH end-to-end test drives
+       a generated page unchanged;
+     · posting the finished lines back with the engine version and the spec
+       hash that produced them.
+
+   It never computes an amount itself: every figure comes from JVCore.
+   It compiles nothing and reads nothing from the network.
+   ========================================================================= */
+(function (W) {
+  'use strict';
+
+  var ENGINE_VERSION = '1.0.0';
+  var ROOT_ID = 'jvRoot', ISLAND_ID = 'jvDef';
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;';
+    });
+  }
+  function post(m) { try { W.parent.postMessage(m, '*'); } catch (e) { /* no host */ } }
+
+  /* ── the core has to be there ───────────────────────────────────────────────
+     The shell's two script tags are plain and in order, so if this file runs
+     and the core did not, the core file is missing from the share. Say which
+     file, and offer the one button that still means something. */
+  function pageRef() {
+    var last = (location.pathname.split('/').pop() || '');
+    try { last = decodeURIComponent(last); } catch (e) { /* keep it raw */ }
+    return last.replace(/\.html?$/i, '');
+  }
+  var PAGE_REF = pageRef();
+
+  var C = W.JVCore;
+  if (!C || typeof C.buildAll !== 'function') {
+    var showMissing = function () {
+      var r = el(ROOT_ID);
+      if (!r) return;
+      r.className = '';
+      r.innerHTML = '<div class="jv-fatal"><b>This Special JV cannot run: the calculator engine is missing.</b>'
+        + '<pre>special_jv_templates/_engine/jv-core-' + esc(ENGINE_VERSION) + '.js did not load.\n'
+        + 'It ships with Reco and is copied to the shared folder the first time a JV is saved.\n'
+        + 'Ask whoever set up the shared folder to put the _engine folder back, then reopen this JV.</pre></div>'
+        + '<div class="actions"><button data-act="cancel">Close</button></div>';
+      r.onclick = function (ev) {
+        var t = ev.target;
+        if (t && t.getAttribute && t.getAttribute('data-act') === 'cancel') {
+          post({ type: 'specialJV.cancel', ref: PAGE_REF, lines: [], primaryKeys: [] });
+        }
+      };
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', showMissing);
+    else showMissing();
+    return;
+  }
+
+  var S = {
+    ref: PAGE_REF, def: null, spec: null, island: null, islandBad: '',
+    inputs: [], cls: [], presets: [], sections: [], nextId: 1, assign: {},
+    fatal: '', errors: [], warnings: [], drift: '', started: false, previewOpen: false
+  };
+
+  /* ── boot ──────────────────────────────────────────────────────────────── */
+  function readIsland() {
+    var node = el(ISLAND_ID);
+    if (!node) return null;
+    var txt = node.textContent || '';
+    if (!txt.trim()) return null;
+    try { return JSON.parse(txt); }
+    catch (e) {
+      /* Only fatal when there is nothing else to run from: with a definition
+         from Reco the page works, and the operator is told the file is damaged. */
+      S.islandBad = 'the copy of the mapping embedded in this page is not valid JSON (' + e.message + ')';
+      return null;
+    }
+  }
+  /* Same-origin: Reco exposes the inputs on its own window. Reading it throws
+     when the browser isolates the two pages (every file:// pair), which is the
+     normal case and not an error — the postMessage handshake takes over. */
+  function readParent() {
+    try {
+      var p = W.parent;
+      if (!p || p === W || !p._specialJvRef) return false;
+      S.inputs = p._specialJvInputs || [];
+      S.ref = p._specialJvRef;
+      S.def = p._specialJvDef || null;
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function start() {
+    if (S.started) return;
+    S.started = true;
+    S.island = readIsland();
+
+    /* A host can never make this page compute another JV's maths. */
+    if (S.def && String(S.def.ref) !== PAGE_REF && PAGE_REF) {
+      S.fatal = 'This page is ' + PAGE_REF + ', but Reco asked it to run "' + String(S.def.ref) + '". Nothing was computed.';
+      return render();
+    }
+    var live = S.def || S.island;
+    if (!live) {
+      S.fatal = S.islandBad
+        ? ('No JV definition reached this page: special_jv_mapping/' + PAGE_REF
+           + '.json was not sent by Reco, and ' + S.islandBad + '.')
+        : ('No JV definition reached this page: special_jv_mapping/' + PAGE_REF
+           + '.json was not sent by Reco and this page carries no embedded copy.');
+      return render();
+    }
+    if (S.islandBad) S.drift = 'This page\'s own embedded copy of the mapping is damaged — ' + S.islandBad
+      + '. The mapping JSON from Reco is being used.';
+    /* The mapping JSON is the source of truth. When the page's own embedded
+       copy disagrees, someone edited one of them — say so and carry on with
+       the mapping, because that is the file the chart of accounts is kept in. */
+    if (S.def && S.island && C.canonicalDef(S.def) !== C.canonicalDef(S.island)) {
+      S.drift = 'The mapping JSON and the copy embedded in this page differ (someone edited one of them). '
+        + 'The mapping JSON is being used.';
+    }
+    S.def = live;
+    S.ref = S.ref || String(live.ref || PAGE_REF);
+    S.spec = live.jvSpec || null;
+
+    var v = C.validateSpec(live);
+    S.warnings = v.warnings || [];
+    if (v.errors && v.errors.length) { S.errors = S.errors.concat(v.errors); return render(); }
+
+    S.cls = S.inputs.map(function (r) { return C.classify(S.spec, r); });
+    S.presets = C.presets(S.spec, S.inputs);
+    initSections();
+    render();
+  }
+
+  function initSections() {
+    var sec = S.spec.sections || {};
+    if (sec.mode === 'byColumn' && sec.valueColumn) {
+      var seen = {}, order = [];
+      S.inputs.forEach(function (r, i) {
+        if (S.cls[i].kind === '@skip') return;
+        var v = String(C.cellText(S.spec, r, sec.valueColumn) || '');
+        if (!v || seen[v]) return;
+        seen[v] = 1; order.push(v);
+      });
+      order.forEach(function (v) { var s = C.newSection(S.spec, S.nextId++); s.group = v; S.sections.push(s); });
+      S.inputs.forEach(function (r, i) {
+        if (S.cls[i].kind === '@skip') return;
+        var v = String(C.cellText(S.spec, r, sec.valueColumn) || '');
+        for (var k = 0; k < S.sections.length; k++) if (S.sections[k].group === v) { S.assign[i] = S.sections[k].id; return; }
+      });
+    }
+    var want = sec.mode === 'single' ? 1 : Math.max(1, sec.startWith == null ? 1 : (sec.startWith | 0));
+    while (S.sections.length < want) S.sections.push(C.newSection(S.spec, S.nextId++));
+  }
+
+  /* ── the layout of a section's table ───────────────────────────────────────
+     One column group per declared heading, aggregates first then typed fields,
+     in the order the spec declares them. Headings the spec lists in
+     layout.sectionTable.groups come first, so the creator controls the order
+     without repeating it per cell. */
+  function groupPlan() {
+    var order = ((S.spec.layout || {}).sectionTable || {}).groups || [];
+    var map = {}, names = [];
+    function slot(g) {
+      var key = g == null ? '' : String(g);
+      if (!map[key]) { map[key] = { name: key, cells: [] }; names.push(key); }
+      return map[key];
+    }
+    order.forEach(function (g) { slot(g); });
+    (S.spec.aggregates || []).forEach(function (a) {
+      slot(a.group).cells.push({ t: 'agg', id: a.id, label: a.label || a.id });
+    });
+    (S.spec.fields || []).forEach(function (f) {
+      if (f.group === '@head') return;
+      slot(f.group).cells.push({ t: 'field', id: f.id, label: f.label || f.id, f: f });
+    });
+    var out = [];
+    names.forEach(function (n) { if (map[n].cells.length) out.push(map[n]); });
+    return out;
+  }
+  function headFields() {
+    return (S.spec.fields || []).filter(function (f) { return f.group === '@head'; });
+  }
+  function sectionIdx(id) {
+    for (var i = 0; i < S.sections.length; i++) if (S.sections[i].id === id) return i;
+    return -1;
+  }
+  function sectionById(id) { var i = sectionIdx(id); return i < 0 ? null : S.sections[i]; }
+  function withN(s, i) { return String(s == null ? '' : s).split('{n}').join(String(i + 1)); }
+  function tok(i) { return withN((S.spec.sections || {}).token || 'T{n}', i); }
+
+  /* ── render ────────────────────────────────────────────────────────────── */
+  function render() {
+    var root = el(ROOT_ID);
+    if (!root) return;
+    root.className = '';
+    if (S.fatal || S.errors.length) { renderFatal(root); return; }
+
+    var sec = S.spec.sections || {};
+    var h = '';
+    h += '<h2>' + esc(S.spec.title || S.def.displayName || S.ref) + '</h2>';
+    h += '<div id="summary" class="summary"></div>';
+    if (S.drift) h += '<div class="jv-warn">' + esc(S.drift) + '</div>';
+    if (S.warnings.length) {
+      h += '<details class="jv-notes"><summary>' + S.warnings.length + ' note(s) about this JV definition</summary><ul>'
+        + S.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></details>';
+    }
+    h += '<div id="sectionsWrap"></div>';
+    if (sec.mode !== 'single') {
+      h += '<button class="add-tch" data-act="add">' + esc(sec.addLabel || ('+ Add ' + (S.spec.sectionNoun || 'Section'))) + '</button>';
+    }
+    h += '<div class="rows-head"><h3>Source Rows · assign each to a '
+      + esc(S.spec.sectionNoun || 'section') + ' section</h3><div class="spacer"></div>';
+    if (sec.autoAssign) {
+      h += '<button class="small" data-act="auto">' + esc(sec.autoAssign.label || 'Auto-assign by period') + '</button>';
+    }
+    if (sec.assignAll) h += '<select id="assignAllSel" data-act="assignAll" style="min-width:140px;"></select>';
+    h += '</div>';
+    h += '<div class="rows-wrap"><table class="rows-table" id="rowsTable"><thead></thead><tbody></tbody></table></div>';
+    h += '<div id="previewPane" class="preview-pane" style="display:none;"></div>';
+    h += '<div class="actions"><button data-act="cancel">Cancel</button>'
+      + '<button class="small" id="previewBtn" data-act="preview">Show Preview</button>'
+      + '<div class="spacer"></div><span id="assignInfo"></span>'
+      + '<button class="primary" data-act="submit">Generate Lines &amp; Return</button></div>';
+    root.innerHTML = h;
+    wire(root);
+    renderSummary();
+    renderSections();
+    renderRows();
+    refresh();
+  }
+
+  function renderFatal(root) {
+    var list = S.errors.length ? S.errors : [S.fatal];
+    root.innerHTML = '<div class="jv-fatal"><b>This Special JV cannot run.</b>'
+      + '<pre>' + esc(S.ref || PAGE_REF) + ' — nothing has been computed and nothing will be posted.</pre>'
+      + '<ul>' + list.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>'
+      + '<pre>Fix special_jv_mapping/' + esc(S.ref || PAGE_REF) + '.json (or reopen the JV in Reco → '
+      + 'Entry Generator → Special JVs) and try again.</pre></div>'
+      + '<div class="actions"><button data-act="cancel">Cancel</button></div>';
+    wire(root);
+  }
+
+  function renderSummary() {
+    var e = el('summary');
+    if (!e) return;
+    var counts = {}, skipped = 0;
+    S.cls.forEach(function (c) {
+      if (c.kind === '@skip') { skipped++; return; }
+      counts[c.kind] = (counts[c.kind] || 0) + 1;
+    });
+    var kindBits = (S.spec.kinds || []).map(function (k) {
+      return ' · ' + C.fmtInt(counts[k.id] || 0) + ' ' + esc(k.label || k.id);
+    }).join('');
+    var months = {}, nMonths = 0;
+    var dateCol = null;
+    (S.spec.columns || []).forEach(function (c) { if (c.role === 'date' && !dateCol) dateCol = c; });
+    if (dateCol) {
+      S.inputs.forEach(function (r) {
+        var d = C.cell(S.spec, r, dateCol.id);
+        if (d) { var k = d.getFullYear() + '-' + d.getMonth(); if (!months[k]) { months[k] = 1; nMonths++; } }
+      });
+    }
+    var accBits = (S.spec.slots || []).map(function (s) {
+      var a = (S.def.accounts || {})[s.id] || {};
+      return esc(s.short || s.label || s.id) + ' ' + esc(a.nominal || '?') + '/' + esc(a.rc == null ? '' : a.rc);
+    }).join(' · ');
+    var h = '';
+    h += '<div><b>JV:</b> ' + esc(S.ref) + ' <span class="muted">spec v' + esc(S.spec.specVersion)
+       + ' · engine ' + esc(C.version) + '</span></div>';
+    h += '<div><b>Inputs:</b> ' + C.fmtInt(S.inputs.length) + ' row(s)' + kindBits
+       + (skipped ? ' · ' + C.fmtInt(skipped) + ' ignored' : '') + '</div>';
+    if (dateCol) h += '<div><b>Months detected:</b> ' + C.fmtInt(nMonths) + '</div>';
+    if (accBits) h += '<div><b>Accounts:</b> ' + accBits + ' · LOB ' + esc((S.def.accounts || {}).lob) + '</div>';
+    if (!S.inputs.length) {
+      h += '<div class="err">No rows received from Reco — check the To Account column and the mapping\'s inputColumns.</div>';
+    }
+    e.innerHTML = h;
+  }
+
+  function fieldInput(sec, f, idx) {
+    var val = sec.fields[f.id] == null ? '' : sec.fields[f.id];
+    var ph = withN(f.placeholder, idx);
+    var attrs = ' data-s="' + sec.id + '" data-f="' + esc(f.id) + '"';
+    if (f.type === 'choice') {
+      return '<select' + attrs + '><option value=""></option>'
+        + (f.options || []).map(function (o) {
+            return '<option value="' + esc(o) + '"' + (String(val) === String(o) ? ' selected' : '') + '>' + esc(o) + '</option>';
+          }).join('') + '</select>';
+    }
+    if (f.type === 'yesno') {
+      return '<select' + attrs + '><option value=""></option>'
+        + ['Yes', 'No'].map(function (o) {
+            return '<option value="' + esc(o) + '"' + (String(val) === o ? ' selected' : '') + '>' + o + '</option>';
+          }).join('') + '</select>';
+    }
+    var numeric = (f.type === 'amount' || f.type === 'number');
+    var bad = '';
+    if ((f.type === 'period' || f.type === 'date') && String(val).trim() && !C.parsePeriod(val, presetFormat())) bad = ' class="bad"';
+    return '<input type="' + (numeric ? 'number' : 'text') + '"' + (numeric ? ' step="0.01"' : '') + bad + attrs
+      + (ph ? ' placeholder="' + esc(ph) + '"' : (numeric ? ' placeholder="0.00"' : ''))
+      + ' value="' + esc(val) + '" />';
+  }
+  function presetFormat() { return ((S.spec.sections || {}).presets || {}).valueFormat; }
+
+  function renderSections() {
+    var wrap = el('sectionsWrap');
+    if (!wrap) return;
+    var sec = S.spec.sections || {};
+    var plan = groupPlan(), heads = headFields();
+    var html = '';
+    S.sections.forEach(function (s, idx) {
+      html += '<div class="tch-card" data-s="' + s.id + '">';
+      html += '<div class="head"><div class="title">' + esc(C.sectionTitle(S.spec, idx))
+        + (s.group ? ' — ' + esc(s.group) : '')
+        + ' <span class="muted">(token: ' + esc(tok(idx)) + ')</span></div><div>'
+        + (S.sections.length > 1 ? '<button class="small danger" data-del="' + s.id + '">Remove</button>' : '')
+        + '</div></div>';
+      html += '<div class="top-row">';
+      heads.forEach(function (f) {
+        html += '<label><span class="lbl">' + esc(f.label || f.id) + (f.required ? ' *' : '') + '</span>'
+          + fieldInput(s, f, idx) + '</label>';
+      });
+      if (S.presets.length) {
+        html += '<label><span class="lbl">' + esc((sec.presets && sec.presets.label) || 'Range Preset') + '</span>'
+          + '<select data-preset="' + s.id + '"><option value="">— pick a slot —</option>'
+          + S.presets.map(function (p, pi) {
+              return '<option value="' + pi + '"' + (String(s.preset) === String(pi) ? ' selected' : '') + '>'
+                + esc(p.label) + ' (' + esc(p.from) + ' → ' + esc(p.to) + ')</option>';
+            }).join('') + '</select></label>';
+      }
+      html += '<span class="rows-badge" data-rows="' + s.id + '"></span>';
+      html += '</div>';
+
+      if (plan.length) {
+        html += '<table class="tch-data-table"><thead><tr class="h1">';
+        plan.forEach(function (g) {
+          html += '<th colspan="' + g.cells.length + '">' + (g.name ? esc(g.name) : '&nbsp;') + '</th>';
+        });
+        html += '</tr><tr class="h2">';
+        plan.forEach(function (g) {
+          g.cells.forEach(function (c) {
+            html += '<th>' + esc(c.label)
+              + (c.t === 'field' && c.f.memoOnly ? '<span class="memo">recorded, not posted</span>' : '')
+              + '</th>';
+          });
+        });
+        html += '</tr></thead><tbody><tr>';
+        plan.forEach(function (g) {
+          g.cells.forEach(function (c) {
+            if (c.t === 'agg') html += '<td class="computed" data-s="' + s.id + '" data-k="' + esc(c.id) + '"></td>';
+            else html += '<td class="input">' + fieldInput(s, c.f, idx) + '</td>';
+          });
+        });
+        html += '</tr></tbody></table>';
+      }
+      html += '</div>';
+    });
+    wrap.innerHTML = html;
+  }
+
+  function renderRows() {
+    var tbl = el('rowsTable');
+    if (!tbl) return;
+    var layout = (S.spec.layout || {}).rowsTable || {};
+    var cols = (S.def.inputColumns || []).map(function (c) { return c.name; });
+    var assignHead = layout.assignColumn || (S.spec.sectionNoun || 'Section');
+    var head = '<tr><th style="width:74px;">' + esc(assignHead) + '</th>'
+      + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('')
+      + (layout.noteColumn === false ? '' : '<th>Note</th>') + '</tr>';
+    tbl.querySelector('thead').innerHTML = head;
+
+    var body = S.inputs.map(function (row, i) {
+      var c = S.cls[i];
+      var cls = c.kind === '@skip' ? 'row-skip' : ('row-' + (C.kindStyle(S.spec, c.kind) || 'grey'));
+      var opts = '<option value="0">—</option>' + S.sections.map(function (s, idx) {
+        return '<option value="' + s.id + '"' + (S.assign[i] === s.id ? ' selected' : '') + '>' + esc(tok(idx)) + '</option>';
+      }).join('');
+      /* Exact column name first, then the same name ignoring case, spaces and
+         underscores — the lookup the core uses, so what is shown is what the
+         maths read. */
+      var tds = cols.map(function (col) {
+        return '<td>' + esc(C.raw(row, { label: col })) + '</td>';
+      }).join('');
+      return '<tr class="' + cls + '"><td class="tch-cell"><select data-row="' + i + '">' + opts + '</select></td>'
+        + tds
+        + (layout.noteColumn === false ? ''
+            : '<td class="note">' + (c.kind === '@skip' ? 'ignored: ' + esc(c.why) : esc(c.label || c.kind)) + '</td>')
+        + '</tr>';
+    }).join('');
+    if (!S.inputs.length) {
+      body = '<tr><td colspan="' + (cols.length + (layout.noteColumn === false ? 1 : 2))
+        + '" class="err" style="text-align:center; padding:14px;">No input rows received from host.</td></tr>';
+    }
+    tbl.querySelector('tbody').innerHTML = body;
+
+    var all = el('assignAllSel');
+    if (all) {
+      all.innerHTML = '<option value="">Assign all rows to…</option><option value="0">— (clear)</option>'
+        + S.sections.map(function (s, idx) { return '<option value="' + s.id + '">' + esc(tok(idx)) + '</option>'; }).join('');
+    }
+  }
+
+  /* Typing only refreshes the computed cells and the preview. Rebuilding the
+     DOM on every keystroke loses the caret, which is the bug the hand-written
+     page had to fix and the end-to-end test watches for. */
+  function refresh() {
+    S.sections.forEach(function (s) {
+      var vals;
+      try { vals = C.aggregates(S.spec, S.inputs, S.cls, S.assign, s.id).values; }
+      catch (e) { vals = {}; }
+      var cells = document.querySelectorAll('td.computed[data-s="' + s.id + '"]');
+      Array.prototype.forEach.call(cells, function (td) {
+        var k = td.getAttribute('data-k');
+        td.textContent = C.fmtNum(vals[k]);
+      });
+      var badge = document.querySelector('.rows-badge[data-rows="' + s.id + '"]');
+      if (badge) badge.textContent = C.fmtInt(vals['@rowsUsed'] || 0) + ' row(s) assigned';
+    });
+    var un = 0;
+    S.inputs.forEach(function (r, i) { if (S.cls[i].kind !== '@skip' && !S.assign[i]) un++; });
+    var info = el('assignInfo');
+    if (info) info.textContent = un ? C.fmtInt(un) + ' row(s) not assigned' : '';
+    if (S.previewOpen) renderPreview();
+  }
+
+  function build() {
+    return C.buildAll(S.def, S.spec, S.inputs, S.cls, S.assign, S.sections);
+  }
+
+  function renderPreview() {
+    var p = el('previewPane');
+    if (!p) return;
+    var built;
+    try { built = build(); }
+    catch (e) { p.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; return; }
+    if (!built.lines.length) {
+      p.innerHTML = '<div class="err">No lines yet — assign rows and/or fill the typed figures.</div>';
+      return;
+    }
+    var bal = C.balances(built.lines);
+    var balHtml = Object.keys(bal).sort().map(function (c) {
+      var diff = Math.round((bal[c].dr - bal[c].cr) * 100) / 100;
+      /* Zero, not "within a cent": this is the rule Reco's own
+         SpecialJV.checkLines applies when the lines arrive, so what the
+         operator sees here is what the host will accept. */
+      var okb = diff === 0;
+      return '<span class="' + (okb ? 'balanced' : 'unbalanced') + '">' + esc(c || '(no currency)')
+        + ': Dr ' + C.fmtNum(bal[c].dr) + ' / Cr ' + C.fmtNum(bal[c].cr) + (okb ? ' ✓' : ' ✗') + '</span>';
+    }).join('');
+    var h = '<h4>Preview — ' + C.fmtInt(built.lines.length) + ' line(s) across '
+      + C.fmtInt(S.sections.length) + ' section(s)</h4><div style="margin-bottom:6px;">' + balHtml + '</div>';
+    h += '<table><thead><tr><th>Reco</th><th>Cur</th><th>RC</th><th>Nominal</th><th>SubNom</th><th>AK</th>'
+      + '<th>LOB</th><th>Dr</th><th>Cr</th><th>Desc</th></tr></thead><tbody>';
+    built.lines.forEach(function (l) {
+      h += '<tr><td>' + esc(l.Reco) + '</td><td>' + esc(l.Cur) + '</td><td>' + esc(l.RC) + '</td><td>' + esc(l.Nominal)
+        + '</td><td>' + esc(l.SubNominal) + '</td><td>' + esc(l['Analysis Key']) + '</td><td>' + esc(l.LOB) + '</td><td>'
+        + (l.Dr ? C.fmtNum(l.Dr) : '') + '</td><td>' + (l.Cr ? C.fmtNum(l.Cr) : '') + '</td><td>' + esc(l.Desc) + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    p.innerHTML = h;
+  }
+
+  /* ── events: every handler is delegated from the mount div, so the
+     generated HTML carries no on* attribute and no inline handler. ───────── */
+  function wire(root) {
+    root.onclick = function (ev) {
+      var t = ev.target;
+      if (!t || !t.getAttribute) return;
+      var act = t.getAttribute('data-act');
+      if (act === 'cancel') { post({ type: 'specialJV.cancel', ref: S.ref, lines: [], primaryKeys: [] }); return; }
+      if (act === 'submit') { submit(); return; }
+      if (act === 'add') { S.sections.push(C.newSection(S.spec, S.nextId++)); renderSections(); renderRows(); refresh(); return; }
+      if (act === 'auto') { autoAssign(); return; }
+      if (act === 'preview') {
+        var p = el('previewPane');
+        S.previewOpen = !S.previewOpen;
+        p.style.display = S.previewOpen ? 'block' : 'none';
+        t.textContent = S.previewOpen ? 'Hide Preview' : 'Show Preview';
+        if (S.previewOpen) renderPreview();
+        return;
+      }
+      var del = t.getAttribute('data-del');
+      if (del) {
+        if (S.sections.length <= 1) return;
+        var id = +del;
+        S.sections = S.sections.filter(function (s) { return s.id !== id; });
+        Object.keys(S.assign).forEach(function (k) { if (S.assign[k] === id) S.assign[k] = 0; });
+        renderSections(); renderRows(); refresh();
+      }
+    };
+    root.oninput = function (ev) { onFieldEdit(ev.target); };
+    root.onchange = function (ev) {
+      var t = ev.target;
+      if (!t || !t.getAttribute) return;
+      if (t.getAttribute('data-act') === 'assignAll') {
+        if (t.value === '') return;
+        C.assignAll(S.spec, S.inputs, S.cls, S.assign, +t.value || 0);
+        t.value = '';
+        renderRows(); refresh();
+        return;
+      }
+      if (t.getAttribute('data-row') != null) { S.assign[+t.getAttribute('data-row')] = +t.value || 0; refresh(); return; }
+      var pre = t.getAttribute('data-preset');
+      if (pre) { applyPreset(+pre, t.value); return; }
+      onFieldEdit(t);
+    };
+  }
+  function onFieldEdit(t) {
+    if (!t || !t.getAttribute) return;
+    var sid = t.getAttribute('data-s'), fid = t.getAttribute('data-f');
+    if (!sid || !fid) return;
+    var s = sectionById(+sid);
+    if (!s) return;
+    s.fields[fid] = t.value;
+    var f = C.fieldDef(S.spec, fid);
+    if (f && f.clearsPreset) {
+      s.preset = '';
+      var sel = document.querySelector('select[data-preset="' + s.id + '"]');
+      if (sel) sel.value = '';
+    }
+    if (f && (f.type === 'period' || f.type === 'date')) {
+      var bad = String(t.value).trim() && !C.parsePeriod(t.value, presetFormat());
+      t.className = bad ? 'bad' : '';
+    }
+    refresh();
+  }
+  function applyPreset(sid, pi) {
+    if (pi === '') return;
+    var p = S.presets[+pi];
+    var s = sectionById(sid);
+    if (!p || !s) return;
+    var w = ((S.spec.sections || {}).presets || {}).writes || {};
+    if (w.from) s.fields[w.from] = p.from;
+    if (w.to) s.fields[w.to] = p.to;
+    s.preset = String(pi);
+    renderSections(); renderRows(); refresh();
+  }
+  function autoAssign() {
+    var a = (S.spec.sections || {}).autoAssign || {};
+    var r = C.autoAssign(S.spec, S.inputs, S.cls, S.sections, S.assign);
+    if (r.noRange) {
+      W.alert(a.noRangeMessage || 'Set a valid period on at least one section first.');
+      return;
+    }
+    renderRows(); refresh();
+    if (r.nodate) W.alert(String(a.noDateMessage || '{n} row(s) have no readable date and were left as they were.').split('{n}').join(String(r.nodate)));
+  }
+
+  /* ── submit ────────────────────────────────────────────────────────────── */
+  function submit() {
+    var r;
+    try { r = C.runChecks(S.def, S.spec, S.inputs, S.cls, S.assign, S.sections); }
+    catch (e) { W.alert('This JV could not be computed:\n' + e.message); return; }
+    if (r.blocks.length) { W.alert(r.blocks[0]); return; }
+    for (var i = 0; i < r.confirms.length; i++) if (!W.confirm(r.confirms[i])) return;
+    var built = r.built;
+    if (!built) {
+      try { built = build(); }
+      catch (e2) { W.alert('This JV could not be computed:\n' + e2.message); return; }
+    }
+    /* A spec need not declare the noLines check, but an empty line set reads
+       to the host as a cancel, which would silently discard the user's work. */
+    if (!built.lines.length) {
+      W.alert('No accounting lines to post — every entry computes to zero.');
+      return;
+    }
+    post({
+      type: 'specialJV.complete',
+      ref: S.ref,
+      jvId: 'JV_' + String(S.ref).replace(/[^A-Za-z0-9]/g, '') + '_' + Date.now().toString(36),
+      lines: built.lines,
+      primaryKeys: built.primaryKeys,
+      inputData: S.inputs,
+      meta: {
+        sections: built.sections,
+        accounts: S.def.accounts,
+        engine: C.version,
+        page: ENGINE_VERSION,
+        specVersion: S.spec.specVersion,
+        /* The hash of the definition that actually produced these numbers,
+           beside the one the file claims: together they say which maths wrote
+           the figures now sitting in Reco's entry history. */
+        specHash: C.specHash(S.def),
+        declaredSpecHash: String((S.def.audit || {}).specHash || ''),
+        drift: S.drift ? true : false,
+        ref: S.ref
+      }
+    });
+  }
+
+  function boot() {
+    if (readParent()) { start(); return; }
+    W.addEventListener('message', function (ev) {
+      var d = ev.data;
+      if (ev.source !== W.parent || !d || d.type !== 'specialJV.init') return;
+      S.inputs = Array.isArray(d.inputs) ? d.inputs : [];
+      S.ref = d.ref || PAGE_REF;
+      S.def = d.def || null;
+      start();
+    });
+    post({ type: 'specialJV.ready', ref: PAGE_REF });
+    /* Opened outside Reco, or by a Reco too old to answer: show the form from
+       the embedded copy so the page is still readable on its own. */
+    setTimeout(start, 2500);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+
+  W.JVPage = { version: ENGINE_VERSION, _state: S, _build: build, _refresh: refresh };
+})(typeof window !== 'undefined' ? window : this);
+</script>
+<script type="text/plain" id="jvPageCss">/* ============================================================================
+   jv-page-1.0.0.css — the look of a generated Special JV calculator.
+   Lifted from special_jv_templates/TCH.html so a spec-driven JV is visually
+   the page the team already knows. Class names are TCH's too, which is what
+   lets the TCH end-to-end test drive a generated page unchanged.
+   Shipped once, versioned in the filename, never rewritten in place.
+   ========================================================================= */
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; padding: 14px; color: #1f2937; background: #f5f6f8; margin: 0; }
+h2 { margin: 0 0 8px 0; font-size: 16px; }
+h3 { margin: 0 0 6px 0; font-size: 13px; font-weight: 600; }
+h4 { margin: 0 0 6px 0; font-size: 12px; }
+
+.summary { background: #f9fafb; padding: 8px 10px; border-radius: 4px; margin-bottom: 12px; font-size: 12px; border: 1px solid #e5e7eb; display: flex; gap: 16px; flex-wrap: wrap; }
+.summary b { color: #1f2937; }
+.err { color: #b91c1c; font-weight: 600; }
+.muted { color: #6b7280; font-weight: 400; font-size: 11px; }
+
+/* The static text the shell carries before the engine loads. If the engine
+   files are missing from the share this is all the user ever sees, so it has
+   to read as a sentence rather than as a loading flicker. */
+.jv-boot { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 12px; font-size: 12px; color: #92400e; }
+
+/* A spec that cannot run: every reason, and nothing else. No form is drawn,
+   so there is no way to post a line from a JV the engine does not understand. */
+.jv-fatal { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 6px; padding: 12px 14px; }
+.jv-fatal b { color: #991b1b; }
+.jv-fatal ul { margin: 6px 0 0 18px; padding: 0; }
+.jv-fatal li { margin: 2px 0; }
+.jv-fatal pre { white-space: pre-wrap; margin: 6px 0 0; font-size: 12px; font-family: inherit; }
+.jv-warn { background: #fffbeb; border: 1px solid #fde68a; border-radius: 4px; padding: 6px 8px; margin-bottom: 10px; font-size: 12px; color: #92400e; }
+.jv-notes { margin-bottom: 10px; font-size: 12px; color: #92400e; }
+.jv-notes summary { cursor: pointer; }
+.jv-notes ul { margin: 4px 0 0 18px; }
+
+.tch-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }
+.tch-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.tch-card .head .title { font-weight: 700; font-size: 14px; color: #2563eb; }
+.tch-card .top-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 8px; }
+.tch-card .top-row > label { display: flex; flex-direction: column; gap: 2px; }
+.tch-card .top-row > label .lbl { font-size: 11px; font-weight: 600; color: #4b5563; text-transform: uppercase; letter-spacing: 0.3px; }
+.rows-badge { align-self: center; font-size: 11px; color: #6b7280; }
+
+.tch-data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tch-data-table th, .tch-data-table td { border: 1px solid #e5e7eb; padding: 4px 6px; text-align: center; }
+.tch-data-table thead tr.h1 th { background: #eef2ff; color: #3730a3; font-weight: 700; }
+.tch-data-table thead tr.h2 th { background: #f9fafb; font-size: 11px; font-weight: 600; color: #4b5563; }
+.tch-data-table td.computed { background: #fafbfc; color: #1f2937; font-weight: 600; min-width: 80px; }
+.tch-data-table td.input { background: #fffbeb; min-width: 90px; }
+.tch-data-table td.input input { width: 100%; border: 1px solid #fde68a; background: #fff; padding: 3px 5px; font-size: 12px; border-radius: 3px; }
+.tch-data-table th .memo { display: block; font-weight: 400; color: #9ca3af; font-size: 10px; }
+
+input[type=text], input[type=number], select { border: 1px solid #d1d5db; border-radius: 3px; padding: 4px 6px; font-size: 12px; font-family: inherit; min-width: 110px; }
+select { background: #fff; }
+input.bad { border-color: #dc2626; }
+
+.add-tch { background: #fff; border: 2px dashed #93c5fd; color: #2563eb; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; margin-bottom: 12px; }
+.add-tch:hover { background: #eff6ff; }
+
+.rows-head { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.rows-head h3 { margin: 0; }
+.rows-head .spacer { flex: 1; }
+.rows-wrap { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; overflow: auto; max-height: 340px; margin-top: 6px; }
+.rows-table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; }
+.rows-table th { background: #f9fafb; padding: 5px 7px; border: 1px solid #e5e7eb; font-size: 11px; font-weight: 600; text-align: left; position: sticky; top: 0; }
+.rows-table td { padding: 4px 7px; border: 1px solid #e5e7eb; }
+.rows-table tr:hover td { background: #fafbfc; }
+.rows-table .tch-cell select { min-width: 60px; }
+.rows-table td.note { font-size: 11px; }
+
+/* One class per declared row-type style, so a spec picks a colour by name
+   instead of carrying one. */
+.row-skip   { color: #9ca3af; }
+.row-blue   { color: #1d4ed8; font-weight: 600; }
+.row-amber  { color: #b45309; font-weight: 600; }
+.row-green  { color: #047857; font-weight: 600; }
+.row-violet { color: #6d28d9; font-weight: 600; }
+.row-pink   { color: #be185d; font-weight: 600; }
+.row-grey   { color: #4b5563; font-weight: 600; }
+
+.actions { display: flex; gap: 8px; padding: 10px 0; position: sticky; bottom: 0; background: #f5f6f8; border-top: 1px solid #e5e7eb; margin-top: 14px; }
+.actions .spacer { flex: 1; }
+#assignInfo { align-self: center; font-size: 12px; color: #6b7280; }
+button { padding: 7px 16px; border-radius: 4px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; font-size: 12px; font-weight: 500; }
+button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+button.primary:hover { background: #1d4ed8; }
+button.danger { background: #fff; color: #b91c1c; border-color: #fca5a5; }
+button.small { padding: 3px 8px; font-size: 11px; }
+
+.preview-pane { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; margin-top: 10px; max-height: 240px; overflow-y: auto; }
+.preview-pane table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.preview-pane th, .preview-pane td { border: 1px solid #e5e7eb; padding: 3px 5px; text-align: left; }
+.preview-pane th { background: #f9fafb; }
+.balanced { color: #059669; font-weight: 600; margin-right: 14px; }
+.unbalanced { color: #b91c1c; font-weight: 600; margin-right: 14px; }
+</script>
+<script>
+/* ================================================================
+   MODULE 2d — JV ENGINE
+   One generic engine interprets a declarative JV spec, so a new Special JV
+   is a JSON record rather than new JavaScript on a shared network folder.
+   Three places must agree about it:
+     · special_jv_templates/_engine/jv-core-1.0.0.js, which every generated
+       calculator page loads;
+     · this app, which evaluates the island above, so the creator's live
+       preview runs exactly the arithmetic the page will run;
+     · tests/e2e/run_jv_core_unit.mjs, which loads the same file under node.
+   Reco has to carry the text, because folder_manager.init_skeleton creates
+   the shared folders but copies no app files: a share that has never held a
+   creator-built JV has no _engine/ folder, and these bytes are where it
+   comes from.
+   What is evaluated here is app-shipped code, reviewed in this repo, and
+   never anything a user typed. A spec's amounts are parsed by JVCore.Expr's
+   closed grammar, which cannot reach a function, a property or a string
+   (run_jv_core_unit.mjs [F]); the engine files contain no call that
+   compiles text at all ([K]).
+   ================================================================ */
+const JV_ENGINE_VERSION = '1.0.0';
+/* Which island goes to which filename on the shared folder. The version is
+   in the filename: a later engine lands beside this one and never over it,
+   so a JV keeps running on the engine it was validated against. */
+const JV_ENGINE_FILES = [
+  { island: 'jvCoreSrc', name: 'jv-core-' + JV_ENGINE_VERSION + '.js' },
+  { island: 'jvPageSrc', name: 'jv-page-' + JV_ENGINE_VERSION + '.js' },
+  { island: 'jvPageCss', name: 'jv-page-' + JV_ENGINE_VERSION + '.css' }
+];
+function jvEngineSource(island) {
+  const node = document.getElementById(island);
+  return node ? node.textContent : '';
+}
+const JVCore = (function () {
+  const src = jvEngineSource('jvCoreSrc');
+  if (!src) { console.error('MODULE 2d: the jvCoreSrc island is empty — the JV engine is unavailable'); return null; }
+  try {
+    /* The core publishes itself on its root object, and it is read back from
+       there rather than by its name: the name here is a global const, which
+       would shadow the property while it is still being initialised. */
+    (new Function(src))();
+    return window.JVCore || null;
+  } catch (e) {
+    console.error('MODULE 2d: the JV engine core could not be loaded', e);
+    return null;
+  }
+})();
 
 /* ================================================================
    MODULE 3 — DATA STORE

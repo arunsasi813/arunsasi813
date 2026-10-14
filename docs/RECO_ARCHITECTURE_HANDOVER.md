@@ -234,6 +234,46 @@ Remarks: `Cross Currency Adjustment Entry for DD MMM - DD MMM YY` / `BSP TCH Cha
 
 Submit validates **every** section's period (and From ≤ To), asks once about empty Reco codes and about unassigned RAPID/OF rows, and checks each currency balances within 0.01. `meta.sections` carries each section's period, sale data, totals and consumed PKs for audit. `RUB (no 2.1)`, `RUB Total (no 2)` and `TCH Charges` are recorded in `meta` but, as before, not used in the postings.
 
+### 6.7 A Special JV as data — the spec-driven engine
+
+A second route exists, and it needs no new JavaScript. One reviewed engine
+interprets a declarative spec, so a new Special JV is a JSON record instead of
+a new program on the shared folder:
+
+```
+special_jv_templates/_engine/jv-core-1.0.0.js    the compute core — no DOM, and it compiles nothing
+special_jv_templates/_engine/jv-page-1.0.0.js    the handshake + the DOM, using TCH.html's own hooks
+special_jv_templates/_engine/jv-page-1.0.0.css   TCH's look
+special_jv_templates/EXAMPLE_TCH.html            the worked example: a page with NO script of its own
+```
+
+* The maths lives in a new `jvSpec` block inside `special_jv_mapping/<REF>.json`
+  (every key that was there keeps its exact meaning). `special_jv_mapping/TCH.json`
+  carries TCH's own maths in that form, as the example to copy — and
+  `special_jv_templates/TCH.html` is **untouched** and still ignores it: a
+  hand-written calculator keeps working exactly as §6.1–§6.6 describe.
+* A generated page is a shell: a title, a stylesheet link, a mount `<div>`, an
+  inert `<script type="application/json">` copy of its own mapping, and two
+  `<script src>` tags. No inline script, no `on*` attribute. That is the point:
+  "a colleague added a JV" stops meaning "a colleague put new executable code
+  on the shared folder".
+* Amounts are a closed grammar (`JVCore.Expr`: `+ - * / ( )`,
+  `abs min max round round2 neg ifpos ifneg`, and names the spec itself
+  declares). Nothing a user types is ever compiled, division by zero refuses
+  instead of posting a silent zero, and a spec that is malformed or from a
+  newer Reco draws a panel listing every reason and posts nothing.
+* `apps/Reco.html` MODULE 2d carries the three files verbatim as inert text
+  islands and runs the core from the first one, so the creator's preview and
+  the calculator page cannot drift, and the creator can seed `_engine/` on a
+  share that has never had it (`init_skeleton` copies no app files).
+* Tests: `tests/e2e/run_jv_core_unit.mjs` (no browser) and
+  `tests/e2e/run_jv_engine_e2e.mjs`, which drives `EXAMPLE_TCH` through the
+  real Reco with `run_e2e.mjs`'s four rows and asserts it produces TCH's eight
+  lines byte for byte.
+
+The creator UI that writes these files is not built yet; today a developer adds
+a spec-driven JV by writing one JSON file and copying the shell.
+
 ---
 
 ## 6a. Filters and custom reports — what an operator means
@@ -446,11 +486,16 @@ kind (text, `isDate`, `isValue`, computed extra, master lookup, free tag,
 
 ## 8. Adding a new Special JV — checklist
 
+This is the hand-written route, and it stays supported. Before taking it, read
+§6.7: if the JV's maths is "classify the rows, total them per section, post a
+few Dr/Cr pairs", it can be a `jvSpec` block plus a copy of the generated
+shell, with no new JavaScript on the shared folder at all.
+
 1. Write `special_jv_templates/<REF>.html`. Read `window.parent._specialJvInputs / _specialJvDef / _specialJvRef` inside `try`; if that throws, post `{type:'specialJV.ready', ref:'<REF>'}` and wait for `{type:'specialJV.init', inputs, def, ref}` (copy the pattern from TCH.html §0 and §10).
 2. On submit post `{type:'specialJV.complete', ref, jvId, lines, primaryKeys, inputData, meta?}`; on cancel post `{type:'specialJV.cancel', ref}`.
 3. Write `special_jv_mapping/<REF>.json` with `ref` exactly matching the HTML stem, a `displayName`, and every input column the calculator needs.
 4. Reopen Reco (the registry loads at boot). The ref appears in the To Account dropdown and on Home.
-5. Emit lines with the AEG output column names, amounts as 2-dp strings, balanced per currency — Reco does not re-validate.
+5. Emit lines with the AEG output column names and amounts as 2-dp strings, one side per line, balanced per currency. `SpecialJV.checkLines` now refuses a set that does not balance (per currency, to the cent), a line with both sides or neither, a negative or non-numeric amount, and a blank currency beside lines that have one — at arrival, in the preview and at commit. A JV may also only report primary keys Reco actually handed it.
 
 ---
 

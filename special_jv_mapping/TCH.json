@@ -15,5 +15,151 @@
     "subNominal": "0",
     "analysisKey": "0",
     "lob": "51"
+  },
+  "jvSpec": {
+    "_comment": [
+      "TCH's maths written as data, for the generic engine in",
+      "special_jv_templates/_engine/. special_jv_templates/TCH.html is a",
+      "HAND-WRITTEN calculator and still reads this file for its account codes",
+      "and its input columns only: it ignores this block entirely, and nothing",
+      "here changes what it does. The block is here as the worked example the",
+      "JV creator copies from ('Start from TCH'), and as the spec the engine",
+      "tests measure themselves against.",
+      "columns[].accept is deliberately empty: Reco sends a JV only the columns",
+      "listed in inputColumns above, so every accepted spelling would have to be",
+      "listed there too — which would widen TCH.html's own rows table and report",
+      "the extra names as missing. TCH.html keeps its own alias list internally."
+    ],
+    "specVersion": 1,
+    "title": "TCH JV — Cross Currency Adjustment & TCH Charges",
+    "sectionNoun": "TCH",
+    "columns": [
+      { "id": "date",     "label": "Date",      "type": "date",   "role": "date" },
+      { "id": "txn",      "label": "Txn Type",  "type": "text",   "normalize": ["trim", "upper"] },
+      { "id": "currency", "label": "Currency",  "type": "text",   "normalize": ["trim", "upper"], "role": "currency" },
+      { "id": "amount",   "label": "FC Amount", "type": "number", "role": "amount" }
+    ],
+    "kinds": [
+      { "id": "rapid", "label": "RAPID", "style": "blue" },
+      { "id": "of",    "label": "OF",    "style": "amber" }
+    ],
+    "classify": {
+      "rules": [
+        { "id": "r1", "kind": "@skip", "reason": "no Txn Type",
+          "all": [ { "col": "txn", "op": "empty" } ] },
+        { "id": "r2", "kind": "rapid",
+          "all": [ { "col": "txn", "op": "equals", "val": "RAPID" },
+                   { "col": "currency", "op": "in_list", "val": "RUB,USD,EUR" } ] },
+        { "id": "r3", "kind": "@skip", "reason": "RAPID in {currency|no currency}",
+          "all": [ { "col": "txn", "op": "equals", "val": "RAPID" } ] },
+        { "id": "r4", "kind": "of",
+          "all": [ { "col": "txn", "op": "starts_with", "val": "OF" },
+                   { "col": "currency", "op": "equals", "val": "RUB" } ] },
+        { "id": "r5", "kind": "@skip", "reason": "OF in {currency|no currency} (only RUB is used)",
+          "all": [ { "col": "txn", "op": "starts_with", "val": "OF" } ] }
+      ],
+      "fallbackReason": "Txn Type {txn}"
+    },
+    "sections": {
+      "mode": "manual",
+      "startWith": 1,
+      "addLabel": "+ Add TCH Section",
+      "title": "TCH {n}",
+      "token": "T{n}",
+      "recoFrom": { "field": "recoCode", "default": "TCH{n}" },
+      "presets": {
+        "kind": "dateSlots", "label": "Range Preset", "column": "date",
+        "slots": [ { "label": "1-10",      "start": 1,  "end": 10 },
+                   { "label": "11-20",     "start": 11, "end": 20 },
+                   { "label": "21-{eom}",  "start": 21, "end": "eom" } ],
+        "writes": { "from": "periodFrom", "to": "periodTo" },
+        "valueFormat": "MM/DD/YY",
+        "optionLabel": "{slot} {MMM} {YYYY}"
+      },
+      "autoAssign": {
+        "kind": "dateInRange", "column": "date", "from": "periodFrom", "to": "periodTo",
+        "label": "Auto-assign by period",
+        "noRangeMessage": "Set a valid period (or pick a Range Preset) on at least one TCH section first.",
+        "noDateMessage": "{n} row(s) have no readable date and were left as they were."
+      },
+      "assignAll": true
+    },
+    "fields": [
+      { "id": "periodFrom", "label": "Period From (MM/DD/YY)", "type": "period", "group": "@head", "placeholder": "MM/DD/YY", "clearsPreset": true },
+      { "id": "periodTo",   "label": "Period To (MM/DD/YY)",   "type": "period", "group": "@head", "placeholder": "MM/DD/YY", "clearsPreset": true },
+      { "id": "recoCode",   "label": "Reco Code",              "type": "text",   "group": "@head", "placeholder": "TCH{n}" },
+      { "id": "rubEqUsd",   "label": "RUB Eq for USD",   "type": "amount", "group": "Sale Data — manual entry" },
+      { "id": "rubEqEur",   "label": "RUB Eq for EUR",   "type": "amount", "group": "Sale Data — manual entry" },
+      { "id": "rubNo21",    "label": "RUB (no 2.1)",     "type": "amount", "group": "Sale Data — manual entry", "memoOnly": true },
+      { "id": "rubTotal",   "label": "RUB Total (no 2)", "type": "amount", "group": "Sale Data — manual entry", "memoOnly": true },
+      { "id": "tchCharges", "label": "TCH Charges",      "type": "amount", "group": "Sale Data — manual entry", "memoOnly": true }
+    ],
+    "aggregates": [
+      { "id": "rapid_RUB", "label": "RUB", "fn": "sum", "of": "amount",
+        "where": [ { "kind": "rapid" }, { "col": "currency", "op": "equals", "val": "RUB" } ],
+        "group": "Rapid (net Dr) — auto from rows" },
+      { "id": "rapid_USD", "label": "USD", "fn": "sum", "of": "amount",
+        "where": [ { "kind": "rapid" }, { "col": "currency", "op": "equals", "val": "USD" } ],
+        "group": "Rapid (net Dr) — auto from rows" },
+      { "id": "rapid_EUR", "label": "EUR", "fn": "sum", "of": "amount",
+        "where": [ { "kind": "rapid" }, { "col": "currency", "op": "equals", "val": "EUR" } ],
+        "group": "Rapid (net Dr) — auto from rows" },
+      { "id": "of_RUB",    "label": "RUB", "fn": "sum", "of": "amount",
+        "where": [ { "kind": "of" }, { "col": "currency", "op": "equals", "val": "RUB" } ],
+        "group": "OF (net Cr) — auto" }
+    ],
+    "slots": [
+      { "id": "clearing", "label": "TCH clearing",              "short": "clearing" },
+      { "id": "crossCcy", "label": "Cross-currency adjustment", "short": "cross-ccy" },
+      { "id": "charges",  "label": "BSP TCH charges (expense)", "short": "charges" }
+    ],
+    "remarks": {
+      "ranges": {
+        "range": { "from": "periodFrom", "to": "periodTo",
+                   "pattern": "{from:DD MMM} - {to:DD MMM YY}", "invalid": "<period>" }
+      },
+      "templates": {
+        "ccAdj": "Cross Currency Adjustment Entry for {range}",
+        "bsp":   "BSP TCH Charges for {range}"
+      }
+    },
+    "entryDefaults": { "round": 2, "minAbs": 0.01, "swapOnNegative": true },
+    "entries": [
+      { "id": "e1", "label": "Cross Currency Adjustment (RUB)",
+        "amount": "rubEqUsd + rubEqEur", "dr": "clearing", "cr": "crossCcy", "cur": "RUB", "remark": "ccAdj" },
+      { "id": "e2", "label": "Cross Currency Adjustment USD",
+        "amount": "rapid_USD", "dr": "crossCcy", "cr": "clearing", "cur": "USD", "remark": "ccAdj" },
+      { "id": "e3", "label": "Cross Currency Adjustment EUR",
+        "amount": "rapid_EUR", "dr": "crossCcy", "cr": "clearing", "cur": "EUR", "remark": "ccAdj" },
+      { "id": "e4", "label": "BSP TCH Charges",
+        "amount": "-(of_RUB + rubEqUsd + rubEqEur + rapid_RUB)", "dr": "charges", "cr": "clearing", "cur": "RUB", "remark": "bsp" }
+    ],
+    "validate": [
+      { "kind": "fieldValid", "fields": ["periodFrom", "periodTo"], "level": "block",
+        "message": "{section}: Period From / To is missing or invalid.\nUse a Range Preset or type MM/DD/YY." },
+      { "kind": "fieldOrder", "from": "periodFrom", "to": "periodTo", "level": "block",
+        "message": "{section}: Period From is after Period To." },
+      { "kind": "fieldEmpty", "field": "recoCode", "level": "confirm",
+        "message": "Reco Code is empty for {list}. Continue? (the Reco field defaults to \"TCH<n>\")" },
+      { "kind": "unassignedRows", "level": "confirm",
+        "message": "{n} RAPID/OF row(s) are not assigned to any TCH section. They are not included in this JV and stay open in Reco. Continue?" },
+      { "kind": "noLines", "level": "block",
+        "message": "No accounting lines to post — every entry computes to zero. Did you forget to assign rows or enter Sale Data?" },
+      { "kind": "balancePerCurrency", "tolerance": 0.01, "level": "block",
+        "message": "Currency {cur} is not balanced: Dr {dr} vs Cr {cr}. Aborting." }
+    ],
+    "layout": {
+      "rowsTable": { "assignColumn": "TCH", "noteColumn": true },
+      "sectionTable": { "groups": ["Rapid (net Dr) — auto from rows", "OF (net Cr) — auto", "Sale Data — manual entry"] }
+    }
+  },
+  "audit": {
+    "_comment": "TCH is the reference JV: its PAGE is hand-written and must never be overwritten by the creator. Only the jvSpec above may be copied to a new ref.",
+    "builtBy": "hand",
+    "handWrittenPage": true,
+    "engine": null,
+    "rev": 0,
+    "retired": false,
+    "handEdited": false
   }
 }

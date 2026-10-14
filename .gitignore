@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 launcher_config.json
 webview_storage/
+
+# Agent worktrees created inside the checkout by background workflows
+.claude/worktrees/

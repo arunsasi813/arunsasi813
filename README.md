@@ -34,12 +34,16 @@ In a template's Reco view, **📗 Edit in Excel** writes the rows to a real Exce
 
 ```bash
 python -m pytest tests/                 # launcher bridge, migration engine, Excel link engine
+node tests/e2e/run_jv_core_unit.mjs     # the Special JV engine with no browser: TCH's figures, the formula parser, validateSpec
 node tests/e2e/run_e2e.mjs              # Reco, TCH and the hub in Chromium against the real bridge
 node tests/e2e/run_xllink_e2e.mjs       # Edit in Excel → edit (openpyxl) → Load back → review → apply
 node tests/e2e/run_xlview_e2e.mjs       # the in-app Excel view (jspreadsheet CE 5, from tests/e2e/vendor)
 node tests/e2e/run_reports_e2e.mjs      # custom reports: what a filter means per column kind, cards, totals, CSV, 200k rows
 node tests/e2e/run_grid_scale_e2e.mjs   # the grid on a 200k-row extract: slicers, surgical updates, progress, navigation, sort order
+node tests/e2e/run_specialjv_e2e.mjs    # Special JV safety: balance at arrival/preview/commit, posted-JV tracking, ref validation
+node tests/e2e/run_jv_engine_e2e.mjs    # a generated, data-only JV page driven through the real Reco — the lines TCH produces
 ```
 
-Run them one at a time — each binds fixed ports. All six must pass: 72 pytest
-cases and 73 + 63 + 92 + 100 + 97 end-to-end checks.
+Run them one at a time — each binds fixed ports (`run_jv_core_unit.mjs` needs
+neither a port nor a browser, and takes about a second). All nine must pass:
+75 pytest cases (1 skipped) and 176 + 73 + 63 + 92 + 107 + 99 + 81 + 49 checks.
