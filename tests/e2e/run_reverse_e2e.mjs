@@ -308,10 +308,10 @@ const stateOf = (page, id, aid) => page.evaluate(([id, aid]) => {
 const browser = await chromium.launch();
 const procs = [];
 const watchdog = setTimeout(() => {
-  console.error('\nWATCHDOG: reverse e2e exceeded 8 minutes; last check: ' + (passes + failures));
+  console.error('\nWATCHDOG: reverse e2e exceeded 25 minutes; last check: ' + (passes + failures));
   procs.forEach(p => p.kill());
   process.exit(2);
-}, 480000);
+}, 1500000);
 const killAll = () => procs.forEach(p => { try { p.kill(); } catch (e) {} });
 process.on('exit', killAll);
 ['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, () => { killAll(); process.exit(130); }));
@@ -581,30 +581,114 @@ try {
   check(shareHistory(root4)[t4.id].every(e => !e.reversal), 'and entryHistory.json was not rewritten');
   check(s4.dnm.D1 === a4, 'the document numbers were not freed either', s4.dnm);
 
-  // (b) the write lands but cannot be read back — the silent-loss case
+  /* (b) THE REBASE READ FAILS. Verified finding: Versioning.changesSince
+     could not read the share, the catch turned that into an empty Map, and the
+     un-stamp wrote this session's stale snapshot over the share - reverting a
+     colleague's edit to another column - on the path the app then reported as
+     "the reversal was not recorded", so there was no trace of the loss
+     anywhere. readFile without `strict` RETURNS [] on a failed read, so
+     nothing even threw: the fix is a strict read AND a refusal before any
+     write. */
+  await fault(B4, { append_csv_rows: false });
+  const colleague4 = await page.evaluate(([id]) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const row = AppState.recoSessions[id].data.find(r => r.Doc === 'D1');
+    return Versioning.appendChangesBatch(tpl, [{ pk: 'D1', row: Object.assign({}, row, { ToAccount: 'COLLEAGUE4' }) }],
+      { _src: 'grid', _by: 'a.colleague' });
+  }, [t4.id]);
+  check(!!colleague4 && (rowsFor(file4, 'D1').slice(-1)[0] || {}).ToAccount === 'COLLEAGUE4',
+    'a colleague edits another column of a key this entry closed, on the share',
+    rowsFor(file4, 'D1').map(r => r._ver + '/' + r.ToAccount));
+  const nRebase = csvRows(file4).length;
   await fault(B4, { append_csv_rows: false, read_file: true });
   await openReverse(page, t4.id, a4);
+  const f4r = await runReverse(page, 'cancelled', 'the rebase read fails');
+  await fault(B4, { read_file: false });
+  const s4r = await stateOf(page, t4.id, a4);
+  check(/not recorded/i.test(f4r.after.title) && /cannot be rebased onto it/.test(f4r.after.body)
+    && /nothing was written/.test(f4r.after.body),
+    'a failed rebase read is a refusal that says nothing was written, not a silent overwrite', f4r.after);
+  check(csvRows(file4).length === nRebase,
+    'and not one Cn row was written — the un-stamp never became the overwrite the rebase exists to prevent',
+    csvRows(file4).length - nRebase);
+  check((rowsFor(file4, 'D1').slice(-1)[0] || {}).ToAccount === 'COLLEAGUE4',
+    'so the colleague\'s edit is still the last word for that key on the share',
+    rowsFor(file4, 'D1').map(r => r._ver + '/' + r.ToAccount));
+  check(!s4r.hasReversal, 'and the entry was not marked', s4r.reversal);
+
+  /* (c) the write lands but cannot be read back — the silent-loss case. The
+     share going away BETWEEN the write and the read-back is a state the
+     bridge's one read_file flag cannot express now that the rebase read is
+     strict, so the second changesSince call is made to fail on the real
+     function; everything else is the real path. */
+  await page.evaluate(() => {
+    const real = Versioning.changesSince.bind(Versioning);
+    window._csReal = Versioning.changesSince;
+    let n = 0;
+    Versioning.changesSince = async function (...a) {
+      n++;
+      if (n >= 2) throw new Error('injected fault: the share went away before the read-back');
+      return real(...a);
+    };
+  });
+  await openReverse(page, t4.id, a4);
   const f4b = await runReverse(page, 'cancelled', 'entered twice');
+  await page.evaluate(() => { Versioning.changesSince = window._csReal; });
   const s4b = await stateOf(page, t4.id, a4);
   check(/not recorded/i.test(f4b.after.title) && /could not be read back/.test(f4b.after.body),
     'when the write cannot be confirmed off the share the user is told that instead', f4b.after);
   check(!s4b.hasReversal,
     'the entry is still NOT marked — "marked reversed while the rows still read posted" is the one state to avoid',
     s4b.reversal);
-  check(csvRows(file4).length > before4 && (rowsFor(file4, 'D1').slice(-1)[0] || {}).Status === '',
+  check(csvRows(file4).length > nRebase && (rowsFor(file4, 'D1').slice(-1)[0] || {}).Status === '',
     'the rows themselves were released, which is the recoverable direction', rowsFor(file4, 'D1').map(r => r._ver));
-  await fault(B4, { read_file: false });
-  // (c) and a retry once the share is healthy completes, writing nothing twice
+  check((rowsFor(file4, 'D1').slice(-1)[0] || {}).ToAccount === 'COLLEAGUE4',
+    'and the un-stamp carried the colleague\'s value forward into its own Cn row',
+    rowsFor(file4, 'D1').map(r => r._ver + '/' + r.ToAccount));
+
+  /* (d) and the retry the dialog itself recommends. Verified finding: the
+     record it wrote was wrong in three ways and BLAMED A COLLEAGUE for the
+     app's own write ninety seconds earlier - unstamped: [], unstampedSkipped
+     reading 'somebody changed it after this entry', a Comment linked to no
+     row, and a banner reporting "0 row(s) released" for a reversal that
+     released every row. */
   await resetLog(B4);
-  await openReverse(page, t4.id, a4);
+  const nRetry = csvRows(file4).length;
+  const seen4d = await openReverse(page, t4.id, a4);
+  check(/already read the value this reversal would put back/.test(seen4d.body)
+    && !/somebody changed it after this entry/.test(seen4d.body),
+    'the dialog on the retry says the rows already read the value, instead of accusing a colleague',
+    seen4d.body.slice(0, 1200));
   await runReverse(page, 'cancelled', 'entered twice');
   const s4c = await stateOf(page, t4.id, a4);
   check(s4c.reversal && rv(s4c).mode === 'cancelled',
     'the retry records the reversal', s4c.reversal && rv(s4c).mode);
+  check(csvRows(file4).length === nRetry,
+    'and writes nothing twice — not one further Cn row', csvRows(file4).length - nRetry);
   check((rv(s4c).unstamped || []).length === 0
-    && (rv(s4c).unstampedSkipped || []).length === 2,
-    'and writes nothing twice: the rows already read blank, so both keys are skipped, not re-written',
-    { un: rv(s4c).unstamped, sk: rv(s4c).unstampedSkipped });
+    && (rv(s4c).unstampedSkipped || []).length === 0
+    && (rv(s4c).alreadyUnstamped || []).map(a => a.pk).slice().sort().join() === 'D1,D2',
+    'the record blames nobody: both keys are recorded as already released, not as somebody else\'s change',
+    { un: rv(s4c).unstamped, sk: rv(s4c).unstampedSkipped, au: rv(s4c).alreadyUnstamped });
+  check((rv(s4c).alreadyUnstamped || []).every(a => a.by === 'this reversal'
+          && /earlier attempt of this reversal/.test(a.why || '')),
+    'and names what really did it — the share\'s own Cn row carries _src reverse:<this id>',
+    rv(s4c).alreadyUnstamped);
+  const cmt4 = s4c.comments.find(c => /cancelled/.test(c.text)) || {};
+  check((cmt4.pks || []).slice().sort().join() === 'D1,D2',
+    'and each row\'s Timeline carries the reversal, which it could not when the key list came from un.unstamped '
+    + 'alone', s4c.comments);
+  const banner4 = await page.evaluate(([id, aid]) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const e = (AppState.entryHistory[id] || []).find(x => x.accountingId === aid);
+    const d = document.createElement('div');
+    d.innerHTML = Reco.renderEntryDetailInline(tpl, e);
+    return d.textContent;
+  }, [t4.id, a4]);
+  check(/2 row\(s\) released on the shared history/.test(banner4)
+    && /by an earlier attempt of this reversal/.test(banner4),
+    'and the entry banner reports 2 released, not 0, for a reversal that released two rows',
+    banner4.slice(0, 500));
   const used4 = (await callLog(B4)).calls.map(c => c.method).filter((m, i, a) => a.indexOf(m) === i).sort();
   check(used4.every(m => ['read_file', 'write_file', 'append_csv_rows', 'list_directories', 'list_files',
     'list_folder_files', 'save_template', 'delete_template', 'current_username', 'load_master',
@@ -1051,20 +1135,62 @@ try {
   const seenM = await switchMode(page, 'reversed');
   check(/malformed/.test(seenM.body) && /carries neither a debit nor a credit/.test(seenM.body),
     'the dialog names the malformed line', seenM.body.slice(0, 800));
-  check(/no way to force past it/.test(seenM.body) && !/does not balance/.test(seenM.body),
-    'and offers no force, and does not call it a balance difference');
-  const rM = await runReverse(page, 'reversed', 'try to mirror a malformed entry');
-  check(rM.btn.disabled, 'the Reverse button stays disabled for it', rM.btn);
-  check(/cannot be posted/.test(rM.after.title), 'and calling the commit anyway refuses', rM.after.title);
-  const sM = await stateOf(page, t9.id, aM);
-  check(!sM.hasReversal && sM.status.D1 === 'Posted', 'nothing was written', sM.status);
-  // ... but a CANCEL of the same entry is still allowed: no lines are built.
+  /* Verified finding: this used to be a flat refusal — "there is no way to
+     force past it — correct the entry at source". A GENERATED entry has no
+     source to correct, and the refusal left CANCEL ("it never reached the
+     general ledger") as the only working action on an entry that may well be
+     in the ledger. Every shape rule in checkLines is swap-invariant, so the
+     mirror reproduces the defect exactly rather than inventing one, and the
+     refusal had no arithmetic behind it. It is a forced confirmation now. */
+  check(/one more confirmation/.test(seenM.body) && !/no way to force past it/.test(seenM.body)
+    && !/does not balance/.test(seenM.body),
+    'and offers the force it never had a reason to withhold, without calling it a balance difference',
+    seenM.body.slice(0, 1000));
+  const rM = await runReverse(page, 'reversed', 'mirror a malformed entry', { refuseConfirm: true });
+  check(!rM.btn.disabled, 'and the Reverse button is live once a reason is typed, where it used to stay disabled',
+    rM.btn);
+  const sM0 = await stateOf(page, t9.id, aM);
+  check(!sM0.hasReversal && !sM0.reversing && sM0.status.D1 === 'Posted',
+    'declining the confirmation writes nothing at all', { rev: sM0.reversal, mirror: !!sM0.reversing });
   await openReverse(page, t9.id, aM);
+  await runReverse(page, 'reversed', 'mirror a malformed entry');
+  await sleep(500);
+  await page.evaluate(() => App.closeModal());
+  const sM = await stateOf(page, t9.id, aM);
+  check(sM.reversal && rv(sM).mode === 'reversed' && rv(sM).linesMalformed === true,
+    'accepting it posts the mirror and records linesMalformed on the original',
+    { mode: sM.reversal && rv(sM).mode, mal: rv(sM).linesMalformed });
+  check(sM.reversing && sM.reversing.linesMalformed === true,
+    'and on the mirror, so neither record pretends the lines were well formed', !!sM.reversing);
+  /* The whole point of allowing it: the mirror must reproduce the defect, not
+     invent a different one. */
+  const defect = await page.evaluate(([id, aid]) => {
+    const hist = AppState.entryHistory[id] || [];
+    const o = hist.find(e => e.accountingId === aid), n = hist.find(e => e.reverses === aid);
+    const lc = { dr: 'Dr', cr: 'Cr', cur: 'Cur' };
+    const v = (l, c) => { const x = l[c]; return (x && typeof x === 'object') ? (x.value || '') : (x == null ? '' : x); };
+    const oc = Reco._reverseChk(o.lines, lc), nc = Reco._reverseChk(n.lines, lc);
+    return { same: o.lines.length === n.lines.length,
+      swapped: o.lines.every((l, i) => v(n.lines[i], 'Dr') === v(l, 'Cr') && v(n.lines[i], 'Cr') === v(l, 'Dr')),
+      oShape: oc.shape, nShape: nc.shape, oBal: oc.bal, nBal: nc.bal };
+  }, [t9.id, aM]);
+  check(defect.same && defect.swapped && defect.oShape === defect.nShape && defect.oBal === defect.nBal
+    && defect.oShape > 0,
+    'the mirror carries the SAME defect as the original, cell for cell — which is what undoing a posted entry '
+    + 'means, and why the refusal had no arithmetic behind it', defect);
+  // ... and a CANCEL of a malformed entry was always open, and still is.
+  const aM2 = await genEntry(page, t9.id, ['D4']);
+  await page.evaluate(([id, aid]) => {
+    const e = (AppState.entryHistory[id] || []).find(x => x.accountingId === aid);
+    e.lines.push({ Reference: 'ACC1', RC: '100', Nominal: '1', SubNominal: '0', 'Analysis Key': '0', LOB: '51',
+                   Cur: 'AED', Reco: '', Dr: '', Cr: '', Doc: 'D4', Desc: 'zero-net exchange leg' });
+  }, [t9.id, aM2]);
+  await openReverse(page, t9.id, aM2);
   const rM2 = await runReverse(page, 'cancelled', 'cancel it instead');
-  check(!rM2.btn.disabled, 'cancel is still open to the user — a malformed line only blocks the mirror', rM2.btn);
-  const sM2 = await stateOf(page, t9.id, aM);
-  check(sM2.reversal && rv(sM2).mode === 'cancelled' && sM2.status.D1 === '',
-    'and it goes through', { mode: sM2.reversal && rv(sM2).mode, st: sM2.status.D1 });
+  check(!rM2.btn.disabled, 'cancel is open to the user too — a malformed line never blocked that', rM2.btn);
+  const sM2 = await stateOf(page, t9.id, aM2);
+  check(sM2.reversal && rv(sM2).mode === 'cancelled' && sM2.status.D4 === '',
+    'and it goes through', { mode: sM2.reversal && rv(sM2).mode, st: sM2.status.D4 });
 
   /* (iii) genuinely UNBALANCED: the one case that gets a forced confirmation. */
   const aU = await genEntry(page, t9.id, ['D2']);
@@ -1283,6 +1409,695 @@ try {
   check((rowsFor(file13b, 'D1').slice(-1)[0] || {}).Status === '',
     'and the reversal\'s Cn is the last word for that key on the share',
     rowsFor(file13b, 'D1').map(r => r._ver + '=' + r.Status));
+  check(errors.length === 0, 'no JavaScript errors', errors);
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[14] The mode inference is part of the conflict signature');
+  /* Verified finding, and it broke a promise made in writing. The dialog
+     pre-selects CANCEL from "no accounting reference is recorded", states that
+     inference in words, and the pre-write share re-read then checked
+     everything EXCEPT that one fact: _reversePlanSig carried `dn:
+     plan.freeDocs`, derived from the LOCAL docNumberMaster, and nothing
+     derived from entry.docNumbers, plan.docs or plan.defaultMode. So A opens
+     the dialog on an unallocated entry, colleague B allocates a GL voucher to
+     it, A presses Cancel, and the entry is cancelled on the strength of a fact
+     that stopped being true while the dialog was open. DECISIONS.md: never
+     cancel a posted entry silently on the strength of a blank field. */
+  const rootA = makeRoot('rootA');
+  const BA = await startBridge(rootA, 19960, ['--jv-port', '19961']); procs.push(BA.proc);
+  await ctx.close();
+  ({ page, errors, ctx } = await openReco(browser, BA));
+  const tA = await createTemplate(page, 'Mode Sig', ROWS);
+  const fileA = dayFile(rootA, tA.folder);
+  const aA = await genEntry(page, tA.id, ['D1', 'D2']);
+  const seenA = await openReverse(page, tA.id, aA);
+  check(/No accounting reference is recorded/.test(seenA.body) && seenA.mode === 'cancelled',
+    'the dialog pre-selects CANCEL and states that inference in words', { mode: seenA.mode });
+  const beforeA = csvRows(fileA).length;
+  // colleague B, on another PC, allocates a GL voucher to the same entry
+  await page.evaluate(([id, aid]) => {
+    const p = 'reco/entryHistory.json';
+    return window.pywebview.api.read_file(p).then(txt => {
+      const base = JSON.parse(txt || '{}');
+      (base[id] || []).forEach(e => { if (e.accountingId === aid) e.docNumbers = { AED: 'JV-5001' }; });
+      return window.pywebview.api.write_file(p, JSON.stringify(base, null, 2));
+    });
+  }, [tA.id, aA]);
+  const rA = await runReverse(page, 'cancelled', 'cancel on a blank field');
+  const sA = await stateOf(page, tA.id, aA);
+  check(/shared record disagrees/i.test(rA.after.title),
+    'the pre-write share re-read refuses, because plan.docs and plan.defaultMode are in the signature now',
+    rA.after.title);
+  check(!sA.hasReversal,
+    'the entry is NOT cancelled on the strength of a blank field that stopped being blank', sA.reversal);
+  check(csvRows(fileA).length === beforeA && sA.status.D1 === 'Posted' && sA.status.D2 === 'Posted',
+    'and not one row was released — the rows are exactly as they were',
+    { rows: csvRows(fileA).length - beforeA, st: sA.status });
+  const seenA2 = await openReverse(page, tA.id, aA);
+  check(/AED JV-5001/.test(seenA2.body) && seenA2.mode === 'reversed',
+    'pressing Reverse again shows the current picture: the voucher is quoted and REVERSE is pre-selected',
+    { mode: seenA2.mode, body: seenA2.body.slice(0, 260) });
+  /* And the two directions of the inference made explicit, rather than left to
+     one signature term: overriding the pre-selected mode is asked outright. */
+  const rA2 = await runReverse(page, 'cancelled', 'cancel a posted entry', { refuseConfirm: true });
+  const sA2 = await stateOf(page, tA.id, aA);
+  check(!sA2.hasReversal && !rA2.btn.disabled,
+    'cancelling an entry that HAS an accounting reference takes its own confirmation, naming the voucher',
+    sA2.reversal);
+  await openReverse(page, tA.id, aA);
+  await runReverse(page, 'reversed', 'post the contra');
+  await sleep(500);
+  await page.evaluate(() => App.closeModal());
+  const sA3 = await stateOf(page, tA.id, aA);
+  check(sA3.reversal && rv(sA3).mode === 'reversed'
+    && ((rv(sA3).evidence || {}).docNumbers || {}).AED === 'JV-5001',
+    'and the reversal that does go through records the voucher it was decided on, so the record cannot '
+    + 'contradict itself', rv(sA3).evidence);
+  const aA4 = await genEntry(page, tA.id, ['D3']);
+  await openReverse(page, tA.id, aA4);
+  const rA4 = await runReverse(page, 'reversed', 'contra an unposted entry', { refuseConfirm: true });
+  const sA4 = await stateOf(page, tA.id, aA4);
+  check(!sA4.hasReversal && !sA4.reversing && !rA4.btn.disabled,
+    'and posting a reversal of an entry with NO accounting reference takes its own confirmation — the other '
+    + 'direction of the same inference', { rev: sA4.reversal, mirror: !!sA4.reversing });
+  check(errors.length === 0, 'no JavaScript errors', errors);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[15] The entryHistory write window: a colleague inside it is not dropped');
+  /* Verified finding. entryHistory.json is whole-file last-writer-wins, and
+     the un-stamp between step 3's read and step 10's write is the longest
+     write window in this app: 900 ms per read on a share, 14 s for 200,000
+     keys, over 100 s end to end. A colleague who generated an entry inside it
+     had it dropped by this write, while their row kept its Posted stamp — a
+     closed row with no accounting record behind it. The colleague's write is
+     made from inside the un-stamp here, which is exactly when it was lost. */
+  const tB = await createTemplate(page, 'Write Window', ROWS);
+  const aB = await genEntry(page, tB.id, ['D1', 'D2']);
+  const hookUnstamp = (fn) => page.evaluate(([src]) => {
+    const real = Reco._reverseUnstamp.bind(Reco);
+    window._unReal = Reco._reverseUnstamp;
+    const during = new Function('return ' + src)();
+    Reco._reverseUnstamp = async function (...a) {
+      const out = await real(...a);
+      await during();
+      return out;
+    };
+  }, [fn]);
+  const unhookUnstamp = () => page.evaluate(() => { Reco._reverseUnstamp = window._unReal; });
+  await hookUnstamp(`async function () {
+    const p = 'reco/entryHistory.json';
+    const base = JSON.parse((await window.pywebview.api.read_file(p)) || '{}');
+    const id = AppState.activeRecoId;
+    base[id] = base[id] || [];
+    base[id].push({ accountingId: 'AECOLLEAGUE', lines: [], sourceRowIds: [], specialJvIds: [], specialJvs: [],
+      postedPks: ['D6'], createdAt: '14/10/2026, 11:00:00', createdBy: 'a.colleague', docNumbers: {} });
+    await window.pywebview.api.write_file(p, JSON.stringify(base, null, 2));
+  }`);
+  await openReverse(page, tB.id, aB);
+  await runReverse(page, 'cancelled', 'colleague generates during the un-stamp');
+  await unhookUnstamp();
+  const histB = shareHistory(rootA)[tB.id] || [];
+  check(histB.some(e => e.accountingId === 'AECOLLEAGUE'),
+    'the colleague\'s entry is still on the share — the re-read and re-merge happen immediately BEFORE the '
+    + 'write, not before the un-stamp', histB.map(e => e.accountingId));
+  check(((histB.find(e => e.accountingId === aB) || {}).reversal || {}).mode === 'cancelled',
+    'and this reversal is recorded on the same file', histB.map(e => e.accountingId + ':' + !!e.reversal));
+
+  /* The same re-read is what stops two people minting two mirrors for one
+     entry: the "already reversed" check now runs AFTER the un-stamp too. */
+  const aB2 = await genEntry(page, tB.id, ['D4']);
+  await hookUnstamp(`async function () {
+    const p = 'reco/entryHistory.json';
+    const base = JSON.parse((await window.pywebview.api.read_file(p)) || '{}');
+    const id = AppState.activeRecoId;
+    (base[id] || []).forEach(e => {
+      if (e.accountingId === window._raceId) e.reversal = { mode: 'reversed', at: '2026-10-14T09:00:00.000Z',
+        by: 'a.colleague', reason: 'got there first', reversalId: 'AETHEIRS', unstamped: ['D4'],
+        unstampedSkipped: [], alreadyUnstamped: [], unstampedSessionOnly: [], notInSession: [] };
+    });
+    await window.pywebview.api.write_file(p, JSON.stringify(base, null, 2));
+  }`);
+  await page.evaluate((aid) => { window._raceId = aid; }, aB2);
+  await openReverse(page, tB.id, aB2);
+  const rB2 = await runReverse(page, 'reversed', 'race to reverse the same entry');
+  await unhookUnstamp();
+  const histB2 = shareHistory(rootA)[tB.id] || [];
+  check(/reversed it first/i.test(rB2.after.title),
+    'a colleague who reversed the same entry inside the window is named, and this reversal stops',
+    rB2.after.title);
+  check(!histB2.some(e => e.reverses === aB2),
+    'so one entry cannot get two mirrors — the dropped-mirror race is closed',
+    histB2.map(e => e.accountingId + '->' + (e.reverses || '')));
+  check(((histB2.find(e => e.accountingId === aB2) || {}).reversal || {}).by === 'a.colleague',
+    'and their record is the one that stands', (histB2.find(e => e.accountingId === aB2) || {}).reversal);
+
+  /* And the mode evidence re-checked at the last possible moment: a voucher
+     that lands DURING the un-stamp must not be cancelled over. */
+  const aB3 = await genEntry(page, tB.id, ['D3']);
+  await hookUnstamp(`async function () {
+    const p = 'reco/entryHistory.json';
+    const base = JSON.parse((await window.pywebview.api.read_file(p)) || '{}');
+    const id = AppState.activeRecoId;
+    (base[id] || []).forEach(e => { if (e.accountingId === window._raceId) e.docNumbers = { AED: 'JV-9999' }; });
+    await window.pywebview.api.write_file(p, JSON.stringify(base, null, 2));
+  }`);
+  await page.evaluate((aid) => { window._raceId = aid; }, aB3);
+  await openReverse(page, tB.id, aB3);
+  const rB3 = await runReverse(page, 'cancelled', 'a voucher lands during the un-stamp');
+  await unhookUnstamp();
+  const histB3 = shareHistory(rootA)[tB.id] || [];
+  check(/accounting reference recorded against/.test(rB3.after.body) && /NOT marked/.test(rB3.after.body),
+    'a voucher that lands during the un-stamp stops the cancel, in the same words', rB3.after.body.slice(0, 400));
+  check(!(histB3.find(e => e.accountingId === aB3) || {}).reversal,
+    'so no record is written that contradicts its own evidence',
+    (histB3.find(e => e.accountingId === aB3) || {}).reversal);
+  check(errors.length === 0, 'no JavaScript errors', errors);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[16] The rebase watermark: an upload must not move it, a legacy session must still rebase');
+  const rootC = makeRoot('rootC');
+  const BC = await startBridge(rootC, 19962, ['--jv-port', '19963']); procs.push(BC.proc);
+  await ctx.close();
+  ({ page, errors, ctx } = await openReco(browser, BC));
+  const tC = await createTemplate(page, 'Watermark', ROWS);
+  const fileC = dayFile(rootC, tC.folder);
+  const extra = (doc) => ([{ Doc: doc, Date: '13/10/2026', 'Txn Type': 'RAPID', Currency: 'USD',
+    'FC Amount': '7', AED: '7', ToAccount: 'ACC1', Status: '' }]);
+  /* Verified finding: ingestData moved sess.loadedAt, so adding today's extra
+     rows to an open session moved the rebase window forward and a colleague's
+     EARLIER edit stopped being seen as theirs — and was reverted, under a
+     success toast, for every key in the entry. loadedAt means "when the rows I
+     HOLD came off the share". */
+  const loaded0 = await page.evaluate(id => AppState.recoSessions[id].loadedAt, tC.id);
+  await sleep(40);
+  await page.evaluate(([id, fields, rows]) => {
+    Reco.ingestData(AppState.recoTemplates.find(x => x.id === id), rows, fields);
+  }, [tC.id, FIELDS, extra('D7')]);
+  await sleep(300);
+  const loaded1 = await page.evaluate(id => AppState.recoSessions[id].loadedAt, tC.id);
+  check(!!loaded0 && loaded1 === loaded0,
+    'adding data to an open session leaves loadedAt alone — the rows already held still date from the earlier '
+    + 'load, and the appended rows have no share history to rebase onto', { before: loaded0, after: loaded1 });
+  const aC = await genEntry(page, tC.id, ['D1', 'D2']);
+  await page.evaluate(([id]) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const row = AppState.recoSessions[id].data.find(r => r.Doc === 'D1');
+    return Versioning.appendChangesBatch(tpl, [{ pk: 'D1', row: Object.assign({}, row, { ToAccount: 'COLLEAGUEC' }) }],
+      { _src: 'grid', _by: 'a.colleague' });
+  }, [tC.id]);
+  await sleep(40);
+  await page.evaluate(([id, fields, rows]) => {
+    Reco.ingestData(AppState.recoTemplates.find(x => x.id === id), rows, fields);
+  }, [tC.id, FIELDS, extra('D8')]);
+  await sleep(300);
+  await openReverse(page, tC.id, aC);
+  await runReverse(page, 'cancelled', 'reverse after an upload into the open session');
+  const lastC = rowsFor(fileC, 'D1').slice(-1)[0] || {};
+  check(lastC._src === 'reverse:' + aC && lastC.Status === '' && lastC.ToAccount === 'COLLEAGUEC',
+    'the un-stamp still rebases onto the colleague\'s earlier edit after an upload — the window did not move',
+    rowsFor(fileC, 'D1').map(r => r._ver + '/' + r._src + '/' + r.ToAccount));
+
+  /* Verified finding: ensureSessionShape sets loadedAt = loadedAt || '', and
+     the rebase was gated on it — so on the day this ships NO session restored
+     from an older build could rebase at all, and every one of them would
+     revert a colleague's edit under a success toast. DECISION: derive a safe
+     watermark from the data file's own day rather than block, because blocking
+     makes a reload (of up to 200,000 rows) the only route to a reversal, and
+     erring EARLY can only read more and pull the share's current record. The
+     block is kept for the residue where nothing can be derived. */
+  const aC2 = await genEntry(page, tC.id, ['D3', 'D4']);
+  await page.evaluate(([id]) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const row = AppState.recoSessions[id].data.find(r => r.Doc === 'D3');
+    return Versioning.appendChangesBatch(tpl, [{ pk: 'D3', row: Object.assign({}, row, { ToAccount: 'LEGACYC' }) }],
+      { _src: 'grid', _by: 'a.colleague' });
+  }, [tC.id]);
+  const legacy = await page.evaluate(([id]) => {
+    const sess = AppState.recoSessions[id];
+    delete sess.loadedAt;
+    Reco.ensureSessionShape(sess);
+    return { loadedAt: sess.loadedAt, file: sess.activeVersionFile || '' };
+  }, [tC.id]);
+  check(legacy.loadedAt === '' && !!legacy.file,
+    'the exact state a recoSessions.json written by an older build restores to', legacy);
+  const seenC = await openReverse(page, tC.id, aC2);
+  check(/rebases onto every change written to the shared history since/.test(seenC.body)
+    && !/cannot be rebased/.test(seenC.body),
+    'the dialog says what it rebases onto instead of warning that it cannot', seenC.body.slice(0, 1400));
+  const derived = await page.evaluate(() => ({ from: Reco._reverseState.plan.rebaseFrom,
+    derived: Reco._reverseState.plan.rebaseDerived, blocked: Reco._reverseState.plan.rebaseBlocked }));
+  check(derived.derived === true && derived.blocked === false && /^\d{4}-\d\d-\d\dT/.test(derived.from),
+    'and a watermark is derived from the data file rather than given up on', derived);
+  await runReverse(page, 'cancelled', 'legacy session reversal');
+  const lastC2 = rowsFor(fileC, 'D3').slice(-1)[0] || {};
+  check(lastC2._src === 'reverse:' + aC2 && lastC2.Status === '' && lastC2.ToAccount === 'LEGACYC',
+    'so a session with no watermark still rebases, and the colleague\'s edit survives instead of being '
+    + 'reverted under a success toast',
+    rowsFor(fileC, 'D3').map(r => r._ver + '/' + r._src + '/' + r.ToAccount));
+  const sC2 = await stateOf(page, tC.id, aC2);
+  check(rv(sC2).rebaseDerived === true && !!rv(sC2).rebaseFrom,
+    'and the record says the watermark was derived, so it is auditable after the fact',
+    { from: rv(sC2).rebaseFrom, derived: rv(sC2).rebaseDerived });
+
+  // and the residue: nothing to derive from either, so the reload is the only route
+  const aC3 = await genEntry(page, tC.id, ['D7']);
+  await page.evaluate(([id]) => {
+    const sess = AppState.recoSessions[id];
+    sess.loadedAt = '';
+    sess._savedVersionFile = sess.activeVersionFile;
+    sess.activeVersionFile = '';
+  }, [tC.id]);
+  const seenC3 = await openReverse(page, tC.id, aC3);
+  check(/cannot be rebased onto the shared history/.test(seenC3.body) && /Reload the data/.test(seenC3.body),
+    'with no watermark and no data file the reversal is refused and the reload is the only route',
+    seenC3.body.slice(0, 700));
+  const nC3 = csvRows(fileC).length;
+  const rC3 = await runReverse(page, 'cancelled', 'no watermark at all');
+  const sC3 = await stateOf(page, tC.id, aC3);
+  check(rC3.btn.disabled, 'the button stays disabled even with a reason typed', rC3.btn);
+  check(/cannot be done/i.test(rC3.after.title) && !sC3.hasReversal,
+    'and calling the commit anyway refuses', { title: rC3.after.title, rev: sC3.reversal });
+  check(csvRows(fileC).length === nC3, 'with nothing written', csvRows(fileC).length - nC3);
+  await page.evaluate(([id]) => {
+    const sess = AppState.recoSessions[id];
+    sess.activeVersionFile = sess._savedVersionFile;
+    sess.loadedAt = new Date().toISOString();
+  }, [tC.id]);
+  check(errors.length === 0, 'no JavaScript errors', errors);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[17] Posted-JV Tracking is reversal-aware, and the exports say so');
+  /* Verified finding: after a cancel, "Special JVs posted" still read 1 and
+     the row still said "Rows posted: 2" with no mark, while JvCreator.inUse
+     correctly read 0 — and a cancel-and-regenerate made the counter 2 for one
+     JV that posted once. _postedAuditIndex pushes into byJv ABOVE the
+     `if (rev) return;` guard, deliberately (a reversed entry's JV did post),
+     but without carrying the reversal onto the row. */
+  const rootD = makeRoot('rootD');
+  const BD = await startBridge(rootD, 19964, ['--jv-port', '19965']); procs.push(BD.proc);
+  await ctx.close();
+  ({ page, errors, ctx } = await openReco(browser, BD));
+  const tD = await createTemplate(page, 'JV Counter', ROWS);
+  const aD = await genEntry(page, tD.id, ['D1', 'D5'], true);
+  const jvCounts = (id) => page.evaluate((id) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    Reco._postedIdxReset();
+    const a = Reco.postedJvAudit(tpl, sess);
+    return { live: a.jvLive, cancelled: a.jvCancelled, reversed: a.jvReversed, rows: a.byJv.length,
+             marks: a.byJv.map(j => (j.reversal && j.reversal.mode) || ''),
+             inUse: JvCreator.inUse('FAKE') };
+  }, id);
+  const jv0 = await jvCounts(tD.id);
+  check(jv0.live === 1 && jv0.cancelled === 0 && jv0.rows === 1,
+    'one Special JV posted, counted once', jv0);
+  await openReverse(page, tD.id, aD);
+  await runReverse(page, 'cancelled', 'cancel the JV entry');
+  const jv1 = await jvCounts(tD.id);
+  check(jv1.live === 0 && jv1.cancelled === 1 && jv1.rows === 1 && jv1.marks.join() === 'cancelled',
+    'after a cancel the counter reads 0, the row keeps its place and carries the reversal — it used to read 1 '
+    + 'while JvCreator.inUse correctly read 0', jv1);
+  const cardD = await page.evaluate(() => {
+    Reco.openPostedJvAuditModal();
+    const el = document.getElementById('appModalBody');
+    const out = { html: el.innerHTML, text: el.textContent };
+    App.closeModal();
+    return out;
+  });
+  check(/Special JVs posted: <b>0<\/b>/.test(cardD.html) && /In cancelled entries \(not counted\)/.test(cardD.text),
+    'the Manage card counts it out and says where it went', cardD.text.slice(0, 320));
+  check(/line-through/.test(cardD.html) && /cancelled on \d{4}-\d\d-\d\d by /.test(cardD.text)
+    && /pending again/.test(cardD.text),
+    'and the dead row is struck through with who cancelled it and when — the treatment _postedRefFor already '
+    + 'gives a key', cardD.text.slice(0, 600));
+  // the cancel handed the JV back as pending, so the next preview consumes it
+  const aD2 = await genEntry(page, tD.id, ['D1', 'D5'], false);
+  const jv2 = await jvCounts(tD.id);
+  check(jv2.live === 1 && jv2.cancelled === 1 && jv2.rows === 2,
+    'and a cancel-and-regenerate still counts one posting for one JV, not two', jv2);
+  const expD = await page.evaluate(() => {
+    const got = [];
+    const real = U.download;
+    U.download = (name, data) => got.push({ name, text: String(data) });
+    Reco.openPostedJvAuditModal();
+    Reco.exportPostedJvMap();
+    U.download = real;
+    App.closeModal();
+    return got[0] || null;
+  });
+  check(expD && /EntryReversal/.test(expD.text) && /CANCELLED on \d{4}-\d\d-\d\d by /.test(expD.text),
+    'the JV map export carries the reversal too, so a spreadsheet of it cannot count a dead entry as live',
+    expD && expD.text.split(/\r?\n/).slice(0, 3));
+  check(errors.length === 0, 'no JavaScript errors', errors);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[18] The mirror is a deep copy, and a reversed entry cannot leave as a clean CSV');
+  const tE = await createTemplate(page, 'Deep Copy', ROWS);
+  const aE = await genEntry(page, tE.id, ['D2']);
+  /* Verified finding: _buildReversalLines did Object.assign({}, l), one level
+     deep, so a line whose Reference cell is an OBJECT — what AEG.buildLine
+     writes whenever a master lookup misses — was the SAME INSTANCE in the
+     original and in the mirror, both living in AppState.entryHistory. */
+  const deep = await page.evaluate(([id, aid]) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const e = (AppState.entryHistory[id] || []).find(x => x.accountingId === aid);
+    e.lines.forEach(l => { l.Reference = { value: 'ACC1', _missingRC: false, _missingInfo: true }; });
+    const lc = Reco._reverseLineCols(tpl, e).lc;
+    const mirror = Reco._buildReversalLines(e, lc);
+    const shared = mirror.some((m, i) => m.Reference === e.lines[i].Reference);
+    mirror.forEach(m => { m.Reference._missingInfo = false; });
+    return { shared, origStillFlagged: e.lines.every(l => l.Reference._missingInfo === true),
+             mirrorValue: mirror[0].Reference.value, n: mirror.length };
+  }, [tE.id, aE]);
+  check(!deep.shared && deep.origStillFlagged && deep.mirrorValue === 'ACC1' && deep.n > 0,
+    'an object cell is deep-copied into the mirror, so writing to the mirror\'s cell cannot reach the original — '
+    + 'both live in AppState.entryHistory at once', deep);
+
+  /* Verified finding: exportEntryCsv wrote <id>.csv of postable journal lines
+     with no reversal check and no marker, and the Export CSV button is
+     deliberately kept on a reversed entry's toolbar — so a cancelled entry
+     could leave the app looking exactly like a live one. */
+  await openReverse(page, tE.id, aE);
+  await runReverse(page, 'cancelled', 'so the CSV has something to mark');
+  const dl = await page.evaluate(([id, aid]) => {
+    AppState.activeRecoId = id;
+    const got = [];
+    const real = U.download;
+    U.download = (name, data) => got.push({ name, lines: String(data).split(/\r?\n/).slice(0, 2) });
+    Reco.exportEntryCsv(aid);
+    U.download = real;
+    return got[0] || null;
+  }, [tE.id, aE]);
+  check(dl && /-CANCELLED\.csv$/.test(dl.name),
+    'the file is named for what it is', dl && dl.name);
+  check(dl && /CANCELLED on \d{4}-\d\d-\d\d by /.test(dl.lines[1]) && /DO NOT POST/.test(dl.lines[1]),
+    'and a marker row says so in the file itself, above the lines', dl && dl.lines[1]);
+  const vsr = await page.evaluate(([id, aid]) => {
+    AppState.activeRecoId = id;
+    Reco.viewSourceRows(aid);
+    const t = document.getElementById('appModalBody').textContent;
+    App.closeModal();
+    return t;
+  }, [tE.id, aE]);
+  check(/was cancelled/.test(vsr) && /released/.test(vsr) && /re-reconciled/.test(vsr),
+    'and View Source Rows stops presenting released rows as a live claim', vsr.slice(0, 340));
+  // a REVERSING entry is marked too, so the mirror cannot be posted twice by accident
+  const aE2 = await genEntry(page, tE.id, ['D3']);
+  await openReverse(page, tE.id, aE2);
+  await runReverse(page, 'reversed', 'mark the mirror too');
+  await sleep(500);
+  await page.evaluate(() => App.closeModal());
+  const dl2 = await page.evaluate(([id, aid]) => {
+    AppState.activeRecoId = id;
+    const hist = AppState.entryHistory[id] || [];
+    const mirror = hist.find(e => e.reverses === aid);
+    const got = [];
+    const real = U.download;
+    U.download = (name, data) => got.push({ name, lines: String(data).split(/\r?\n/).slice(0, 2) });
+    Reco.exportEntryCsv(mirror.accountingId);
+    Reco.exportEntryCsv(aid);
+    U.download = real;
+    return got;
+  }, [tE.id, aE2]);
+  check(/REVERSING ENTRY for /.test(dl2[0].lines[1]) && /-REVERSED\.csv$/.test(dl2[1].name)
+    && /DO NOT POST AGAIN/.test(dl2[1].lines[1]),
+    'the mirror\'s CSV says it is a reversing entry, and the original\'s says it has been undone',
+    [dl2[0].name, dl2[0].lines[1].slice(0, 80), dl2[1].name]);
+  /* Verified finding, and the user will hit it: a cancel releases the rows in
+     the append-only version file, but recoSessions.json is another whole-file
+     shared JSON written from memory, so a colleague who had this data loaded
+     BEFORE the reversal puts the stamp back the next time they save or edit
+     one of those rows. That is the store's semantics (S13), not this
+     feature's to fix alone — but "Colleagues who already have this data loaded
+     will see the change when they next load it" reads as automatic, and is
+     not. */
+  const aE3 = await genEntry(page, tE.id, ['D4']);
+  const seenE3 = await openReverse(page, tE.id, aE3);
+  check(/already has this data loaded/.test(seenE3.body)
+    && /must press Load on the data file before they touch these rows/.test(seenE3.body)
+    && /puts the stamp back on the shared history/.test(seenE3.body)
+    && !/will see the change when they next load it/.test(seenE3.body),
+    'the "what will happen" list says a colleague who already has the data loaded must press Load, instead of '
+    + 'promising they will see it next time', seenE3.body.slice(-520));
+  const toastE3 = await page.evaluate(async ([reason]) => {
+    const got = [];
+    const real = U.toast;
+    U.toast = function (text, kind) { got.push({ text: text, kind: kind }); return real.call(U, text, kind); };
+    const el = document.getElementById('revReason');
+    if (el) { el.value = reason; Reco._reverseValidate(); }
+    try { await Reco.reverseEntry(); } finally { U.toast = real; }
+    return got;
+  }, ['the toast has to say it too']);
+  check(toastE3.some(t => t.kind === 'success' && /must press Load before they touch these rows/.test(t.text)),
+    'and so does the success toast, which is the last thing the user reads', toastE3);
+  check(errors.length === 0, 'no JavaScript errors', errors);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[19] The reversal log: append-only, carries the contra, and a failed read erases nothing');
+  const tF = await createTemplate(page, 'Log', ROWS);
+  const logJson = path.join(rootD, 'reco', 'reversals.log.json');
+  const logCsv = path.join(rootD, 'reco', 'reversals.log.csv');
+  const jsonLines = () => (fs.existsSync(logJson)
+    ? fs.readFileSync(logJson, 'utf8').trim().split(/\n/).filter(Boolean).map(l => JSON.parse(l)) : []);
+  const csvLines = () => csvRows(logCsv);
+  const before19 = jsonLines().length;
+  const beforeCsv19 = csvLines().length;
+  const aF = await genEntry(page, tF.id, ['D1']);
+  await page.evaluate(([id, aid]) => {
+    const e = (AppState.entryHistory[id] || []).find(x => x.accountingId === aid);
+    e.docNumbers = { AED: 'JV-7' };
+    AppState.docNumberMaster[id] = Object.assign(AppState.docNumberMaster[id] || {}, { 'JV-7': aid });
+  }, [tF.id, aF]);
+  await openReverse(page, tF.id, aF);
+  await runReverse(page, 'reversed', 'post the contra for the log');
+  await sleep(500);
+  await page.evaluate(() => App.closeModal());
+  const csvLog = csvLines();
+  const mine19 = csvLog.filter(r => r.accountingId === aF);
+  check(csvLog.length === beforeCsv19 + 1 && mine19.length === 1 && mine19[0].mode === 'reversed',
+    'reco/reversals.log.csv is appended through append_csv_rows, which never reads the file',
+    { added: csvLog.length - beforeCsv19, mine: mine19.length });
+  /* Verified finding: the log "does not carry the mirror's lines so it cannot
+     actually stand in for the record". It does now. */
+  const payload = await page.evaluate(([csv, aid]) => {
+    const p = Papa.parse(csv, { header: true, skipEmptyLines: true });
+    const r = (p.data || []).find(x => x && x.accountingId === aid) || {};
+    return { n: JSON.parse(r.linesJson || '[]').length, count: r.lineCount,
+             lc: JSON.parse(r.lineCols || '{}'), docs: JSON.parse(r.docNumbers || '{}'),
+             rev: r.reversalId };
+  }, [fs.readFileSync(logCsv, 'utf8'), aF]);
+  check(payload.n > 0 && String(payload.n) === String(payload.count) && payload.lc.dr && payload.lc.cr
+    && payload.docs.AED === 'JV-7' && !!payload.rev,
+    'and the line carries the mirror\'s own lines, its Dr/Cr columns, the document numbers and the mirror id — '
+    + 'so the contra is recoverable by hand when the whole-file entryHistory write loses it', payload);
+  check(jsonLines().length === before19 + 1,
+    'the JSON-per-line trail still has its line too', jsonLines().length);
+
+  /* Verified finding: _reverseAppendLog swallowed a failed read into txt = ''
+     and then wrote the whole file back, so ONE failed read erased every
+     reversal already logged. The bridge's fault injection is scoped to
+     reco_data, so the read of this one file is failed in the page. */
+  const aF2 = await genEntry(page, tF.id, ['D2']);
+  await page.evaluate(() => {
+    window._rfReal = window.pywebview.api.read_file;
+    window.pywebview.api.read_file = function (rel) {
+      if (rel === 'reco/reversals.log.json') {
+        return Promise.reject(new Error('injected fault: locked by a backup agent'));
+      }
+      return window._rfReal.apply(window.pywebview.api, arguments);
+    };
+  });
+  await openReverse(page, tF.id, aF2);
+  await runReverse(page, 'cancelled', 'the log read fails');
+  await page.evaluate(() => { window.pywebview.api.read_file = window._rfReal; });
+  const after19 = jsonLines();
+  check(after19.length === before19 + 1 && after19[after19.length - 1].accountingId === aF,
+    'one failed read leaves reversals.log.json exactly as it was — the first reversal is still in it, where it '
+    + 'used to be erased and replaced by the second', after19.map(l => l.accountingId));
+  check(csvLines().length === beforeCsv19 + 2 && csvLines().some(r => r.accountingId === aF2),
+    'while the append-only CSV has both, because nothing reads it',
+    { added: csvLines().length - beforeCsv19, ids: csvLines().slice(-2).map(r => r.accountingId) });
+  const sF2 = await stateOf(page, tF.id, aF2);
+  check(sF2.reversal && /could not be read/.test(rv(sF2).logProblem || ''),
+    'and the reversal record says the file was left alone instead of saying nothing', rv(sF2).logProblem);
+  check(errors.every(e => /injected fault|reversals\.log\.json/.test(e)),
+    'the only console output is the injected fault and the app reporting it', errors);
+  errors.length = 0;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[20] It says what it is doing, and two quadratic costs are gone');
+  /* Verified finding: a 200,000-row reversal ran for 104-122 seconds showing
+     NOTHING — a 120 ms sampler of the modal title recorded one state for the
+     whole run, "(no modal)". Reco._busy / BUSY_ROWS exist for exactly this.
+     BUSY_ROWS is lowered here so the same path runs at test size. */
+  const aG = await genEntry(page, tF.id, ['D3', 'D4']);
+  await openReverse(page, tF.id, aG);
+  await page.evaluate(() => {
+    const el = document.getElementById('revReason');
+    if (el) { el.value = 'show me what you are doing'; Reco._reverseValidate(); }
+  });
+  const busy = await page.evaluate(async () => {
+    /* Both halves, because either alone can lie: `stages` is what the commit
+       asked the overlay to say (a 5 ms sampler can slip between two fast
+       stages on a six-row fixture), `seen` is what was actually on the page. */
+    const stages = [], seen = [];
+    const realBusy = Reco._busy;
+    Reco._busy = function (text, pct) { stages.push(text); return realBusy.call(Reco, text, pct); };
+    const iv = setInterval(() => {
+      const t = document.getElementById('recoBusyText');
+      const shown = document.getElementById('appModal').classList.contains('show');
+      seen.push((shown && t) ? ('busy: ' + t.textContent) : '(no overlay)');
+    }, 5);
+    const old = Reco.BUSY_ROWS;
+    Reco.BUSY_ROWS = 1;
+    try { await Reco.reverseEntry(); }
+    finally { Reco.BUSY_ROWS = old; Reco._busy = realBusy; clearInterval(iv); }
+    /* App.closeModal only drops the `show` class, so the bar's node lingers in
+       the DOM by design — what matters is that the overlay is not up. */
+    return { stages, seen: Array.from(new Set(seen)),
+             left: document.getElementById('appModal').classList.contains('show') };
+  });
+  check(busy.stages.some(s => /^Reversing .* reading the shared entry history/.test(s))
+    && busy.stages.some(s => /^Releasing \d+ row\(s\)/.test(s))
+    && busy.stages.some(s => /^Re-reading the shared entry history/.test(s))
+    && busy.stages.some(s => /^Recording the reversal/.test(s)),
+    'the commit names each stage instead of freezing a blank window — a 200,000-row reversal showed exactly '
+    + 'one state for 104-122 s: "(no modal)"', busy.stages);
+  check(busy.seen.some(s => /^busy: /.test(s)),
+    'and the overlay really was up on the page, not merely asked for', busy.seen);
+  check(!busy.left, 'and it is taken down at the end', busy.seen);
+  const sG = await stateOf(page, tF.id, aG);
+  check(sG.reversal && rv(sG).mode === 'cancelled' && sG.status.D3 === '' && sG.status.D4 === '',
+    'and the reversal itself still does its job with the overlay up', { rev: !!sG.reversal, st: sG.status });
+  // D1 was released by aF's reversal, so it can be posted again; D5/D6 would
+  // pull the fake Special JV into the preview, which is a different test.
+  const aG2 = await genEntry(page, tF.id, ['D1'], false);
+  const busyOpen = await page.evaluate(async ([id, aid]) => {
+    const seen = [];
+    const iv = setInterval(() => {
+      const t = document.getElementById('recoBusyText');
+      if (t) seen.push(t.textContent);
+    }, 5);
+    const old = Reco.BUSY_ROWS;
+    Reco.BUSY_ROWS = 1;
+    AppState.activeRecoId = id;
+    App.closeModal();
+    try { await Reco.openReverseEntryModal(aid); }
+    finally { Reco.BUSY_ROWS = old; clearInterval(iv); }
+    const out = { seen: Array.from(new Set(seen)),
+                  title: (document.getElementById('appModalTitle') || {}).textContent || '' };
+    App.closeModal();
+    return out;
+  }, [tF.id, aG2]);
+  check(busyOpen.seen.some(s => /Working out what reversing/.test(s)) && /^Reverse entry /.test(busyOpen.title),
+    'and opening the dialog on a big entry says so too, then shows the dialog', busyOpen);
+
+  /* And a refusal raised WITH the overlay up. _busyDone looks for the bar
+     inside the modal body, so a refusal that opened its own modal first would
+     leave the overlay up for ever — every exit from step 3 onwards goes
+     through a refuse() that takes it down first. */
+  const aG3 = await genEntry(page, tF.id, ['D2'], false);
+  const refuseBusy = await page.evaluate(async ([id, aid]) => {
+    AppState.activeRecoId = id;
+    App.closeModal();
+    await Reco.openReverseEntryModal(aid);
+    const el = document.getElementById('revReason');
+    if (el) { el.value = 'a refusal with the overlay up'; Reco._reverseValidate(); }
+    const orig = Reco._reverseReadShareHistory;
+    let n = 0;
+    Reco._reverseReadShareHistory = async function () {
+      n++;
+      if (n === 2) return { ok: false, problem: 'injected fault: the share went away before the record.' };
+      return orig.call(Reco);
+    };
+    const old = Reco.BUSY_ROWS;
+    Reco.BUSY_ROWS = 1;
+    try { await Reco.reverseEntry(); }
+    finally { Reco.BUSY_ROWS = old; Reco._reverseReadShareHistory = orig; }
+    return { title: (document.getElementById('appModalTitle') || {}).textContent || '',
+             body: (document.getElementById('appModalBody') || {}).textContent || '',
+             shown: document.getElementById('appModal').classList.contains('show'),
+             bar: !!document.querySelector('#appModalBody #recoBusyText') };
+  }, [tF.id, aG3]);
+  check(/not recorded/i.test(refuseBusy.title) && refuseBusy.shown && !refuseBusy.bar,
+    'a refusal raised with the overlay up replaces it rather than hiding behind it',
+    { title: refuseBusy.title, shown: refuseBusy.shown, bar: refuseBusy.bar });
+  check(/rows were released/.test(refuseBusy.body) && /writes nothing twice/.test(refuseBusy.body),
+    'and says what did happen to the rows', refuseBusy.body.slice(0, 320));
+
+  /* The dedupe. Timed in this same Chromium: Array.prototype.indexOf as a
+     dedupe is quadratic, and the list is then truncated to 500 anyway. */
+  const perf = await page.evaluate(() => {
+    const N = 200000, a = [];
+    for (let i = 0; i < N; i++) a.push('K' + i);
+    const b = a.slice(0, 500);
+    let t = performance.now();
+    const viaSet = Array.from(new Set(a.concat(b)));
+    const setMs = performance.now() - t;
+    const S = 20000, as = a.slice(0, S), bs = b.slice(0, 200);
+    t = performance.now();
+    const viaIdx = as.concat(bs).filter((k, i, arr) => arr.indexOf(k) === i);
+    const idxMs = performance.now() - t;
+    t = performance.now();
+    const setS = Array.from(new Set(as.concat(bs)));
+    const setSMs = performance.now() - t;
+    return { n: N, setMs: Math.round(setMs), sample: S, idxSampleMs: Math.round(idxMs),
+             setSampleMs: Math.round(setSMs),
+             projectedIdx200kMs: Math.round(idxMs * Math.pow(N / S, 2)),
+             identical: viaSet.length === N && viaIdx.length === S && setS.length === S
+               && viaIdx.every((k, i) => k === setS[i]) };
+  });
+  console.log('    dedupe at ' + perf.n + ' keys: Set ' + perf.setMs + ' ms; indexOf at ' + perf.sample
+    + ' keys ' + perf.idxSampleMs + ' ms (Set ' + perf.setSampleMs + ' ms), so ~'
+    + perf.projectedIdx200kMs + ' ms projected at ' + perf.n);
+  check(perf.identical, 'the Set gives the identical list, in the same order, for normalised pk strings', perf);
+  check(perf.setMs * 20 < perf.projectedIdx200kMs,
+    'and it is more than an order of magnitude cheaper at the size this app is built for', perf);
+
+  /* The memo key. Verified finding: postedJvAudit went 175 ms at one entry to
+     1,280 ms at 2,000, entirely from an O(history) reversal count recomputed
+     inside the memo key on every _postedRefFor call. */
+  const memo = await page.evaluate(([id]) => {
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    const keys = sess.data.map(r => r._pk);
+    const saved = AppState.entryHistory[id];
+    const row = sess.data[0];
+    const time = (n) => {
+      const h = [];
+      for (let i = 0; i < n; i++) h.push({ accountingId: 'AEX' + i, lines: [], postedPks: keys.slice(),
+        sourceRowIds: [], specialJvIds: [], specialJvs: [], createdAt: '', createdBy: '', docNumbers: {} });
+      if (n > 1) h[1].reversal = { mode: 'cancelled', at: '', by: '', reason: '' };
+      AppState.entryHistory[id] = h;
+      Reco._postedIdxReset();
+      Reco._postedRefFor(tpl, row);                       // warm the memo
+      const t = performance.now();
+      for (let k = 0; k < 3000; k++) Reco._postedRefFor(tpl, row);
+      return (performance.now() - t) / 3000;
+    };
+    const one = time(1), many = time(2000);
+    /* The shape that used to be IN the key, timed on the same history, so the
+       report carries a before as well as an after. */
+    const h = AppState.entryHistory[id] || [];
+    const t0 = performance.now();
+    for (let k = 0; k < 3000; k++) h.reduce((n, e) => n + ((e && e.reversal) ? 1 : 0), 0);
+    const scanUs = (performance.now() - t0) / 3000 * 1000;
+    AppState.entryHistory[id] = saved;
+    Reco._postedIdxReset();
+    return { oneUs: one * 1000, manyUs: many * 1000, ratio: many / Math.max(one, 1e-6),
+             oldKeyScanUs: scanUs };
+  }, [tF.id]);
+  console.log('    _postedRefFor on a warm memo: ' + memo.oneUs.toFixed(2) + ' µs at 1 entry, '
+    + memo.manyUs.toFixed(2) + ' µs at 2,000 — ratio ' + memo.ratio.toFixed(2)
+    + '; the reversal-count scan that used to be in the key costs '
+    + memo.oldKeyScanUs.toFixed(2) + ' µs per call at 2,000 entries');
+  check(memo.oldKeyScanUs > memo.manyUs,
+    'and the scan it replaced cost more on its own than the whole memoised lookup now does',
+    { scan: memo.oldKeyScanUs, call: memo.manyUs });
+  check(memo.ratio < 4,
+    'the posted-row index no longer walks the whole history on every call: the reversal count came out of the '
+    + 'memo key and _postedIdxReset bumps a counter instead', memo);
   check(errors.length === 0, 'no JavaScript errors', errors);
 
   clearTimeout(watchdog);

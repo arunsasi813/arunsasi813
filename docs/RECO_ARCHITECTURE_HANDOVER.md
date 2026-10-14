@@ -992,6 +992,18 @@ is one click away on the same dialog. A reason of at least 3 characters is requi
 carries the verb of the chosen mode. The app never cancels a posted entry on the strength of a
 blank field, and never posts a reversal the user did not choose.
 
+**That inference is part of the conflict signature.** `_reversePlanSig` carries
+`docs: plan.docs.slice().sort()` and `dm: plan.defaultMode`, computed from the ENTRY
+(`_reverseDocsOf`), not from the local `docNumberMaster`. Without them the pre-write share
+re-read checked everything *except* the one fact the decision was made of: A could open the
+dialog on an unallocated entry, B could allocate a GL voucher to it, and A's Cancel would go
+through on a fact that stopped being true while the dialog was open — a record reading
+`mode: 'cancelled'` with the voucher in its own `evidence`. The re-read now refuses with *"The
+shared record disagrees with this one"*, the same check is repeated **after** the un-stamp
+against the entry's `docNumbers` on the share, and overriding the pre-selected mode asks
+outright in both directions (cancelling an entry that has a reference names the voucher;
+reversing one that has none says so).
+
 ### 12.2 Order of operations (`Reco.reverseEntry`)
 
 1. re-run `Reco._reversePlan`; refuse if its signature no longer matches what the dialog showed
@@ -999,16 +1011,34 @@ blank field, and never posts a reversal the user did not choose.
 3. `AppState.flush()`, then re-read `reco/entryHistory.json`, merge, and refuse if the share
    already carries a `reversal` (naming who and when)
 4. **the un-stamp**, through `Reco.applyEdits({ scope:'allStandard', historyFirst:true, trusted:true, pulled })`
+4b. **re-read and re-merge `reco/entryHistory.json` again**, re-check `base.reversal` and the
+   mode evidence, and re-apply onto that fresher base
 5. mark the original, and (Reverse) append the mirror
 6. (Cancel) free the document numbers · 7 (Cancel) restore the pending Special JVs
 8. one `Comments.create` linked to the affected keys (capped at 500) · 9 `_postedIdxReset()`
-10. clear `AppState._snap.entryHistory`, flush, and re-read the share to confirm the mark
+10. clear `AppState._snap.entryHistory`, flush, re-read the share to confirm the mark, and
+   append the reversal log
 
 **Step 4 before step 5 is load-bearing.** The stamp is what makes a row look dealt-with to
 everyone else; the mark is only a record. Marked-but-still-stamped is the worst state
 available, so the mark is refused unless the `Cn` rows come back off the share. The other way
 round — rows released, entry not yet marked — the user sees at once and simply presses Reverse
 again: the un-stamp is idempotent, because the second pass finds the column already clear.
+
+**Step 4b exists because `entryHistory.json` is whole-file last-writer-wins** and the un-stamp
+between step 3 and step 10 is the longest write window in the app — 900 ms per read on a share,
+14 s for 200,000 keys, over 100 s end to end. Step 3's read is what refuses a *conflict*; step
+4b's is what keeps the write from being a *clobber*: a colleague who generated an entry inside
+that window had it dropped by this write while their row kept its `Posted` stamp, leaving a
+closed row with no accounting record behind it. Re-checking `base.reversal` there also means
+two people reversing the same entry cannot both mint a mirror. The durable fix is S13
+`Store.mergeWrite`.
+
+**The commit runs under `Reco._busy`** (`BUSY_ROWS: 100000`), naming each stage, and
+`_reversePlan` in `openReverseEntryModal` runs under `_withBusy`. A 200,000-row reversal used
+to run for 104–122 s with no modal at all. Every refusal from step 3 onwards goes through a
+local `refuse()` that takes the overlay down *before* opening its own modal, because
+`_busyDone` looks for the bar inside the modal body.
 
 ### 12.3 Three things that make the un-stamp real
 
@@ -1021,13 +1051,46 @@ again: the un-stamp is idempotent, because the second pass finds the column alre
 - **`opts.pulled`.** `appendChangesBatch` writes the whole row for a key, built from this
   session's row. A colleague's edit to any other column, made after this session loaded, would
   be reverted — up to 5,000 keys, under a success toast. The reversal reads
-  `Versioning.changesSince(tpl, sess.loadedAt, pkSet)` first and passes every differing cell as
-  `pulled`, so the `Cn` row is the **share's** current row with one cell cleared.
-  `sess.loadedAt` is set by `loadVersionedFile` and `ingestData` for this.
+  `Versioning.changesSince(tpl, plan.rebaseFrom, pkSet, true)` first and passes every differing
+  cell as `pulled`, so the `Cn` row is the **share's** current row with one cell cleared.
+  Three things had to be true for that to hold:
+  - **the read is `strict`.** Without it `Versioning.readFile` returns `[]` on a failed read and
+    `listFiles` skips an unlistable folder, so "the share could not be read" arrived as "nothing
+    has changed since" and the un-stamp wrote its stale snapshot over the share — on the path
+    the app then reported as *"the reversal was not recorded"*, so nothing recorded the loss. A
+    failed rebase read is now a refusal **before any write**:
+    `{ok:false, problem:'… cannot be rebased onto it; nothing was written'}`, the same treatment
+    the post-write verification failure gets.
+  - **`loadedAt` means "when the rows I hold came off the share".** `ingestData` no longer moves
+    it: appended rows are new, have no share history to rebase onto, and go out as `upload` rows
+    anyway, while the rows already held still date from the earlier load. Moving it forward made
+    a colleague's *earlier* edit stop being seen as theirs — and reverted it.
+  - **a session with no watermark still rebases.** `ensureSessionShape` sets
+    `loadedAt = loadedAt || ''`, so every session restored from a build before the watermark
+    existed would have skipped the rebase — on the day this ships, nobody on the share could
+    rebase at all. `plan.rebaseFrom` is therefore DERIVED from the active version file's own day
+    (`Versioning.dayStartOf(path, 2)`) when `loadedAt` is empty, recorded as
+    `reversal.rebaseDerived`. Erring early can only read more files and hand back the share's
+    current record, which is what the un-stamp wants to write onto; erring late is the lost
+    edit. Where nothing can be derived either (no `activeVersionFile`) the un-stamp is
+    **blocked** and the dialog's reload is the only route — writing an un-stamp that was not
+    rebased is the overwrite the rebase exists to prevent. The alternative — blocking in every
+    no-watermark case — was rejected because it makes a reload of up to 200,000 rows the price
+    of any reversal, and the derived watermark is strictly safer than `loadedAt` ever was.
 - **Reading the write back.** `Versioning._withLock` and the launcher's `_path_locks` are both
   in-process, and two people run two processes over one folder. After the write the keys are
   re-read from the share and the post-entry column confirmed; a key that the plan said would be
   versioned and that comes back without a version label **refuses the mark**.
+- **Two kinds of "it does not read the stamp any more".** `_reversePlan` resolves
+  `postedPrev[pk]` *before* the drift check. A key whose current value is what this entry
+  recorded as the value before it stamped goes to `plan.alreadyUnstamped`, not to
+  `plan.skipped`: that is the state the app's **own** earlier attempt leaves behind on the retry
+  the dialog recommends (the `Cn` rows landed, the verification read failed, the mark did not),
+  and `_reverseUnstamp` confirms it against the share's own `Cn` row (`_src === 'reverse:<id>'`)
+  before wording it *"released by an earlier attempt of this reversal"*. Calling it *"somebody
+  changed it after this entry"* put a false accusation in a permanent audit record, reported
+  *"0 row(s) released"* for a reversal that released every row, and left every row's Timeline
+  without the reversal, because step 8's key list came from `un.unstamped` alone.
 
 ### 12.4 What is refused, and what can be forced
 
@@ -1035,12 +1098,18 @@ again: the un-stamp is idempotent, because the second pass finds the column alre
 unbalanced currency bucket). A swap turns each bucket's Dr total into its Cr total, so it can
 neither cause nor cure a shape problem:
 
-- **malformed source lines** (shape problems on the original) → refused outright, problems
-  quoted, no force. The AEG `autoExchange` branch really does emit a line with neither side,
-  and standard lines are never checked at commit.
+- **malformed source lines** (shape problems on the original) → a **forced confirmation**
+  quoting the problems, the same treatment `unbalanced` gets, recorded as `linesMalformed` on
+  both records. Every shape rule in `checkLines` is swap-invariant, so the mirror reproduces the
+  original's defect exactly — which is what undoing a posted entry means — and the refusal had
+  no arithmetic behind it. It also told the user to *"correct the entry at source"* when a
+  GENERATED entry has no source to correct, and left `Cancel` ("it never reached the general
+  ledger") as the only working action on an entry that may well be in the ledger. The AEG
+  `autoExchange` branch really does emit a line with neither side, and a Special JV that leaves
+  the currency column blank reaches this the same way, with no template change at all.
 - **the swap itself fails** → refused outright; that is a defect in the app.
-- **only a currency bucket is out, on both** → the genuine "the original never balanced" case,
-  and the only one offered a confirmation. Accepting records `linesUnbalanced` on both records.
+- **only a currency bucket is out, on both** → the genuine "the original never balanced" case.
+  Also a confirmation; accepting records `linesUnbalanced` on both records.
 
 Also refused, with no force: a template that maps one column to both sides, and an entry whose
 lines do not carry the Dr/Cr columns the reversal would swap (a legacy entry whose AEG template
@@ -1060,9 +1129,37 @@ generation, are what let a post-change entry reverse into its own columns years 
   `Allocate Doc#` buttons are dropped for one.
 - `JvCreator.inUse` skips a cancelled entry: the cancel handed the JV back as pending, where it
   is already counted.
+- `_postedAuditIndex` carries `reversal` onto each `byJv` row. The push sits above the
+  `if (rev) return;` guard deliberately — a *reversed* entry's JV did post — but without the
+  mark, "Special JVs posted" read 1 for a cancelled entry while `JvCreator.inUse` correctly read
+  0, and a cancel-and-regenerate made it 2 for one JV that posted once. `postedJvAudit` now
+  reports `jvLive` / `jvCancelled` / `jvReversed`, the card counts a cancelled one out and
+  renders its row struck through with who cancelled it and when, and `exportPostedJvMap` carries
+  an `EntryReversal` column so a spreadsheet of the map cannot count a dead entry as live.
+- `exportEntryCsv` names the file `<id>-CANCELLED.csv` / `<id>-REVERSED.csv` and prepends a
+  marker row (a mirror gets a `REVERSING ENTRY for <id>` row). The Export CSV button is
+  deliberately kept on a reversed entry's toolbar, and these CSVs are how an entry reaches the
+  GL system, so the file itself has to say it. `viewSourceRows` says the rows were released and
+  may have been re-reconciled since.
+- `_postedIdxReset()` bumps `_postedIdxGen`, and the memo key uses that counter instead of
+  counting the reversals in the history. The count was an O(history) scan recomputed on every
+  `_postedRefFor` call: `postedJvAudit` went 175 ms at one entry to 1,280 ms at 2,000.
+- `_buildReversalLines` deep-copies each line. One level was not enough: a cell that is an
+  OBJECT (what `AEG.buildLine` writes when a master lookup misses) was the same instance in the
+  original and the mirror, both living in `AppState.entryHistory`.
 - `App._carryReversalsList` re-applies a reversal onto a restored record, so a backup taken
   before one cannot un-reverse an entry; the confirm names any id whose reversing entry the
-  backup does not hold. `reco/reversals.log.json` is a second, append-only home for the trail.
+  backup does not hold.
+- **The trail has two second homes, and the reason is that neither alone is both append-only
+  and the shape the app reads.** `reco/reversals.log.csv` is written through the launcher's
+  `append_csv_rows`, which creates-or-appends and never reads the file, and it carries the
+  mirror's own `linesJson` / `lineCols` / `docNumbers` — so the contra is recoverable by hand
+  when the whole-file `entryHistory` write loses it, which is what "a second home" has to mean.
+  `reco/reversals.log.json` (the JSON-per-line trail) stays for continuity, but there is no text
+  append in the bridge, so it is read-modify-write: one failed read used to be swallowed into
+  `txt = ''` and the whole file rewritten from a single line, **erasing every reversal already
+  logged**. It is never written now when the read failed — the file is left exactly as it is and
+  `reversal.logProblem` says so.
 
 ### 12.6 Known limitations
 
@@ -1075,6 +1172,13 @@ generation, are what let a post-change entry reverse into its own columns years 
   (pre-existing).
 - A key present on two session rows collapses to one entry in `postedPrev`: read it as
   per-KEY, never per-row.
+- **A colleague who already has this data loaded puts the stamp back.** The release is durable
+  in the append-only version file, but `recoSessions.json` is another whole-file shared JSON
+  written from memory, so a colleague whose session pre-dates the reversal restores the stamp
+  the next time they save or edit one of those rows. That is the store's semantics (S13), not
+  this feature's, but the user meets it here, so the dialog's "what will happen" list and the
+  success toast both say it: **they must press Load before they touch these rows.** The
+  `⚠ <id> cancelled` badge and the posted-row audit surface it after the fact.
 - Out of scope in this version: the exportable reversal report CSV, a "posted to the general
   ledger" tick at allocation time (which would let the dialog know instead of asking), and a
   "Finish re-opening" action for the keys that were not in the loaded data (they are recorded in
