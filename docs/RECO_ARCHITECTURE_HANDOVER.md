@@ -150,7 +150,40 @@ their banner comment rather than by line (`MODULE 2d — JV ENGINE`, and so on):
 | 9b | `JvGen` + `JvCreator` — the two texts, and the write path onto the share (§6.8) |
 | 9c | `JvWizard` — the nine-step creator and its live test-run (§6.9) |
 
-Additional-column values (master lookups, formulas, tags) are computed in one place: `Reco._rowWithExtras(tpl, sess, row)` (cascading, declaration order). The grid, Excel view, filters, sort, slicers, pivot, custom reports and exports all use it.
+Additional-column values (master lookups, formulas, tags) are computed in one place: `Reco._extraOwnValue`, reached through `Reco.rowFull(tpl, sess, row, uptoName)` (cascading, declaration order). The grid, Excel view, filters, sort, slicers, pivot, custom reports and exports all use it.
+
+### Shared helpers worth knowing before you add a feature
+
+Several features were each about to grow their own copy of the same thing, so
+these exist once. Added as foundations; most have no second caller yet.
+
+| helper | what it is | why |
+|---|---|---|
+| `Reco._runState(tplId)` | per-app-run state, never serialised | a latch or an "is loading" flag written to the shared folder outlives the run that set it and reaches colleagues who never saw the event (see §5a) |
+| `AppState.saveKeys(...keys)` | write only the named keys, debounced on `SAVE_DELAY` like `save()` | `save()` serialises every persisted key to decide what changed; `recoSessions` alone is 798–1378 ms / 85.6 MiB at 200k rows. **It is no saving at all for a view preference**, because those live on `sess` inside `recoSessions` — making those cheap means moving them out |
+| `Masters.indexFor(tpl, ac, ctx)` | matchKey→returnKey `Map`, built once per render pass | replaced a per-row scan of the master. Threaded as an explicit per-call `ctx`, **never** module-cached: a stale master is a wrong account code |
+| `Reco._fullPass()` / `_fullEnd()` / `_fullCtx()` | the render pass that owns that `ctx` | **every opener is paired with a `finally`.** An index that outlives its render is a stale chart of accounts: edit an account, re-render, and the grid still shows the old nominal. That bug was shipped into the working tree once and caught by two reviewers |
+| `Reco.rowFull(tpl, sess, row, uptoName)` | the row enriched with its additional columns, threading the pass `ctx` | there is deliberately **no** whole-row memo: `uptoName` is set on every real call, because an additional column must see only the columns declared *above* it, so a whole-row memo is never read |
+| `Reco.displayCellValue(...)` | the one display rule | replaced the grid's private "does the column name contain the word date" branch |
+| `Reco.columnCatalog(tpl, sess)` | one column list | replaced three hand-rolled ones |
+| `fileNames` / `extraNames` / `allNames` in `saveTemplate` | the name sets every prune reads | the prune they replace tested against `t.columns` alone, so anything else naming an added column was silently deleted on save |
+
+Two things deliberately **not** done, recorded so they are not re-attempted
+blind. `manualTags` is still keyed on the session `_id`, so a value typed into an
+added column does not survive a reload; re-keying it onto `_pk || _id` was tried
+and refused, because it still lands on `_id` for a keyless template, it lives on
+the session so Clear Data destroys it, it is serialised inside the 85.6 MiB blob,
+and being per-session it cannot carry a value across *files* — the durable
+`_pk`-keyed store lands with the features that need it. And a "someone else
+changed this template while you had it open" check was written and removed:
+`AppState.recoTemplates` is read once, at boot, so the comparison only ever saw
+this session's own object and could never fire. The hazard is real — the editor
+deep-clones on open and `saveTemplate` replaces the whole object, so a field a
+colleague set at 10:00 is wiped by a save from a 09:00 clone — and detecting it
+means re-reading the stored template from the share at save time, which makes
+`saveTemplate` async.
+
+---
 
 ---
 
@@ -169,6 +202,74 @@ Control columns: `_pk` (PK columns joined with `||`, or `_auto_<uid>`), `_ver` (
 - Opening a file (`Reco.loadVersionedFile` → `Versioning.loadActive`) applies the latest `Cn` from **newer** files, because edits always go to the day's file. Auto-load picks the newest file that contains `upload` rows.
 - **Compaction** (Manage → Version History): keeps every upload row and the latest `Cn` per PK; optionally archives the full file to `_archive/` first.
 - Ingesting data warns when rows share a primary key (they collapse to one when reopened from history).
+
+### 5a. Opening a reco: what loads, when, and what the screen says
+
+The user's report was *"once the reco is opened its first shown just not loading
+the data and only when clicking only its loading the data"*. The cause was a
+latch: `sess._autoLoadAttempted` was an ordinary session property, and
+`Store.serialize` strips exactly one key (`_fillDrag`), so the latch was written
+into `reco/recoSessions.json` **on the shared folder** and read back on every
+later start. Two ways in: Clear Loaded Data set it deliberately, to stop the
+file it had just cleared coming straight back, and that suppression then never
+expired; and opening a template *before* the day's extract landed latched an
+attempt that found nothing. Because the file is shared, one person's Clear Data
+stopped that template auto-loading for the whole team, permanently.
+
+The contract now:
+
+- **The latch is per-run**, in `Reco._runState(tplId)` — `{ autoLoadTried,
+  autoLoadFailed, autoLoading, loadGen, savedFiles, latestFile }`. It is never
+  serialised. `ensureSessionShape` deletes `_autoLoadAttempted` from any session
+  that still carries one, so the old value leaves the share on the next write.
+- **Clear Loaded Data records `clearedAt`**, an ISO timestamp, and that one IS
+  persisted. Auto-load skips a candidate file whose newest `upload` row `_ts` is
+  at or before it. So a reco cleared on purpose stays cleared, and the next
+  genuinely newer upload still appears by itself.
+- **Re-opening a template clears the latch** (`Reco._reopened(tplId)`, called
+  from `RecoTemplate.open` and `Home.openEntryForDoc`), so an extract that lands
+  an hour after the first look is found without restarting. The latch exists to
+  stop a read per repaint — `Reco.render` runs on every navigation and section
+  switch — not to stop the user finding today's file.
+- **Only a conclusive outcome latches.** "I looked and there is nothing" and "I
+  loaded it" are conclusive. "The share did not answer" is not: it sets
+  `autoLoadFailed`, toasts the reason, and leaves the latch so the *next
+  repaint* does not retry, while *re-opening* does. Clearing the latch inside the
+  failure path is an endless read loop against a dead share — it was written that
+  way once and caught by a test.
+- **The read path has a strict mode.** `Versioning.listFiles/latestDataFile/loadActive`
+  take `strict` and propagate the failure instead of returning `[]`. Without it a
+  failed read reported **"File empty"**, because `readFile` swallowed the error —
+  "unreadable" and "empty" were the same thing to the caller.
+- **A file with rows but no `_pk`** is an error naming the reason, not a green
+  `Loaded 0 active rows`.
+- **Loads carry a generation counter.** `ingestData`, `clearSession` and an
+  explicit `loadVersionedFile` bump `run.loadGen`; auto-load captures it and
+  `loadVersionedFile` discards its result if it no longer matches. This was a
+  **data-loss** bug: on a slow share, a user who gave up waiting and used Add
+  Data had their upload replaced by the in-flight auto-load's older rows, under a
+  success toast. Add Data, Paste Data and Open Existing are also disabled while a
+  read is in flight.
+- **Three honest empty states**, from `Reco._renderEmptyState`: *reading* (with a
+  spinner and `aria-busy`), *read succeeded and the folder is empty* (the old
+  copy), and *read succeeded and N saved files exist* — the last with an "Open
+  the latest" button, because telling someone to upload data they already
+  uploaded is actively misleading. The empty state also no longer replaces the
+  whole section, so Manage (and Version History) is reachable with an empty grid.
+
+**Not the cause, and deliberately left alone:** `loadVersionedFile`'s repaint
+guard `AppState.currentPage === 'reco' && AppState.activeRecoId === id`. It was
+the first suspect and it is innocent — only two callers pass a param to
+`App.navigate` and both set `activeRecoId` first. The one time it declines, it is
+doing its job: stopping a slow read for one template painting over the template
+the user has since moved to. Section 9 of `run_autoload_e2e.mjs` guards that
+behaviour so the "obvious" fix cannot be made later. `App.navigate` now also
+assigns `activeRecoId` from its param, so a future caller cannot reintroduce the
+hole the guard protects against.
+
+Suite: `tests/e2e/run_autoload_e2e.mjs` (41 checks; 12 passed before the fix).
+The test bridge gained `--slow-read <ms>` and `reco_data/**`-scoped fault
+injection to make any of this testable.
 
 ---
 
@@ -222,6 +323,60 @@ parent.postMessage({ type: 'specialJV.cancel',   ref }, '*');   // cancel
 ```
 
 A `complete` with no lines is treated as a cancel (it used to unblock Generate with zero lines). Line objects use the AEG output column names: `Reference, RC, Nominal, SubNominal, Analysis Key, LOB, Cur, Reco, Dr, Cr, Doc, Desc`.
+
+**`window.pywebview` is NOT reachable inside a JV page, so the handshake is the
+only channel — not belt-and-braces.** Established from the pywebview 5.4 source
+rather than a manual check, for two independent reasons:
+
+1. `inject_pywebview()` (`webview/util.py`) is called from
+   `EdgeChrome.on_navigation_completed` (`webview/platforms/edgechromium.py`),
+   bound to WebView2's **top-level** `NavigationCompleted`. pywebview never
+   subscribes to `FrameNavigationCompleted`; there is no frame handling in the
+   backend at all.
+2. Even if it did, the injection runs through `ExecuteScriptAsync`, which
+   executes in the current **top-level document** only.
+
+`window.parent.pywebview` is blocked too: `main.py` creates the window with
+`html=HUB_HTML` and `LauncherAPI.resolve_url()` hands out `file://` URLs, so Reco
+and a JV page are two distinct **opaque** origins under Chromium's default.
+Reading across throws.
+
+Consequences worth keeping in mind: a generated JV page must carry zero inline
+script for readability and review, not for sandboxing; and
+`iframe sandbox="allow-scripts"` was considered and **not** added, because the
+origin boundary is the real protection and `sandbox` would buy nothing while
+risking TCH's modals.
+
+**Test fidelity:** `tests/e2e/bridge_server.py` serves the iframe from the same
+HTTP origin unless `--jv-port` is passed, which is a *weaker* environment than
+production. Both `run_e2e.mjs` and `run_specialjv_e2e.mjs` now pass it. When that
+suite was switched over, nine checks failed at once — the fixture chose its
+malformed-line mode through `window.parent._fakeMode`, a same-origin read, so
+cross-origin every one of those nine refusal cases had been quietly sending
+*balanced* lines and being correctly accepted. Keep the JV suites on `--jv-port`.
+
+### 6.4a Posted JVs and the accounting-reference control
+
+The user asked to *"keep a track on jv marked as posted and highlight cases where
+accounting reference not updated for posted jv"*. What exists:
+
+- `entry.specialJvs[]` carries, per JV, `{ jvId, ref, primaryKeys, claimedNotSent, meta }`
+  where `primaryKeys` is the **audited** set — only the rows that JV was actually
+  sent and actually consumed. `Reco._jvConsumedPks` computes it and
+  `Reco._jvUnsentClaims` records what a JV claimed but was never given.
+- `entry.postedPks` is the keys of the rows an entry stamped. It exists because a
+  posted standard row's only other link is its session `_id`, which is re-minted
+  on the next load — without it every correctly posted row read as "no GL
+  reference" and the exception list filled with false positives.
+- `Reco._postedAuditIndex` / `_postedIdxReset` / `isRowPosted` / `_postedRefFor`
+  resolve "is this row posted, and under which accounting reference". A badge on
+  the row (`_postedBadge`) shows it.
+- `Reco.openPostedJvAuditModal` lists posted JVs and their rows;
+  `exportPostedJvExceptions` exports the rows that are posted with no accounting
+  reference recorded; `exportPostedJvMap` exports the whole mapping.
+- Entries written by older builds carry `specialJvIds` only, with no
+  `specialJvs`; `_postedAuditIndex` special-cases them rather than reporting
+  every one of their rows as an exception.
 
 ### 6.5 Pending JV lifecycle
 
