@@ -572,6 +572,15 @@ try {
     const r = timeSort('Ref');    o.refMs = r.ms;  o.refFirst = r.first.Ref;   o.refLast = r.last.Ref;
     const a = timeSort('Amount'); o.amtMs = a.ms;  o.amtFirst = a.first.Amount;
     const c = timeSort('Calc');   o.calcMs = c.ms;
+    // The same 200k sort through the pre-cache comparator, measured in this run
+    // on this CPU, so 5.4 can compare like with like instead of against a
+    // wall-clock number that moves with whatever else the machine is doing.
+    {
+      const rows = sess.data.slice();
+      const t = performance.now();
+      rows.sort((ra, rb) => refCompare(ra.Amount, rb.Amount, false, 1));
+      o.amtRefMs = Math.round(performance.now() - t);
+    }
     // Count the formula evaluations a sort costs: the keyed sort must evaluate
     // each row once, where the old comparator evaluated per comparison.
     const realEval = Formula.evaluate;
@@ -590,7 +599,18 @@ try {
   }
   under(sort.dateMs, 800, '5.2 sorting 200,000 rows by a date column', 1747);
   under(sort.refMs, 700, '5.3 sorting 200,000 rows by a text column', 1623);
-  under(sort.amtMs, 150, '5.4 sorting 200,000 rows by a value column', 176);   // new ~93ms, old 176ms
+  // 5.4 is a ratio, not a budget. Sorting 200k numbers is CPU-bound, and the
+  // same sort measured 93ms on an idle container and 167ms while other work
+  // ran: an absolute budget tight enough to prove the gain could not survive
+  // that, and one loose enough to survive it could not fail. Both halves of a
+  // ratio pay the same contention, so the ratio holds either way. The
+  // comparison is deliberately unfair to the new path: applyTableFiltersSort
+  // also filters and maps, where the reference only sorts.
+  check(typeof sort.amtMs === 'number' && typeof sort.amtRefMs === 'number'
+        && sort.amtRefMs > 40 && sort.amtMs < sort.amtRefMs * 0.6,
+    '5.4 the keyed sort of 200,000 values beats the pre-cache comparator by >40% '
+    + '(' + sort.amtMs + 'ms vs ' + sort.amtRefMs + 'ms in the same run)',
+    { amtMs: sort.amtMs, amtRefMs: sort.amtRefMs });
   // A formula column cannot gain from key caching (Formula.evaluate dominates).
   // What the keyed sort guarantees is one evaluation per row, not one per
   // comparison — ~200k instead of ~3.4M — so assert the call count.
