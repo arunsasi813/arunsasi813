@@ -43,7 +43,11 @@ ROOT_MARKERS = ("apps", "master", "reco", "reco_data", "aegtemplates",
 # Standard layout created by init_skeleton().
 SKELETON_DIRS = ("apps", "apps/lib", "apps/icon", "master", "aegtemplates", "reco",
                  "reco_data", "reco_attachments", "special_jv_mapping",
-                 "special_jv_templates")
+                 "special_jv_templates",
+                 # The Special JV creator: work in progress, and the previous
+                 # version of every published JV. write_file() creates parents
+                 # anyway, so an older launcher still works without these.
+                 "special_jv_drafts", "special_jv_archive")
 
 ACCOUNTS_MASTER_HEADER = "Reference,RC,Nominal,SubNominal,AnalysisKey,LOB\r\n"
 

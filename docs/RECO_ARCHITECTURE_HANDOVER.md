@@ -46,8 +46,12 @@ The launcher asks for one **base folder** once, persists it to `launcher_config.
 ├── reco_attachments/<templateId>/<id>_<filename>   uploaded files; storedPath is RELATIVE to ROOT
 ├── reco_excel/<dataFolder>/<user>/<file>.xlsx      workbooks opened with "📗 Edit in Excel" (§11)
 ├── reco_excel/<dataFolder>/_links/<exportId>.json  Excel-link manifests (+ .base.json baselines)
-├── special_jv_mapping/<REF>.json       JV definition (ref, displayName, inputColumns, accounts)
-└── special_jv_templates/<REF>.html     JV calculator UI (ROOT/apps/special_jv_templates/ also works)
+├── special_jv_mapping/<REF>.json       JV definition (ref, displayName, inputColumns, accounts, jvSpec, audit)
+├── special_jv_mapping/.lock_<REF>.json advisory lock while a JV is being published (invisible to list_files)
+├── special_jv_templates/<REF>.html     JV calculator UI (ROOT/apps/special_jv_templates/ also works)
+├── special_jv_templates/_engine/…      the reviewed JV engine a generated page loads (§6.7)
+├── special_jv_drafts/<REF>.json        a JV being built: data only, never registered
+└── special_jv_archive/<REF>/<stamp>_<user>/{<REF>.json,<REF>.html}   the version a publish replaced
 ```
 
 Folder names are **load-bearing** — `Store`, `Versioning`, `SpecialJV`, and `Attachments` hardcode these prefixes.
@@ -135,6 +139,16 @@ async function bootApp() {
 | 7 | 3723 | `RecoTemplate` — 5-step wizard; `dataFolder`; validation |
 | 8 | 4685 | `Reco` — the engine, Excel view (jspreadsheet), sheet mode, virtualised grid, reports, entries, preview/commit, groups, manage (+ Version History) |
 | 9 | 10428 | `AEG` — generic double-entry template engine |
+
+Four modules were added after those line numbers were taken, and are found by
+their banner comment rather than by line (`MODULE 2d — JV ENGINE`, and so on):
+
+| Module | Contents |
+|---|---|
+| 2d | the three `_engine/` files carried verbatim as inert text, `JV_ENGINE_VERSION`, `JV_ENGINE_FILES`, and `JVCore` built by evaluating the core island — so Reco runs the same text it writes to the share (§6.7) |
+| 3j / 3k | `XlSchema` and `ExcelLink` — the Excel round trip (§7) |
+| 9b | `JvGen` + `JvCreator` — the two texts, and the write path onto the share (§6.8) |
+| 9c | `JvWizard` — the nine-step creator and its live test-run (§6.9) |
 
 Additional-column values (master lookups, formulas, tags) are computed in one place: `Reco._rowWithExtras(tpl, sess, row)` (cascading, declaration order). The grid, Excel view, filters, sort, slicers, pivot, custom reports and exports all use it.
 
@@ -271,8 +285,180 @@ special_jv_templates/EXAMPLE_TCH.html            the worked example: a page with
   real Reco with `run_e2e.mjs`'s four rows and asserts it produces TCH's eight
   lines byte for byte.
 
-The creator UI that writes these files is not built yet; today a developer adds
-a spec-driven JV by writing one JSON file and copying the shell.
+### 6.8 The creator: how those files get onto the share
+
+`apps/Reco.html` MODULE 9b holds the half that writes. **`JvGen`** turns a
+definition into the two texts and nothing else: `JvGen.island(def)` escapes
+`<`, `>`, `&`, U+2028 and U+2029 as JSON `\u` escapes — never HTML entities,
+which are *not* decoded inside an `application/json` block and would corrupt
+the `&` in `TCH JV — Cross Currency & Charges` — and `JvGen.page(def)` builds
+the shell and **refuses to return it** (`JvGen.pageProblems`) if it would
+carry an inline script, an `on*` attribute, a `javascript:` URL or an
+unescaped island. `JvGen.mappingJson(def)` is the mapping as it goes on the
+share.
+
+**`JvCreator`** owns the folder. `Entry Generator → Special JVs` lists every
+registered JV, badged from what is actually in the files, with `Duplicate…`
+(copy a JV under a new short code — the whole of the creator's UI for now),
+`Retire` / `Bring back`, and *What is on the share?*, which prints the three
+fingerprints side by side.
+
+`JvCreator.publish(def, opts)` is the write path, and it returns
+`{ok, mode, errors, warnings, steps, written, archive, needs, inUse, engine}`
+rather than throwing, so the UI and the tests read the same answer. In order:
+
+1. the short code must be 1–24 of `[A-Za-z0-9_-]` starting with a letter, not
+   a Windows device name, not starting with `_` (that reserves `_engine/`);
+   `JvCreator._paths()` throws for anything else, so a bad code can never
+   become a path. Every write is relative, under one of the four JV folders.
+2. `JVCore.validateSpec` must return no errors. `inputColumns` is derived
+   first, as the union of every column's label and accepted spellings — Reco
+   projects only the names listed there, so a spelling the spec accepts but
+   the mapping does not declare would arrive blank.
+3. the target is classified **from the files**: `new`, `generated`,
+   `handEdited`, `abandoned`, `pageOnly`, `mappingOnly`, `handWritten`,
+   `detached`, `strayPage`, `strayMapping`. A page with no
+   `<meta name="generator">` is never overwritten at any price, and a page
+   whose embedded JSON no longer matches the mapping needs a second, explicit
+   confirmation.
+4. a code that differs from an existing one only by capitals is refused (the
+   share is a Windows folder), and so is a code whose page or mapping already
+   exists but is not ours.
+5. `audit.rev` / `audit.updatedAt` on the share are compared with the ones the
+   edit began from; if they moved, nothing is written and the message names
+   who moved them. A JV that has already posted entries needs its short code
+   typed back (`needs: 'typedRef'`).
+6. an advisory lock at `special_jv_mapping/.lock_<REF>.json`: refused when it
+   is under ten minutes old and belongs to someone else, otherwise written,
+   given a second to settle and read back. **This narrows the race, it does
+   not close it** — the bridge has no create-if-absent primitive. One method
+   in `main.py` (`O_EXCL`) would close it properly.
+7. the current pair is copied to `special_jv_archive/<REF>/<stamp>_<user>/`.
+   That **is** the rollback mechanism: the bridge has no delete and no rename,
+   so a previous version only exists if it was copied first.
+8. `_engine/` is seeded from MODULE 2d's islands when a file is missing, and
+   an existing one is never touched or compared — the version is in the
+   filename, so a JV keeps the engine it was validated against.
+9. **the page is written first, the mapping second**, because the mapping *is*
+   the registration: a half-written JV stays invisible rather than appearing in
+   the To Account dropdown with a blank iframe.
+10. both files are read back and compared byte for byte, and the island is
+    parsed and hashed against the page's own `<meta name="jv-spec-hash">`. On
+    any mismatch the previous version is put back from step 7; for a code that
+    never existed, the page becomes a placeholder that says it was not
+    published (nothing can be deleted).
+11. the lock is emptied, `SpecialJV.load()` runs, and any load problem is
+    reported.
+
+**Retire, never delete** (`JvCreator.setRetired`): `audit.retired = true`, the
+ref stays registered so a pending JV can still be completed or discarded, and
+`SpecialJV._buildToAccountOptions` stops offering it.
+
+**The admin password is a guard against accidents, not security.** It is asked
+for exactly one creator action — forcing an overwrite after a conflict — and
+`pwd.txt` is a plain text file sitting in the base folder: anyone who can open
+the shared folder can read it in Notepad. It is no longer readable *through the
+app* (`main.py::_abs` refuses it), so `verify_admin_password` is the only way
+to check it, but do not describe it to the team as an authorisation boundary.
+
+Tests: `tests/e2e/run_jv_gen_e2e.mjs` creates `TCH2` by copying TCH through the
+tab, the dialog and the Publish button, opens it through the real
+`SpecialJV.open` and asserts TCH's eight lines; then one test per rule above,
+including a traversal code, a case collision, a stray file, a conflict with
+nothing written, a tampered read-back that restores, a hand-edited page the
+engine warns about at run time, and retire.
+
+### 6.9 The wizard — building a JV without writing anything
+
+MODULE 9c (`JvWizard`) is the screen a finance user sees. It writes nothing to
+the share itself: every write still goes through `JvCreator.publish` /
+`JvCreator.downloadFiles`, so §6.8's rules have exactly one implementation.
+
+**The way in.** `Entry Generator → Special JVs → + New Special JV`, and the
+same button on Home's *Available Special JVs* panel — which now renders even
+when nothing is registered, because otherwise a share with no JVs had no entry
+point at all. `Edit…` on a card opens an existing JV; a JV whose page the
+creator did not write opens **read-only** and can only be copied.
+
+**Where to start from** — `JvWizard.openChooser()`: *Start from TCH* (its spec
+is shipped in its own mapping, so copying it costs nothing and touches
+nothing), *Copy one of ours*, *Start blank*, *Import a JV file…* (paste a
+colleague's `<REF>.json`; it keeps none of its history and its code is typed
+again). A copy goes through `JvCreator.duplicateDef`, the same function the
+`Duplicate…` button uses.
+
+**Nine steps, and the order they were built in.** The chips are clickable —
+unlike `RecoTemplate`'s — because a copy arrives with every step filled in.
+
+| step | what it decides | written to |
+|---|---|---|
+| 1 | short code, name, page heading, and the columns Reco must send | `ref`, `displayName`, `jvSpec.columns`, and `inputColumns` **derived** |
+| 2 | the row types, and the ordered rules that sort a row into one | `jvSpec.kinds`, `jvSpec.classify` |
+| 3 | one section per period / per column value / one for everything; the 10-day presets | `jvSpec.sections`, `remarks.ranges` |
+| 4 | the boxes typed once per section | `jvSpec.fields` |
+| 5 | the totals worked out from the rows | `jvSpec.aggregates` |
+| 6 | the accounts, from the Accounts Master | `jvSpec.slots` + the `accounts` block |
+| 7 | the entries — the heart | `jvSpec.entries`, `remarks.templates` |
+| 8 | the checks run before anything is handed back | `jvSpec.validate`, `entryDefaults` |
+| 9 | the live test-run, and Publish | — |
+
+**Step 9 is the screen that matters, and it is where the wizard opens.** Four
+panels, all driven by the same `JVCore` calls the generated page makes —
+`classify`, `aggregates`, `runChecks`, `buildAll` — over real rows: how each
+row sorted and why an ignored one was ignored; each section's totals with its
+typed boxes **live**; the Dr/Cr lines under the real AEG column names with the
+per-currency balance strip; and everything that would stop it, red for blocking
+and amber for not, each with a *Take me there*. Test rows come from the rows
+selected in a template, all its rows, the rows a pending JV last ran on, a
+paste, or six rows synthesised from the classification rules themselves. They
+are projected exactly as `Reco.openSpecialJv` projects them (`SpecialJV.pick`
+over the derived `inputColumns`), so **the alias trap is visible here instead of
+in production**: rename a column and the amounts go to zero while you watch.
+Capped at the first 500 rows, said out loud. Recompute is debounced ~120 ms and
+rewrites only the figures, never a control holding a caret — `JvWizard._touch`
+versus `JvWizard._struct` is that distinction, and it is why typing in a Sale
+Data box does not lose focus.
+
+**Nothing can be published without a computed, balanced test-run**
+(`JvWizard._canPublish`): a valid spec, a name, no blocking check, and every
+currency balanced. Publish recomputes first, so what is on screen is what is
+judged. The footer also offers *Save as a draft* (`special_jv_drafts/<REF>.json`
+— data only, no page, not registered; the tab lists drafts with *Carry on with
+it*) and *Download the files instead*, which is the no-bridge path.
+
+**The amount is one stored thing.** A formula string over the names the spec
+declares, parsed by `JVCore.Expr` — never `new Function`, never `eval`. Two
+editors over it: the default `+ add / − take off` term rows, which serialise to
+`a + b - c` and parse back out of it (`JvWizard.parseTerms` /
+`serialTerms`, round-trip tested), and, for anything that is no longer a plain
+signed sum, the same grammar in a text box checked on every keystroke with the
+error shown inline. Two buttons do the work a formula builder alone cannot:
+*one entry per currency* (a `forEachCurrency` rule — TCH's USD and EUR
+adjustments in one click) and *balancing figure* (the flip-the-sign sum over
+every name the other entries already read, expanded through `forEachCurrency`
+first — the shape of TCH's charges entry).
+
+**`Check against the real <REF> page →`** opens a hand-written calculator with
+the same rows through the real `SpecialJV.open`, and diffs the lines it posts
+against the lines this spec produces, field by field, plus the rows each would
+close. That is the only honest test of "my new JV does what the old one did",
+and it needs no new plumbing.
+
+**What the creator refuses.** A short code that is not a safe file name; a code
+that exists; TCH, or any page it did not write; an entry whose Dr and Cr are
+the same account; a formula that is not in the grammar; a test-run that does
+not balance. Everything typed anywhere in the nine screens goes through
+`U.esc` / `U.escAttr` / `U.jsq`, so markup in a label injects nothing into the
+creator's own screens either.
+
+Tests: `tests/e2e/run_jv_wizard_e2e.mjs` (99 checks). The headline test rebuilds
+TCH **through this UI** — clicks and typing only, no JSON — from *Start blank*,
+publishes it as `TCHW`, opens `TCHW` through the real `SpecialJV.open` and
+asserts every figure `run_e2e.mjs` asserts for the real TCH page; then *Start
+from TCH* → `TCH3` whose spec, accounts and input columns equal TCH's; the live
+recompute on a keystroke; the diff against the real TCH page coming back
+*Identical*; the read-only path; the hostile-formula corpus; the injection
+corpus; drafts; and the term-builder round trip.
 
 ---
 
@@ -486,10 +672,16 @@ kind (text, `isDate`, `isValue`, computed extra, master lookup, free tag,
 
 ## 8. Adding a new Special JV — checklist
 
-This is the hand-written route, and it stays supported. Before taking it, read
-§6.7: if the JV's maths is "classify the rows, total them per section, post a
-few Dr/Cr pairs", it can be a `jvSpec` block plus a copy of the generated
-shell, with no new JavaScript on the shared folder at all.
+This is the hand-written route, and it stays supported. **Before taking it,
+read §6.7, §6.8 and §6.9**: if the JV's maths is "classify the rows, total them
+per section, post a few Dr/Cr pairs", it can be a `jvSpec` block plus a
+generated shell, with no new JavaScript on the shared folder at all — and
+`Entry Generator → Special JVs → + New Special JV` will build it and write both
+files, with a live test-run against real rows before anything is saved. Take
+this checklist only when the JV needs something §10 of the creator's
+specification lists as out of scope: one Dr/Cr pair per *row*, an account
+chosen from the data, a conditional entry, three legs, two currencies on one
+pair, or a genuinely bespoke layout.
 
 1. Write `special_jv_templates/<REF>.html`. Read `window.parent._specialJvInputs / _specialJvDef / _specialJvRef` inside `try`; if that throws, post `{type:'specialJV.ready', ref:'<REF>'}` and wait for `{type:'specialJV.init', inputs, def, ref}` (copy the pattern from TCH.html §0 and §10).
 2. On submit post `{type:'specialJV.complete', ref, jvId, lines, primaryKeys, inputData, meta?}`; on cancel post `{type:'specialJV.cancel', ref}`.
@@ -509,7 +701,8 @@ shell, with no new JavaScript on the shared folder at all.
 - **"The grid feels heavy on a big file"** → §6b. Check first whether the
   action went through `Reco.refreshGrid()` or a full `App.navigate('reco')`,
   and whether anything is iterating `sess.data` per click.
-- **Tests:** `python -m pytest tests/` (launcher + migration engine) and `node tests/e2e/run_e2e.mjs` (Reco, TCH and the hub in Chromium against the real `LauncherAPI`, including an "older launcher" mode). `run_reports_e2e.mjs` covers filters and custom reports (§6a); `run_grid_scale_e2e.mjs` covers the grid on a 200k-row extract (§6b). Run one at a time — each binds fixed ports.
+- **"How do I add a Special JV?"** → `Entry Generator → Special JVs → + New Special JV` (§6.9). The hand-written route is §8 and is for the shapes a spec cannot say.
+- **Tests:** `python -m pytest tests/` (launcher + migration engine) and `node tests/e2e/run_e2e.mjs` (Reco, TCH and the hub in Chromium against the real `LauncherAPI`, including an "older launcher" mode). `run_reports_e2e.mjs` covers filters and custom reports (§6a); `run_grid_scale_e2e.mjs` covers the grid on a 200k-row extract (§6b); `run_specialjv_e2e.mjs` covers the host side of a Special JV; `run_jv_core_unit.mjs` (no browser), `run_jv_engine_e2e.mjs`, `run_jv_gen_e2e.mjs` and `run_jv_wizard_e2e.mjs` cover §6.7, §6.8 and §6.9. Run one at a time — each binds fixed ports.
 
 ---
 
