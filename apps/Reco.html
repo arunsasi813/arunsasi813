@@ -3755,10 +3755,66 @@ const Masters = {
     return r ? Object.keys(r) : [];
   },
 
-  /* Find a single row by matching `matchKey` against `matchValue`, return `returnKey`. */
-  lookup(sourceId, tplId, matchKey, matchValue, returnKey) {
+  /* What a lookup additional column matches on and returns, for both the
+     legacy `type:'master'` shape and the unified `masterCfg` one. The two
+     differ in how a found row becomes a value - legacy maps any falsy value
+     to '', the unified one only maps null/undefined - so the flavour is
+     carried on the descriptor instead of being smoothed over. */
+  _lookupCfg(tpl, ac) {
+    if (!ac) return null;
+    if (ac.type === 'master') {
+      return { source: 'accounts', matchColumn: ac.masterRefColumn, matchKey: 'Reference',
+               returnKey: ac.masterValueColumn, legacy: true };
+    }
+    const cfg = ac.masterCfg || {};
+    if (!cfg.source || !cfg.matchColumn || !cfg.matchKey || !cfg.returnKey) return null;
+    return { source: cfg.source, matchColumn: cfg.matchColumn, matchKey: cfg.matchKey,
+             returnKey: cfg.returnKey, legacy: false };
+  },
+
+  /* matchKey -> returnKey for one lookup column, built once and kept on an
+     explicit context object the caller owns and drops at the end of its pass.
+     It replaces a rows.find() scan per row: 110 rows against a 50,000-row
+     master was 5.5M comparisons, and is now one 50,000-entry build.
+
+     Deliberately NOT module-cached. Four different masters feed these
+     lookups (accounts, document numbers, corrections, custom lists), so a
+     module cache would need invalidating in four places, and a stale master
+     means a wrong account code on a posted entry. A ctx cannot go stale
+     because it does not outlive the pass that made it. Returns null when no
+     ctx is given, and callers then fall back to the scan unchanged. */
+  indexFor(tpl, ac, ctx) {
+    if (!ctx) return null;
+    const cfg = Masters._lookupCfg(tpl, ac);
+    if (!cfg) return null;
+    const bag = ctx.masterIdx || (ctx.masterIdx = new Map());
+    const SEP = String.fromCharCode(31);
+    const ck = (tpl ? tpl.id : '') + SEP + cfg.source + SEP + cfg.matchKey + SEP
+             + cfg.returnKey + SEP + (cfg.legacy ? '1' : '0');
+    let m = bag.get(ck);
+    if (m) return m;
+    m = new Map();
+    const rows = Masters.rows(cfg.source, tpl && tpl.id) || [];
+    // Walked backwards so that where two master rows share a match value the
+    // entry left standing is the lowest-index one - exactly the row
+    // rows.find() would have returned.
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (!r) continue;
+      const v = r[cfg.returnKey];
+      m.set(String(r[cfg.matchKey] || '').trim(), cfg.legacy ? (v || '') : (v != null ? v : ''));
+    }
+    bag.set(ck, m);
+    return m;
+  },
+
+  /* Find a single row by matching `matchKey` against `matchValue`, return `returnKey`.
+     `idx` is an optional Masters.indexFor map; without one this is the
+     original scan, byte for byte. */
+  lookup(sourceId, tplId, matchKey, matchValue, returnKey, idx) {
     if (matchValue == null || matchValue === '') return '';
     const v = String(matchValue).trim();
+    if (idx) { const got = idx.get(v); return got === undefined ? '' : got; }
     const rows = Masters.rows(sourceId, tplId);
     const r = rows.find(x => String(x[matchKey] || '').trim() === v);
     return r ? (r[returnKey] != null ? r[returnKey] : '') : '';
@@ -3775,19 +3831,28 @@ const Masters = {
   },
 
   /* Run a lookup based on an additionalColumn config.
-     Supports both legacy (`type:'master'`) and new (`type:'master_lookup'`). */
-  evalLookup(tpl, ac, row) {
-    // Legacy: type=='master', masterRefColumn / masterValueColumn against accounts master
+     Supports both legacy (`type:'master'`) and new (`type:'master_lookup'`).
+     `ctx` is an optional per-pass context (see Masters.indexFor); with one,
+     the master is indexed once instead of scanned per row. Omit it and this
+     is the original code path. */
+  evalLookup(tpl, ac, row, ctx) {
+    const idx = ctx ? Masters.indexFor(tpl, ac, ctx) : null;
+    // Legacy: type=='master', masterRefColumn / masterValueColumn against accounts master.
+    // Note it has no early return on an empty match value: a master row whose
+    // Reference trims to '' is a legitimate hit here, where the unified path
+    // below returns '' without looking. That difference is pre-existing.
     if (ac.type === 'master') {
       const matchKey = ac.masterRefColumn ? row[ac.masterRefColumn] : '';
-      const m = (AppState.aegMaster || []).find(x => String(x.Reference || '').trim() === String(matchKey || '').trim());
+      const k = String(matchKey || '').trim();
+      if (idx) { const got = idx.get(k); return got === undefined ? '' : got; }
+      const m = (AppState.aegMaster || []).find(x => String(x.Reference || '').trim() === k);
       return m ? (m[ac.masterValueColumn] || '') : '';
     }
     // New unified config:
     // ac.masterCfg = { source, matchColumn, matchKey, returnKey }
     const cfg = ac.masterCfg || {};
     if (!cfg.source || !cfg.matchColumn || !cfg.matchKey || !cfg.returnKey) return '';
-    return Masters.lookup(cfg.source, tpl.id, cfg.matchKey, row[cfg.matchColumn], cfg.returnKey);
+    return Masters.lookup(cfg.source, tpl.id, cfg.matchKey, row[cfg.matchColumn], cfg.returnKey, idx);
   }
 };
 
@@ -7978,6 +8043,64 @@ const AppState = {
     }
   },
 
+  /* Write only the named keys. Anything outside PERSIST_KEYS, and any
+     read-only key, is ignored rather than invented.
+
+     WHAT THIS IS WORTH, AND WHAT IT IS NOT. save() serialises every persisted
+     key to work out what changed, and recoSessions alone measured 798-1378 ms
+     / 85.6 MiB at 200,000 rows and 2453-3625 ms / 216.3 MiB at 500,000. So
+     this is a real saving for a key that is NOT recoSessions - entryHistory,
+     docNumberMaster, a master - and NO saving whatever for a view preference,
+     because every one of those lives on `sess`, inside recoSessions, which is
+     the expensive key itself. Making a preference write cheap means moving the
+     preference OUT of recoSessions; saveKeys does not do that on its own, and
+     an earlier version of this comment claimed it did.
+
+     DEBOUNCED, on the same delay as save(). Without it a burst of ten
+     preference changes is ten whole-file overwrites of a file on a shared
+     network folder where save() would have made one - strictly worse for the
+     colleague saving at the same moment.
+
+     save() is deliberately NOT routed through this: it owns its own timer and
+     its waiter list, and leaving it byte-for-byte as it was is what guarantees
+     no existing caller changes behaviour. Diffing against _snap is the same
+     rule save() uses, so a key written here is not written again by the next
+     save(). Resolves with { written, skipped, failed } so a caller can tell a
+     key that could not be serialised from one that simply had not changed. */
+  _keyTimer: null,
+  _keyWanted: null,
+  _keyPromise: null,
+  saveKeys(...keys) {
+    const want = [];
+    keys.flat().forEach(k => {
+      if (AppState.PERSIST_KEYS.includes(k) && !Store.readOnlyKeys[k] && !want.includes(k)) want.push(k);
+    });
+    if (!want.length) return Promise.resolve({ written: [], skipped: [], failed: [] });
+    AppState._keyWanted = AppState._keyWanted || new Set();
+    want.forEach(k => AppState._keyWanted.add(k));
+    if (AppState._keyTimer) return AppState._keyPromise;      // join the burst already in flight
+    AppState._keyPromise = new Promise(resolve => {
+      AppState._keyTimer = setTimeout(async () => {
+        AppState._keyTimer = null;
+        const batch = Array.from(AppState._keyWanted || []);
+        AppState._keyWanted = null;
+        const out = { written: [], skipped: [], failed: [] };
+        batch.forEach(key => {
+          let text;
+          try { text = Store.serialize(key, AppState[key]); }
+          catch (e) { console.error('serialize failed for ' + key, e); out.failed.push(key); return; }
+          if (text === AppState._snap[key]) { out.skipped.push(key); return; }
+          AppState._snap[key] = text;
+          Store.save(key, AppState[key], text);
+          out.written.push(key);
+        });
+        await Promise.all([Store.idle(), Versioning.idle()]);
+        resolve(out);
+      }, AppState.SAVE_DELAY);
+    });
+    return AppState._keyPromise;
+  },
+
   pendingCount() {
     return (AppState._saveTimer ? 1 : 0) + Store.pendingCount() + Versioning.pendingCount();
   },
@@ -8401,6 +8524,7 @@ defaultTemplate() {
 
   create() {
     RecoTemplate._editing = RecoTemplate.defaultTemplate();
+    RecoTemplate._openedWith = null;      // nothing stored yet to be stale against
     RecoTemplate._isNew = true;
     RecoTemplate._isQuickEdit = false;
     RecoTemplate._step = 1;
@@ -8426,7 +8550,8 @@ defaultTemplate() {
       h += '<tr>';
       h += '<td><button class="small" onclick="RecoTemplate.moveExtra('+i+',-1)">↑</button>';
       h += '<button class="small" onclick="RecoTemplate.moveExtra('+i+',1)">↓</button></td>';
-      h += '<td><input type="text" value="'+U.escAttr(ac.name)+'" oninput="RecoTemplate._editing.additionalColumns['+i+'].name=this.value" /></td>';
+      h += '<td><input type="text" value="'+U.escAttr(ac.name)+'" oninput="RecoTemplate._editing.additionalColumns['+i+'].name=this.value"'
+         + ' onchange="this.value=this.value.trim(); RecoTemplate._editing.additionalColumns['+i+'].name=this.value" /></td>';
       h += '<td><select onchange="RecoTemplate._setExtraType('+i+',this.value)">';
       [
         ['custom',         'Free text'],
@@ -8675,6 +8800,9 @@ defaultTemplate() {
     const t = AppState.recoTemplates.find(x => x.id === id);
     if (!t) return;
     RecoTemplate._editing = JSON.parse(JSON.stringify(t));
+    // A second, untouched clone of exactly what was opened, so saveTemplate
+    // can tell "the user changed this" from "someone else changed this".
+    RecoTemplate._openedWith = JSON.parse(JSON.stringify(t));
     if (!RecoTemplate._editing.editableColumnConfig) RecoTemplate._editing.editableColumnConfig = {};
     if (!RecoTemplate._editing.aegIntegration) RecoTemplate._editing.aegIntegration = { enabled:false, aegTemplateId:'', keywordColumn:'', keywordValues:'', postEntryColumn:'', postEntryValue:'' };
     if (!RecoTemplate._editing.reports) RecoTemplate._editing.reports = [];
@@ -9375,11 +9503,49 @@ defaultTemplate() {
     if (!t.columns.length) { U.toast('Define at least one column','error'); return; }
     t.columns.forEach(c => { c.name = String(c.name || '').trim(); });
     if (t.columns.some(c => !c.name)) { U.toast('Every column needs a name','error'); return; }
-    const names = t.columns.map(c => c.name);
-    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    const colNames = t.columns.map(c => c.name);
+    const dup = colNames.find((n, i) => colNames.indexOf(n) !== i);
     if (dup) { U.toast('Column "' + dup + '" is defined twice','error'); return; }
+
+    /* An added column's name is matched BY NAME in formulas, display order, the
+       Excel link, the manual-tag store and the per-cell format store, so a
+       space at either end is invisible on screen and breaks every one of them.
+       The name box trims on blur, so the editor cannot produce one.
+       A padded name reaching here therefore came from an older build or a hand
+       edit, and renaming it HERE would silently orphan everything already
+       stored against the padded name - tags, filters, slicers, hidden columns,
+       column order, per-cell formats. So refuse, and name the column. Same for
+       two added columns that collide, which nothing else in the app rejects. */
+    const extraRaw = (t.additionalColumns || []).map(ac => String((ac && ac.name) == null ? '' : ac.name));
+    const padded = extraRaw.find(n => n !== n.trim());
+    if (padded != null) {
+      U.toast('Added column "' + padded + '" has a space at the start or end of its name. Take it out '
+            + 'before saving: renaming it here would lose the values already stored against it.', 'error');
+      return;
+    }
+    const extraDup = extraRaw.filter(Boolean).find((n, i, a) => a.indexOf(n) !== i);
+    if (extraDup) { U.toast('Added column "' + extraDup + '" is defined twice', 'error'); return; }
+    const clash = extraRaw.filter(Boolean).find(n => colNames.includes(n));
+    if (clash) { U.toast('"' + clash + '" is both a file column and an added column', 'error'); return; }
+
+    /* The three name sets, built once, read by every prune below.
+       The prune that follows used to test against t.columns alone, so the
+       moment anything else may legitimately name an added column - a primary
+       key, a display order, a correction context - saving the template
+       silently deleted that reference. Three upcoming features would each
+       have added their own copy of that bug beside it; instead they each add
+       one line that reads from here. */
+    const fileNames  = new Set(colNames);
+    const extraNames = new Set((t.additionalColumns || []).map(ac => ac && ac.name).filter(Boolean));
+    const allNames   = new Set([...fileNames, ...extraNames]);
+
     // Drop references to columns that no longer exist
-    t.primaryKeys = (t.primaryKeys || []).filter(k => names.includes(k));
+    // fileNames, deliberately, not allNames: an added column's value is never
+    // on the row, so a primary key naming one makes getRowPK produce a blank
+    // component for it for ever. #24 widens this in the same commit that
+    // teaches getRowPK to resolve an added column; widening it any earlier
+    // just keeps a broken key alive instead of repairing it.
+    t.primaryKeys = (t.primaryKeys || []).filter(k => fileNames.has(k));
     
     // Ensure display columns exist
     if (!t.displayColumns.length) t.displayColumns = t.columns.map(c=>c.name);
@@ -9390,6 +9556,19 @@ defaultTemplate() {
     } else {
       const i = AppState.recoTemplates.findIndex(x=>x.id===t.id);
       const orig = i !== -1 ? AppState.recoTemplates[i] : null;
+      /* KNOWN AND UNMITIGATED: someone else may have saved this template since
+         the editor opened it. edit() deep-clones, this function replaces the
+         whole object, and AppState.load() runs once at boot - so a field a
+         colleague set at 10:00 is wiped when this save goes out from a 09:00
+         clone. The hazard is pre-existing and affects EVERY template field.
+         A check against AppState.recoTemplates was written here and removed:
+         that array is read once at boot, so it only ever holds THIS session's
+         own object and the comparison could never fire. Detecting a
+         colleague's change means re-reading the stored template from the
+         shared folder, which makes this function async. That is a deliberate
+         change to the template write path and belongs in its own commit.
+         _openedWith is still captured, because that is what such a check needs
+         to tell "the user changed this field" from "someone else did". */
       // Keep the history folder the template already uses, even when it is renamed.
       if (!t.dataFolder) t.dataFolder = Versioning.folderFor(orig || t);
       if (orig && (orig.primaryKeys || []).length && JSON.stringify(orig.primaryKeys) !== JSON.stringify(t.primaryKeys || [])) {
@@ -9403,10 +9582,19 @@ defaultTemplate() {
     // which flattens the data and sends it to Python.
     AppState.save(); 
 
+    // What is stored now IS what the editor holds, so a second save from the
+    // same screen must not report itself as someone else's change.
+    try { RecoTemplate._openedWith = JSON.parse(JSON.stringify(t)); } catch (e) { RecoTemplate._openedWith = null; }
+
     App.closeModal();
     App.navigate('home');
     U.toast('Template saved to database','success');
-  }
+  },
+
+  /* Top-level template fields that someone else changed while this editor was
+     open AND that this save is about to overwrite with the stale original. A
+     field the user deliberately edited is not a conflict to report - they
+     know what they typed - so only fields the editor left alone count. */
 };
 
 /* ================================================================
@@ -13074,34 +13262,98 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   _extraValueForRow(tpl, sess, row, ac) {
     if (!ac) return '';
     // Formulas / lookups may reference additional columns declared above this one.
-    const accum = Reco._rowWithExtras(tpl, sess, row, ac.name);
-    return Reco._extraOwnValue(tpl, sess, accum, row, ac);
+    const accum = Reco.rowFull(tpl, sess, row, ac.name);
+    return Reco._extraOwnValue(tpl, sess, accum, row, ac, Reco._fullCtx());
+  },
+
+  /* ---- the one key a manually-typed additional-column value is stored under.
+     Written by Reco.applyEdits (the tag branch) and Reco.setTag, read by
+     _extraOwnValue and the AEG source-row loop: four sites that used to spell
+     `row._id + '||' + name` out by hand. One spelling, so re-keying it later
+     is one edit instead of four.
+
+     It is row._id today, and row._id is minted fresh on every load, so a value
+     a user typed into their own column does not survive reopening the same
+     file. Moving this to Reco._ssRowKey(row) is the fix and is NOT done here -
+     see the report: four existing assertions pin the stored key to _id, and
+     the change is user-visible, which step 2 is not allowed to be. */
+  _tagKey(row, name) { return row._id + '||' + name; },
+
+  /* The manually-typed value of an additional column for a row, or ''. */
+  _manualTag(sess, row, name) {
+    return ((sess && sess.manualTags) || {})[Reco._tagKey(row, name)] || '';
   },
 
   /* Value of one additional column given the row enriched with the columns
-     declared before it (`accum`). Same rules as the grid. */
-  _extraOwnValue(tpl, sess, accum, row, ac) {
+     declared before it (`accum`). Same rules as the grid - and since step 2
+     the grid goes through here rather than keeping its own copy of them.
+     `ctx` is an optional per-pass context handed to Masters.evalLookup so a
+     lookup indexes its master once instead of scanning it per row. */
+  _extraOwnValue(tpl, sess, accum, row, ac, ctx) {
     if (ac.type === 'master' || ac.type === 'master_lookup') {
-      try { return Masters.evalLookup(tpl, ac, accum); } catch(e) { return ''; }
+      try { return Masters.evalLookup(tpl, ac, accum, ctx); } catch(e) { return ''; }
     }
     if (ac.type === 'formula') {
       try { return Formula.evaluate(ac.formula, accum); } catch(e) { return '#ERR'; }
     }
     // dropdown / custom: a value on the row wins, else the manual tag
     if (row[ac.name] != null && row[ac.name] !== '') return row[ac.name];
-    return ((sess && sess.manualTags) || {})[row._id + '||' + ac.name] || '';
+    return Reco._manualTag(sess, row, ac.name);
   },
 
   /* Copy of a row with every additional column (template + session) filled
      in, in declaration order. Stops before `uptoName` when given. */
-  _rowWithExtras(tpl, sess, row, uptoName) {
+  _rowWithExtras(tpl, sess, row, uptoName, ctx) {
     const out = Object.assign({}, row);
     const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
     for (const ac of extras) {
       if (uptoName != null && ac.name === uptoName) break;
-      out[ac.name] = Reco._extraOwnValue(tpl, sess, out, row, ac);
+      out[ac.name] = Reco._extraOwnValue(tpl, sess, out, row, ac, ctx);
     }
     return out;
+  },
+
+  /* ---- S1: one enriched row per render pass -------------------------------
+     _rowWithExtras is pure given (tpl, sess, row, the masters), so within a
+     single render nothing it reads can change and the result can be reused.
+     Three callers used to re-derive it and three more kept uncoordinated
+     caches of their own.
+
+     The pass is opened by renderRecoTable / _refreshVirtBody /
+     renderCorrection and holds two things: the memo, keyed by row._id, and
+     the Masters.indexFor context, built once per pass instead of scanning the
+     master once per row. It lives on Reco and not on the session because
+     sessions are JSON-serialised to the shared folder and a Map would be
+     written out as {}.
+
+     IT MUST BE CLOSED. A master index that outlives its render is a stale
+     chart of accounts: edit an account, re-render, and the grid still shows the
+     old nominal. Every opener below is paired with a finally. */
+  _fullCache: null,
+
+  /* Start a render pass. Anything cached by the previous one is dropped. */
+  _fullPass() {
+    Reco._fullCache = { ctx: {} };
+    return Reco._fullCache;
+  },
+
+  /* End it. Outside a pass every lookup falls back to its own per-row scan,
+     which is slower and always right. */
+  _fullEnd() { Reco._fullCache = null; },
+
+  /* The open pass's Masters context, or undefined outside a pass (in which
+     case every lookup falls back to its original per-row scan). */
+  _fullCtx() { return Reco._fullCache ? Reco._fullCache.ctx : undefined; },
+
+  /* The row enriched with its additional columns, memoised for this pass.
+     With `uptoName` the walk stops early and is NOT memoised: a partial row
+     must never be handed to a caller that asked for the whole one. */
+  rowFull(tpl, sess, row, uptoName) {
+    const c = Reco._fullCache;
+    // No row, or no open pass: hand straight to the walker, so this is the
+    // original call in every respect including how it treats a missing row.
+    if (!row || !c) return Reco._rowWithExtras(tpl, sess, row, uptoName);
+    return Reco._rowWithExtras(tpl, sess, row, uptoName, c.ctx);
   },
 
   // Returns the additionalColumn definition for a given column name, or null
@@ -13700,7 +13952,11 @@ _sortKeyed(keyed, isDate, dir) {
   },
   // Build the effective ordered column list for the reco table.
   // Honours: tpl.displayColumns, AEG-injected To Account column, and sess.columnOrder.
+  // A null session is a template with nothing open yet - a column catalog is
+  // still a sensible question to ask about it - so the session's view
+  // preferences simply read as absent instead of throwing.
   effectiveDisplayCols(tpl, sess) {
+    sess = sess || {};
     let base = (tpl.displayColumns && tpl.displayColumns.length)
       ? tpl.displayColumns.slice()
       : tpl.columns.map(c => c.name);
@@ -13726,6 +13982,55 @@ _sortKeyed(keyed, isDate, dir) {
     const ordered     = order.filter(c => base.includes(c));
     const notOrdered  = base.filter(c => !ordered.includes(c));
     return ordered.concat(notOrdered).filter(c => !(sess.hiddenCols || []).includes(c));
+  },
+
+  /* Every column this template could show, as XlSchema descriptors: template
+     columns including hidden ones, every additional column, no status column,
+     nothing editable. One catalog, so a column picker, an exporter and a
+     context view cannot disagree about what a column is or what role it
+     plays. `rows: []` is deliberate - a catalog is a question about the
+     template, so no sampling of row data is wanted and none is paid for. */
+  columnCatalog(tpl, sess) {
+    return XlSchema.build(tpl, sess, { scope: 'readonly', includeHidden: true,
+                                       showExtras: 'all', showStatus: false, rows: [] }).cols;
+  },
+
+  /* ---- S2: the one display rule ------------------------------------------
+     Which of XlSchema.currentValue's three cases a column name falls under,
+     without building a whole schema for it. A template column and the
+     To-Account column both read the row itself; only an additional column
+     reads the enriched row. Cheap on purpose: this is asked once per cell. */
+  _dispDesc(tpl, sess, col) {
+    if (col === '_status_') return { name: col, role: 'status' };
+    if ((tpl.columns || []).some(c => c.name === col)) return { name: col, role: 'tpl' };
+    const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
+    const ac = extras.find(a => a && a.name === col);
+    if (!ac) return { name: col, role: 'tpl' };
+    if (col === XlSchema.toAccountCol(tpl)) return { name: col, role: 'toAccount' };
+    const t = ac.type || 'custom';
+    const computed = (t === 'formula' || t === 'master' || t === 'master_lookup');
+    return { name: col, role: computed ? 'computed' : 'tag' };
+  },
+
+  /* What a grid cell shows, as one rule instead of a branch private to the
+     row renderer: the raw value through XlSchema.currentValue, then a
+     spreadsheet-mode cell formula if one is set for this cell, then the date
+     pass. `full` is the enriched row (Reco.rowFull) and is only consulted for
+     an additional column, so a caller rendering template columns may leave it
+     out and pays nothing.
+
+     The per-cell number format is NOT applied here: today only the read-only
+     branch of the row renderer applies it, and it is applied after the
+     format-error class has been decided from the unformatted value. Moving it
+     in would change both of those. */
+  displayCellValue(tpl, sess, row, col, full) {
+    const desc = Reco._dispDesc(tpl, sess, col);
+    let val = XlSchema.currentValue(desc, row, full, sess);
+    const cellFormula = (sess && sess.spreadsheetMode)
+      ? ((sess.cellFormulas || {})[Reco._ssRowKey(row)] || {})[col] : null;
+    if (cellFormula) val = Reco._ssEvalFormula(cellFormula, row, tpl);
+    if (col.toLowerCase().includes('date')) val = U.formatExcelDate(val);
+    return val;
   },
 
 
@@ -13921,6 +14226,12 @@ _refreshVirtBody() {
   if (!tpl || !sess) return;
   const tbody = document.querySelector('.reco-table-wrap tbody');
   if (!tbody) return;
+  Reco._fullPass();
+  try { return Reco._refreshVirtBodyInner(tpl, sess, tbody); }
+  finally { Reco._fullEnd(); }
+},
+
+_refreshVirtBodyInner(tpl, sess, tbody) {
 
   const pageSize = sess.pageSize || 200;
   const cached = Reco._virtStateFor(tpl, sess);
@@ -14019,22 +14330,15 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
   displayCols.forEach(col => {
     const dataAttr = ' data-col="' + U.escAttr(col) + '"';
     const colDef = tpl.columns.find(c => c.name === col);
-    let val = row[col];
+    // The raw value, any per-cell formula and the date pass are all one rule
+    // now (Reco.displayCellValue). displayCols only ever holds template
+    // columns, so the enriched row is not needed and not built.
+    let val = Reco.displayCellValue(tpl, sess, row, col);
           // Phase 4: per-cell format
           const fmt = Reco._ssFmtFor(sess, row, col);
           const fmtStyle = Reco._ssFmtStyle(fmt);
           const fmtCls   = Reco._ssFmtClass(fmt);
 
-    // Phase 2: if a per-cell formula exists, evaluate and override the displayed value
-          const rowKey = Reco._ssRowKey(row);
-          const cellFormula = sess.spreadsheetMode ? ((sess.cellFormulas || {})[rowKey] || {})[col] : null;
-          let formulaCls = '';
-          if (cellFormula) {
-            val = Reco._ssEvalFormula(cellFormula, row, tpl);
-            formulaCls = ' ss-formula-cell';
-          }  
-
-    if (col.toLowerCase().includes('date')) val = U.formatExcelDate(val);
     let cls = '';
     if (row['_corrected_'+col]) cls = 'cell-corrected';
     else if (colDef && colDef.formats && colDef.formats.length && !FMT.validate(val, colDef.formats)) cls = 'cell-error';
@@ -14074,6 +14378,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
   });
 
   const accum = Object.assign({}, row);
+  const fullCtx = Reco._fullCtx();
   extraCols.forEach(ac => {
     const dataAttr = ' data-col="' + U.escAttr(ac.name) + '"';
 
@@ -14097,21 +14402,30 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
       return;
     }
 
+    /* One rule for what an additional column is worth: Reco._extraOwnValue.
+       The grid used to keep its own copy of that ladder - a lookup, a
+       formula, a tag - and the copy had drifted. Going through the helper
+       also hands the lookup the pass's Masters index instead of a per-row
+       scan of the master.
+       Two deltas, both confirmed invisible on screen: the lookup gains the
+       helper's try/catch -> '' (evalLookup has no throwing path today), and
+       the tag branch stops being String()'d before it lands in `accum`,
+       which only ever feeds Formula/Masters and both re-stringify. The
+       markup below still compares a String, so a numeric tag value still
+       matches its dropdown option rather than becoming "(custom)". */
     let v;
     if (ac.type === 'master' || ac.type === 'master_lookup') {
-      v = Masters.evalLookup(tpl, ac, accum);
+      v = Reco._extraOwnValue(tpl, sess, accum, row, ac, fullCtx);
       accum[ac.name] = v;
       h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(v)+'</td>';
     } else if (ac.type === 'formula') {
-      try { v = Formula.evaluate(ac.formula, accum); } catch(e) { v = '#ERR'; }
+      v = Reco._extraOwnValue(tpl, sess, accum, row, ac, fullCtx);
       accum[ac.name] = v;
       h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(v)+'</td>';
     } else {
-      const tagKey = row._id + '||' + ac.name;
-      const tagVal = (row[ac.name] != null && row[ac.name] !== '')
-        ? String(row[ac.name])
-        : ((sess.manualTags || {})[tagKey] || '');
-      accum[ac.name] = tagVal;
+      const own = Reco._extraOwnValue(tpl, sess, accum, row, ac, fullCtx);
+      accum[ac.name] = own;
+      const tagVal = own == null ? '' : String(own);
       if (ac.type === 'dropdown') {
         const dropOpts = Masters._extraDropdownOptions(tpl, ac);
         h += '<td' + dataAttr + '><select onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)">';
@@ -14133,6 +14447,11 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
 
 /* Render the main reco table with pagination, column filters, slicers, row selection */
 renderRecoTable(tpl, sess) {
+    Reco._fullPass();
+    try { return Reco._renderRecoTableInner(tpl, sess); }
+    finally { Reco._fullEnd(); }
+  },
+  _renderRecoTableInner(tpl, sess) {
     SpecialJV.resetOptions();
     Reco._postedIdxReset();
     // 1. Effective display order (honours saved sess.columnOrder + AEG To Account injection)
@@ -15231,7 +15550,7 @@ renderRecoTable(tpl, sess) {
     sessionOnly.forEach(s => {
       if (s.desc.writeTo === 'tag') {
         sess.manualTags = sess.manualTags || {};
-        const k = s.row._id + '||' + s.col;
+        const k = Reco._tagKey(s.row, s.col);
         if (s.value === '' || s.value == null) delete sess.manualTags[k];
         else sess.manualTags[k] = s.value;
         // A value on the row would hide the tag (see _extraOwnValue).
@@ -15242,6 +15561,9 @@ renderRecoTable(tpl, sess) {
       res.sessionOnly.push({ row: s.row, col: s.col, reason: s.reason });
     });
     res.rows = touched.size;
+    // The render-scoped enriched rows are no longer true for anything this
+    // edit touched. The next pass rebuilds the memo from scratch anyway; this
+    // covers a caller that reads rowFull between passes.
     if (res.applied) AppState.save();
     return res;
   },
@@ -15262,7 +15584,9 @@ renderRecoTable(tpl, sess) {
     const row = Reco._rowById(sess, rowId);
     if (row) { Reco.applyEdits(tpl, sess, [{ row, col: tagName, value: val }], { source: 'grid', trusted: true }); return; }
     sess.manualTags = sess.manualTags || {};
-    sess.manualTags[rowId + '||' + tagName] = val;
+    // No row to hand _tagKey, so the id is the key - which is what _tagKey
+    // spells out for a row too.
+    sess.manualTags[Reco._tagKey({ _id: rowId }, tagName)] = val;
     AppState.save();
   },
 
@@ -15358,6 +15682,11 @@ renderRecoTable(tpl, sess) {
   },
   /* ============== CORRECTION SECTION ============== */
   renderCorrection(tpl, sess) {
+    Reco._fullPass();
+    try { return Reco._renderCorrectionInner(tpl, sess); }
+    finally { Reco._fullEnd(); }
+  },
+  _renderCorrectionInner(tpl, sess) {
     let h = '<div class="panel"><h2>Column Corrections <span>';
     h += '<button class="small primary" onclick="Reco.addCorrectionCol()">+ Add Column Rule</button>';
     h += '</span></h2>';
@@ -16095,7 +16424,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         } else {
           // 'custom' or 'dropdown' — only fall back to manualTags if the row has no value yet.
           if (r[ac.name] != null && r[ac.name] !== '') return;
-          r[ac.name] = (sess.manualTags||{})[r._id + '||' + ac.name] || '';
+          r[ac.name] = Reco._manualTag(sess, r, ac.name);
         }
       });
     });

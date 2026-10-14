@@ -292,19 +292,36 @@ try {
     await raf();
     o.clearMs = Math.round(performance.now() - t);
     o.clearSurvived = alive();
+    o.clearBest = o.clearMs;
     o.clearNoneTicked = [...document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]')]
       .every(tr => !tr.classList.contains('selected'));
     o.barHidden = !document.getElementById('selSumBar').classList.contains('show');
     o.headerEmpty = !document.getElementById('recoSelectAll').checked
                  && !document.getElementById('recoSelectAll').indeterminate;
 
-    // What clearing used to cost: a full re-render of the screen. Measured here,
-    // in this run, on this CPU, so 2.11 can compare like with like. It replaces
-    // the DOM, so the sentinel 2.12 watches has to be planted again afterwards.
-    t = performance.now();
-    App.navigate('reco');
-    await raf();
-    o.fullRenderMs = Math.round(performance.now() - t);
+    /* What clearing used to cost: a full re-render of the screen, measured in
+       this run on this CPU so 2.11 compares like with like.
+       Both are measured three times and the BEST of each is kept. A ratio
+       survives a uniform slowdown but not additive noise: on a contended
+       machine both halves spend their time waiting rather than computing, so
+       the small one inflates proportionally more and the ratio walks towards 1
+       (seen: 73 vs 170 idle, 109 vs 126 loaded). The minimum is the standard
+       estimator for the uninterrupted cost, which is what is being compared. */
+    o.fullRenderMs = Infinity;
+    for (let rep = 0; rep < 3; rep++) {
+      t = performance.now();
+      App.navigate('reco');
+      await raf();
+      o.fullRenderMs = Math.min(o.fullRenderMs, Math.round(performance.now() - t));
+      plant();
+      // Re-select so the next clear has the same work to do as the first.
+      await Reco.toggleAllRows(true);
+      await raf();
+      t = performance.now();
+      Reco.clearSelection();
+      await raf();
+      o.clearBest = Math.min(o.clearBest, Math.round(performance.now() - t));
+    }
     plant();
 
     t = performance.now();
@@ -353,11 +370,11 @@ try {
   // The claim being tested is that clearing is surgical rather than a full
   // re-render, which is exactly what 2.9 asserts behaviourally; this puts a
   // number on it, against a full re-render measured in the same run.
-  check(typeof surg.clearMs === 'number' && typeof surg.fullRenderMs === 'number'
-        && surg.fullRenderMs > 30 && surg.clearMs < surg.fullRenderMs * 0.7,
+  check(typeof surg.clearBest === 'number' && typeof surg.fullRenderMs === 'number'
+        && surg.fullRenderMs > 30 && surg.clearBest < surg.fullRenderMs * 0.7,
     '2.11 clearing a 200,000-row selection costs well under a full re-render '
-    + '(' + surg.clearMs + 'ms vs ' + surg.fullRenderMs + 'ms in the same run)',
-    { clearMs: surg.clearMs, fullRenderMs: surg.fullRenderMs });
+    + '(best of 3: ' + surg.clearBest + 'ms vs ' + surg.fullRenderMs + 'ms in the same run)',
+    { clearBest: surg.clearBest, clearFirst: surg.clearMs, fullRenderMs: surg.fullRenderMs });
   check(surg.pageSurvived, '2.12 turning the page re-renders the grid, not the screen');
   // Not a timing check. Turning the page costs about what the old full
   // re-render did (95-136ms measured here): the saving from redrawing only the
@@ -370,6 +387,40 @@ try {
   check(surg.chipSurvived, '2.14 removing a slicer chip does not re-render the whole screen');
   check(surg.chipsLeft === 1, '2.15 the chip strip is refreshed in place', surg.chipsLeft);
   check(surg.rowsAfterChip === BIG / 4, '2.16 and the table follows the remaining chip', surg.rowsAfterChip);
+
+  /* The grid's additional-column ladder was a copy of the rule in
+     Reco._extraOwnValue, and the two had drifted; the copy is gone and the
+     grid now goes through the rule, with a render-scoped row memo and a
+     per-pass master index behind it. A memo that is wrong in the cheap
+     direction shows up here as fewer evaluations than rendered rows (a stale
+     row reused across a pass); one that is wrong in the expensive direction
+     as more (the walk repeated per cell). Measured at 110 before the
+     refactor: one Formula.evaluate per rendered row per formula column, and
+     this template has exactly one of those (Calc).
+     The first render is thrown away because App.navigate renders once itself,
+     which would count two passes. */
+  const ev = await page.evaluate(async () => {
+    const o = {};
+    const raf = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const tpl = AppState.recoTemplates.find(x => x.name === 'GRID');
+    const sess = AppState.recoSessions[tpl.id];
+    sess.slicers = {}; sess.columnFilters = {}; sess.columnSorts = null; sess.page = 0;
+    App.navigate('reco'); await raf();
+    Reco.refreshGrid(); await raf();
+    const realEval = Formula.evaluate;
+    let evals = 0;
+    Formula.evaluate = function (f, row) { evals++; return realEval.call(Formula, f, row); };
+    try { Reco.refreshGrid(); await raf(); } finally { Formula.evaluate = realEval; }
+    o.evals = evals;
+    o.renderedRows = document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]').length;
+    o.formulaCols = (tpl.additionalColumns || []).filter(ac => ac.type === 'formula').length;
+    o.want = o.renderedRows * o.formulaCols;
+    return o;
+  });
+  check(ev.renderedRows > 0 && ev.formulaCols > 0 && ev.evals === ev.want,
+    '2.17 a 200,000-row grid render still evaluates a formula column exactly once per rendered row '
+    + '(' + ev.evals + ' calls for ' + ev.renderedRows + ' rendered rows x ' + ev.formulaCols
+    + ' formula column; was 110 before the step-2 refactor)', ev);
 
   /* ====================================================================
      [3] Long operations say what they are doing
