@@ -304,6 +304,12 @@ try {
     o.pageMs = Math.round(performance.now() - t);
     o.pageSurvived = alive();
     o.pagerText = document.querySelector('.page-info').textContent;
+    // The page must start at its first row. Keeping the previous offset left
+    // the first rows of the new page above the viewport, silently unread.
+    const pw = document.querySelector('.reco-table-wrap');
+    o.pageScrollTop = pw ? pw.scrollTop : -1;
+    const firstTr = document.querySelector('.reco-table-wrap tbody tr[data-frow]');
+    o.pageFirstFrow = firstTr ? Number(firstTr.dataset.frow) : -1;
 
     // A slicer chip's × refreshes the chip strip and the table, nothing else.
     sess.slicers = { Cur: ['USD', 'EUR'] }; sess.page = 0;
@@ -333,7 +339,14 @@ try {
     '2.10b the header box reads empty / half / full to match the real selection', surg);
   under(surg.clearMs, 100, '2.11 clearing a 200,000-row selection', 120);  // new 33-84ms (variance), old 120ms+
   check(surg.pageSurvived, '2.12 turning the page re-renders the grid, not the screen');
-  under(surg.pageMs, 90, '2.13 jumping to page 501 of 1,000', 117);        // new ~51ms, old 117ms
+  // Not a timing check. Turning the page costs about what the old full
+  // re-render did (95-136ms measured here): the saving from redrawing only the
+  // grid is spent re-rendering the virtual window from row 0, which is the
+  // point — 2.12 covers the grid-only redraw, and these cover landing at the
+  // top of the page. A loose ceiling still catches a catastrophic regression.
+  check(surg.pageScrollTop === 0, '2.13 the new page starts at its first row', surg.pageScrollTop);
+  check(surg.pageFirstFrow === 500 * 200, '2.13b and the first row rendered is the page\'s first row', surg.pageFirstFrow);
+  under(surg.pageMs, 600, '2.13c jumping to page 501 of 1,000 stays responsive', 117);
   check(surg.chipSurvived, '2.14 removing a slicer chip does not re-render the whole screen');
   check(surg.chipsLeft === 1, '2.15 the chip strip is refreshed in place', surg.chipsLeft);
   check(surg.rowsAfterChip === BIG / 4, '2.16 and the table follows the remaining chip', surg.rowsAfterChip);

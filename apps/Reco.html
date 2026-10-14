@@ -133,6 +133,10 @@ THEMES['default'] = {
   .summary-bar { display: flex; gap: 18px; padding: 9px 12px; background: var(--summary-bar-bg, #f9fafb); border-radius: 5px; font-size: 12px; margin: 8px 0; flex-wrap: wrap; }
   .summary-bar .item b { color: var(--text, #1f2937); }
   .modal-bg { position: fixed; inset: 0; background: rgba(15,23,42,0.55); display: none; align-items: flex-start; justify-content: center; z-index: 1000; padding: 40px 16px; overflow-y: auto; }
+/* Posted to the GL: the accounting reference it went out under, or a warning
+   that the claim has nothing behind it. */
+.badge.posted-ref   { background: var(--badge-violet-bg, #ede9fe); color: var(--badge-violet, #5b21b6); text-transform: none; }
+.badge.posted-noref { background: var(--danger-bg, #fee2e2); color: var(--danger, #b91c1c); }
 .badge.ss-added    { background: var(--badge-blue-bg, #dbeafe); color: var(--badge-blue, #1e40af); }
 .badge.ss-single   { background: var(--badge-amber-bg, #fef3c7); color: var(--badge-amber, #92400e); }
 .badge.ss-persist  { background: var(--badge-green-bg, #dcfce7); color: var(--badge-green, #166534); }
@@ -2243,14 +2247,38 @@ const Versioning = {
    is special_jv_templates/<ref>.html (ROOT-relative; ROOT/apps/ also works).
    ================================================================ */
 const SpecialJV = {
-  registry: {},
+  /* No prototype: a To Account value of "constructor" or "__proto__" must not
+     answer get()/isJvRef() with something inherited from Object. */
+  registry: Object.create(null),
   _loaded: false,
   _activeHandler: null,
   _activeFrame: null,
   _onCancel: null,
 
+  /* A ref is BOTH the registry key and the HTML filename stem, and it is
+     concatenated into 'special_jv_templates/<ref>.html' which becomes an
+     iframe src. So it must be one safe path segment and nothing else:
+     letters/digits/underscore/hyphen, starting with a letter or digit.
+     No dot (blocks "..", and a second extension), no slash or backslash,
+     no space, no colon, no leading underscore. Max 40 characters. */
+  REF_RE: /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/,
+  /* Reco runs in a WebView2 window on Windows over a shared network folder,
+     where these names cannot be files. */
+  _RESERVED: /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i,
+
+  /* null when the ref is usable, else the reason to show the user. */
+  refProblem(ref) {
+    const s = String(ref == null ? '' : ref);
+    if (!s.trim()) return 'the ref is empty';
+    if (s !== s.trim()) return 'the ref "' + s + '" has leading or trailing spaces';
+    if (!SpecialJV.REF_RE.test(s)) return 'the ref "' + s + '" is not a safe name — use 1-40 letters, digits, '
+      + 'underscore or hyphen, starting with a letter or digit (no dots, slashes or spaces)';
+    if (SpecialJV._RESERVED.test(s)) return 'the ref "' + s + '" is a reserved Windows device name';
+    return null;
+  },
+
   async load() {
-    SpecialJV.registry = {};
+    SpecialJV.registry = Object.create(null);
     if (!Store._hasApi()) { SpecialJV._loaded = true; return; }
     const problems = [];
     try {
@@ -2261,12 +2289,29 @@ const SpecialJV = {
           const txt = await window.pywebview.api.read_file('special_jv_mapping/' + f.name);
           const def = JSON.parse(txt);
           if (!def || !def.ref) { problems.push(f.name + ' has no "ref" — skipped.'); continue; }
-          def.ref = String(def.ref).trim();
+          // Checked as written, NOT trimmed: a ref of " TCH " would otherwise
+          // become TCH and a stray copy of a mapping could shadow the real one.
+          const bad = SpecialJV.refProblem(String(def.ref));
+          if (bad) { problems.push(f.name + ' was not loaded: ' + bad + '.'); continue; }
+          def.ref = String(def.ref);
+          if (Object.prototype.hasOwnProperty.call(SpecialJV.registry, def.ref)) {
+            // The file named after the ref is the real one; a copy under any
+            // other name loses, whichever happened to be read first.
+            const held = SpecialJV.registry[def.ref];
+            const mine = f.name.toLowerCase() === (def.ref + '.json').toLowerCase();
+            const theirs = String(held._file || '').toLowerCase() === (def.ref + '.json').toLowerCase();
+            if (!mine || theirs) {
+              problems.push(f.name + ' was not loaded: ref "' + def.ref + '" is already used by '
+                + (held._file || 'another mapping file') + '. Give one of them a different ref.');
+              continue;
+            }
+            problems.push(held._file + ' was not loaded: it claims ref "' + def.ref
+              + '", which belongs to ' + f.name + '. Give one of them a different ref.');
+          }
           def.inputColumns = (Array.isArray(def.inputColumns) ? def.inputColumns : [])
             .map(c => (typeof c === 'string' ? { name: c } : c)).filter(c => c && c.name);
           def.htmlPath = 'special_jv_templates/' + def.ref + '.html';
           def._file = f.name;
-          if (SpecialJV.registry[def.ref]) problems.push('Two mapping files use ref "' + def.ref + '"; ' + f.name + ' wins.');
           SpecialJV.registry[def.ref] = def;
         } catch(e) {
           console.error('SpecialJV mapping parse fail', f.name, e);
@@ -2280,7 +2325,12 @@ const SpecialJV = {
   },
 
   list() { return Object.values(SpecialJV.registry); },
-  get(ref) { return SpecialJV.registry[ref] || null; },
+  /* Own keys only: the To Account column is free text, so "constructor" and
+     friends must not resolve to anything. */
+  get(ref) {
+    const k = String(ref == null ? '' : ref);
+    return Object.prototype.hasOwnProperty.call(SpecialJV.registry, k) ? (SpecialJV.registry[k] || null) : null;
+  },
   isJvRef(ref) { return !!SpecialJV.get(ref); },
 
   /* Build "To Account" dropdown options: master Refs + JV refs.
@@ -2322,6 +2372,14 @@ const SpecialJV = {
   /* Where the JV page is. New launchers resolve it (ROOT/special_jv_templates
      or ROOT/apps/special_jv_templates); older ones get a best guess. */
   async _resolveSrc(def) {
+    // Belt and braces: load() refuses a bad ref, but this is the one function
+    // that turns a ref into something a browser will fetch, so never build a
+    // path from a ref that would not pass the same test.
+    const bad = SpecialJV.refProblem(def && def.ref);
+    if (bad) throw new Error('Special JV cannot be opened: ' + bad);
+    if (def.htmlPath !== 'special_jv_templates/' + def.ref + '.html') {
+      throw new Error('Special JV cannot be opened: the page path for "' + def.ref + '" was altered');
+    }
     const api = Store._hasApi() ? window.pywebview.api : null;
     if (api && typeof api.resolve_url === 'function') {
       try { const u = await api.resolve_url(def.htmlPath); if (u) return u; } catch (e) {}
@@ -2341,10 +2399,11 @@ const SpecialJV = {
      by postMessage when the page announces {type:'specialJV.ready'}.
      onComplete(result) runs only when the JV returns accounting lines;
      onCancel() runs when it is cancelled or returns nothing. */
-  async open(ref, prefilledInputs, onComplete, onCancel) {
+  async open(ref, prefilledInputs, onComplete, onCancel, opts) {
     const def = SpecialJV.get(ref);
     if (!def) { U.toast('Special JV "' + ref + '" not registered', 'error'); return; }
     SpecialJV._detach();
+    SpecialJV._lineCols = (opts && opts.lineCols) || null;
 
     // Expose inputs to the iframe
     window._specialJvInputs = prefilledInputs || [];
@@ -2352,7 +2411,9 @@ const SpecialJV = {
     window._specialJvDef = def;
 
     // Cache-bust the iframe src so changes to the JV HTML reload immediately
-    const base = await SpecialJV._resolveSrc(def);
+    let base;
+    try { base = await SpecialJV._resolveSrc(def); }
+    catch (e) { U.toast((e && e.message) || 'Special JV cannot be opened', 'error'); return; }
     const src = base + (base.indexOf('?') === -1 ? '?' : '&') + 't=' + Date.now();
     const body = ''
       + '<div style="height:72vh; display:flex; flex-direction:column;">'
@@ -2361,6 +2422,10 @@ const SpecialJV = {
       +     (prefilledInputs||[]).length + ' input row(s) sent · '
       +     '<code>' + U.esc(def.htmlPath) + '</code>'
       + '  </div>'
+      // Refused line sets are reported here. It is filled by innerHTML so the
+      // iframe beside it is never re-created — the user's work is still on the
+      // page while they read why it was refused.
+      + '  <div id="specialJvProblems"></div>'
       + '  <iframe id="specialJvFrame" src="' + U.escAttr(src) + '"'
       +     ' style="flex:1; width:100%; border:1px solid var(--border, #e5e7eb); border-radius:4px; background:#fff;"></iframe>'
       + '</div>';
@@ -2389,6 +2454,15 @@ const SpecialJV = {
       if (d.type !== 'specialJV.complete' && d.type !== 'specialJV.cancel') return;
       const lines = Array.isArray(d.lines) ? d.lines : [];
       const cancelled = d.type === 'specialJV.cancel' || !lines.length;
+
+      // An unbalanced or malformed line set never becomes a pending JV. The
+      // modal stays open and the page keeps the user's work, so they can fix
+      // the numbers and press its own button again — or Cancel JV to walk away.
+      if (!cancelled) {
+        const chk = SpecialJV.checkLines(lines, SpecialJV._lineCols);
+        if (!chk.ok) { SpecialJV._showProblems(chk); return; }
+      }
+
       const cancelCb = SpecialJV._onCancel;
       SpecialJV._detach();
       SpecialJV._restoreModal();
@@ -2404,11 +2478,27 @@ const SpecialJV = {
     SpecialJV._activeHandler = handler;
   },
 
+  /* Why the lines were refused, shown above the still-loaded JV page. */
+  _showProblems(chk) {
+    const el = document.getElementById('specialJvProblems');
+    const totals = SpecialJV.totalsText(chk.totals);
+    let h = '<div class="doc-banner" style="margin-bottom:6px; background:var(--danger-bg, #fef2f2); color:var(--danger, #b91c1c); display:block;">';
+    h += '<b>⚠ These lines were not accepted — nothing has been recorded.</b>';
+    h += '<ul style="margin:4px 0 0 18px;">' + chk.problems.map(p => '<li>' + U.esc(p) + '</li>').join('') + '</ul>';
+    if (totals) h += '<div style="margin-top:4px; font-size:11px;">' + U.esc(totals) + '</div>';
+    h += '<div style="margin-top:4px; font-size:11px;">Your work is still on the page below. Correct it and generate again, '
+      + 'or use <b>Cancel JV</b> to discard it.</div>';
+    h += '</div>';
+    if (el) el.innerHTML = h;
+    U.toast('Special JV not accepted — ' + chk.problems[0], 'error');
+  },
+
   _detach() {
     if (SpecialJV._activeHandler) window.removeEventListener('message', SpecialJV._activeHandler);
     SpecialJV._activeHandler = null;
     SpecialJV._activeFrame = null;
     SpecialJV._onCancel = null;
+    SpecialJV._lineCols = null;
   },
 
   _cancel() {
@@ -2426,6 +2516,107 @@ const SpecialJV = {
       modalEl.style.maxWidth = '';
       delete modalEl.dataset._jvWidened;
     }
+  },
+
+  /* ---------------- Line-set validation (no unbalanced JV) ----------------
+     A JV page does bespoke maths and hands back finished accounting lines.
+     The host used to take them on trust. These are checked instead:
+
+       · per currency, |sum(Dr) - sum(Cr)| must be <= 0.01. The amounts are
+         2-decimal strings, so a cent of rounding is the only slack allowed.
+       · a line carries a debit OR a credit, never both and never neither
+         (AEG.buildLine writes '' on the unused side, so '' is normal and a
+         literal 0.00 on one side with '' on the other is "neither").
+       · an amount that is present but not a number is refused.
+       · an amount is an absolute value; a negative one means the page put
+         the sign in the amount instead of choosing the side.
+       · a blank currency is only refused when other lines in the same set DO
+         carry one — an AEG template need not map a currency column at all,
+         and then every line is blank and there is nothing to compare.
+
+     Deliberately NOT refused: how many lines there are (no cap — the user
+     asked for none), which accounts they hit, whether the Reference resolves
+     in the Accounts Master (the preview already flags those cells), and a
+     set that balances to zero overall. Those are accounting choices, not
+     arithmetic, and the host does not own them. */
+
+  _amt(line, name) {
+    if (!name) return { raw: '', n: 0, bad: false };
+    const cell = line ? line[name] : '';
+    const raw = (cell && typeof cell === 'object') ? (cell.value == null ? '' : cell.value) : (cell == null ? '' : cell);
+    const s = String(raw).trim();
+    if (s === '') return { raw: '', n: 0, bad: false };
+    if (!U.isNumeric(s)) return { raw: s, n: 0, bad: true };
+    return { raw: s, n: U.num(s), bad: false };
+  },
+
+  _cur(line, name) {
+    if (!name) return '';
+    const cell = line ? line[name] : '';
+    const raw = (cell && typeof cell === 'object') ? (cell.value == null ? '' : cell.value) : (cell == null ? '' : cell);
+    return String(raw).trim();
+  },
+
+  /* cols = { dr, cr, cur } output-column names (Reco._jvLineCols resolves
+     them from the AEG template; 'Dr'/'Cr'/'Cur' are the defaults).
+     → { ok, problems:[string], totals:[{cur, dr, cr, diff, ok}] } */
+  checkLines(lines, cols) {
+    const c = Object.assign({ dr: 'Dr', cr: 'Cr', cur: 'Cur' }, cols || {});
+    const list = Array.isArray(lines) ? lines : [];
+    const problems = [];
+    if (!list.length) return { ok: false, problems: ['the JV returned no accounting lines'], totals: [] };
+
+    const buckets = new Map();
+    let anyCur = false, blankCurAt = [];
+    list.forEach((l, i) => {
+      const n = i + 1;
+      const dr = SpecialJV._amt(l, c.dr), cr = SpecialJV._amt(l, c.cr);
+      if (dr.bad) problems.push('line ' + n + ' has a debit that is not a number ("' + dr.raw + '")');
+      if (cr.bad) problems.push('line ' + n + ' has a credit that is not a number ("' + cr.raw + '")');
+      if (!dr.bad && !cr.bad) {
+        if (dr.n && cr.n) problems.push('line ' + n + ' carries both a debit (' + U.fmtNum(dr.n) + ') and a credit (' + U.fmtNum(cr.n) + ')');
+        else if (!dr.n && !cr.n) problems.push('line ' + n + ' carries neither a debit nor a credit');
+        if (dr.n < 0) problems.push('line ' + n + ' has a negative debit (' + U.fmtNum(dr.n) + ') — the amount must be positive and the side chosen instead');
+        if (cr.n < 0) problems.push('line ' + n + ' has a negative credit (' + U.fmtNum(cr.n) + ') — the amount must be positive and the side chosen instead');
+      }
+      const cur = SpecialJV._cur(l, c.cur);
+      if (cur) anyCur = true; else blankCurAt.push(n);
+      const key = cur || '';
+      if (!buckets.has(key)) buckets.set(key, { cur: key, dr: 0, cr: 0 });
+      const b = buckets.get(key);
+      b.dr += dr.bad ? 0 : dr.n;
+      b.cr += cr.bad ? 0 : cr.n;
+    });
+
+    if (anyCur && blankCurAt.length) {
+      problems.push('line' + (blankCurAt.length > 1 ? 's ' : ' ') + blankCurAt.join(', ')
+        + ' ha' + (blankCurAt.length > 1 ? 've' : 's') + ' no currency, so they cannot be balanced against the rest');
+    }
+
+    const totals = [];
+    buckets.forEach(b => {
+      // The amounts are 2-decimal strings, so the difference is rounded back to
+      // the cent before it is compared: summing them in binary floating point
+      // turns 100.01 - 100.00 into 0.010000000000005, which is not "a cent out".
+      const diff = Math.round((b.dr - b.cr) * 100) / 100;
+      // Zero, not "within a cent". Rounding to the cent is only the floating
+      // point guard (summing 2-decimal strings turns 100.01 - 100.00 into
+      // 0.010000000000005); a cent of real slack is an allocation that does
+      // not add up, which is the thing this check exists to stop.
+      const ok = diff === 0;
+      totals.push({ cur: b.cur, dr: b.dr, cr: b.cr, diff, ok });
+      if (!ok) problems.push((b.cur || 'no currency') + ' is out by ' + U.fmtNum(diff)
+        + ' (Dr ' + U.fmtNum(b.dr) + ' vs Cr ' + U.fmtNum(b.cr) + ')');
+    });
+    totals.sort((a, b) => String(a.cur).localeCompare(String(b.cur)));
+    return { ok: !problems.length, problems, totals };
+  },
+
+  /* Per-currency Dr/Cr as one short line, for a preview banner. */
+  totalsText(totals) {
+    if (!totals || !totals.length) return '';
+    return totals.map(t => (t.cur || '—') + ' Dr ' + U.fmtNum(t.dr) + ' / Cr ' + U.fmtNum(t.cr)
+      + (t.ok ? '' : ' · out by ' + U.fmtNum(t.diff))).join('  ·  ');
   },
 
   /* Does a completed (pending) JV belong to exactly this set of rows? */
@@ -5967,6 +6158,7 @@ const App = {
         if (d.groupMaster) AppState.groupMaster = d.groupMaster;
         if (d.attachmentMaster) AppState.attachmentMaster = d.attachmentMaster;
         if (d.commentMaster) AppState.commentMaster = d.commentMaster;
+        if (typeof Reco !== 'undefined') Reco._postedIdxReset();   // history replaced wholesale
         if (d.version === 2 && d.templates) AppState.aegTemplates = d.templates;
         if (d.version === 2 && d.master) AppState.aegMaster = d.master;
         AppState.flush().then(() => U.toast('Restore complete','success'));
@@ -7780,7 +7972,26 @@ _xlStatusHtml(row, sess, tpl) {
     if (a) h += ' <span class="badge fc" title="' + a + ' attachment(s)">📎 ' + a + '</span>';
     if (c) h += ' <span class="badge specific" title="' + c + ' comment(s)">💬 ' + c + '</span>';
   }
+  h += Reco._postedBadge(tpl, row);
   return h;
+},
+
+/* The GL side of a row, on the row itself: the accounting reference it was
+   posted under, or a warning when it is marked posted and no entry, document
+   number or Special JV accounts for it. This is where a user meets the
+   exception without going looking for it; the Manage card has the full list. */
+_postedBadge(tpl, row) {
+  if (!Reco.isRowPosted(tpl, row)) return '';
+  const ref = Reco._postedRefFor(tpl, row);
+  if (ref) {
+    return ' <span class="badge posted-ref" style="cursor:pointer;" title="'
+      + U.escAttr('Posted — ' + ref.accountingId + ' · via ' + ref.via)
+      + '" onclick="event.stopPropagation(); Reco.openEntryByAccountingId(\'' + U.jsq(ref.accountingId) + '\')">🧾 '
+      + U.esc(ref.accountingId) + '</span>';
+  }
+  return ' <span class="badge posted-noref" style="cursor:pointer;" title="'
+    + U.escAttr('Marked posted, but no accounting reference: no entry, document number or Special JV refers to this row')
+    + '" onclick="event.stopPropagation(); Reco.openPostedJvAuditModal()">⚠ no GL ref</span>';
 },
 /* Groups / attachments / comments per key, built once per view (the
    module lookups scan and sort their whole lists for every row). Same
@@ -11404,7 +11615,10 @@ _sortKeyed(keyed, isDate, dir) {
    filter-set menu and the format-error count as well — none of which a page
    turn changes. Falls back to a full navigate whenever the grid is not the
    thing on screen, so no caller has to know. */
-refreshGrid() {
+/* opts.toTop: start the new body at row 0 instead of keeping the old offset
+   (a page turn). Done here, after the DOM swap, so there is one scroll write
+   rather than a write before the render and a restore after it. */
+refreshGrid(opts) {
   const id = AppState.activeRecoId;
   const tpl = AppState.recoTemplates.find(x => x.id === id);
   const sess = AppState.recoSessions[id];
@@ -11413,7 +11627,8 @@ refreshGrid() {
       || (sess.activeSection || 'action') !== 'action'
       || (AppState.activeSubSection || 'reco') !== 'reco') { App.navigate('reco'); return; }
   const old = area.querySelector('.reco-table-wrap');
-  const top = old ? old.scrollTop : 0, left = old ? old.scrollLeft : 0;
+  const toTop = !!(opts && opts.toTop);
+  const top = toTop ? 0 : (old ? old.scrollTop : 0), left = old ? old.scrollLeft : 0;
   area.innerHTML = Reco.renderRecoTable(tpl, sess);
   const bar = document.getElementById('recoSlicerBar');
   if (bar) bar.innerHTML = Reco.renderSlicers(tpl, sess);
@@ -11677,6 +11892,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
     if (attCount) statusHtml += ' <span class="badge fc" style="cursor:pointer;" title="'+attCount+' attachment(s)" onclick="event.stopPropagation(); Reco.openRowTimeline(\''+U.jsq(row._id)+'\')">📎 '+attCount+'</span>';
     if (comCount) statusHtml += ' <span class="badge specific" style="cursor:pointer;" title="'+comCount+' comment(s)" onclick="event.stopPropagation(); Reco.openRowTimeline(\''+U.jsq(row._id)+'\')">💬 '+comCount+'</span>';
   }
+  statusHtml += Reco._postedBadge(tpl, row);
   h += '<td class="status-cell">' + statusHtml + '</td>';
 
   displayCols.forEach(col => {
@@ -11797,6 +12013,7 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
 /* Render the main reco table with pagination, column filters, slicers, row selection */
 renderRecoTable(tpl, sess) {
     SpecialJV.resetOptions();
+    Reco._postedIdxReset();
     // 1. Effective display order (honours saved sess.columnOrder + AEG To Account injection)
     const displayCols = Reco.effectiveDisplayCols(tpl, sess);
     const extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
@@ -12158,18 +12375,14 @@ renderRecoTable(tpl, sess) {
     sess.page = Math.max(0, p | 0);
     // Back to the top of the new page: keeping the old offset left the first
     // rows of the page above the viewport, silently skipped.
-    const w = document.querySelector('.reco-table-wrap');
-    if (w) w.scrollTop = 0;
-    Reco.refreshGrid();
+    Reco.refreshGrid({ toTop: true });
   },
   setPageSize(s) {
     const sess = AppState.recoSessions[AppState.activeRecoId];
     sess.pageSize = s;
     sess.page = 0;
-    const w = document.querySelector('.reco-table-wrap');
-    if (w) w.scrollTop = 0;
     AppState.save();
-    Reco.refreshGrid();
+    Reco.refreshGrid({ toTop: true });
   },
 
   /* Type a page number. At 200k rows and 200 to a page there are 1,000 pages;
@@ -13707,6 +13920,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         delete entry.docNumbers[cur];
       }
     });
+    Reco._postedIdxReset();   // docNumberMaster is one of the reference lookups
     AppState.save();
     App.closeModal();
     App.navigate('reco');
@@ -13815,10 +14029,60 @@ renderCustomReport(tpl, sess, rpt, idx) {
     Reco._renderPreviewModal(tpl, sess);
   },
 
+  /* Which output columns hold the debit, the credit and the currency. The AEG
+     template owns the names; {Dr, Cr, Cur} is the shape every JV page writes
+     today and is the fallback when the template does not map a side. */
+  _jvLineCols(aegTpl) {
+    const find = (p) => {
+      const c = ((aegTpl && aegTpl.outputColumns) || []).find(x => x.mapping && p(x.mapping));
+      return c ? c.name : null;
+    };
+    return {
+      dr:  find(m => m.type === 'value' && m.side === 'Dr') || 'Dr',
+      cr:  find(m => m.type === 'value' && m.side === 'Cr') || 'Cr',
+      // 'Cur' is the documented line field, so fall back to it the way dr/cr
+      // do: without that, a template mapping no currency column netted USD
+      // against EUR in one bucket and called an unbalanced JV balanced.
+      // Lines that genuinely carry no currency still land in one bucket —
+      // checkLines only objects to a blank currency when others have one.
+      cur: find(m => m.type === 'currency') || 'Cur'
+    };
+  },
+
+  /* The rows a pending JV may act on: what it says it consumed, narrowed to
+     what Reco actually handed it. A JV cannot reach a row it never saw.
+     Pendings written by older builds carry an unfiltered primaryKeys, so this
+     is applied on read as well as on capture. */
+  _jvConsumedPks(p) {
+    const claimed = Array.isArray(p && p.primaryKeys) ? p.primaryKeys.map(String) : [];
+    const sent = Array.isArray(p && p.sentPks) ? p.sentPks.filter(Boolean).map(String) : [];
+    if (!sent.length) return claimed;          // nothing recorded as sent: leave as-is
+    const set = new Set(sent);
+    return claimed.filter(pk => set.has(pk));
+  },
+  /* Rows a JV claimed but was never sent — a bug in the JV page, so it is
+     shown rather than quietly dropped. */
+  _jvUnsentClaims(p) {
+    if (Array.isArray(p && p.claimedNotSent) && p.claimedNotSent.length) return p.claimedNotSent.map(String);
+    const claimed = Array.isArray(p && p.primaryKeys) ? p.primaryKeys.map(String) : [];
+    const sent = Array.isArray(p && p.sentPks) ? p.sentPks.filter(Boolean).map(String) : [];
+    if (!sent.length) return [];
+    const set = new Set(sent);
+    return claimed.filter(pk => !set.has(pk));
+  },
+
   _renderPreviewModal(tpl, sess) {
     const ctx = Reco._pendingEntry;
     const aegTpl = ctx.aegTpl;
     const cols = aegTpl.outputColumns.map(c => c.name);
+    const lineCols = Reco._jvLineCols(aegTpl);
+    // Every pending JV in this entry is re-checked on every render, including
+    // ones captured by an older build that never validated them. Keyed on the
+    // pending object itself, not its jvId: a JV page chooses its own id and two
+    // pendings could carry the same one.
+    const jvChecks = new Map();
+    ctx.jvCompleted.forEach(p => jvChecks.set(p, SpecialJV.checkLines(p.lines || [], lineCols)));
+    const badJvs = ctx.jvCompleted.filter(p => !(jvChecks.get(p) || {}).ok);
 
     // Combine standard + completed JV lines
     const allLines = ctx.lines.slice();
@@ -13847,6 +14111,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         h += '<span>'+rows.length+' selected row(s) target this JV.</span>';
         if (alreadyDone) {
           h += '<span class="badge offset">✓ Completed (JV '+U.esc(alreadyDone.jvId)+' · '+(alreadyDone.lines||[]).length+' lines)</span>';
+          h += Reco._jvBannerDetail(alreadyDone, jvChecks.get(alreadyDone));
           h += '<button class="small danger" onclick="Reco._removePendingJv(\''+U.jsq(alreadyDone.jvId)+'\')" title="Discard and redo this JV">Redo</button>';
         } else {
           h += '<button class="small primary" onclick="Reco.openSpecialJv(\''+U.jsq(ref)+'\')">Complete '+U.esc(def?.displayName || ref)+' →</button>';
@@ -13855,12 +14120,23 @@ renderCustomReport(tpl, sess, rpt, idx) {
       });
       // Completed but not for the current selection (carried forward into this entry)
       ctx.jvCompleted.filter(p => !p._fromCurrentSelection).forEach(p => {
-        h += '<div class="doc-banner" style="margin-bottom:6px; background:var(--success-bg); color:var(--success);">';
-        h += '<b>✓ Carried forward:</b> JV '+U.esc(p.jvId)+' ('+U.esc(p.ref)+') — '+(p.lines||[]).length+' lines';
+        const chk = jvChecks.get(p) || { ok: true, problems: [], totals: [] };
+        const style = chk.ok ? 'background:var(--success-bg); color:var(--success);'
+                             : 'background:var(--danger-bg, #fef2f2); color:var(--danger, #b91c1c);';
+        h += '<div class="doc-banner" style="margin-bottom:6px; display:block; '+style+'">';
+        h += '<b>'+(chk.ok ? '✓ Carried forward:' : '⚠ Carried forward (will not post):')+'</b> JV '+U.esc(p.jvId)+' ('+U.esc(p.ref)+') — '+(p.lines||[]).length+' lines';
         if (p.ts) h += ' <span class="text-muted">· completed '+U.esc(String(p.ts).replace('T',' ').substring(0,16))+'</span>';
-        h += '<button class="small danger" onclick="Reco._removePendingJv(\''+U.jsq(p.jvId)+'\')">Discard</button>';
+        h += ' <button class="small danger" onclick="Reco._removePendingJv(\''+U.jsq(p.jvId)+'\')">Discard</button>';
+        h += Reco._jvBannerDetail(p, chk);
         h += '</div>';
       });
+      h += '</div>';
+    }
+
+    if (badJvs.length) {
+      h += '<div class="doc-banner" style="display:block; margin-bottom:6px; background:var(--danger-bg, #fef2f2); color:var(--danger, #b91c1c);">';
+      h += '<b>⚠ '+U.fmtInt(badJvs.length)+' Special JV'+(badJvs.length>1?'s do':' does')+' not balance, so this entry cannot be generated.</b>';
+      h += '<div style="font-size:11px; margin-top:3px;">Use <b>Redo</b> or <b>Discard</b> on the JV above to clear it, then build it again.</div>';
       h += '</div>';
     }
 
@@ -13887,13 +14163,49 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const diff = totalDr - totalCr;
     h += '<div class="item"'+(Math.abs(diff) > 0.005 ? ' style="color:var(--danger);"' : '')+'>Diff: <b>'+U.fmtNum(diff)+'</b></div></div>';
 
-    const canGenerate = allLines.length > 0
-      && pendingRefs.every(ref => ctx.jvCompleted.find(p => p.ref === ref && p._fromCurrentSelection));
+    // Generate is blocked when there is nothing to post, when a required JV is
+    // still outstanding, or when any pending JV's own lines do not balance.
+    let blockReason = '';
+    if (!allLines.length) blockReason = 'Nothing to post';
+    else if (!pendingRefs.every(ref => ctx.jvCompleted.find(p => p.ref === ref && p._fromCurrentSelection)))
+      blockReason = 'Complete all required Special JVs first';
+    else if (badJvs.length) {
+      const first = jvChecks.get(badJvs[0]);
+      blockReason = 'JV ' + badJvs[0].jvId + ' does not balance: ' + (first.problems[0] || 'unbalanced')
+        + (badJvs.length > 1 ? ' (and ' + (badJvs.length - 1) + ' more)' : '');
+    }
     let footer = '<button onclick="App.closeModal()">Cancel</button>';
-    if (!canGenerate) footer += '<button disabled title="'+(allLines.length ? 'Complete all required Special JVs first' : 'Nothing to post')+'">Generate (blocked)</button>';
+    if (blockReason) footer += '<button disabled title="'+U.escAttr(blockReason)+'">Generate (blocked)</button>';
     else footer += '<button class="success" onclick="Reco.commitEntryFromPreview()">Generate</button>';
 
     App.openModal('Entry Preview', h, footer);
+  },
+
+  /* Per-currency Dr/Cr for one pending JV, plus anything wrong with it and any
+     row it claimed without being sent. Shown inside the JV's own banner so the
+     numbers sit beside the Generate button. */
+  _jvBannerDetail(p, chk) {
+    let h = '';
+    if (chk && chk.totals && chk.totals.length) {
+      h += '<div style="font-size:11px; margin-top:3px;">';
+      h += chk.totals.map(t =>
+        '<span style="margin-right:10px;'+(t.ok ? '' : 'color:var(--danger, #b91c1c); font-weight:600;')+'">'
+        + U.esc(t.cur || '—') + ': Dr ' + U.fmtNum(t.dr) + ' / Cr ' + U.fmtNum(t.cr)
+        + (t.ok ? ' ✓' : ' · out by ' + U.fmtNum(t.diff)) + '</span>').join('');
+      h += '</div>';
+    }
+    if (chk && !chk.ok) {
+      h += '<ul style="margin:3px 0 0 18px; font-size:11px; color:var(--danger, #b91c1c);">'
+         + chk.problems.map(x => '<li>' + U.esc(x) + '</li>').join('') + '</ul>';
+    }
+    const unsent = Reco._jvUnsentClaims(p);
+    if (unsent.length) {
+      h += '<div style="font-size:11px; margin-top:3px; color:var(--danger, #b91c1c);">'
+        + '⚠ This JV reported ' + U.fmtInt(unsent.length) + ' row(s) it was never sent ('
+        + U.esc(unsent.slice(0, 5).join(', ')) + (unsent.length > 5 ? ', …' : '')
+        + '). They are ignored — the JV page is reporting the wrong keys.</div>';
+    }
+    return h;
   },
 
   /* Open the Special JV HTML, prefilled with relevant rows */
@@ -13924,12 +14236,25 @@ renderCustomReport(tpl, sess, rpt, idx) {
     SpecialJV.open(ref, payload, (result) => {
       // result = {type, ref, jvId, lines, primaryKeys, inputData, meta?}
       AppState.pendingSpecialJV[tplId] = AppState.pendingSpecialJV[tplId] || [];
+      // A JV may only report rows Reco actually handed it. Anything else is a
+      // bug in the JV page: it is dropped here, before it can mark a row as
+      // posted, and kept in claimedNotSent so the user is told.
+      const sentPks = rows.map(r => r._pk).filter(Boolean).map(String);
+      const sentSet = new Set(sentPks);
+      const claimed = Array.isArray(result.primaryKeys) ? result.primaryKeys.filter(k => k != null).map(String) : null;
+      const consumed = claimed ? claimed.filter(pk => sentSet.has(pk)) : sentPks.slice();
+      const notSent = claimed ? Array.from(new Set(claimed.filter(pk => !sentSet.has(pk)))) : [];
+      if (notSent.length) {
+        U.toast('Special JV "' + ref + '" reported ' + notSent.length + ' row(s) it was never sent — ignored', 'error');
+        console.warn('SpecialJV ' + ref + ' claimed unsent keys', notSent);
+      }
       const entry = {
         jvId: result.jvId || ('JV_' + Date.now().toString(36)),
         ref: result.ref,
         lines: result.lines || [],
-        primaryKeys: Array.isArray(result.primaryKeys) ? result.primaryKeys : rows.map(r => r._pk),
-        sentPks: rows.map(r => r._pk),
+        primaryKeys: consumed,
+        claimedNotSent: notSent,
+        sentPks: sentPks,
         inputData: result.inputData || payload,
         meta: result.meta || null,
         ts: new Date().toISOString()
@@ -13943,7 +14268,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       AppState.save();
       U.toast('Special JV "'+ref+'" completed','success');
       rerender();
-    }, rerender);
+    }, rerender, { lineCols: Reco._jvLineCols(ctx.aegTpl) });
   },
 
   _removePendingJv(jvId) {
@@ -14012,6 +14337,19 @@ renderCustomReport(tpl, sess, rpt, idx) {
     pending.jvCompleted.forEach(p => { (p.lines||[]).forEach(l => allLines.push(l)); });
     if (!allLines.length) { U.toast('Nothing to post', 'error'); return; }
 
+    // The preview disables Generate for an unbalanced JV, but this is the only
+    // door into entry history, so it is checked here too — a pending captured
+    // by an older build, or a stale modal, must not slip through.
+    const lineCols = Reco._jvLineCols(pending.aegTpl);
+    for (const p of pending.jvCompleted) {
+      const chk = SpecialJV.checkLines(p.lines || [], lineCols);
+      if (!chk.ok) {
+        U.toast('JV ' + p.jvId + ' does not balance: ' + chk.problems[0] + ' — discard or redo it first', 'error');
+        Reco._renderPreviewModal(tpl, sess);
+        return;
+      }
+    }
+
     const byId = new Map(sess.data.map(r => [r._id, r]));
     const byPk = new Map(sess.data.filter(r => r._pk).map(r => [r._pk, r]));
     const sourceRowIds = pending.sourceRows.map(r => r._id);
@@ -14021,7 +14359,15 @@ renderCustomReport(tpl, sess, rpt, idx) {
       lines: allLines,
       sourceRowIds: sourceRowIds,
       specialJvIds: pending.jvCompleted.map(p => p.jvId),
-      specialJvs: pending.jvCompleted.map(p => ({ jvId: p.jvId, ref: p.ref, primaryKeys: p.primaryKeys || [], meta: p.meta || null })),
+      // primaryKeys here is the audited set — only rows this JV was sent. It is
+      // what the posted-row tracking reads back, so it must not contain a key
+      // the JV never saw.
+      specialJvs: pending.jvCompleted.map(p => ({
+        jvId: p.jvId, ref: p.ref,
+        primaryKeys: Reco._jvConsumedPks(p),
+        claimedNotSent: Reco._jvUnsentClaims(p),
+        meta: p.meta || null
+      })),
       createdAt: new Date().toLocaleString(),
       createdBy: AppState.currentUser || '',
       docNumbers: {}
@@ -14045,7 +14391,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
       const targets = new Map();
       (pending.standardRows || []).forEach(r => { const o = byId.get(r._id); if (o) targets.set(o._id, o); });
       pending.jvCompleted.forEach(p => {
-        (p.primaryKeys||[]).forEach(pk => { const o = byPk.get(pk); if (o) targets.set(o._id, o); });
+        // byPk spans the whole session, so a JV could otherwise stamp any row
+        // in it. Only the rows this JV was actually sent are reachable.
+        Reco._jvConsumedPks(p).forEach(pk => { const o = byPk.get(pk); if (o) targets.set(o._id, o); });
       });
       const isStdCol = tpl.columns.some(c => c.name === aeg.postEntryColumn);
       targets.forEach(o => {
@@ -14053,6 +14401,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
         // Template columns are versioned: record the change so a reload keeps it.
         if (isStdCol && o._pk) Versioning.queueChange(tpl, o._pk, o).then(v => { if (v) o._ver = v; });
       });
+      // The keys of the rows this entry actually stamped. Without it a posted
+      // standard row's only link is its session _id, which is regenerated on
+      // the next load — every such row then reads as "no GL ref" and the
+      // exception list fills with correctly posted rows.
+      entry.postedPks = Array.from(targets.values()).map(o => o._pk).filter(Boolean).map(String);
     }
 
     // Clear pending JVs that were used in this entry
@@ -14352,6 +14705,17 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
 
 
+    // Posted-JV tracking: only meaningful once the template stamps a column.
+    const pAeg = tpl.aegIntegration || {};
+    if (pAeg.postEntryColumn && pAeg.postEntryValue) {
+      const pa = Reco.postedJvAudit(tpl, sess, { countsOnly: true });
+      h += '<div class="card" onclick="Reco.openPostedJvAuditModal()">';
+      h += '<h3>Posted-JV Tracking <span class="badge '+(pa.missing ? 'posted-noref' : 'general')+'">'+U.fmtInt(pa.missing)+'</span></h3>';
+      h += '<p>'+U.fmtInt(pa.posted)+' row(s) marked <b>'+U.esc(pa.value)+'</b>, '+U.fmtInt(pa.linked)+' with an accounting reference';
+      if (pa.missing) h += ', <b style="color:var(--danger, #b91c1c);">'+U.fmtInt(pa.missing)+' missing one</b>';
+      h += '. Which Special JV posted which rows. Exportable.</p></div>';
+    }
+
     h += '<div class="card" onclick="ExcelLink.openLinksPanel()">';
     h += '<h3>📗 Excel Links</h3><p>Workbooks opened with "Edit in Excel": load back, reopen, load from a file, close or clean up.</p></div>';
 
@@ -14494,11 +14858,244 @@ renderCustomReport(tpl, sess, rpt, idx) {
       keys.sort().forEach(k => {
         h += '<tr><td><b>'+U.esc(k)+'</b></td><td>'+U.esc(dn[k])+'</td>';
         h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.jsq(dn[k])+'\')">View Entry</button>';
-        h += '<button class="small danger" onclick="delete AppState.docNumberMaster[\''+U.jsq(id)+'\'][\''+U.jsq(k)+'\']; AppState.save(); App.closeModal(); Reco.viewDocNumberMaster()">Remove</button></td></tr>';
+        h += '<button class="small danger" onclick="delete AppState.docNumberMaster[\''+U.jsq(id)+'\'][\''+U.jsq(k)+'\']; Reco._postedIdxReset(); AppState.save(); App.closeModal(); Reco.viewDocNumberMaster()">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
     }
     App.openModal('Document Number Master ('+keys.length+')', h, '<button onclick="App.closeModal()">Close</button>');
+  },
+
+  /* ================= POSTED-JV TRACKING & MISSING REFERENCES =================
+     A row stamped with aegIntegration.postEntryValue is a claim that the row
+     has been posted to the GL. The "accounting reference" behind that claim is
+     the accountingId of the generated entry, and a row reaches it three ways —
+     listed here in the order they are trusted, most durable first:
+
+       1. its primary key is in entry.specialJvs[].primaryKeys — key-based, so
+          it survives a reload and a re-ingest, and it names the JV that
+          consumed the row and the accounting id it went out under;
+       2. its tpl.docNumberColumn value is in docNumberMaster[tplId] — also
+          key-based, and the map a user searches by document number;
+       3. its _id is in entry.sourceRowIds — session row ids, so this only
+          holds while the session that produced the entry is the loaded one.
+
+     A posted row that none of the three resolve is the exception the user
+     asked to see: it says posted, but there is no accounting reference to
+     show for it. Nothing here writes: it reads what the entry flow recorded. */
+
+  _postedIdxMemo: null,
+  _postedIdxReset() { Reco._postedIdxMemo = null; },
+
+  _postedAuditIndex(tpl) {
+    const hist = AppState.entryHistory[tpl.id] || [];
+    const m = Reco._postedIdxMemo;
+    // Keyed on more than the length: restoring a backup can swap in a
+    // different history of the same size.
+    const last = hist.length ? hist[hist.length - 1] : null;
+    const key = hist.length + '|' + ((last && last.accountingId) || '')
+      + '|' + Object.keys(AppState.docNumberMaster[tpl.id] || {}).length;
+    if (m && m.tplId === tpl.id && m.n === key) return m.idx;
+    const byPk = new Map(), byRid = new Map(), byJv = [];
+    // Oldest first, so a row posted twice reports the most recent entry.
+    hist.forEach(e => {
+      const aid = e.accountingId;
+      // Entries written before postedPks existed carry specialJvIds only. Keep
+      // the JV in the map with its rows unknown rather than dropping it, or
+      // the tracking card would report "no Special JV ever posted here".
+      const jvs = (e.specialJvs && e.specialJvs.length) ? e.specialJvs
+        : (e.specialJvIds || []).map(jid => ({ jvId: jid, ref: '', primaryKeys: null, _legacy: true }));
+      jvs.forEach(j => {
+        if (j._legacy) {
+          byJv.push({ jvId: j.jvId || '', ref: '', accountingId: aid, createdAt: e.createdAt || '',
+                      createdBy: e.createdBy || '', pks: [], claimedNotSent: [], legacy: true });
+          return;
+        }
+        const pks = Reco._jvConsumedPks(j);
+        pks.forEach(pk => byPk.set(String(pk), { accountingId: aid, via: 'Special JV ' + (j.ref || '') + ' (' + (j.jvId || '') + ')', jvId: j.jvId || '', ref: j.ref || '' }));
+        byJv.push({ jvId: j.jvId || '', ref: j.ref || '', accountingId: aid, createdAt: e.createdAt || '',
+                    createdBy: e.createdBy || '', pks, claimedNotSent: Reco._jvUnsentClaims(j) });
+      });
+      // The rows the entry really stamped, by key: survives a re-ingest, where
+      // sourceRowIds (session ids) does not. A Special JV attribution wins.
+      (e.postedPks || []).forEach(pk => {
+        const k = String(pk);
+        if (!byPk.has(k)) byPk.set(k, { accountingId: aid, via: 'posted by this entry', jvId: '', ref: '' });
+      });
+      (e.sourceRowIds || []).forEach(rid => byRid.set(String(rid), { accountingId: aid, via: 'entry source row' }));
+    });
+    const idx = { byPk, byRid, byJv, dnm: AppState.docNumberMaster[tpl.id] || {} };
+    Reco._postedIdxMemo = { tplId: tpl.id, n: key, idx };
+    return idx;
+  },
+
+  isRowPosted(tpl, row) {
+    const aeg = tpl.aegIntegration || {};
+    if (!aeg.postEntryColumn || !aeg.postEntryValue) return false;
+    const v = row[aeg.postEntryColumn];
+    return String(v == null ? '' : v) === String(aeg.postEntryValue);
+  },
+
+  /* The accounting reference behind a row's "posted" claim, or null. */
+  _postedRefFor(tpl, row) {
+    const ix = Reco._postedAuditIndex(tpl);
+    const pk = row._pk || Reco.getRowPK(tpl, row) || '';
+    if (pk) { const hit = ix.byPk.get(String(pk)); if (hit) return hit; }
+    if (tpl.docNumberColumn) {
+      const dn = String(row[tpl.docNumberColumn] == null ? '' : row[tpl.docNumberColumn]).trim();
+      if (dn && Object.prototype.hasOwnProperty.call(ix.dnm, dn) && ix.dnm[dn]) {
+        // Weaker than the key paths: commit registers a document number for
+        // every source row of the entry, including a row a JV was sent and
+        // left unassigned — such a row was never posted by that entry.
+        return { accountingId: ix.dnm[dn], via: 'document number ' + dn, weak: true, jvId: '', ref: '' };
+      }
+    }
+    const byRid = ix.byRid.get(String(row._id));
+    return byRid || null;
+  },
+
+  /* opts.countsOnly skips building the exception rows: the Manage card only
+     needs the three totals, and a large session can hold a lot of rows. */
+  postedJvAudit(tpl, sess, opts) {
+    const countsOnly = !!(opts && opts.countsOnly);
+    const aeg = tpl.aegIntegration || {};
+    const out = { configured: !!(aeg.postEntryColumn && aeg.postEntryValue),
+                  column: aeg.postEntryColumn || '', value: aeg.postEntryValue || '',
+                  posted: 0, linked: 0, missing: 0, exceptions: [], byJv: [], unsentClaims: 0 };
+    if (!out.configured) return out;
+    const ix = Reco._postedAuditIndex(tpl);
+    out.byJv = ix.byJv.slice().reverse();                      // newest entry first
+    out.byJv.forEach(j => { out.unsentClaims += (j.claimedNotSent || []).length; });
+    ((sess && sess.data) || []).forEach(row => {
+      if (!Reco.isRowPosted(tpl, row)) return;
+      out.posted++;
+      const hit = Reco._postedRefFor(tpl, row);
+      if (hit) { out.linked++; return; }
+      out.missing++;
+      if (countsOnly) return;
+      out.exceptions.push({
+        pk: row._pk || Reco.getRowPK(tpl, row) || '',
+        rowId: row._id,
+        docNumber: tpl.docNumberColumn ? String(row[tpl.docNumberColumn] == null ? '' : row[tpl.docNumberColumn]).trim() : '',
+        value: String(row[aeg.postEntryColumn] == null ? '' : row[aeg.postEntryColumn]),
+        amount: tpl.valueColumn ? String(row[tpl.valueColumn] == null ? '' : row[tpl.valueColumn]) : '',
+        reason: 'marked ' + aeg.postEntryValue + ' but no entry, document number or Special JV refers to this row'
+      });
+    });
+    return out;
+  },
+
+  openPostedJvAuditModal() {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    Reco._postedIdxReset();                                     // always read fresh here
+    const a = Reco.postedJvAudit(tpl, sess);
+    Reco._postedAudit = a;
+
+    let h = '';
+    if (!a.configured) {
+      h = '<div class="empty">This template does not stamp a post-entry column, so there is nothing to track. '
+        + 'Set <b>Post-entry column</b> and <b>value</b> under the template\'s AEG integration first.</div>';
+      App.openModal('Posted-JV Tracking', h, '<button onclick="App.closeModal()">Close</button>');
+      return;
+    }
+
+    h += '<div class="help">A row whose <b>'+U.esc(a.column)+'</b> is <b>'+U.esc(a.value)+'</b> is claimed to be posted to the GL. '
+      + 'Its accounting reference is the entry it went out under, found by primary key through a Special JV, by document number, '
+      + 'or by the entry\'s own source rows. Rows with none of those are listed first.</div>';
+    h += '<div class="summary-bar">';
+    h += '<div class="item">Posted rows: <b>'+U.fmtInt(a.posted)+'</b></div>';
+    h += '<div class="item">With an accounting reference: <b>'+U.fmtInt(a.linked)+'</b></div>';
+    h += '<div class="item"'+(a.exceptions.length ? ' style="color:var(--danger, #b91c1c);"' : '')+'>Missing reference: <b>'+U.fmtInt(a.exceptions.length)+'</b></div>';
+    h += '<div class="item">Special JVs posted: <b>'+U.fmtInt(a.byJv.length)+'</b></div>';
+    if (a.unsentClaims) h += '<div class="item" style="color:var(--danger, #b91c1c);">Rows claimed but not sent: <b>'+U.fmtInt(a.unsentClaims)+'</b></div>';
+    h += '</div>';
+
+    h += '<h3>Posted without an accounting reference ('+U.fmtInt(a.exceptions.length)+')</h3>';
+    if (!a.exceptions.length) {
+      h += '<div class="empty">Every posted row traces back to a generated entry.</div>';
+    } else {
+      h += '<div class="toolbar"><button class="success small" onclick="Reco.exportPostedJvExceptions()">Export exceptions CSV</button></div>';
+      h += '<div style="max-height:260px; overflow-y:auto;"><table><thead><tr><th>Primary Key</th>'
+        + (tpl.docNumberColumn ? '<th>'+U.esc(tpl.docNumberColumn)+'</th>' : '')
+        + '<th>'+U.esc(a.column)+'</th>'+(tpl.valueColumn ? '<th>'+U.esc(tpl.valueColumn)+'</th>' : '')+'<th>Why</th></tr></thead><tbody>';
+      a.exceptions.slice(0, 500).forEach(x => {
+        h += '<tr><td><code>'+U.esc(x.pk)+'</code></td>';
+        if (tpl.docNumberColumn) h += '<td>'+U.esc(x.docNumber || '—')+'</td>';
+        h += '<td><span class="badge posted-noref">'+U.esc(x.value)+'</span></td>';
+        if (tpl.valueColumn) h += '<td>'+U.esc(x.amount)+'</td>';
+        h += '<td class="text-muted" style="font-size:11px;">'+U.esc(x.reason)+'</td></tr>';
+      });
+      h += '</tbody></table></div>';
+      if (a.exceptions.length > 500) h += '<div class="text-muted" style="font-size:11px;">Showing the first 500 — export the CSV for all '+U.fmtInt(a.exceptions.length)+'.</div>';
+    }
+
+    h += '<div class="divider"></div>';
+    h += '<h3>Which Special JV posted which rows ('+U.fmtInt(a.byJv.length)+')</h3>';
+    if (!a.byJv.length) {
+      h += '<div class="empty">No Special JV has been committed into an entry for this template yet.</div>';
+    } else {
+      h += '<div class="toolbar"><button class="success small" onclick="Reco.exportPostedJvMap()">Export JV map CSV</button></div>';
+      h += '<div style="max-height:260px; overflow-y:auto;"><table><thead><tr><th>JV</th><th>Template</th><th>Accounting ID</th>'
+        + '<th>Created</th><th>Rows posted</th><th>Primary keys</th></tr></thead><tbody>';
+      a.byJv.slice(0, 300).forEach(j => {
+        h += '<tr><td><b>'+U.esc(j.jvId)+'</b></td><td>'+U.esc(j.ref)+'</td>';
+        h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.jsq(j.accountingId)+'\')">'+U.esc(j.accountingId)+'</button></td>';
+        h += '<td>'+U.esc(j.createdAt)+'</td><td>'+U.fmtInt(j.pks.length)+'</td>';
+        h += '<td style="font-size:11px;"><code>'+U.esc(j.pks.slice(0, 8).join(', '))+(j.pks.length > 8 ? ', …' : '')+'</code>';
+        if ((j.claimedNotSent || []).length) {
+          h += '<div style="color:var(--danger, #b91c1c);">⚠ also claimed '+U.fmtInt(j.claimedNotSent.length)
+            + ' row(s) it was never sent ('+U.esc(j.claimedNotSent.slice(0, 5).join(', '))+(j.claimedNotSent.length > 5 ? ', …' : '')+') — ignored</div>';
+        }
+        h += '</td></tr>';
+      });
+      h += '</tbody></table></div>';
+    }
+
+    App.openModal('Posted-JV Tracking — '+U.esc(tpl.name), h, '<button onclick="App.closeModal()">Close</button>');
+  },
+
+  exportPostedJvExceptions() {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const a = Reco._postedAudit;
+    if (!tpl || !a) return;
+    // Fixed header names, with the template's own column names carried as
+    // values: a template whose post-entry column IS its document-number column
+    // would otherwise produce two headers with the same name.
+    const cols = ['PrimaryKey', 'DocumentNumberColumn', 'DocumentNumber',
+                  'PostedColumn', 'PostedValue', 'AmountColumn', 'Amount', 'Reason'];
+    const rows = a.exceptions.map(x => ({
+      PrimaryKey: x.pk,
+      DocumentNumberColumn: tpl.docNumberColumn || '',
+      DocumentNumber: x.docNumber,
+      PostedColumn: a.column,
+      PostedValue: x.value,
+      AmountColumn: tpl.valueColumn || '',
+      Amount: x.amount,
+      Reason: x.reason
+    }));
+    U.download('posted_without_reference_'+Versioning._safe(tpl.name)+'_'+U.todayStr()+'.csv',
+      Papa.unparse(rows, { columns: cols }), 'text/csv');
+  },
+
+  exportPostedJvMap() {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const a = Reco._postedAudit;
+    if (!tpl || !a) return;
+    const cols = ['JvId', 'JvTemplate', 'AccountingId', 'CreatedAt', 'CreatedBy', 'PrimaryKey', 'ClaimedButNotSent'];
+    const rows = [];
+    a.byJv.forEach(j => {
+      if (!j.pks.length && !(j.claimedNotSent || []).length) {
+        rows.push({ JvId: j.jvId, JvTemplate: j.ref, AccountingId: j.accountingId, CreatedAt: j.createdAt, CreatedBy: j.createdBy, PrimaryKey: '', ClaimedButNotSent: '' });
+      }
+      j.pks.forEach(pk => rows.push({ JvId: j.jvId, JvTemplate: j.ref, AccountingId: j.accountingId, CreatedAt: j.createdAt, CreatedBy: j.createdBy, PrimaryKey: pk, ClaimedButNotSent: '' }));
+      (j.claimedNotSent || []).forEach(pk => rows.push({ JvId: j.jvId, JvTemplate: j.ref, AccountingId: j.accountingId, CreatedAt: j.createdAt, CreatedBy: j.createdBy, PrimaryKey: pk, ClaimedButNotSent: 'YES — ignored, the JV was never sent this row' }));
+    });
+    U.download('posted_jv_map_'+Versioning._safe(tpl.name)+'_'+U.todayStr()+'.csv',
+      Papa.unparse(rows, { columns: cols }), 'text/csv');
   },
 
   backupSession() {
@@ -14534,6 +15131,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         if (d.correctionMaster) AppState.correctionMaster[id] = d.correctionMaster;
         if (d.docNumberMaster) AppState.docNumberMaster[id] = d.docNumberMaster;
         if (d.entryHistory) AppState.entryHistory[id] = d.entryHistory;
+        Reco._postedIdxReset();   // a restore swaps the history the index was built from
         AppState.save();
         App.navigate('reco');
         U.toast('Session restored','success');
