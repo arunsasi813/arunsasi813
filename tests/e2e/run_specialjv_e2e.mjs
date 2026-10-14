@@ -41,6 +41,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const FAKE_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>FAKE JV</title></head>
 <body><div id="s">fake jv</div><script>
 var REF = 'FAKE', inputs = [], mode = 'good';
+/* Same-origin is the fallback, not the channel: cross-origin this throws. */
 try { mode = window.parent._fakeMode || 'good'; } catch (e) {}
 function L(o) {
   return Object.assign({ Reference:'ACC1', RC:'100', Nominal:'12345', SubNominal:'0',
@@ -85,7 +86,11 @@ function start() {
 }
 window.addEventListener('message', function (ev) {
   var d = ev.data; if (!d || d.type !== 'specialJV.init') return;
-  inputs = d.inputs || []; start();
+  inputs = d.inputs || [];
+  /* The host posts the whole mapping, so the test puts the mode there and it
+     arrives over postMessage like everything else a real JV page is told. */
+  if (d.def && d.def._fakeMode) mode = d.def._fakeMode;
+  start();
 });
 try { if (window.parent !== window && window.parent._specialJvInputs) { inputs = window.parent._specialJvInputs; start(); } } catch (e) {}
 if (!started) {
@@ -246,7 +251,7 @@ try {
   // ══════════════════════════════════════════════════════════════════════════
   console.log('\n[1] SpecialJV.load refuses an unsafe or duplicate ref');
   const rootA = makeRoot('rootA', { badRefs: true });
-  const BA = await startBridge(rootA, 18961); procs.push(BA.proc);
+  const BA = await startBridge(rootA, 18961, ['--jv-port', '18971']); procs.push(BA.proc);
   let { page, errors, ctx } = await openReco(browser, BA);
 
   const reg = await page.evaluate(() => ({
@@ -305,7 +310,7 @@ try {
   // ══════════════════════════════════════════════════════════════════════════
   console.log('\n[2] A JV whose lines do not balance never becomes a pending JV');
   const rootB = makeRoot('rootB');
-  const BB = await startBridge(rootB, 18962); procs.push(BB.proc);
+  const BB = await startBridge(rootB, 18962, ['--jv-port', '18972']); procs.push(BB.proc);
   ({ page, errors, ctx } = await openReco(browser, BB));
   const tpl = await createTemplate(page, 'JV Host', ROWS);
 
@@ -323,7 +328,10 @@ try {
       s.data.filter(r => docs.includes(r.Doc)).forEach(r => s.selectedRows[r._id] = true);
       Reco.previewEntryFromSelection(true);
     }, [tpl.id, docs]);
-    await page.evaluate((m) => { window._fakeMode = m; }, mode);
+    await page.evaluate((m) => {
+      window._fakeMode = m;                                  // same-origin fallback
+      Object.keys(SpecialJV.registry).forEach(k => { SpecialJV.registry[k]._fakeMode = m; });
+    }, mode);
     await page.click('#appModalBody button:has-text("Complete")');
     await sleep(900);
   }
@@ -715,7 +723,7 @@ try {
   // ══════════════════════════════════════════════════════════════════════════
   console.log('\n[5] The real TCH page still works end to end');
   const rootC = makeRoot('rootC');
-  const BC = await startBridge(rootC, 18963); procs.push(BC.proc);
+  const BC = await startBridge(rootC, 18963, ['--jv-port', '18973']); procs.push(BC.proc);
   ({ page, errors, ctx } = await openReco(browser, BC));
   const tplT = await createTemplate(page, 'TCH Host', TCH_ROWS);
   await page.evaluate((id) => {
