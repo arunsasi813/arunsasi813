@@ -138,10 +138,19 @@ try {
   const sl = await page.evaluate(async () => {
     const o = {};
     const raf = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    /* Best of three. The cost being asserted is the rendering work, which 1.2
+       and 1.3 pin behaviourally (capped nodes, small markup); the number here
+       is corroboration, and a single sample of it tracks machine load as much
+       as it tracks the code. */
+    o.openMs = Infinity;
+    for (let rep = 0; rep < 3; rep++) {
+      if (rep) { App.closeModal(); await raf(); }   // it is a modal; there is no closeSlicer
+      const t0 = performance.now();
+      await Reco.openSlicer('Ref');
+      await raf();
+      o.openMs = Math.min(o.openMs, Math.round(performance.now() - t0));
+    }
     let t = performance.now();
-    await Reco.openSlicer('Ref');
-    await raf();
-    o.openMs = Math.round(performance.now() - t);
     o.nodes = document.querySelectorAll('#slicerItems .slicer-item').length;
     o.htmlLen = document.getElementById('slicerItems').innerHTML.length;
     o.countLine = document.getElementById('slicerCount').textContent;
@@ -170,7 +179,7 @@ try {
     o.savedSel = (sess.slicers.Ref || []).length;
     return o;
   });
-  under(sl.openMs, 1500, '1.1 the slicer opens on a 200k-distinct column', 5819);
+  under(sl.openMs, 1500, '1.1 the slicer opens on a 200k-distinct column (best of 3)', 5819);
   check(sl.nodes === sl.cap, '1.2 the list is capped, not one node per distinct value', { nodes: sl.nodes, cap: sl.cap, wasNodes: BIG });
   check(sl.htmlLen < 500000, '1.3 the markup stays small', { htmlLen: sl.htmlLen, wasHtmlLen: 19177812 });
   check(/200,000 distinct values/.test(sl.countLine), '1.4 it states the true number of distinct values', sl.countLine);
@@ -646,12 +655,25 @@ try {
     // The same 200k sort through the pre-cache comparator, measured in this run
     // on this CPU, so 5.4 can compare like with like instead of against a
     // wall-clock number that moves with whatever else the machine is doing.
-    {
+    /* Both sides, best of three. A ratio is immune to a uniform slowdown but
+       not to additive noise: under contention both halves spend time waiting
+       rather than computing, the smaller one inflates proportionally more, and
+       the ratio walks towards 1 (seen: 2.6x idle, 1.64x loaded, which failed).
+       The minimum is the standard estimator for the uninterrupted cost, which
+       is what this comparison is about. */
+    o.amtRefMs = Infinity;
+    o.amtBest = o.amtMs;
+    for (let rep = 0; rep < 3; rep++) {
       const rows = sess.data.slice();
-      const t = performance.now();
+      const t0 = performance.now();
       rows.sort((ra, rb) => refCompare(ra.Amount, rb.Amount, false, 1));
-      o.amtRefMs = Math.round(performance.now() - t);
+      o.amtRefMs = Math.min(o.amtRefMs, Math.round(performance.now() - t0));
+      sess.columnSorts = { col: 'Amount', dir: 'asc' };
+      const t1 = performance.now();
+      Reco.applyTableFiltersSort(tpl, sess);
+      o.amtBest = Math.min(o.amtBest, Math.round(performance.now() - t1));
     }
+    sess.columnSorts = null;
     // Count the formula evaluations a sort costs: the keyed sort must evaluate
     // each row once, where the old comparator evaluated per comparison.
     const realEval = Formula.evaluate;
@@ -677,11 +699,11 @@ try {
   // ratio pay the same contention, so the ratio holds either way. The
   // comparison is deliberately unfair to the new path: applyTableFiltersSort
   // also filters and maps, where the reference only sorts.
-  check(typeof sort.amtMs === 'number' && typeof sort.amtRefMs === 'number'
-        && sort.amtRefMs > 40 && sort.amtMs < sort.amtRefMs * 0.6,
+  check(typeof sort.amtBest === 'number' && typeof sort.amtRefMs === 'number'
+        && sort.amtRefMs > 40 && sort.amtBest < sort.amtRefMs * 0.6,
     '5.4 the keyed sort of 200,000 values beats the pre-cache comparator by >40% '
-    + '(' + sort.amtMs + 'ms vs ' + sort.amtRefMs + 'ms in the same run)',
-    { amtMs: sort.amtMs, amtRefMs: sort.amtRefMs });
+    + '(best of 3: ' + sort.amtBest + 'ms vs ' + sort.amtRefMs + 'ms in the same run)',
+    { amtBest: sort.amtBest, amtFirst: sort.amtMs, amtRefMs: sort.amtRefMs });
   // A formula column cannot gain from key caching (Formula.evaluate dominates).
   // What the keyed sort guarantees is one evaluation per row, not one per
   // comparison — ~200k instead of ~3.4M — so assert the call count.
