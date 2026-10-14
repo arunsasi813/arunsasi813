@@ -14,10 +14,17 @@ POST /__pick               {"path": "<abs path>"}: the file the next
                            excel_link_pick_file() returns (one shot; without
                            it the call answers {ok: false, cancelled: true})
 POST /__fault              {"append_csv_rows": true|false}: make append_csv_rows
-                           raise OSError("injected fault") (history write failure)
+                           raise OSError("injected fault") (history write failure).
+                           Any other bridge method named here fails the same way,
+                           but only for a reco_data/** path, so the app still boots.
 
 --legacy   expose only the methods an older launcher had (no list_files,
            append_csv_rows, resolve_url, write_file_b64_abs, excel_link_* ...)
+--slow-read N
+           delay every folder-read call by N ms, to stand in for a real network
+           share. Scoped to reco_data/** so booting the app stays fast and the
+           delay lands on Reco.autoLoadLatest's read chain, which is what makes
+           the "opened but empty" window long enough to observe.
 --jv-port  serve <root> on a second port too; resolve_url() answers with that
            origin so the Special JV iframe is cross-origin, like file:// pages
            are in Chromium (exercises the postMessage handshake).
@@ -31,6 +38,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -49,6 +57,10 @@ root = Path(sys.argv[1]).resolve()
 port = int(sys.argv[2])
 legacy = "--legacy" in sys.argv
 jv_port = int(sys.argv[sys.argv.index("--jv-port") + 1]) if "--jv-port" in sys.argv else None
+slow_read_ms = int(sys.argv[sys.argv.index("--slow-read") + 1]) if "--slow-read" in sys.argv else 0
+# Only the versioned-data reads are slowed. Slowing every read would make the
+# app itself boot slowly, which is a different test.
+SLOW_READ_METHODS = {"read_file", "list_directories", "list_files", "list_folder_files"}
 cfg_path = root.parent / f"cfg_{port}.json"
 if not cfg_path.exists():
     cfg_path.write_text(json.dumps({"folder_path": str(root)}))
@@ -199,6 +211,15 @@ class Handler(SimpleHTTPRequestHandler):
             calls.append({"method": name, "arg0": args[0] if args and isinstance(args[0], str) else None})
         if name not in public_methods():
             return self._json({"ok": False, "error": f"no such bridge method {name}"})
+        rel0 = args[0] if args and isinstance(args[0], str) else None
+        under_data = bool(rel0) and rel0.startswith("reco_data")
+        if slow_read_ms and name in SLOW_READ_METHODS and under_data:
+            time.sleep(slow_read_ms / 1000.0)
+        # A read that fails. append_csv_rows has its own override above (it must
+        # raise inside the API to exercise the history write path); everything
+        # else fails at the bridge, which is what a dropped share looks like.
+        if name != "append_csv_rows" and state["faults"].get(name) and under_data:
+            return self._json({"ok": False, "error": "OSError: injected fault"})
         fn = OVERRIDES.get(name) or getattr(api, name)
         try:
             return self._json({"ok": True, "result": fn(*args)})
