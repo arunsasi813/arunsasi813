@@ -2099,7 +2099,7 @@ const FilterOps = {
     var out = [];
     keys.forEach(function (ym) {
       var y = ym[0], mi = ym[1], eom = lastDay(y, mi);
-      (p.slots || []).forEach(function (sl) {
+      arr(p.slots).forEach(function (sl) {
         var end = sl.end === 'eom' ? eom : sl.end;
         var start = sl.start === 'eom' ? eom : sl.start;
         var slot = str(sl.label).split('{eom}').join(String(eom));
@@ -2471,6 +2471,22 @@ const FilterOps = {
     if (!REF_RE.test(refStr)) errors.push('"ref" must be 1–24 characters of letters, digits, _ or -, starting with a letter (got "' + refStr + '")');
     else if (RESERVED_REF.test(refStr)) errors.push('"ref" is a reserved Windows device name ("' + refStr + '")');
 
+    /* A container of the wrong shape reads as empty, which would otherwise be
+       indistinguishable from "the author declared none". Say so for each. */
+    [['columns', spec.columns, 'no column would be read'],
+     ['kinds', spec.kinds, 'no row type would exist'],
+     ['classify.rules', ((spec.classify) || {}).rules, 'no row would be classified'],
+     ['fields', spec.fields, 'no section field would appear'],
+     ['aggregates', spec.aggregates, 'every total would be missing'],
+     ['slots', spec.slots, 'no account would be declared'],
+     ['entries', spec.entries, 'the JV would post nothing'],
+     ['validate', spec.validate, 'every check this JV declares would be skipped, '
+                                 + 'including the per-currency balance']
+    ].forEach(function (t) {
+      if (t[1] != null && !Array.isArray(t[1])) {
+        errors.push('"' + t[0] + '" is not a list, so ' + t[2]);
+      }
+    });
     var colIds = Object.create(null), kinds = Object.create(null), aggIds = Object.create(null),
         fieldIds = Object.create(null), slotIds = Object.create(null);
     kinds['@skip'] = 1;
@@ -2495,8 +2511,9 @@ const FilterOps = {
       var where = 'rule ' + (i + 1);
       if (!kinds[r.kind]) errors.push(where + ' targets unknown row type "' + str(r.kind) + '"');
       if (r.kind === '@skip' && !r.reason) warnings.push(where + ' ignores rows without saying why');
-      if (!(r.all || []).length) warnings.push(where + ' has no conditions, so it matches every row');
-      (r.all || []).forEach(function (c) {
+      if (!arr(r.all).length) warnings.push(where + ' has no conditions, so it matches every row');
+      if (r.all != null && !Array.isArray(r.all)) errors.push(where + ': "all" must be a list of conditions');
+      arr(r.all).forEach(function (c) {
         if (!colIds[c.col]) errors.push(where + ' tests unknown column "' + str(c.col) + '"');
         else if (OPS.indexOf(c.op) < 0) errors.push(where + ': unknown operator "' + str(c.op) + '"');
       });
@@ -2512,7 +2529,8 @@ const FilterOps = {
       aggIds[a.id] = 1;
       if (AGG_FNS.indexOf(a.fn) < 0) errors.push('total "' + a.id + '": unknown function "' + str(a.fn) + '"');
       if (a.fn !== 'count' && !colIds[a.of]) errors.push('total "' + a.id + '" sums unknown column "' + str(a.of) + '"');
-      (a.where || []).forEach(function (c) {
+      if (a.where != null && !Array.isArray(a.where)) errors.push('total "' + a.id + '": "where" must be a list of conditions');
+      arr(a.where).forEach(function (c) {
         if (c.kind != null && !kinds[c.kind]) errors.push('total "' + a.id + '" filters on unknown row type "' + str(c.kind) + '"');
         if (c.kindIn) (c.kindIn || []).forEach(function (k) { if (!kinds[k]) errors.push('total "' + a.id + '" filters on unknown row type "' + str(k) + '"'); });
         if (c.kind == null && !c.kindIn) {
@@ -2540,6 +2558,14 @@ const FilterOps = {
     if (sec.recoFrom && sec.recoFrom.field && !fieldIds[sec.recoFrom.field]) errors.push('sections: the Reco field "' + str(sec.recoFrom.field) + '" is not a declared field');
     if (sec.presets) {
       if (!colIds[sec.presets.column]) errors.push('sections.presets reads unknown column "' + str(sec.presets.column) + '"');
+      // presets() reads this list long after the spec is saved, when the first
+      // rows arrive, so a wrong shape here would otherwise surface as a period
+      // dropdown that is simply empty - with nothing anywhere saying why.
+      if (sec.presets.slots != null && !Array.isArray(sec.presets.slots)) {
+        errors.push('sections.presets: "slots" must be a list, so no period option would be offered');
+      } else if (sec.presets.kind === 'dateSlots' && !arr(sec.presets.slots).length) {
+        warnings.push('sections.presets offers no period options');
+      }
       var w = sec.presets.writes || {};
       ['from', 'to'].forEach(function (k) { if (w[k] && !fieldIds[w[k]]) errors.push('sections.presets writes unknown field "' + str(w[k]) + '"'); });
     }
@@ -2555,9 +2581,10 @@ const FilterOps = {
     var seenEntry = Object.create(null);
     entries.forEach(function (en, i) {
       var where = 'entry ' + (i + 1) + ' (' + str(en.label || en.id) + ')';
-      if (en.id) {
+      if (!en.id) errors.push(where + ': every entry needs an id');
+      else {
         if (seenEntry[en.id]) errors.push(where + ': two entries share the id "' + str(en.id)
-          + '" — the posting would be made twice');
+          + '" - the posting would be made twice');
         seenEntry[en.id] = 1;
       }
       try {
@@ -2574,7 +2601,8 @@ const FilterOps = {
 
     arr(spec.validate).forEach(function (v) {
       if (CHECK_KINDS.indexOf(v.kind) < 0) { errors.push('unknown check "' + str(v.kind) + '"'); return; }
-      var named = (v.fields || []).slice();
+      if (v.fields != null && !Array.isArray(v.fields)) errors.push('check "' + str(v.kind) + '": "fields" must be a list');
+      var named = arr(v.fields).slice();
       if (v.field) named.push(v.field);
       if (v.from) named.push(v.from);
       if (v.to) named.push(v.to);
@@ -18483,11 +18511,13 @@ const JvCreator = {
     const first = JvCreator._archiveDir(ref, stamp, user);
     for (let n = 1; n <= 20; n++) {
       const dir = n === 1 ? first : first + '_' + n;
-      let taken = false;
-      try { taken = (await JvCreator._exists(dir)).exists === true; } catch (e) { taken = false; }
+      let taken = true;   // an unanswerable check counts as taken, never as free
+      try { taken = (await JvCreator._exists(dir)).exists === true; }
+      catch (e) { console.error('_freeArchiveDir: could not check ' + dir, e); taken = true; }
       if (!taken) return dir;
     }
-    throw new Error('the archive folder ' + first + ' already holds 20 copies from this second');
+    throw new Error('no free archive folder could be found beside ' + first
+      + ' (either this second already holds 20 copies, or the shared folder did not answer)');
   },
 
   /* ---- the bridge, with relative paths only ------------------------------
@@ -19368,8 +19398,13 @@ const JvCreator = {
       return;
     }
     App.closeModal();
-    U.toast('Special JV "' + s.ref + '" saved — it is in the To Account dropdown', 'success');
-    if (r.warnings.length) console.warn('JV published with warnings', r.warnings);
+    U.toast('Special JV "' + s.ref + '" saved' + ((r.warnings || []).length ? '' : ' — it is in the To Account dropdown'), 'success');
+    if ((r.warnings || []).length) {
+      console.warn('JV published with warnings', r.warnings);
+      // Shown, not only logged: at least one of these means the JV is NOT in
+      // the dropdown yet, which contradicts the success toast above.
+      U.toast('Saved, but: ' + r.warnings.join(' · '), 'error');
+    }
     JvCreator._dup = null;
     if (AEG.currentTab === 'specialjv') JvCreator.renderTab();
   },
@@ -19733,17 +19768,23 @@ const JvWizard = {
       U.toast('"' + ref + '" has no jvSpec block, so there is nothing for the creator to edit', 'error');
       return;
     }
-    if (!inv.publishable) {
-      /* A hand-written page is opened read-only and can only be copied: the
-         creator never overwrites a page it did not write (R-15). */
-      JvWizard._begin(JvGen._clean(JSON.parse(JSON.stringify(def))),
-        { isNew: false, readOnly: true, why: inv.why, fromRef: ref });
-      return;
+    try {
+      if (!inv.publishable) {
+        /* A hand-written page is opened read-only and can only be copied: the
+           creator never overwrites a page it did not write (R-15). */
+        JvWizard._begin(JvGen._clean(JSON.parse(JSON.stringify(def))),
+          { isNew: false, readOnly: true, why: inv.why, fromRef: ref });
+        return;
+      }
+      JvWizard._begin(JvGen._clean(JSON.parse(JSON.stringify(def))), {
+        isNew: false, baseRev: inv.rev, baseUpdatedAt: inv.updatedAt, origRef: String(ref),
+        handEdited: inv.kind === 'handEdited', why: inv.kind === 'handEdited' ? inv.why : ''
+      });
+    } catch (e) {
+      console.error('JvWizard.edit', e);
+      JvWizard._st = null;
+      U.toast('"' + ref + '" could not be opened in the creator: ' + ((e && e.message) || e), 'error');
     }
-    JvWizard._begin(JvGen._clean(JSON.parse(JSON.stringify(def))), {
-      isNew: false, baseRev: inv.rev, baseUpdatedAt: inv.updatedAt, origRef: String(ref),
-      handEdited: inv.kind === 'handEdited', why: inv.kind === 'handEdited' ? inv.why : ''
-    });
   },
 
   _engineOrComplain() {
@@ -19968,6 +20009,8 @@ JvWizard._sync = function () {
   const st = JvWizard._st;
   if (!st) return;
   const d = st.def, s = d.jvSpec || (d.jvSpec = {});
+  // A mapping or draft read off the share may hold a list of the wrong shape.
+  const arr = v => (Array.isArray(v) ? v : []);
   /* The columns table on step 1 IS the projection contract while the wizard
      is open, so a name no column declares any more goes — otherwise renaming
      a column would leave Reco asking for a heading nothing reads, and the
@@ -19975,7 +20018,7 @@ JvWizard._sync = function () {
      a surviving entry is kept. */
   const norm = x => String(x == null ? '' : x).toLowerCase().replace(/[\s_]/g, '');
   const was = Object.create(null);
-  (d.inputColumns || []).forEach(c => {
+  arr(d.inputColumns).forEach(c => {
     const n = typeof c === 'string' ? c : (c && c.name);
     if (n) was[norm(n)] = c;
   });
@@ -19995,7 +20038,7 @@ JvWizard._sync = function () {
   });
   s.layout.sectionTable = Object.assign({}, s.layout.sectionTable || {}, { groups: groups });
   const order = JvWizard.CHECK_ORDER;
-  s.validate = (s.validate || []).slice().sort((a, b) =>
+  if (Array.isArray(s.validate)) s.validate = s.validate.slice().sort((a, b) =>
     order.indexOf(a.kind) - order.indexOf(b.kind));
 };
 
@@ -20849,8 +20892,13 @@ JvWizard.publish = async function (opts) {
   }
   if (r.ok) {
     const ref = String(st.def.ref);
-    U.toast('Special JV "' + ref + '" saved — it is in the To Account dropdown', 'success');
-    if ((r.warnings || []).length) console.warn('JV published with warnings', r.warnings);
+    U.toast('Special JV "' + ref + '" saved' + ((r.warnings || []).length ? '' : ' — it is in the To Account dropdown'), 'success');
+    if ((r.warnings || []).length) {
+      console.warn('JV published with warnings', r.warnings);
+      // Shown, not only logged: at least one of these means the JV is NOT in
+      // the dropdown yet, which contradicts the success toast above.
+      U.toast('Saved, but: ' + r.warnings.join(' · '), 'error');
+    }
     JvWizard._st = null;
     App.closeModal();
     if (AppState.currentPage === 'aeg' && AEG.currentTab === 'specialjv') JvCreator.renderTab();
@@ -23100,16 +23148,27 @@ JvWizard.openDraft = async function (ref) {
   /* Same gate as JvWizard.edit: a hand-written JV is read-only wherever it is
      opened from, or a draft becomes a side door into editing it. */
   if (inv && inv.mappingDef && !inv.publishable) {
-    JvWizard._begin(JvGen._clean(d), { isNew: false, readOnly: true, why: inv.why, fromRef: String(ref) });
+    try { JvWizard._begin(JvGen._clean(d), { isNew: false, readOnly: true, why: inv.why, fromRef: String(ref) }); }
+    catch (e) {
+      console.error('JvWizard.openDraft', e);
+      JvWizard._st = null;
+      U.toast('that draft could not be opened: ' + ((e && e.message) || e), 'error');
+    }
     return;
   }
   delete d.htmlPath;
   delete d._file;
   if (d.audit) delete d.audit.draft;
+  try {
   JvWizard._begin(JvGen._clean(d), existing
     ? { isNew: false, baseRev: inv.rev, baseUpdatedAt: inv.updatedAt, origRef: String(ref),
         handEdited: inv.kind === 'handEdited', why: inv.kind === 'handEdited' ? inv.why : '' }
     : { isNew: true, fromRef: '' });
+  } catch (e) {
+    console.error('JvWizard.openDraft', e);
+    JvWizard._st = null;
+    U.toast('that draft could not be opened: ' + ((e && e.message) || e), 'error');
+  }
   U.toast('Carrying on with the draft of "' + ref + '"', 'success');
 };
 

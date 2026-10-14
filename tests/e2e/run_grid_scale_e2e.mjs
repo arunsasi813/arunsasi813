@@ -298,6 +298,15 @@ try {
     o.headerEmpty = !document.getElementById('recoSelectAll').checked
                  && !document.getElementById('recoSelectAll').indeterminate;
 
+    // What clearing used to cost: a full re-render of the screen. Measured here,
+    // in this run, on this CPU, so 2.11 can compare like with like. It replaces
+    // the DOM, so the sentinel 2.12 watches has to be planted again afterwards.
+    t = performance.now();
+    App.navigate('reco');
+    await raf();
+    o.fullRenderMs = Math.round(performance.now() - t);
+    plant();
+
     t = performance.now();
     Reco.setPage(500);
     await raf();
@@ -337,7 +346,18 @@ try {
   check(surg.clearNoneTicked && surg.barHidden, '2.10 clearing unticks the visible rows and hides the bar', surg);
   check(surg.headerPartial && surg.headerAllTicked && surg.headerEmpty,
     '2.10b the header box reads empty / half / full to match the real selection', surg);
-  under(surg.clearMs, 100, '2.11 clearing a 200,000-row selection', 120);  // new 33-84ms (variance), old 120ms+
+  // 2.11 is a ratio, not a budget, for the same reason as 5.4: this is CPU-bound
+  // work, and on a shared machine the same clear measured 33ms idle and 143ms
+  // with other work running - so an absolute budget tight enough to prove the
+  // gain cannot survive that, and one loose enough to survive it cannot fail.
+  // The claim being tested is that clearing is surgical rather than a full
+  // re-render, which is exactly what 2.9 asserts behaviourally; this puts a
+  // number on it, against a full re-render measured in the same run.
+  check(typeof surg.clearMs === 'number' && typeof surg.fullRenderMs === 'number'
+        && surg.fullRenderMs > 30 && surg.clearMs < surg.fullRenderMs * 0.7,
+    '2.11 clearing a 200,000-row selection costs well under a full re-render '
+    + '(' + surg.clearMs + 'ms vs ' + surg.fullRenderMs + 'ms in the same run)',
+    { clearMs: surg.clearMs, fullRenderMs: surg.fullRenderMs });
   check(surg.pageSurvived, '2.12 turning the page re-renders the grid, not the screen');
   // Not a timing check. Turning the page costs about what the old full
   // re-render did (95-136ms measured here): the saving from redrawing only the

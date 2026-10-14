@@ -12,7 +12,13 @@
 //   [I]-[J] the submit checks and the spec hash;
 //   [K]-[M] the repo invariants: no compiled text anywhere in the engine, the
 //           generated page carries no script of its own, and the copies of the
-//           engine inside apps/Reco.html are byte-identical to the files.
+//           engine inside apps/Reco.html are byte-identical to the files;
+//   [N]-[P] the three ways a Special JV posted a wrong figure and said nothing:
+//           a name set that inherited from Object.prototype, two entries with
+//           one id, two sections with one id;
+//   [Q]     a spec list that is not a list at all is reported, not thrown.
+// Every check from [N] on is also run against the core's own source with that
+// one fix reversed, so none of them can pass vacuously — see the harness there.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -460,6 +466,328 @@ ISLANDS.forEach(([id, file]) => {
   t(RECO.indexOf("{ island: '" + id + "', name: '" + stem + "-' + JV_ENGINE_VERSION + '" + ext + "' }") > 0,
     'JV_ENGINE_FILES maps ' + id + ' to ' + file);
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+/* The mutation harness for [N]-[Q].
+
+   Every check below exists because a fix went in, and a check nobody has
+   watched fail is not evidence of anything. So each one is also run against a
+   copy of the core's own source with that single fix reversed by a string
+   replace — the engine in the shape the reviewers found it. The fragment has
+   to match exactly once: a mutation that quietly matches nothing would make a
+   check look like it bites when it does not, so a miss is a hard error that
+   names the fragment and stops the run. Nothing is written anywhere — [K]
+   already read the file into TEXT — and the real module is left alone. */
+const CORE_SRC = TEXT['jv-core-1.0.0.js'];
+const reverted = (find, replace) => {
+  const hits = CORE_SRC.split(find).length - 1;
+  if (hits !== 1) throw new Error('the fragment ' + JSON.stringify(find.slice(0, 64)) + ' occurs ' + hits
+    + ' times in jv-core-1.0.0.js, not once — the fix moved, so this test no longer proves anything');
+  const real = globalThis.JVCore;
+  (0, eval)(CORE_SRC.split(find).join(replace));            // the mutant lives in memory only
+  const mutant = globalThis.JVCore;
+  globalThis.JVCore = real;
+  return mutant;
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('\n[N] the name sets validateSpec builds carry no inheritance');
+/* Every "is this name declared?" question in validateSpec is a lookup in a
+   small set built from the spec itself. While those sets were plain objects
+   they answered YES for every key on Object.prototype, so a spec that named
+   "constructor", "toString", "valueOf" or "hasOwnProperty" walked straight
+   past the guard — and the mirror of the same bug, a column or a field
+   legitimately called one of those, was refused as a duplicate of something
+   nobody had declared. Both halves are below, and both are one `= {}` away. */
+const PROTO_SETS = reverted(
+  'var colIds = Object.create(null), kinds = Object.create(null), aggIds = Object.create(null),\n'
+  + '        fieldIds = Object.create(null), slotIds = Object.create(null);',
+  'var colIds = {}, kinds = {}, aggIds = {}, fieldIds = {}, slotIds = {};');
+const PROTO_ROLES = reverted('var roles = Object.create(null);', 'var roles = {};');
+const PROTO_SCOPE = reverted('var scopeNames = Object.create(null);', 'var scopeNames = {};');
+
+/* Half one: a name that is really on Object.prototype is not declared, and is
+   now refused. The plain-object engine accepted every one of these in total
+   silence — no error, no warning, a JV that saves and posts. */
+const PROTO_BLIND = [
+  ['a total that sums the column "constructor"', PROTO_SETS,
+    d => { d.jvSpec.aggregates[0].of = 'constructor'; }, /total "rapid_RUB" sums unknown column "constructor"/],
+  ['a rule targeting the row type "hasOwnProperty"', PROTO_SETS,
+    d => { d.jvSpec.classify.rules[1].kind = 'hasOwnProperty'; }, /rule 2 targets unknown row type "hasOwnProperty"/],
+  ['an entry posting to the account slot "constructor"', PROTO_SETS,
+    d => { d.jvSpec.entries[0].dr = 'constructor'; }, /Dr account "constructor" is not declared/],
+  ['an amount reading the name "toString"', PROTO_SCOPE,
+    d => { d.jvSpec.entries[0].amount = 'toString + 1'; }, /the amount uses unknown name "toString"/]
+];
+PROTO_BLIND.forEach(([name, old, mutate, re]) => {
+  const d = clone(DEF);
+  mutate(d);
+  t(C.validateSpec(d).errors.some(e => re.test(e)), 'refused: ' + name, C.validateSpec(d).errors.slice(0, 3));
+  const o = old.validateSpec(d);
+  t(o.errors.length === 0 && o.warnings.length === 0,
+    '  and with the plain object back it saved clean, which is the hole: ' + name, o);
+});
+/* Nothing caught the last two until somebody pressed post, which is the worst
+   place to find out: the spec had already been written to the share. */
+const lateSlot = clone(DEF);
+lateSlot.jvSpec.entries[0].dr = 'constructor';
+t((() => { try { PROTO_SETS.buildAll(lateSlot, lateSlot.jvSpec, ROWS, CLS, ASG, [S1]); return false; }
+           catch (e) { return /account slot "constructor" has no nominal/.test(e.message); } })(),
+  'the undeclared slot surfaced only at build time, from slotOf, with the spec already saved');
+const lateName = clone(DEF);
+lateName.jvSpec.entries[0].amount = 'toString + 1';
+t((() => { try { PROTO_SCOPE.buildAll(lateName, lateName.jvSpec, ROWS, CLS, ASG, [S1]); return false; }
+           catch (e) { return /unknown name "toString"/.test(e.message); } })(),
+  'and the undeclared name only at build time, from Expr, where has() was never fooled');
+
+/* Half two: a name that merely collides with Object.prototype is legitimate,
+   and is now accepted. The plain-object engine rejected all four as duplicates
+   of a column, field, total or role that does not exist anywhere in the spec. */
+const PROTO_MIRROR = [
+  ['a column legitimately called "Constructor"', PROTO_SETS,
+    d => { d.jvSpec.columns.push({ id: 'constructor', label: 'Constructor', type: 'text' });
+           d.inputColumns.push({ name: 'Constructor' }); }, /two columns share the id "constructor"/],
+  ['a section field legitimately called "valueOf"', PROTO_SETS,
+    d => { d.jvSpec.fields[5].id = 'valueOf'; }, /field id "valueOf" is already used/],
+  ['a total legitimately called "toString"', PROTO_SETS,
+    d => { d.jvSpec.aggregates[2].id = 'toString'; d.jvSpec.entries[2].amount = 'toString'; },
+    /total id "toString" is already used/],
+  ['a column claiming the role "toString"', PROTO_ROLES,
+    d => { d.jvSpec.columns[1].role = 'toString'; }, /two columns claim the role "toString"/]
+];
+PROTO_MIRROR.forEach(([name, old, mutate, re]) => {
+  const d = clone(DEF);
+  mutate(d);
+  t(C.validateSpec(d).errors.length === 0, 'accepted: ' + name, C.validateSpec(d).errors);
+  t(old.validateSpec(d).errors.some(e => re.test(e)),
+    '  and the plain object called it a duplicate of nothing: ' + name, old.validateSpec(d).errors.slice(0, 3));
+});
+/* The control. "nosuch" is not on Object.prototype, so this one guard always
+   fired for it: what changed above is the inheritance and nothing else. */
+const nosuch = clone(DEF);
+nosuch.jvSpec.aggregates[0].of = 'nosuch';
+t(C.validateSpec(nosuch).errors.some(e => /sums unknown column "nosuch"/.test(e))
+  && PROTO_SETS.validateSpec(nosuch).errors.some(e => /sums unknown column "nosuch"/.test(e)),
+  'of: "nosuch" is refused by both engines — the guard was never missing, only blind',
+  PROTO_SETS.validateSpec(nosuch).errors);
+
+/* What the hole cost, end to end, on the reviewer's own three rows. cell()
+   returns "" for a column nobody declared and num("") is 0, so the broken
+   total read ZERO, the charge entry swallowed the whole OF figure — and
+   because every entry is its own Dr/Cr pair it balanced to the kopeck, so no
+   check anywhere in Reco or in the page could have seen it. */
+const RROWS = [
+  { _pk: 'R1', Date: '06/10/2026', 'Txn Type': 'RAPID', Currency: 'USD', 'FC Amount': '100' },
+  { _pk: 'R2', Date: '07/10/2026', 'Txn Type': 'RAPID', Currency: 'RUB', 'FC Amount': '5000' },
+  { _pk: 'R3', Date: '08/10/2026', 'Txn Type': 'OF01',  Currency: 'RUB', 'FC Amount': '-9000' }
+];
+const RCLS = RROWS.map(r => C.classify(SPEC, r));
+const RASG = { 0: 1, 1: 1, 2: 1 };
+const RSEC = C.newSection(SPEC, 1);
+Object.assign(RSEC.fields, { periodFrom: P[0].from, periodTo: P[0].to });
+const charges = ls => ls.filter(l => l.Nominal === '35008');
+const rightL = C.buildAll(DEF, SPEC, RROWS, RCLS, RASG, [RSEC]).lines;
+t(charges(rightL).length === 1 && charges(rightL)[0].Dr === '4000.00',
+  'with rapid_RUB summing "amount" the charge entry is Dr 35008 RUB 4,000.00', charges(rightL));
+const blindOf = clone(DEF);
+blindOf.jvSpec.aggregates[0].of = 'constructor';
+const wrongL = PROTO_SETS.buildAll(blindOf, blindOf.jvSpec, RROWS, RCLS, RASG, [RSEC]).lines;
+t(charges(wrongL).length === 1 && charges(wrongL)[0].Dr === '9000.00',
+  'summing "constructor" it posted RUB 9,000.00 instead — the figure the reviewer found', charges(wrongL));
+const wrongBal = PROTO_SETS.balances(wrongL);
+t(Object.keys(wrongBal).every(c => Math.abs(wrongBal[c].dr - wrongBal[c].cr) < 0.005),
+  'and every currency still balanced, so nothing downstream could have noticed', wrongBal);
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('\n[O] two entries may not share an id');
+/* A doubled posting is invisible from every direction except the paper. Each
+   entry is its own balanced Dr/Cr pair, so the per-currency balance check
+   stays green, the host's own check stays green, and the rows are consumed
+   exactly once either way. The id is the only thing that makes two entries two
+   entries, so save time is the only place this can be caught. */
+const NO_SEEN_ENTRY = reverted("if (seenEntry[en.id]) errors.push(where", 'if (false) errors.push(where');
+const usdDr = ls => ls.filter(l => l.Cur === 'USD' && l.Dr).reduce((s, l) => s + Number(l.Dr), 0);
+
+const dupHand = clone(DEF);
+dupHand.jvSpec.entries.push(clone(dupHand.jvSpec.entries[1]));          // a second "e2", as a hand edit leaves it
+t(C.validateSpec(dupHand).errors.some(e => /two entries share the id "e2" - the posting would be made twice/.test(e)),
+  'refused: a hand-edited mapping that repeats an entry id', C.validateSpec(dupHand).errors);
+t(NO_SEEN_ENTRY.validateSpec(dupHand).errors.length === 0,
+  '  and without the seenEntry set it validated clean', NO_SEEN_ENTRY.validateSpec(dupHand).errors);
+const dupL = C.buildAll(dupHand, dupHand.jvSpec, ROWS, CLS, ASG, [S1]).lines;
+t(dupL.length === L.length + 2 && usdDr(dupL) === 200 && usdDr(L) === 100,
+  'which mattered: the same USD 100 of rows posts Dr 200.00 over ten lines instead of eight',
+  { lines: dupL.length, usdDr: usdDr(dupL) });
+const dupBal = C.balances(dupL);
+t(Object.keys(dupBal).every(c => Math.abs(dupBal[c].dr - dupBal[c].cr) < 0.005),
+  'and it balances per currency, which is why no later check can find it', dupBal);
+
+/* The second route in, and the one a user reaches without editing anything:
+   "one entry per currency" with a currency typed twice. The expansion is
+   deterministic, so the two copies collide on one id. */
+const dupLoop = clone(DEF);
+dupLoop.jvSpec.entries = [
+  dupLoop.jvSpec.entries[0],
+  { id: 'e2', label: 'Cross Currency Adjustment {cur}', amount: 'rapid_{cur}', dr: 'crossCcy', cr: 'clearing',
+    remark: 'ccAdj', forEachCurrency: ['RUB', 'USD', 'EUR', 'USD'] },
+  dupLoop.jvSpec.entries[3]
+];
+t(C.expandEntries(dupLoop.jvSpec).map(e => e.id).join() === 'e1,e2_RUB,e2_USD,e2_EUR,e2_USD,e4',
+  '"RUB, USD, EUR, USD" expands to two entries called e2_USD', C.expandEntries(dupLoop.jvSpec).map(e => e.id));
+t(C.validateSpec(dupLoop).errors.some(e => /two entries share the id "e2_USD"/.test(e)),
+  'refused: a currency typed twice in "one entry per currency"', C.validateSpec(dupLoop).errors);
+t(NO_SEEN_ENTRY.validateSpec(dupLoop).errors.length === 0,
+  '  and that one validated clean too, because every expanded entry lints fine on its own',
+  NO_SEEN_ENTRY.validateSpec(dupLoop).errors);
+const onceLoop = clone(dupLoop);
+onceLoop.jvSpec.entries[1].forEachCurrency = ['RUB', 'USD', 'EUR'];
+const loopOnce = C.buildAll(onceLoop, onceLoop.jvSpec, ROWS, CLS, ASG, [S1]).lines;
+const loopTwice = C.buildAll(dupLoop, dupLoop.jvSpec, ROWS, CLS, ASG, [S1]).lines;
+t(loopTwice.length === loopOnce.length + 2 && usdDr(loopTwice) === 2 * usdDr(loopOnce),
+  'and it doubles the USD posting against the three-currency build, pair for pair',
+  { once: [loopOnce.length, usdDr(loopOnce)], twice: [loopTwice.length, usdDr(loopTwice)] });
+const loopBal = C.balances(loopTwice);
+t(Object.keys(loopBal).every(c => Math.abs(loopBal[c].dr - loopBal[c].cr) < 0.005),
+  'balanced, again', loopBal);
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('\n[P] two sections may not share an id');
+/* Every figure in a section is chosen by `assignments[i] === section.id`, so
+   two sections holding one id both claim the same rows and buildSection runs
+   twice over them. The lines differ only in their Reco code, which is derived
+   from the position, so they look like two legitimate sections. Refuse. */
+const NO_SECTION_IDS = reverted("if (ids[id]) throw new Error('two sections share the id",
+  "if (false) throw new Error('two sections share the id");
+const NO_SECTION_ID_AT_ALL = reverted("if (id == null) throw new Error('a section has no id');",
+  "if (false) throw new Error('a section has no id');");
+const S1dup = C.newSection(SPEC, 1);
+Object.assign(S1dup.fields, S1.fields);
+t((() => { try { C.buildAll(DEF, SPEC, ROWS, CLS, ASG, [S1, S1dup]); return false; }
+           catch (e) { return /two sections share the id "1" - every amount assigned to it would be posted twice/.test(e.message); } })(),
+  'buildAll throws on two sections with the id 1, naming what it would have cost');
+const S2dist = C.newSection(SPEC, 2);
+Object.assign(S2dist.fields, { periodFrom: P[1].from, periodTo: P[1].to, recoCode: 'TCHX' });
+const distinct = C.buildAll(DEF, SPEC, ROWS, CLS, Object.assign({}, ASG, { 2: 2 }), [S1, S2dist]);
+t(distinct.lines.length === 10 && distinct.sections.map(s => s.section).join() === 'T1,T2',
+  'distinct ids still build: T1 and T2, ten lines, exactly as in [E]',
+  { lines: distinct.lines.length, sections: distinct.sections.map(s => s.section) });
+const doubled = NO_SECTION_IDS.buildAll(DEF, SPEC, ROWS, CLS, ASG, [S1, S1dup]);
+t(doubled.lines.length === 2 * L.length, '  without the guard the same rows post 16 lines instead of 8',
+  doubled.lines.length);
+t(doubled.primaryKeys.slice().sort().join() === 'D1,D2,D4'
+  && [...new Set(doubled.lines.map(l => l.Reco))].join() === 'TCH1,TCH2',
+  '  consuming the same three rows once, under two Reco codes, so the audit trail looks ordinary',
+  { pks: doubled.primaryKeys, reco: [...new Set(doubled.lines.map(l => l.Reco))] });
+const doubledBal = NO_SECTION_IDS.balances(doubled.lines);
+t(Object.keys(doubledBal).every(c => Math.abs(doubledBal[c].dr - doubledBal[c].cr) < 0.005),
+  '  and balancing, of course', doubledBal);
+t((() => { try { C.buildAll(DEF, SPEC, ROWS, CLS, ASG, [S1, { fields: {} }]); return false; }
+           catch (e) { return /a section has no id/.test(e.message); } })(),
+  'a section with no id at all is refused too — it can never match a row, so it is a mistake');
+t(NO_SECTION_ID_AT_ALL.buildAll(DEF, SPEC, ROWS, CLS, ASG, [S1, { fields: {} }]).lines.length === L.length,
+  '  where it used to slide through as an empty section nobody would question');
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('\n[Q] a spec list that is not a list is reported, not thrown');
+/* Every list in a mapping comes out of a JSON file somebody can hand-edit on
+   the share, so "columns": {} is a thing that will happen. The old
+   `(x || []).forEach` idiom threw a TypeError straight out of validateSpec,
+   which is the one failure this file's third rule forbids: fail CLOSED, with
+   errors a person can read. arr() degrades a bad shape to empty and the
+   ordinary guards then report what is missing, so the contract asserted here
+   is only that validateSpec RETURNS — what it says about each shape is [G]'s
+   business. Each shape is paired with the one call that fixed it, reversed. */
+const SHAPES = [
+  ['jvSpec.columns as an object', d => { d.jvSpec.columns = { date: { id: 'date', label: 'Date', type: 'date' } }; },
+    ['arr(spec.columns).forEach(function (c) {\n', '((spec.columns) || []).forEach(function (c) {\n']],
+  ['jvSpec.columns as a string', d => { d.jvSpec.columns = 'date,txn,currency,amount'; },
+    ['arr(spec.columns).forEach(function (c) {\n', '((spec.columns) || []).forEach(function (c) {\n']],
+  ['kinds as a number', d => { d.jvSpec.kinds = 2; },
+    ['arr(spec.kinds).forEach', '((spec.kinds) || []).forEach']],
+  ['classify.rules as an object', d => { d.jvSpec.classify.rules = { r1: { kind: 'rapid' } }; },
+    ['arr(((spec.classify) || {}).rules)', '(((spec.classify) || {}).rules || [])']],
+  ['a rule\'s "all" as a string', d => { d.jvSpec.classify.rules[1].all = 'txn equals RAPID'; },
+    ['arr(r.all).forEach', '(r.all || []).forEach']],
+  ['fields as an object', d => { d.jvSpec.fields = { periodFrom: { id: 'periodFrom' } }; },
+    ['arr(spec.fields).forEach', '((spec.fields) || []).forEach']],
+  ['aggregates as a string', d => { d.jvSpec.aggregates = 'rapid_RUB'; },
+    ['arr(spec.aggregates).forEach', '((spec.aggregates) || []).forEach']],
+  ['an aggregate\'s "where" as a string', d => { d.jvSpec.aggregates[0].where = 'rapid'; },
+    ['arr(a.where).forEach', '(a.where || []).forEach']],
+  ['slots as an object', d => { d.jvSpec.slots = { clearing: { id: 'clearing' } }; },
+    ['arr(spec.slots).forEach', '((spec.slots) || []).forEach']],
+  ['validate as an object', d => { d.jvSpec.validate = { balance: { kind: 'balancePerCurrency' } }; },
+    ['arr(spec.validate).forEach(function (v) {\n', '((spec.validate) || []).forEach(function (v) {\n']],
+  ['a check\'s "fields" as a string', d => { d.jvSpec.validate[0].fields = 'periodFrom'; },
+    ['var named = arr(v.fields).slice();', 'var named = (v.fields || []).slice();']],
+  ['inputColumns as an object', d => { d.inputColumns = { Date: 1 }; },
+    ['arr(def.inputColumns).forEach', '((def.inputColumns) || []).forEach']],
+  ['columns[0].accept as a string', d => { d.jvSpec.columns[0].accept = 'Posting Date'; },
+    ['arr(c && c.accept).forEach', '((c && c.accept) || []).forEach']]
+];
+/* All thirteen now report instead of throwing. Three of them did not at first:
+   the arr() sweep stopped at the top-level lists and never reached a rule's own
+   "all", an aggregate's own "where" or a check's own "fields". Those three were
+   pinned here as open gaps until the sweep was finished, and each now carries
+   the mutation that reverts its own fix, like the other ten. A wrong-shaped
+   list is also now REPORTED by name where the container itself is the wrong
+   shape, which is the half of arr()'s contract that was missing: degrading to
+   empty silently is how a classify.rules written as an object classified no row
+   at all, and a validate written as an object removed every check the JV
+   declares, balancePerCurrency included. */
+SHAPES.forEach(([name, mutate, fix]) => {
+  const d = clone(DEF);
+  mutate(d);
+  let out = null, threw = null;
+  try { out = C.validateSpec(d); } catch (e) { threw = e; }
+  t(!threw && Array.isArray(out.errors) && Array.isArray(out.warnings), 'reported, not thrown: ' + name,
+    threw && threw.message);
+  const old = reverted(fix[0], fix[1]);
+  let oldThrew = null;
+  try { old.validateSpec(d); } catch (e) { oldThrew = e; }
+  t(!!oldThrew && /is not a function/.test(oldThrew.message),
+    '  and the (x || []) idiom threw a TypeError on it: ' + name, oldThrew && oldThrew.message);
+});
+t(SHAPES.length === 13, 'all 13 malformed shapes the reviewer found are covered', SHAPES.length);
+t(SHAPES.every(s => !!s[2]), 'every one of them is fixed, and each carries the mutation that reverts it',
+  SHAPES.filter(s => !s[2]).map(s => s[0]));
+
+/* The other half of the contract: a container of the wrong shape is NAMED, so
+   "the author declared none" and "this list is unreadable" stop looking the
+   same. Silently empty is how a JV came to classify no row, or to carry no
+   checks at all, and still look publishable. */
+[['classify.rules as an object', d => { d.jvSpec.classify.rules = { r1: { kind: 'rapid' } }; },
+  /"classify\.rules" is not a list, so no row would be classified/],
+ ['validate as an object', d => { d.jvSpec.validate = { b: { kind: 'balancePerCurrency' } }; },
+  /"validate" is not a list, so every check this JV declares would be skipped, including the per-currency balance/],
+ ['columns as a string', d => { d.jvSpec.columns = 'date,amount'; },
+  /"columns" is not a list, so no column would be read/],
+ ['entries as an object', d => { d.jvSpec.entries = { e1: {} }; },
+  /"entries" is not a list, so the JV would post nothing/]
+].forEach(([name, mutate, re]) => {
+  const d = clone(DEF);
+  mutate(d);
+  const out = C.validateSpec(d);
+  t(out.errors.some(e => re.test(e)), 'named, not silently empty: ' + name, out.errors.slice(0, 3));
+});
+
+/* And an entry with no id at all. The first cut of the duplicate-id check only
+   guarded entries that HAVE one, so two hand-edited entries both missing "id"
+   still posted twice with nothing reported. */
+{
+  const d = clone(DEF);
+  const copy = JSON.parse(JSON.stringify(d.jvSpec.entries[1]));
+  delete d.jvSpec.entries[1].id; delete copy.id;
+  d.jvSpec.entries.push(copy);
+  const out = C.validateSpec(d);
+  t(out.errors.filter(e => /every entry needs an id/.test(e)).length === 2,
+    'two entries with no id at all are both refused', out.errors.slice(0, 3));
+  const old = reverted("      if (!en.id) errors.push(where + ': every entry needs an id');\n      else {",
+                       "      if (en.id) {");
+  t(old.validateSpec(d).errors.length === 0,
+    '  and before the fix they saved clean, which is why the double posting was invisible',
+    old.validateSpec(d).errors.slice(0, 3));
+}
 
 console.log('\n' + ok + ' passed, ' + bad + ' failed');
 process.exit(bad ? 1 : 0);

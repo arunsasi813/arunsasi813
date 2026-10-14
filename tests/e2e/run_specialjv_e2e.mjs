@@ -96,6 +96,17 @@ if (!started) {
 }
 <\/script></body></html>`;
 
+/* The same page under another ref. The host drops any message whose ref is not
+   the one it opened, so a fake JV has to announce itself correctly. */
+const fakePageFor = (ref) => FAKE_PAGE.replace("var REF = 'FAKE'", "var REF = '" + ref + "'");
+
+/* Refs that are also names on Object.prototype. "constructor" is a plain
+   string a user can type into To Account, and a hand-written
+   special_jv_mapping/constructor.json is the whole of what it takes to
+   register one — no creator, no wizard. refProblem() allows them (they are
+   letters and nothing else); "__proto__" is refused for its underscore. */
+const PROTO_REFS = ['constructor', 'toString', 'valueOf'];
+
 // Mapping files whose refs must be refused, and why.
 const BAD_REFS = [
   ['EVIL_TRAVERSAL.json',  '../apps/Reco'],
@@ -150,6 +161,15 @@ function makeRoot(name, opts = {}) {
     fs.writeFileSync(path.join(root, 'special_jv_mapping/OK_UNDER.json'),
       JSON.stringify({ ref: 'JV_3x', displayName: 'Undered', inputColumns: ['Currency'] }, null, 2));
   }
+
+  if (opts.protoRefs) {
+    for (const ref of PROTO_REFS) {
+      fs.writeFileSync(path.join(root, 'special_jv_templates/' + ref + '.html'), fakePageFor(ref));
+      fs.writeFileSync(path.join(root, 'special_jv_mapping/' + ref + '.json'), JSON.stringify({
+        ref, displayName: 'Proto ' + ref, inputColumns: [{ name: 'Currency' }, { name: 'FC Amount' }]
+      }, null, 2));
+    }
+  }
   return root;
 }
 
@@ -186,6 +206,8 @@ const ROWS = [
   { Doc: 'D6', Date: '10/10/2026', 'Txn Type': 'BANK',  Currency: 'AED', 'FC Amount': '20',    AED: '20',   ToAccount: 'ACC1', Status: '' },
 ];
 const TCH_ROWS = ROWS.map(r => Object.assign({}, r, { ToAccount: r.ToAccount === 'FAKE' ? 'TCH' : r.ToAccount }));
+// One row per Object.prototype ref: D1 → constructor, D2 → toString, D3 → valueOf.
+const PROTO_ROWS = PROTO_REFS.map((ref, i) => Object.assign({}, ROWS[i], { ToAccount: ref }));
 const FIELDS = Object.keys(ROWS[0]);
 
 async function createTemplate(page, name, rows) {
@@ -756,6 +778,76 @@ try {
     'every row TCH posted has an accounting reference — no exceptions', tchEnt);
   await page.evaluate(() => App.closeModal());
   check(errors.length === 0, 'no JavaScript errors driving the real TCH page', errors);
+  await ctx.close();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[6] A JV short code that is also a name on Object.prototype');
+  /* The check at [1] only says these names do not resolve when nothing claims
+     them. They are legal refs, so a hand-written special_jv_mapping/
+     constructor.json registers one, and then every map keyed by the ref is
+     being indexed with "constructor". The entry path's own jvBuckets was a
+     plain {}, so jvBuckets["constructor"] answered with Object, .push was not
+     a function, and Preview Entry did NOTHING — no modal, no toast, the only
+     diagnostic an uncaught TypeError in a console a finance user in a WebView2
+     window cannot open. */
+  const rootD = makeRoot('rootD', { protoRefs: true });
+  const BD = await startBridge(rootD, 19640); procs.push(BD.proc);
+  ({ page, errors, ctx } = await openReco(browser, BD));
+  const tplP = await createTemplate(page, 'Proto Host', PROTO_ROWS);
+  const regP = await page.evaluate(() => ({
+    keys: Object.keys(SpecialJV.registry).sort(),
+    resolves: ['constructor', 'toString', 'valueOf'].map(r => SpecialJV.isJvRef(r)),
+    problems: Store.loadProblems.slice()
+  }));
+  check(regP.keys.join() === 'FAKE,TCH,constructor,toString,valueOf' && regP.resolves.every(Boolean),
+    'a mapping may legitimately be named "constructor", "toString" or "valueOf"', regP);
+  check(regP.problems.length === 0, 'and none of them is refused at load', regP.problems);
+  /* get() already guards with hasOwnProperty, so the registry losing its null
+     prototype changes nothing anyone can observe — which is exactly why it is
+     asserted here and not inferred from behaviour. */
+  check(await page.evaluate(() => Object.getPrototypeOf(SpecialJV.registry) === null),
+    'the registry they are keyed into is built with no prototype');
+  await page.evaluate(() => App.closeModal());
+
+  // The real button, in the grid, with nothing selected — all three open rows.
+  await page.evaluate((id) => { AppState.recoSessions[id].activeSection = 'action'; App.navigate('reco'); }, tplP.id);
+  await page.waitForSelector('.reco-table-wrap tbody tr', { timeout: 8000 });
+  await page.click('button.small.primary:has-text("Preview Entry")');
+  await sleep(900);
+  const proto = await page.evaluate(() => {
+    const pe = Reco._pendingEntry || {};
+    const b = pe.jvBuckets || {};
+    return {
+      title: (document.getElementById('appModalTitle') || {}).textContent || '',
+      body: (document.getElementById('appModalBody') || {}).textContent || '',
+      refs: Object.keys(b).sort(),
+      pks: Object.keys(b).sort().map(k => (Array.isArray(b[k]) ? b[k].map(r => r._pk).join('+') : 'NOT AN ARRAY')),
+      bare: !!pe.jvBuckets && Object.getPrototypeOf(pe.jvBuckets) === null
+    };
+  });
+  check(/Entry Preview/.test(proto.title), 'Preview Entry opens its modal instead of doing nothing at all', proto.title);
+  check(proto.refs.join() === 'constructor,toString,valueOf' && proto.pks.join() === 'D1,D2,D3',
+    'each row is bucketed to the JV its To Account names', proto);
+  check(PROTO_REFS.every(r => proto.body.indexOf('Proto ' + r) >= 0) && /1 selected row\(s\) target this JV/.test(proto.body),
+    'and all three are listed as outstanding Special JV requirements', proto.body.slice(0, 400));
+  // Belt and braces: the map has no prototype at all, so a ref nobody thought
+  // of cannot come back as something inherited either.
+  check(proto.bare, 'the bucket map is built with no prototype, not as a plain {}', proto.bare);
+
+  // ...and the JV actually runs: Complete, and the lines come back under that ref.
+  await page.evaluate(() => { window._fakeMode = 'good'; });
+  await page.click('#appModalBody button:has-text("Complete Proto constructor")');
+  await sleep(900);
+  const ctorDone = await page.evaluate((id) => {
+    const p = (AppState.pendingSpecialJV[id] || [])[0] || {};
+    return { n: (AppState.pendingSpecialJV[id] || []).length, ref: p.ref, lines: (p.lines || []).length,
+             pks: (p.primaryKeys || []).join(), title: (document.getElementById('appModalTitle') || {}).textContent || '' };
+  }, tplP.id);
+  check(ctorDone.n === 1 && ctorDone.ref === 'constructor' && ctorDone.lines === 2 && ctorDone.pks === 'D1',
+    'the JV named "constructor" completes and its lines are held under that ref', ctorDone);
+  check(/Entry Preview/.test(ctorDone.title) && errors.length === 0,
+    'the whole round trip raises no JavaScript error', errors);
+  await page.evaluate(() => App.closeModal());
   await ctx.close();
 
 } finally {

@@ -16,7 +16,15 @@
 // code; the live test-run recomputes on a keystroke; "Check against the real
 // TCH page" diffs clean; and a JV that does not balance cannot be published.
 //
+// Then the four ways a creator can hand an operator a balanced but wrong JV,
+// or no JV at all: two sections sharing an id, a draft that opens a
+// hand-written JV for editing, an unreadable file that says nothing, and a
+// currency typed twice. And the one path this suite used not to walk at all —
+// publishing an UPDATE: revision 2 onto the share, then a conflict when
+// somebody else has moved the revision underneath it.
+//
 // Needs: python3, Playwright (Chromium). Exits non-zero on the first failure.
+// Ports 19600-19619.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -36,7 +44,7 @@ const OS_USER = os.userInfo().username;
 const require = createRequire(import.meta.url);
 const JVCore = require(path.join(REPO, 'special_jv_templates/_engine/jv-core-1.0.0.js'));
 
-const PORT = 19142, JVPORT = 19143;
+const PORT = 19600, JVPORT = 19601;
 let failures = 0, passes = 0;
 function check(cond, msg, extra) {
   if (cond) { passes++; console.log('  ✓ ' + msg); }
@@ -873,7 +881,314 @@ try {
         'and anything that is no longer a plain signed sum opens in the formula box instead', terms);
 
   // ════════════════════════════════════════════════════════════════════════
-  console.log('\n[8] the share at the end of the run');
+  console.log('\n[8] section ids — add, add, remove the middle card, add');
+  /* The worst thing in the creator, and the one nothing could see. Every
+     figure in a section is picked out by `assignments[i] === section.id`, so
+     two sections sharing one id build the same rows twice — and because each
+     entry posts its own balanced Dr/Cr pair, every currency still ticks, no
+     check reports anything and Publish stays green. The test-run IS the
+     calculator the operator signs the JV off against: they would read doubled
+     figures as correct. */
+  await page.evaluate(id => {
+    const s = AppState.recoSessions[id];
+    s.selectedRows = {};
+    s.data.forEach(r => { s.selectedRows[r._id] = true; });
+  }, tpl);
+  await page.evaluate(() => JvWizard.startFrom('TCH'));
+  await page.waitForSelector('#jvwChips', { timeout: 15000 });
+  await stepTo(1);
+  await fill('jvwRef', 'TCHX');
+  await fill('jvwName', 'TCHX — three sections');
+  await stepTo(9);
+  const addSec = '#jvwStep button:has-text("+ Add TCH Section")';
+  const nSections = n => page.waitForFunction(
+    want => JvWizard._st.sections.length === want, n, { timeout: 10000 });
+  await page.click(addSec);
+  await nSections(2);
+  await page.click(addSec);
+  await nSections(3);
+  await page.locator('#jvwPanelSections .tch-card').nth(1).locator('button.danger').first().click();
+  await nSections(2);
+  await page.click(addSec);
+  await nSections(3);
+  const secIds = await page.evaluate(() => JvWizard._st.sections.map(s => s.id));
+  check(secIds.length === 3 && new Set(secIds).size === 3,
+        'add, add, remove the middle card, add — and the three sections still have three ids of their own', secIds);
+
+  /* Every card needs a period before anything can be saved, and the state
+     worth asserting is the one where Publish is green — that is what made the
+     doubling invisible. The preset select is the way an operator sets it. */
+  for (let i = 0; i < 3; i++) {
+    await page.locator('#jvwPanelSections .tch-card').nth(i).locator('select').first().selectOption('0');
+    await page.waitForTimeout(60);
+  }
+  /* Two rows into the card that was added last, so the figures are small
+     enough to read off the screen: D1 at USD 100 and D4 at RUB 5,000. Nothing
+     is typed into the Sale Data boxes, so entry 1 posts nothing and what is
+     left is one pair per currency. */
+  await page.locator('#jvwRowsTable select[data-row="0"]').selectOption({ label: 'T3' });
+  await page.locator('#jvwRowsTable select[data-row="3"]').selectOption({ label: 'T3' });
+  await flush();
+  const once = await page.evaluate(() => ({
+    assigned: JvWizard._st.assignments.slice(),
+    lines: (JvWizard._st.built ? JvWizard._st.built.lines : [])
+      .map(l => l.Cur + ' ' + l.Nominal + ' ' + (l.Dr ? 'Dr ' + l.Dr : 'Cr ' + l.Cr)),
+    can: JvWizard._canPublish()
+  }));
+  const posted = s => once.lines.filter(x => x === s).length;
+  check(once.lines.length === 4 && posted('USD 85001 Dr 100.00') === 1 && posted('USD 17036 Cr 100.00') === 1
+        && posted('RUB 17036 Dr 5000.00') === 1 && posted('RUB 35008 Cr 5000.00') === 1,
+        'the two assigned rows post four lines and each amount posts exactly once — not the eight a shared id built',
+        { assigned: once.assigned, lines: once.lines });
+  const onceBal = (await page.textContent('#jvwBalance')).replace(/\s+/g, ' ');
+  check(/USD: Dr 100\.00 \/ Cr 100\.00 ✓/.test(onceBal) && /RUB: Dr 5,000\.00 \/ Cr 5,000\.00 ✓/.test(onceBal)
+        && once.can === '',
+        'and the screen the JV is signed off against reads USD 100.00 and RUB 5,000.00 with Publish green — green is '
+        + 'what made a doubled JV look right, so the figures are the assertion', { bal: onceBal, can: once.can });
+
+  /* Second line of defence, for the refactor that reintroduces this: the
+     engine itself will not build two sections that share an id, rather than
+     posting everything assigned to it twice. */
+  const refused2 = await page.evaluate(() => {
+    const st = JvWizard._st;
+    st.sections[2].id = st.sections[1].id;
+    st.assignments = st.assignments.map(a => (a ? st.sections[1].id : 0));
+    JvWizard._recompute();
+    return { blocks: (st.checks.blocks || []).slice(), built: !!st.built, can: JvWizard._canPublish() };
+  });
+  check(refused2.blocks.some(b => /two sections share the id/.test(b)) && !refused2.built && !!refused2.can,
+        'and a shared id that reaches the engine any other way stops the build altogether, with the reason on the '
+        + 'screen', refused2);
+  await page.evaluate(() => JvWizard.close());
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[9] a draft is not a side door into a hand-written JV');
+  /* JvWizard.edit respects the read-only classification (R-15); openDraft
+     asked only whether a registration existed, and TCH.json has a jvSpec — so
+     a draft saved under the code TCH opened TCH fully editable, with a live
+     Publish button, and the refusal arrived only after the work was done. */
+  await page.evaluate(async () => {
+    JvWizard.startFrom('TCH');
+    JvWizard._st.def.ref = 'TCH';
+    JvWizard._st.def.displayName = 'A draft that lands on TCH';
+    await JvWizard.saveDraft();
+    JvWizard.close();
+  });
+  await page.evaluate(() => { App.navigate('aeg'); AEG.switchTab('specialjv'); });
+  await page.waitForSelector('#jvDraftOpen_TCH', { timeout: 15000 });
+  await page.click('#jvDraftOpen_TCH');
+  await page.waitForSelector('#jvwChips', { timeout: 15000 });
+  const onTch = (await page.textContent('#appModalBody')).replace(/\s+/g, ' ');
+  check(await page.evaluate(() => JvWizard._st.readOnly === true)
+        && /Read-only/.test(onTch) && /written by hand/.test(onTch)
+        && !(await page.isVisible('#jvwPublish'))
+        && await page.isVisible('#appModalFooter button:has-text("Save as a new JV…")'),
+        'a draft saved under TCH opens read-only, says why on the screen, and offers "Save as a new JV…" instead of '
+        + 'a Publish button', onTch.slice(0, 130));
+  const draftRefusal = await page.evaluate(async () => {
+    const r = await JvWizard.publish();
+    return ((r && r.errors) || [])[0] || '';
+  });
+  check(draftRefusal === 'this JV is read-only'
+        && read('special_jv_templates/TCH.html') === TCH_HTML_BEFORE
+        && read('special_jv_mapping/TCH.json') === TCH_JSON_BEFORE,
+        'and the creator refuses it on the classification rather than leaning on the write path to catch it — TCH\'s '
+        + 'own two files are byte for byte what they were', draftRefusal);
+  await page.evaluate(() => JvWizard.close());
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[10] "Import a JV file…" either opens the wizard or says why not');
+  /* A colleague's <CODE>.json is data from outside the app, so every list in
+     it may be the wrong shape. startImport guarded "is it readable JSON" and
+     "has it a jvSpec", and then deriveInputColumns — which runs inside _sync,
+     before _recompute's own try/catch — threw into a console a finance user in
+     a WebView2 window cannot open: no banner, the chooser modal unchanged, no
+     wizard, and _st already holding a half-built session. */
+  const friendOk = JSON.parse(TCH_JSON_BEFORE);
+  friendOk.jvSpec.columns[1].accept = 'Transaction Type';          /* a string where a list belongs */
+  const friendBad = JSON.parse(TCH_JSON_BEFORE);
+  const asMap = {};
+  friendBad.jvSpec.columns.forEach(c => { asMap[c.id] = c; });
+  friendBad.jvSpec.columns = asMap;                                /* a map where a list belongs */
+  const readFile = async def => {
+    await page.evaluate(() => { App.navigate('aeg'); AEG.switchTab('specialjv'); });
+    await page.waitForSelector('#jvNewBtn', { timeout: 10000 });
+    await page.click('#jvNewBtn');
+    await page.waitForSelector('#jvwImport', { timeout: 10000 });
+    await page.fill('#jvwImport', JSON.stringify(def));
+    await page.click('#appModalBody button:has-text("Read it")');
+    await page.waitForTimeout(150);                                /* startImport is synchronous */
+    /* Shape-agnostic on purpose: the session this probe reads may be the
+       half-built one the defect left behind, so it must survive a jvSpec
+       whose columns are not a list at all. */
+    return page.evaluate(() => {
+      const st = JvWizard._st;
+      const msg = ((document.getElementById('jvwImportMsg') || {}).textContent || '').replace(/\s+/g, ' ').trim();
+      if (!st) return { opened: false, msg: msg };
+      const cols = (st.def.jvSpec || {}).columns;
+      const list = Array.isArray(cols);
+      return { opened: true, msg: msg, ref: st.def.ref, shape: list ? 'list' : typeof cols,
+               accept: (list && cols[1]) ? cols[1].accept : null,
+               cols: (st.def.inputColumns || []).map(c => c.name), rows: st.rows.length };
+    });
+  };
+  const impOk = await readFile(friendOk);
+  check(impOk.opened && impOk.shape === 'list' && impOk.accept === 'Transaction Type' && impOk.ref === ''
+        && impOk.rows === 4 && impOk.cols.join() === 'Date,Txn Type,Currency,FC Amount',
+        'a file whose columns[].accept is a string where a list belongs is read rather than thrown: the wizard opens '
+        + 'on the test-run, the odd shape is kept as the data it is, and the one spelling left is the label', impOk);
+  await page.evaluate(() => JvWizard.close());
+  const impBad = await readFile(friendBad);
+  check(!impBad.opened && /could not be read as a JV/.test(impBad.msg)
+        && await page.isVisible('#jvwStartBlank'),
+        'and a file the creator still cannot read says so where the user is looking, leaves the chooser exactly as it '
+        + 'was, and leaves no half-built session behind', impBad);
+  const logged = errors.filter(e => /JvWizard\.startImport/.test(e));
+  check(logged.length === 1,
+        'while the stack a developer needs is still written to the console — as well as the banner now, not instead '
+        + 'of it', errors.slice(0, 5));
+  logged.forEach(e => errors.splice(errors.indexOf(e), 1));
+  await page.evaluate(() => JvWizard.close());
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[11] a currency typed twice in "one entry per currency"');
+  /* "RUB, USD, EUR, USD" expanded to two entries carrying the id e5_USD, and
+     because each posting is its own balanced Dr/Cr pair, neither the preview's
+     per-currency tick nor the host's balance check could see the second one. */
+  await page.evaluate(() => JvWizard.startFrom('TCH'));
+  await page.waitForSelector('#jvwChips', { timeout: 15000 });
+  await stepTo(1);
+  await fill('jvwRef', 'TCH5');
+  await fill('jvwName', 'TCH5 — one entry per currency');
+  await stepTo(7);
+  await page.click('#jvwStep button:has-text("+ Add: one entry per currency")');
+  await page.waitForSelector('#jvwEntry_e5', { timeout: 10000 });
+  await page.fill('#jvwEntry_e5 input[placeholder="USD, EUR"]', 'RUB, USD, EUR, USD');
+  await flush();
+  const dup = await spec();
+  const perCur = (dup.jvSpec.entries.find(e => e.id === 'e5') || {}).forEachCurrency || [];
+  const expanded = JVCore.expandEntries(dup.jvSpec).map(e => e.id);
+  check(perCur.join() === 'RUB,USD,EUR' && expanded.join() === 'e1,e2,e3,e4,e5_RUB,e5_USD,e5_EUR',
+        'typing "RUB, USD, EUR, USD" into the currencies box is three currencies, not four — the second USD would '
+        + 'have become a second entry with the id e5_USD', { typed: 'RUB, USD, EUR, USD', kept: perCur, expanded });
+  await stepTo(9);
+  await page.selectOption('#jvwPanelSections .tch-card select', '0');
+  await page.click('button:has-text("Auto-assign by period")');
+  await page.waitForTimeout(80);
+  const s5 = page.locator('#jvwPanelSections td.input input');
+  await s5.nth(0).fill('7000');
+  await s5.nth(1).fill('5000');
+  await flush();
+  const perLines = await page.evaluate(() => {
+    const st = JvWizard._st;
+    const L = st.built ? st.built.lines : [];
+    return { total: L.length, errors: st.valid.errors.slice(),
+             mine: L.filter(l => /^Per currency/.test(l.Desc || ''))
+                    .map(l => l.Cur + ' ' + (l.Dr ? 'Dr ' + l.Dr : 'Cr ' + l.Cr)) };
+  });
+  check(perLines.total === 14 && !perLines.errors.length
+        && perLines.mine.join(' | ') === 'RUB Dr 5000.00 | RUB Cr 5000.00 | USD Dr 100.00 | USD Cr 100.00 | '
+           + 'EUR Dr 50.00 | EUR Cr 50.00',
+        'so it posts six lines and not eight — one pair per currency, no second USD pair, and no two entries sharing '
+        + 'an id for validateSpec to complain about', perLines);
+  await page.evaluate(() => JvWizard.close());
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[12] publishing an UPDATE, and the conflict the next one hits');
+  /* Both publishes above create a new JV, so until here nothing exercised the
+     revision a session starts from: baseRev travels with the wizard and is
+     the whole reason the write path can say "someone changed this while you
+     were in it" (R-17). TCH3 is the one published JV with nothing posted from
+     it, so updating it needs no typed-back code (R-24). */
+  await page.evaluate(() => { App.navigate('aeg'); AEG.switchTab('specialjv'); });
+  await page.waitForSelector('#aegContent .card-grid', { timeout: 10000 });
+  await page.click('#aegContent .card:has-text("Ref TCH3") button:has-text("Edit")');
+  await page.waitForSelector('#jvwChips', { timeout: 15000 });
+  await page.evaluate(() => JvWizard.go(9));
+  await page.waitForSelector('#jvwPanelSections', { timeout: 10000 });
+  await page.selectOption('#jvwPanelSections .tch-card select', '0');
+  await page.click('button:has-text("Auto-assign by period")');
+  await page.waitForTimeout(80);
+  const u1 = page.locator('#jvwPanelSections td.input input');
+  await u1.nth(0).fill('7000');
+  await u1.nth(1).fill('5000');
+  /* One figure changed, in the editor the user actually has: a fixed 250 on
+     the end of the cross-currency entry. */
+  await stepTo(7);
+  await page.click('#jvwEntry_e1 button:has-text("+ add another")');
+  await page.selectOption('#jvwEntry_e1 select[onchange*="setTermSrc(\'e1\',2"]', '#const');
+  await page.fill('#jvwEntry_e1 input[oninput*="setTermNum(\'e1\',2"]', '250');
+  await flush();
+  const amt250 = (await page.textContent('[data-live="amt:e1"]')).trim();
+  await stepTo(9);
+  await flush();
+  const beforeUpdate = await page.evaluate(() => ({ base: JvWizard._st.baseRev, isNew: JvWizard._st.isNew }));
+  await page.click('#jvwPublish');
+  /* Either the modal closes because it was written, or it stays and says why
+     it was not — waiting only for the first turns a refused update into a
+     30-second hang instead of the assertion below. */
+  await page.waitForFunction(() => !document.getElementById('appModal').classList.contains('show')
+    || /Nothing was written/.test((document.getElementById('jvwResult') || {}).textContent || ''),
+    null, { timeout: 30000 });
+  const up = JSON.parse(read('special_jv_mapping/TCH3.json'));
+  check(up.audit.rev === 2 && up.audit.specHash === JVCore.specHash(up)
+        && up.jvSpec.entries[0].amount === 'rubEqUsd + rubEqEur + 250'
+        && up.audit.createdBy === def3.audit.createdBy && up.audit.createdAt === def3.audit.createdAt
+        && up.audit.updatedAt > def3.audit.updatedAt && up.audit.copiedFrom === 'TCH',
+        'editing a published JV and saving it again publishes revision 2 — the changed figure, the hash of the spec it '
+        + 'now is, and the history it already had', { audit: up.audit, startedFrom: beforeUpdate, onScreen: amt250 });
+  check(read('special_jv_templates/TCH3.html').indexOf('rubEqUsd + rubEqEur + 250') >= 0,
+        'and the calculator page beside it carries the same new figure, so the pair on the share cannot disagree');
+  const archived = fs.existsSync(abs('special_jv_archive/TCH3'))
+    ? fs.readdirSync(abs('special_jv_archive/TCH3')).sort() : [];
+  const archRev = archived.length
+    ? JSON.parse(read('special_jv_archive/TCH3/' + archived[0] + '/TCH3.json')).audit.rev : null;
+  check(archived.length === 1 && archRev === 1,
+        'with revision 1 copied into special_jv_archive first — the only way back there is, because the bridge has no '
+        + 'delete and no rename', { dirs: archived, rev: archRev });
+
+  /* Now someone else saves TCH3 while this session has it open. Only
+     audit.rev and audit.updatedBy move; updatedAt is deliberately left alone,
+     so the revision the session started from is the only thing that can
+     notice — which is exactly the check this suite never had. */
+  await page.waitForSelector('#aegContent .card-grid', { timeout: 10000 });
+  await page.waitForTimeout(200);
+  await page.click('#aegContent .card:has-text("Ref TCH3") button:has-text("Edit")');
+  await page.waitForSelector('#jvwChips', { timeout: 15000 });
+  await page.evaluate(() => JvWizard.go(9));
+  await page.waitForSelector('#jvwPanelSections', { timeout: 10000 });
+  await page.selectOption('#jvwPanelSections .tch-card select', '0');
+  await page.click('button:has-text("Auto-assign by period")');
+  await page.waitForTimeout(80);
+  const u2 = page.locator('#jvwPanelSections td.input input');
+  await u2.nth(0).fill('7000');
+  await u2.nth(1).fill('5000');
+  await flush();
+  const theirs = JSON.parse(read('special_jv_mapping/TCH3.json'));
+  theirs.audit.rev = 3;
+  theirs.audit.updatedBy = 'Priya from Treasury';
+  const theirsText = JSON.stringify(theirs, null, 2) + '\n';
+  fs.writeFileSync(abs('special_jv_mapping/TCH3.json'), theirsText);
+  const pageWas = read('special_jv_templates/TCH3.html');
+  const clash = await page.evaluate(async () => {
+    const r = await JvWizard.publish();
+    return { needs: r.needs, errors: (r.errors || []).slice(), written: (r.written || []).slice() };
+  });
+  check(clash.needs === 'conflict' && !clash.written.length
+        && /Priya from Treasury changed "TCH3"/.test(clash.errors.join(' '))
+        && /revision 3; you started from 2/.test(clash.errors.join(' ')),
+        'publishing on top of a revision somebody else moved is refused as a conflict, and the refusal names them and '
+        + 'both revisions rather than saying "try again"', clash);
+  const clashHtml = ((await page.textContent('#jvwResult').catch(() => '')) || '').replace(/\s+/g, ' ');
+  check(/Nothing was written/.test(clashHtml) && /Reload theirs and lose mine/.test(clashHtml)
+        && /Save mine as a new JV/.test(clashHtml) && /Force overwrite/.test(clashHtml),
+        'and the three ways out of it are on the screen, each an explicit action', clashHtml.slice(0, 170));
+  check(read('special_jv_mapping/TCH3.json') === theirsText && read('special_jv_templates/TCH3.html') === pageWas,
+        'with neither file touched: not the mapping the other user wrote, not the page beside it');
+  await page.evaluate(() => JvWizard.close());
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[13] the share at the end of the run');
   const all = fs.readdirSync(abs('special_jv_mapping')).sort();
   const left = all.filter(f => !f.startsWith('.')).join(' ');
   check(left === 'TCH.json TCH3.json TCHW.json', 'three mappings: TCH untouched, plus the two the creator published', left);

@@ -553,7 +553,7 @@
     var out = [];
     keys.forEach(function (ym) {
       var y = ym[0], mi = ym[1], eom = lastDay(y, mi);
-      (p.slots || []).forEach(function (sl) {
+      arr(p.slots).forEach(function (sl) {
         var end = sl.end === 'eom' ? eom : sl.end;
         var start = sl.start === 'eom' ? eom : sl.start;
         var slot = str(sl.label).split('{eom}').join(String(eom));
@@ -925,6 +925,22 @@
     if (!REF_RE.test(refStr)) errors.push('"ref" must be 1–24 characters of letters, digits, _ or -, starting with a letter (got "' + refStr + '")');
     else if (RESERVED_REF.test(refStr)) errors.push('"ref" is a reserved Windows device name ("' + refStr + '")');
 
+    /* A container of the wrong shape reads as empty, which would otherwise be
+       indistinguishable from "the author declared none". Say so for each. */
+    [['columns', spec.columns, 'no column would be read'],
+     ['kinds', spec.kinds, 'no row type would exist'],
+     ['classify.rules', ((spec.classify) || {}).rules, 'no row would be classified'],
+     ['fields', spec.fields, 'no section field would appear'],
+     ['aggregates', spec.aggregates, 'every total would be missing'],
+     ['slots', spec.slots, 'no account would be declared'],
+     ['entries', spec.entries, 'the JV would post nothing'],
+     ['validate', spec.validate, 'every check this JV declares would be skipped, '
+                                 + 'including the per-currency balance']
+    ].forEach(function (t) {
+      if (t[1] != null && !Array.isArray(t[1])) {
+        errors.push('"' + t[0] + '" is not a list, so ' + t[2]);
+      }
+    });
     var colIds = Object.create(null), kinds = Object.create(null), aggIds = Object.create(null),
         fieldIds = Object.create(null), slotIds = Object.create(null);
     kinds['@skip'] = 1;
@@ -949,8 +965,9 @@
       var where = 'rule ' + (i + 1);
       if (!kinds[r.kind]) errors.push(where + ' targets unknown row type "' + str(r.kind) + '"');
       if (r.kind === '@skip' && !r.reason) warnings.push(where + ' ignores rows without saying why');
-      if (!(r.all || []).length) warnings.push(where + ' has no conditions, so it matches every row');
-      (r.all || []).forEach(function (c) {
+      if (!arr(r.all).length) warnings.push(where + ' has no conditions, so it matches every row');
+      if (r.all != null && !Array.isArray(r.all)) errors.push(where + ': "all" must be a list of conditions');
+      arr(r.all).forEach(function (c) {
         if (!colIds[c.col]) errors.push(where + ' tests unknown column "' + str(c.col) + '"');
         else if (OPS.indexOf(c.op) < 0) errors.push(where + ': unknown operator "' + str(c.op) + '"');
       });
@@ -966,7 +983,8 @@
       aggIds[a.id] = 1;
       if (AGG_FNS.indexOf(a.fn) < 0) errors.push('total "' + a.id + '": unknown function "' + str(a.fn) + '"');
       if (a.fn !== 'count' && !colIds[a.of]) errors.push('total "' + a.id + '" sums unknown column "' + str(a.of) + '"');
-      (a.where || []).forEach(function (c) {
+      if (a.where != null && !Array.isArray(a.where)) errors.push('total "' + a.id + '": "where" must be a list of conditions');
+      arr(a.where).forEach(function (c) {
         if (c.kind != null && !kinds[c.kind]) errors.push('total "' + a.id + '" filters on unknown row type "' + str(c.kind) + '"');
         if (c.kindIn) (c.kindIn || []).forEach(function (k) { if (!kinds[k]) errors.push('total "' + a.id + '" filters on unknown row type "' + str(k) + '"'); });
         if (c.kind == null && !c.kindIn) {
@@ -994,6 +1012,14 @@
     if (sec.recoFrom && sec.recoFrom.field && !fieldIds[sec.recoFrom.field]) errors.push('sections: the Reco field "' + str(sec.recoFrom.field) + '" is not a declared field');
     if (sec.presets) {
       if (!colIds[sec.presets.column]) errors.push('sections.presets reads unknown column "' + str(sec.presets.column) + '"');
+      // presets() reads this list long after the spec is saved, when the first
+      // rows arrive, so a wrong shape here would otherwise surface as a period
+      // dropdown that is simply empty - with nothing anywhere saying why.
+      if (sec.presets.slots != null && !Array.isArray(sec.presets.slots)) {
+        errors.push('sections.presets: "slots" must be a list, so no period option would be offered');
+      } else if (sec.presets.kind === 'dateSlots' && !arr(sec.presets.slots).length) {
+        warnings.push('sections.presets offers no period options');
+      }
       var w = sec.presets.writes || {};
       ['from', 'to'].forEach(function (k) { if (w[k] && !fieldIds[w[k]]) errors.push('sections.presets writes unknown field "' + str(w[k]) + '"'); });
     }
@@ -1009,9 +1035,10 @@
     var seenEntry = Object.create(null);
     entries.forEach(function (en, i) {
       var where = 'entry ' + (i + 1) + ' (' + str(en.label || en.id) + ')';
-      if (en.id) {
+      if (!en.id) errors.push(where + ': every entry needs an id');
+      else {
         if (seenEntry[en.id]) errors.push(where + ': two entries share the id "' + str(en.id)
-          + '" — the posting would be made twice');
+          + '" - the posting would be made twice');
         seenEntry[en.id] = 1;
       }
       try {
@@ -1028,7 +1055,8 @@
 
     arr(spec.validate).forEach(function (v) {
       if (CHECK_KINDS.indexOf(v.kind) < 0) { errors.push('unknown check "' + str(v.kind) + '"'); return; }
-      var named = (v.fields || []).slice();
+      if (v.fields != null && !Array.isArray(v.fields)) errors.push('check "' + str(v.kind) + '": "fields" must be a list');
+      var named = arr(v.fields).slice();
       if (v.field) named.push(v.field);
       if (v.from) named.push(v.from);
       if (v.to) named.push(v.to);

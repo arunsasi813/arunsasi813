@@ -16,6 +16,7 @@
 // copies no app files. Seeding it is part of publishing.
 //
 // Needs: python3, Playwright (Chromium). Exits non-zero on the first failure.
+// Ports 19620-19639.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -35,7 +36,7 @@ const OS_USER = os.userInfo().username;
 const require = createRequire(import.meta.url);
 const JVCore = require(path.join(REPO, 'special_jv_templates/_engine/jv-core-1.0.0.js'));
 
-const PORT = 19120, JVPORT = 19121;
+const PORT = 19620, JVPORT = 19621;
 const ADMIN_PWD = 'sharePass1';
 let failures = 0, passes = 0;
 function check(cond, msg, extra) {
@@ -712,6 +713,130 @@ try {
            === /jv-spec-hash" content="([^"]+)"/.exec(handoverHtml)[1],
         'and the handed-over pair is the same data-only page and matching mapping');
   await page.evaluate(() => App.closeModal());
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[13] the share drops one listing while a publish reloads the registry');
+  /* publish's finally reloads the registry so the new JV is in the To Account
+     dropdown the moment the toast appears — and that reload is the first time
+     load() runs mid-session. One dropped list_files must not be able to empty
+     a registry that was fine a moment ago: every Special JV would leave the
+     dropdown, and rows already carrying ToAccount = "TCH" would stop being
+     recognised as JV rows. Stubbing api.list_files from the page fails exactly
+     the JS path a share that blinks fails, for this one publish. */
+  const blink = await page.evaluate(async () => {
+    const api = window.pywebview.api;
+    api.__list = api.__list || api.list_files;
+    let drops = 0;
+    api.list_files = function (rel) {
+      if (rel === 'special_jv_mapping') { drops++; return Promise.reject(new Error('injected: the share dropped the listing')); }
+      return api.__list(rel);
+    };
+    const before = Object.keys(SpecialJV.registry).sort();
+    const res = await JvCreator.publish(JvCreator.duplicateDef('TCH', 'DROPPED', 'Published while the share was blinking'),
+      { newOnly: true, lockWait: 30 });
+    const after = { refs: Object.keys(SpecialJV.registry).sort(),
+                    opts: SpecialJV.buildToAccountOptions().filter(o => o.kind === 'jv').map(o => o.value).sort() };
+    api.list_files = api.__list;
+    return { res, before, after, drops };
+  });
+  /* load() logs the dropped listing on its way to the load problem, which is
+     where it belongs. The run-wide check at the end is about console errors
+     nobody expected, so this one is counted and taken off that list here. */
+  const blinkLogged = errors.filter(e => /SpecialJV\.load failed/.test(e));
+  for (let i = errors.length - 1; i >= 0; i--) if (/SpecialJV\.load failed/.test(errors[i])) errors.splice(i, 1);
+  check(blink.res.ok && blink.drops > 0 && blinkLogged.length === 1
+        && /special_jv_mapping folder could not be listed/.test(blink.res.warnings.join(' '))
+        && /already loaded are still in use/.test(blink.res.warnings.join(' ')),
+        'a publish whose registry reload could not list the folder hands that failure back — naming the folder, saying the JVs already loaded are still in use, and logging it once',
+        { ok: blink.res.ok, warnings: blink.res.warnings, drops: blink.drops, logged: blinkLogged });
+  check(blink.after.refs.join() === blink.before.join() && blink.after.refs.indexOf('TCH') >= 0,
+        'and the registry it could not rebuild is left exactly as it was — TCH included',
+        { before: blink.before, after: blink.after.refs });
+  check(blink.after.opts.indexOf('TCH') >= 0,
+        'so the Special JVs are all still in the To Account dropdown, which is where the user was just told to look', blink.after.opts);
+  /* The consequence the reviewer measured: with an empty registry a row that
+     says TCH is not a JV row any more, so the split in previewEntryFromSelection
+     posts it through the generic engine against an account reference that is
+     not in the accounts master. */
+  const split = await page.evaluate(id => {
+    AppState.activeRecoId = id;
+    const s = AppState.recoSessions[id];
+    s.data.forEach(r => { r.ToAccount = ''; });
+    const rows = s.data.slice(0, 3);
+    rows[0].ToAccount = 'TCH'; rows[1].ToAccount = 'TCH'; rows[2].ToAccount = 'ACC1';
+    s.selectedRows = {};
+    rows.forEach(r => { s.selectedRows[r._id] = true; });
+    Reco._pendingEntry = null;
+    let threw = '';
+    try { Reco.previewEntryFromSelection(true); } catch (e) { threw = String((e && e.message) || e); }
+    const pe = Reco._pendingEntry || {};
+    return { threw, standard: (pe.standardRows || []).length, buckets: Object.keys(pe.jvBuckets || {}).sort(),
+             inTch: ((pe.jvBuckets || {}).TCH || []).length, lines: (pe.lines || []).length };
+  }, tpl);
+  check(split.buckets.join() === 'TCH' && split.inTch === 2 && split.standard === 1 && !split.threw,
+        'and Preview Entry still buckets the two TCH rows for the calculator, leaving the one master row to the generic engine', split);
+  await page.evaluate(() => App.closeModal());
+  const relisted = await page.evaluate(async () => {
+    const rep = await SpecialJV.load();
+    return { rep, refs: Object.keys(SpecialJV.registry).sort() };
+  });
+  check(!!relisted.rep && relisted.rep.listed === true && relisted.rep.problems.length === 0
+        && relisted.refs.indexOf('DROPPED') >= 0 && relisted.refs.indexOf('TCH') >= 0
+        && JSON.parse(read('special_jv_mapping/DROPPED.json')).audit.rev === 1,
+        'the publish itself did land: load() says whether the listing worked, and the one that works registers it beside the others', relisted);
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[14] two publishes in the same second (R-19, the spec\'s own test)');
+  /* The archive is the only way back — the bridge has no delete and no rename
+     — so the one thing it must never do is write two versions into one folder.
+     Two publishes by the same person inside one second produce the same stamp
+     and the same user segment, which is the collision _freeArchiveDir exists
+     for: the pair below takes about 400 ms, so the real clock gives the same
+     second most of the time and a different one often enough to be a race.
+     The stamp is pinned across the pair to make it a fact; everything else is
+     the real publish path. */
+  const firstTwice = await page.evaluate(() => JvCreator.publish(
+    JvCreator.duplicateDef('TCH', 'TWICE', 'TWICE — the first version'), { newOnly: true, lockWait: 30 }));
+  const revBytes = [{ json: read('special_jv_mapping/TWICE.json'), html: read('special_jv_templates/TWICE.html') }];
+  const republish = name => page.evaluate(name => {
+    const d = JSON.parse(JSON.stringify(SpecialJV.get('TWICE')));
+    delete d.htmlPath; delete d._file;
+    d.displayName = name;
+    return JvCreator.publish(d, { baseRev: d.audit.rev, baseUpdatedAt: d.audit.updatedAt, lockWait: 30 });
+  }, name);
+  await page.evaluate(() => {
+    JvCreator.__stamp = JvCreator.__stamp || JvCreator.stamp;
+    JvCreator.stamp = () => '20261014-121314';
+  });
+  const t0 = Date.now();
+  const up1 = await republish('TWICE — the second version');
+  revBytes.push({ json: read('special_jv_mapping/TWICE.json'), html: read('special_jv_templates/TWICE.html') });
+  const up2 = await republish('TWICE — the third version');
+  const elapsed = Date.now() - t0;
+  await page.evaluate(() => { JvCreator.stamp = JvCreator.__stamp; });
+  const twiceDirs = fs.readdirSync(abs('special_jv_archive/TWICE')).sort();
+  const STAMP_DIR = '20261014-121314_' + WHO.replace(/[^A-Za-z0-9_-]+/g, '_');
+  const archived = twiceDirs.map(d => ({
+    json: fs.readFileSync(abs('special_jv_archive/TWICE/' + d + '/TWICE.json'), 'utf8'),
+    html: fs.readFileSync(abs('special_jv_archive/TWICE/' + d + '/TWICE.html'), 'utf8')
+  }));
+  check(firstTwice.ok && up1.ok && up2.ok && twiceDirs.length === 2
+        && twiceDirs[0] === STAMP_DIR && twiceDirs[1] === STAMP_DIR + '_2',
+        'R-19 the second save of the same second does not write into the first one\'s folder: a free name ending "_2" is found',
+        { dirs: twiceDirs, want: STAMP_DIR, ms: elapsed, errors: [firstTwice.errors, up1.errors, up2.errors] });
+  check(up1.archive === 'special_jv_archive/TWICE/' + twiceDirs[0]
+        && up2.archive === 'special_jv_archive/TWICE/' + twiceDirs[1],
+        'R-19 and each save reports the folder it archived into, so the user can be told where its predecessor went',
+        { a: up1.archive, b: up2.archive });
+  check(JSON.parse(archived[0].json).audit.rev === 1 && JSON.parse(archived[1].json).audit.rev === 2
+        && JSON.parse(read('special_jv_mapping/TWICE.json')).audit.rev === 3,
+        'R-19 the two archived mappings are consecutive revisions — 1 and 2, with 3 on the share — so no version was lost',
+        { archived: archived.map(a => JSON.parse(a.json).audit.rev), live: JSON.parse(read('special_jv_mapping/TWICE.json')).audit.rev });
+  check(archived[0].json === revBytes[0].json && archived[0].html === revBytes[0].html
+        && archived[1].json === revBytes[1].json && archived[1].html === revBytes[1].html,
+        'R-19 and each folder holds the bytes that were on the share before that save, page and mapping together',
+        { names: archived.map((a, i) => [JSON.parse(a.json).displayName, JSON.parse(revBytes[i].json).displayName]) });
+
 
   check(read('special_jv_templates/TCH.html') === TCH_HTML_BEFORE,
         'R-15 after everything, special_jv_templates/TCH.html is byte-identical to the file this run started with');

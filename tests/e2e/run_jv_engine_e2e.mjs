@@ -105,6 +105,26 @@ makeJv('XSSJV', d => {
   d.jvSpec.remarks.templates.bsp = HOSTILE;
 });
 
+/* Mappings that are wrong by SHAPE, not by value: one bracket on the share
+   turns a list into an object. Every one of these is a real way a hand-edited
+   special_jv_mapping/*.json breaks, and every one of them used to throw out of
+   start() — so render() never ran, #jvRoot kept its boot text, and the operator
+   read that jv-core-1.0.0.js was missing from the shared folder and went
+   looking for a file that was sitting right there. See [11].
+   Every one is now NAMED by validateSpec, so the panel points at the list in
+   the file instead of quoting a TypeError, and start()'s guard is the backstop
+   for anything that still throws. NORULESJV is the control: a list that is
+   legitimately ABSENT must still give a usable page, or "unreadable" and
+   "none declared" would have collapsed into the same outcome. */
+makeJv('BADCOLSJV',   d => { d.jvSpec.columns = { c1: d.jvSpec.columns[0] }; });
+makeJv('BADRULESJV',  d => { d.jvSpec.classify.rules = { r1: d.jvSpec.classify.rules[1] }; });
+makeJv('BADCHECKSJV', d => { d.jvSpec.validate = { v1: d.jvSpec.validate[0] }; });
+makeJv('BADCONDJV',   d => { d.jvSpec.classify.rules[1].all = { c1: d.jvSpec.classify.rules[1].all[0] }; });
+makeJv('BADWHEREJV',  d => { d.jvSpec.aggregates[0].where = { w1: d.jvSpec.aggregates[0].where[0] }; });
+makeJv('BADNAMEDJV',  d => { d.jvSpec.validate[0].fields = { f1: d.jvSpec.validate[0].fields[0] }; });
+makeJv('BADSLOTSJV',  d => { d.jvSpec.sections.presets.slots = { s1: d.jvSpec.sections.presets.slots[0] }; });
+makeJv('NORULESJV',   d => { delete d.jvSpec.classify.rules; });
+
 /* A minimal stand-in for Reco, same-origin with the JV page, used to prove the
    page refuses a definition addressed to another JV. */
 fs.writeFileSync(path.join(root, 'special_jv_templates/_harness.html'),
@@ -158,7 +178,8 @@ try {
   // ════════════════════════════════════════════════════════════════════════
   console.log('\n[1] registration: a JV is a filename and a JSON file, nothing else');
   const reg = await page.evaluate(() => Object.keys(SpecialJV.registry).sort());
-  check(reg.join() === 'BROKENJV,DRIFTJV,EXAMPLE_TCH,NEWERJV,TCH,XSSJV',
+  check(reg.join() === 'BADCHECKSJV,BADCOLSJV,BADCONDJV,BADNAMEDJV,BADRULESJV,BADSLOTSJV,BADWHEREJV,'
+                     + 'BROKENJV,DRIFTJV,EXAMPLE_TCH,NEWERJV,NORULESJV,TCH,XSSJV',
         'the generated pages register beside TCH with no change to Reco', reg);
   const refChecks = await page.evaluate(() => ({
     underscore: SpecialJV.refProblem('_EXAMPLE_TCH'),
@@ -452,6 +473,103 @@ try {
   });
   check(parity.diff.length === 0,
         'the engine and Reco\'s own FilterOps agree on all ' + parity.n + ' operator/value combinations', parity.diff);
+
+  // ════════════════════════════════════════════════════════════════════════
+  console.log('\n[11] a mapping that is the wrong SHAPE says so; the boot text never stays');
+  /* While the shell's boot text is on screen it can only mean one thing — the
+     core did not load — so it names jv-core-1.0.0.js. Nothing in start() may
+     therefore throw: a malformed mapping has to reach the fatal panel of [4],
+     which lists the reasons and offers Cancel, or the operator is sent to the
+     shared folder after a file that is already there. */
+  const BOOT = /missing from the shared folder/;
+  /* Every specialJV.* message the host hears, so "nothing was posted back" is
+     a fact about the wire and not about where we happened to look. */
+  await page.evaluate(() => {
+    window.__jvMsgs = [];
+    window.addEventListener('message', ev => {
+      const d = ev.data;
+      if (d && typeof d === 'object' && typeof d.type === 'string' && d.type.indexOf('specialJV.') === 0) {
+        window.__jvMsgs.push(d.type + ':' + d.ref);
+      }
+    });
+  });
+  async function openMalformed(ref) {
+    await page.evaluate(() => { window.__jvMsgs.length = 0; });
+    return openJv(ref);
+  }
+  const jvRootClass = (fr) => fr.locator('#jvRoot').getAttribute('class');
+  const jvRootText = async (fr) => (await fr.locator('#jvRoot').textContent()).replace(/\s+/g, ' ').trim();
+
+  /* [ref, what the panel must say, what it must NOT say, the shape] */
+  const malformed = [
+    ['BADCOLSJV',  /rule 1 tests unknown column "txn"/, /could not be read/,
+     'the columns written as an object — read as none, and every consequence listed'],
+    ['BADCONDJV',  /rule 2: "all" must be a list of conditions/, /is not a function/,
+     'a classify rule\'s condition list written as an object'],
+    ['BADWHEREJV', /total "rapid_RUB": "where" must be a list of conditions/, /is not a function/,
+     'a total\'s filter list written as an object'],
+    ['BADNAMEDJV', /check "fieldValid": "fields" must be a list/, /is not a function/,
+     'a check\'s field list written as an object'],
+    ['BADSLOTSJV', /sections\.presets: "slots" must be a list, so no period option would be offered/, /is not a function/,
+     'the date presets\' slot list written as an object'],
+    ['BADRULESJV', /"classify\.rules" is not a list, so no row would be classified/, /is not a function/,
+     'the classify rules written as an object - every row would silently go unclassified'],
+    ['BADCHECKSJV', /"validate" is not a list, so every check this JV declares would be skipped, including the per-currency balance/, /is not a function/,
+     'the checks written as an object - the JV would carry no validation at all']
+  ];
+  for (const [ref, want, nope, what] of malformed) {
+    f = await openMalformed(ref);
+    /* A shape that is NOT refused has to fail its own check rather than take
+       the other four down with it, so the panel is waited for tolerantly. */
+    const shown = await f.locator('.jv-fatal').waitFor({ timeout: 15000 }).then(() => true, () => false);
+    const txt = await jvRootText(f);
+    check(shown && want.test(txt) && !(nope && nope.test(txt)),
+          'refused with the real reason: ' + what, txt.slice(0, 180));
+    check(!BOOT.test(txt) && (await jvRootClass(f)) === '' && !/engine is missing/.test(txt),
+          'and jv-core-1.0.0.js is not blamed: #jvRoot has dropped jv-boot', { cls: await jvRootClass(f) });
+    const st = await page.evaluate((id) => ({
+      pend: (AppState.pendingSpecialJV[id] || []).length,
+      msgs: window.__jvMsgs.slice(),
+      title: (document.getElementById('appModalTitle') || {}).textContent || ''
+    }), tpl);
+    check(st.pend === 0 && !st.msgs.some(m => /^specialJV\.complete/.test(m)) && /Special JV/.test(st.title),
+          'nothing was posted back to Reco and nothing was recorded', st);
+    /* Cancel from inside the page: on a fatal panel it is the only button
+       there is. With no panel the host has to let go of the modal itself. */
+    if (shown) await f.locator('button[data-act="cancel"]').click();
+    else await page.evaluate(() => SpecialJV._cancel());
+    await page.waitForSelector('#appModalTitle:has-text("Entry Preview")', { timeout: 10000 });
+    const bye = await page.evaluate((id) => ({
+      pend: (AppState.pendingSpecialJV[id] || []).length,
+      msgs: window.__jvMsgs.slice(),
+      handler: !!SpecialJV._activeHandler
+    }), tpl);
+    check(bye.msgs.indexOf('specialJV.cancel:' + ref) >= 0 && !bye.handler && bye.pend === 0,
+          'and its Cancel still walks away cleanly, back to the entry preview', bye);
+    await page.evaluate(() => App.closeModal());
+  }
+
+  /* The other side of the same fix: a list the engine CAN read as empty is read
+     as empty and the page comes up. The two shapes that used to sit here -
+     classify.rules and validate as objects - have moved into the refused list
+     above, because degrading silently was the defect, not the fix: the first
+     classified no row at all while saying nothing, and the second removed every
+     check the JV declares, the per-currency balance included, leaving a JV with
+     no validation looking publishable. What remains here is a shape that is
+     legitimately absent rather than malformed. */
+  const rowsUp = (fr) => fr.locator('#rowsTable tbody tr').first().waitFor({ timeout: 15000 })
+    .then(() => true, () => false);
+
+  f = await openMalformed('NORULESJV');
+  const noneUp = await rowsUp(f);
+  const noneNotes = await f.locator('#rowsTable tbody td.note').allTextContents();
+  const noneText = await jvRootText(f);
+  check(noneUp && await f.locator('.jv-fatal').count() === 0 && noneNotes.length === 4
+        && noneNotes.every(n => /^ignored: Txn Type/.test(n)) && /0 RAPID · 0 OF · 4 ignored/.test(noneText),
+        'no classify rules at all is a usable page: every row is ignored and says why', noneNotes);
+  check(!BOOT.test(noneText) && (await jvRootClass(f)) === '',
+        'the page is usable rather than stuck on the boot text', noneText.slice(0, 120));
+  await page.evaluate(() => SpecialJV._cancel());
 
   console.log('\nconsole/page errors: ' + JSON.stringify(errors.slice(0, 6)));
   check(errors.length === 0, 'no console or page errors in Reco throughout', errors.slice(0, 4));
