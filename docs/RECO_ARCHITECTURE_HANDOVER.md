@@ -962,3 +962,120 @@ The feature was reviewed across eight dimensions with every finding independentl
 3. Save repeatedly while Reco is open: the banner moves to *Saved* and Excel never reports a sharing violation.
 4. **Open again** brings the open workbook to the front; Excel not installed → *Save a copy…* works.
 5. Export 20k × 20 on the share and compare with the dialog's time estimate.
+
+---
+
+## 12. Reversing a generated entry — Cancel and Reverse
+
+An entry generated in error had no undo. It has two now, and the app does not guess which is
+wanted, because **nothing in this codebase records whether an entry reached the general
+ledger**: `entry.docNumbers` is a form a human types into 300 ms after generation, and the
+post-entry stamp is written unconditionally. So the dialog asks, with the inference stated in
+words.
+
+| | **Cancel** | **Reverse** |
+|---|---|---|
+| Meaning | it never reached the GL | it is posted and is now a fact |
+| The original | kept, tombstoned with `reversal.mode='cancelled'` | kept, untouched except for `reversal.mode='reversed'` |
+| New entry | none | one, Dr and Cr cells swapped, `reverses: '<original id>'` |
+| The stamp | undone (one more `Cn` append) | undone (one more `Cn` append) |
+| `docNumberMaster` | every key still valued with this id is freed | nothing freed |
+| Consumed Special JV | back as pending, with its workings | never restored |
+
+### 12.1 How the dialog decides
+
+An accounting reference recorded against the entry sets the **default** (`Reverse`); blank
+defaults to `Cancel`. The dialog says which inference it is acting on — *"No accounting
+reference is recorded against AE1Q2W3E, so this will be CANCELLED and its 412 row(s) released.
+If it is already in the general ledger, post a reversal entry instead."* — and the other route
+is one click away on the same dialog. A reason of at least 3 characters is required; the button
+carries the verb of the chosen mode. The app never cancels a posted entry on the strength of a
+blank field, and never posts a reversal the user did not choose.
+
+### 12.2 Order of operations (`Reco.reverseEntry`)
+
+1. re-run `Reco._reversePlan`; refuse if its signature no longer matches what the dialog showed
+2. (Reverse) the swapped lines and their balance check — see 12.4
+3. `AppState.flush()`, then re-read `reco/entryHistory.json`, merge, and refuse if the share
+   already carries a `reversal` (naming who and when)
+4. **the un-stamp**, through `Reco.applyEdits({ scope:'allStandard', historyFirst:true, trusted:true, pulled })`
+5. mark the original, and (Reverse) append the mirror
+6. (Cancel) free the document numbers · 7 (Cancel) restore the pending Special JVs
+8. one `Comments.create` linked to the affected keys (capped at 500) · 9 `_postedIdxReset()`
+10. clear `AppState._snap.entryHistory`, flush, and re-read the share to confirm the mark
+
+**Step 4 before step 5 is load-bearing.** The stamp is what makes a row look dealt-with to
+everyone else; the mark is only a record. Marked-but-still-stamped is the worst state
+available, so the mark is refused unless the `Cn` rows come back off the share. The other way
+round — rows released, entry not yet marked — the user sees at once and simply presses Reverse
+again: the un-stamp is idempotent, because the second pass finds the column already clear.
+
+### 12.3 Three things that make the un-stamp real
+
+- **`scope: 'allStandard'`.** `XlSchema.build` gives a template column `writeTo: 'row'` only
+  inside `if (can)`, where `can = role === 'toAccount' || scope === 'allStandard' || editableSet.has(name)`.
+  `trusted` clears the editable and role guards but never touches `writeTo`. So with the
+  default scope, a post-entry column that is not in `editableColumns` — the normal production
+  shape — put the edit in `sessionOnly`, wrote **no** `Cn` row, and threw nothing: the grid
+  showed the rows released and the share never heard about it.
+- **`opts.pulled`.** `appendChangesBatch` writes the whole row for a key, built from this
+  session's row. A colleague's edit to any other column, made after this session loaded, would
+  be reverted — up to 5,000 keys, under a success toast. The reversal reads
+  `Versioning.changesSince(tpl, sess.loadedAt, pkSet)` first and passes every differing cell as
+  `pulled`, so the `Cn` row is the **share's** current row with one cell cleared.
+  `sess.loadedAt` is set by `loadVersionedFile` and `ingestData` for this.
+- **Reading the write back.** `Versioning._withLock` and the launcher's `_path_locks` are both
+  in-process, and two people run two processes over one folder. After the write the keys are
+  re-read from the share and the post-entry column confirmed; a key that the plan said would be
+  versioned and that comes back without a version label **refuses the mark**.
+
+### 12.4 What is refused, and what can be forced
+
+`SpecialJV.checkLines` problems split into SHAPE problems and BALANCE problems (one per
+unbalanced currency bucket). A swap turns each bucket's Dr total into its Cr total, so it can
+neither cause nor cure a shape problem:
+
+- **malformed source lines** (shape problems on the original) → refused outright, problems
+  quoted, no force. The AEG `autoExchange` branch really does emit a line with neither side,
+  and standard lines are never checked at commit.
+- **the swap itself fails** → refused outright; that is a defect in the app.
+- **only a currency bucket is out, on both** → the genuine "the original never balanced" case,
+  and the only one offered a confirmation. Accepting records `linesUnbalanced` on both records.
+
+Also refused, with no force: a template that maps one column to both sides, and an entry whose
+lines do not carry the Dr/Cr columns the reversal would swap (a legacy entry whose AEG template
+has since been renamed or re-mapped). `entry.lineCols` / `aegTemplateId`, captured at
+generation, are what let a post-change entry reverse into its own columns years later.
+
+### 12.5 Readers that had to change
+
+- `_postedAuditIndex` keeps a reversed or cancelled entry's keys in a **separate** map. A
+  cancelled entry stamped nothing that is still true and a reversed entry's rows were released,
+  so it no longer shadows a later entry over the same key (`postedPks` was guarded by
+  `if (!byPk.has(k))`, so the oldest entry won and kept winning); and a row that is still
+  stamped after a reversal — the half-done state — comes back from `_postedRefFor` marked
+  `reversed`, is counted as an **exception** by `postedJvAudit` with a reason naming the entry
+  and the date, and is painted with the `posted-noref` warning badge rather than clean green.
+- `openAllocateModal` and `saveAllocation` refuse a reversed or cancelled entry, and **both**
+  `Allocate Doc#` buttons are dropped for one.
+- `JvCreator.inUse` skips a cancelled entry: the cancel handed the JV back as pending, where it
+  is already counted.
+- `App._carryReversalsList` re-applies a reversal onto a restored record, so a backup taken
+  before one cannot un-reverse an entry; the confirm names any id whose reversing entry the
+  backup does not hold. `reco/reversals.log.json` is a second, append-only home for the trail.
+
+### 12.6 Known limitations
+
+- A stamp on an **added** (non-template) post-entry column was never written to the share, so
+  undoing it is session-only — the dialog says so. An added column with no `postedPrev`
+  recorded (every entry already on the share) is **left alone** rather than cleared, because
+  clearing it would wipe whatever the user typed.
+- A `formula` / `master` post-entry column can only have the shadow value deleted; it then
+  computes again. `isRowPosted` and `ExcelLink._isPosted` still disagree about such a column
+  (pre-existing).
+- A key present on two session rows collapses to one entry in `postedPrev`: read it as
+  per-KEY, never per-row.
+- Out of scope in this version: the exportable reversal report CSV, a "posted to the general
+  ledger" tick at allocation time (which would let the dialog know instead of asking), and a
+  "Finish re-opening" action for the keys that were not in the loaded data (they are recorded in
+  `reversal.notInSession`; reversing again once the right file is loaded is the manual route).

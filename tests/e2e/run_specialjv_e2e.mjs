@@ -236,6 +236,48 @@ async function createTemplate(page, name, rows) {
   }, [name, FIELDS, rows]);
 }
 
+/* A template whose AEG wiring the caller chooses: which column the entry
+   stamps (a file column, an added column, or none at all), which added
+   columns exist, and - with renameSides - an AEG template whose debit and
+   credit OUTPUT columns are not called Dr and Cr. Used by [7] to prove the
+   entry record captures what was resolved rather than the defaults. */
+async function createCaptureTemplate(page, name, rows, opts) {
+  return page.evaluate(([name, fields, rows, opts]) => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.name = name;
+    t.columns = fields.map(n => ({ name: n, label: n, formats: [], isValue: n === 'AED', isDate: n === 'Date' }));
+    t.primaryKeys = ['Doc'];
+    t.valueColumn = 'AED';
+    t.docNumberColumn = 'Doc';
+    t.editableColumns = ['ToAccount', 'Status'];
+    t.displayColumns = t.columns.map(c => c.name);
+    t.additionalColumns = opts.additionalColumns || [];
+    let aegId = AppState.aegTemplates[0].id;
+    if (opts.renameSides) {
+      const alt = JSON.parse(JSON.stringify(AppState.aegTemplates[0]));
+      alt.id = U.uid();
+      alt.name = name + ' sides';
+      alt.outputColumns.forEach(c => {
+        const m = c.mapping || {};
+        if (m.type === 'value' && m.side === 'Dr') c.name = 'Debit AED';
+        else if (m.type === 'value' && m.side === 'Cr') c.name = 'Credit AED';
+        else if (m.type === 'currency') c.name = 'Ccy';
+      });
+      AppState.aegTemplates.push(alt);
+      aegId = alt.id;
+    }
+    t.aegIntegration = { enabled: true, aegTemplateId: aegId, keywordColumn: '', keywordValues: '',
+                         postEntryColumn: opts.postEntryColumn == null ? 'Status' : opts.postEntryColumn,
+                         postEntryValue: opts.postEntryValue == null ? 'Posted' : opts.postEntryValue };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.name === name);
+    RecoTemplate.open(tpl.id);
+    Reco.ingestData(tpl, rows, fields);
+    return { id: tpl.id, aegId: aegId };
+  }, [name, FIELDS, rows, opts || {}]);
+}
+
 const browser = await chromium.launch();
 const procs = [];
 const watchdog = setTimeout(() => {
@@ -856,6 +898,221 @@ try {
   check(/Entry Preview/.test(ctorDone.title) && errors.length === 0,
     'the whole round trip raises no JavaScript error', errors);
   await page.evaluate(() => App.closeModal());
+  await ctx.close();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n[7] What an entry records at generation, so it can be reversed later');
+  /* Phase 1 of "reverse a generated entry" is additive: commitEntryFromPreview
+     - the single door into entry history - captures the facts a reversal will
+       need, and nothing else about generation changes. Four shapes, because
+       each one breaks a different way if the capture is missing or late:
+
+       lineCols / aegTemplateId  a reversal swaps Dr and Cr CELLS. Resolving the
+                                 names again years later, off a template that
+                                 has since been renamed or re-mapped, writes two
+                                 blank columns while Object.assign copies the
+                                 original amounts verbatim - a duplicate posting
+                                 labelled "REVERSAL of".
+       postedPrev                a cancel must put back what the post-entry
+                                 column really held. Read off the raw row it
+                                 records '' for an ADDED column, because that
+                                 value lives in sess.manualTags; read after the
+                                 stamp it records the stamp.
+       jvRestore                 entry.specialJvs keeps the JV's keys but not
+                                 its `lines`, and SpecialJV.checkLines refuses a
+                                 lines-less record on sight - so a pending
+                                 rebuilt from specialJvs would block the next
+                                 entry over those rows instead of coming back. */
+  const rootE = makeRoot('rootE');
+  const BE = await startBridge(rootE, 19900, ['--jv-port', '19901']); procs.push(BE.proc);
+  ({ page, errors, ctx } = await openReco(browser, BE));
+
+  /* The last record in history, plus what a reader would actually get back:
+     the fields are also read through Store.serialize, because a capture the
+     store drops is a capture a reversal will not find tomorrow. `has` is
+     computed in the page - page.evaluate drops an undefined field, so absence
+     cannot be told from the returned object. */
+  const lastEntry = (id) => page.evaluate((id) => {
+    const h = AppState.entryHistory[id] || [];
+    const e = h[h.length - 1] || {};
+    const s = AppState.recoSessions[id];
+    const round = (JSON.parse(Store.serialize('entryHistory', AppState.entryHistory))[id] || []);
+    const stored = round[round.length - 1] || {};
+    const own = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+    const lc = e.lineCols || {};
+    return {
+      e: e, stored: stored,
+      has: ['postedPks', 'postedPrev', 'postedCol', 'postedValue', 'lineCols', 'aegTemplateId', 'jvRestore']
+        .reduce((a, k) => (a[k] = own(e, k), a), {}),
+      storedHas: ['postedPrev', 'postedCol', 'lineCols', 'aegTemplateId', 'jvRestore']
+        .reduce((a, k) => (a[k] = own(stored, k), a), {}),
+      // The check a reversal performs before it swaps anything: both captured
+      // side columns must be own keys on EVERY line of the entry.
+      sidesOnEveryLine: (e.lines || []).length > 0
+        && (e.lines || []).every(l => own(l, lc.dr) && own(l, lc.cr)),
+      status: Object.fromEntries(s.data.map(r => [r.Doc, r.Status])),
+      rowHasWorkflow: Object.fromEntries(s.data.map(r => [r.Doc, own(r, 'Workflow') ? r.Workflow : null]))
+    };
+  }, id);
+
+  /* Select some rows, run the fake JV when a mode is given, then Generate. */
+  async function genEntry(id, docs, mode) {
+    await page.evaluate(([id, docs]) => {
+      App.closeModal();
+      AppState.activeRecoId = id;
+      const s = AppState.recoSessions[id];
+      s.selectedRows = {};
+      s.data.filter(r => docs.includes(r.Doc)).forEach(r => s.selectedRows[r._id] = true);
+      Reco.previewEntryFromSelection(true);
+    }, [id, docs]);
+    if (mode) {
+      await page.evaluate((m) => {
+        try { window._fakeMode = m; } catch (e) {}
+        Object.keys(SpecialJV.registry).forEach(k => { SpecialJV.registry[k]._fakeMode = m; });
+      }, mode);
+      await page.click('#appModalBody button:has-text("Complete")');
+      await sleep(900);
+    }
+    await page.click('#appModalFooter button:has-text("Generate")');
+    await page.waitForSelector('#appModalTitle:has-text("Allocate")', { timeout: 8000 });
+    await page.evaluate(() => App.closeModal());
+  }
+
+  // ── 7a. the post-entry column is a FILE column ────────────────────────────
+  const tplF = await createCaptureTemplate(page, 'Cap File Col', ROWS, {});
+  await page.evaluate((id) => {
+    const s = AppState.recoSessions[id];
+    // D5 already carries a workflow value somebody typed; D6 carries nothing.
+    s.data.find(r => r.Doc === 'D5').Status = 'Checked';
+    s.data.find(r => r.Doc === 'D6').Status = '';
+  }, tplF.id);
+  await genEntry(tplF.id, ['D5', 'D6']);           // ToAccount ACC1 — standard rows, no JV
+  const capF = await lastEntry(tplF.id);
+  check(capF.e.aegTemplateId === tplF.aegId && capF.has.aegTemplateId,
+    'the entry records which AEG template produced its lines', { got: capF.e.aegTemplateId, want: tplF.aegId });
+  check(JSON.stringify(capF.e.lineCols) === JSON.stringify({ dr: 'Dr', cr: 'Cr', cur: 'Cur' }),
+    'and the Dr / Cr / currency columns that template resolved to', capF.e.lineCols);
+  check(capF.sidesOnEveryLine,
+    'both captured side columns are own keys on every line of the entry — what a reversal checks before it swaps', capF.e.lines);
+  check((capF.e.postedPks || []).slice().sort().join() === 'D5,D6'
+     && Object.keys(capF.e.postedPrev || {}).sort().join() === 'D5,D6',
+    'postedPrev is keyed exactly like postedPks', { pks: capF.e.postedPks, prev: capF.e.postedPrev });
+  check((capF.e.postedPrev || {}).D5 === 'Checked' && (capF.e.postedPrev || {}).D6 === '',
+    'it holds what the post-entry column held BEFORE the stamp, per key', capF.e.postedPrev);
+  check(capF.status.D5 === 'Posted' && capF.status.D6 === 'Posted',
+    'and the stamp still happened — the capture is a read, not a replacement', capF.status);
+  check(capF.e.postedCol === 'Status' && capF.e.postedValue === 'Posted',
+    'the column those values came out of, and what was written into it, are recorded with them', capF.e);
+  check(Array.isArray(capF.e.jvRestore) && capF.e.jvRestore.length === 0,
+    'an entry with no Special JV records an empty jvRestore, not a missing one', capF.e.jvRestore);
+  check(capF.storedHas.lineCols && capF.storedHas.aegTemplateId && capF.storedHas.postedPrev
+     && capF.storedHas.postedCol && capF.storedHas.jvRestore
+     && ((capF.stored || {}).postedPrev || {}).D5 === 'Checked',
+    'every captured field survives Store.serialize, so a reversal finds it tomorrow', capF.storedHas);
+  check(errors.length === 0, 'no JavaScript errors capturing against a file column', errors);
+
+  // ── 7b. the post-entry column is an ADDED column ──────────────────────────
+  /* The picker offers extras as well as file columns, and an added column's
+     value is NOT on the row: a custom extra lives in sess.manualTags, and the
+     stamp writes a plain row property that shadows it. */
+  const tplA = await createCaptureTemplate(page, 'Cap Added Col', ROWS, {
+    additionalColumns: [
+      // A master-backed extra declared FIRST, so the enriched read walks a
+      // lookup (and its one-per-pass Masters index) before reaching the tag.
+      { name: 'Nom', type: 'master', masterRefColumn: 'ToAccount', masterValueColumn: 'Nominal',
+        options: [], formula: '' },
+      { name: 'Workflow', type: 'custom', options: [], formula: '', masterRefColumn: '', masterValueColumn: '' }
+    ],
+    postEntryColumn: 'Workflow'
+  });
+  const premise = await page.evaluate(async (id) => {
+    const tplo = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[id];
+    const row = s.data.find(r => r.Doc === 'D5');
+    await Reco.applyEdits(tplo, s, [{ row: row, col: 'Workflow', value: 'Reviewed' }], { source: 'grid', trusted: true });
+    const full = Reco._rowWithExtras(tplo, s, row);
+    return { tag: (s.manualTags || {})[row._id + '||Workflow'],
+             onRow: Object.prototype.hasOwnProperty.call(row, 'Workflow'),
+             raw: row.Workflow == null ? '' : String(row.Workflow),
+             enriched: full.Workflow, nom: full.Nom,
+             extras: (tplo.additionalColumns || []).map(a => a.name + ':' + a.type).join() };
+  }, tplA.id);
+  check(premise.tag === 'Reviewed' && premise.onRow === false && premise.raw === ''
+     && premise.enriched === 'Reviewed',
+    'the premise: an added column\'s value is in sess.manualTags and NOT on the row', premise);
+  check(premise.nom === '12345', 'and the master-backed extra beside it resolves', premise.nom);
+  await genEntry(tplA.id, ['D5', 'D6']);
+  const capA = await lastEntry(tplA.id);
+  check(capA.e.postedPrev && capA.e.postedPrev.D5 === 'Reviewed',
+    'postedPrev reads an ADDED post-entry column through the enriched row, so the user\'s own value is recorded',
+    capA.e.postedPrev);
+  check((capA.e.postedPrev || {}).D6 === '', 'a row with no value recorded as blank, not as undefined', capA.e.postedPrev);
+  check(capA.e.postedCol === 'Workflow' && (capA.e.postedPks || []).slice().sort().join() === 'D5,D6',
+    'the added column is named as the one that was stamped', capA.e);
+  check(capA.rowHasWorkflow.D5 === 'Posted',
+    'the stamp shadows the tag on the row — which is why the capture had to run first', capA.rowHasWorkflow);
+  check(errors.length === 0, 'no JavaScript errors capturing against an added column', errors);
+
+  // ── 7c. no post-entry column at all, and renamed side columns ─────────────
+  const tplN = await createCaptureTemplate(page, 'Cap No Stamp', ROWS, {
+    postEntryColumn: '', renameSides: true
+  });
+  await genEntry(tplN.id, ['D5', 'D6']);
+  const capN = await lastEntry(tplN.id);
+  check(capN.has.lineCols && !capN.has.postedPks && !capN.has.postedPrev
+     && !capN.has.postedCol && !capN.has.postedValue,
+    'a template that stamps nothing records no postedPrev — absent, not an empty object', capN.has);
+  check(capN.has.lineCols && capN.has.aegTemplateId && capN.has.jvRestore,
+    'the entry is still fully described for a reversal', capN.has);
+  check(JSON.stringify(capN.e.lineCols) === JSON.stringify({ dr: 'Debit AED', cr: 'Credit AED', cur: 'Ccy' }),
+    'lineCols is what the AEG template RESOLVED to, not the Dr/Cr fallback', capN.e.lineCols);
+  check(capN.e.aegTemplateId === tplN.aegId && capN.e.aegTemplateId !== tplF.aegId,
+    'and it is pinned to the template that produced it', { got: capN.e.aegTemplateId, want: tplN.aegId });
+  check(capN.sidesOnEveryLine,
+    'every line carries those two columns as own keys, so a reversal can swap the right cells', (capN.e.lines || [])[0]);
+  check(errors.length === 0, 'no JavaScript errors with no post-entry column', errors);
+
+  // ── 7d. standard rows AND a Special JV in one entry ───────────────────────
+  const tplJ = await createCaptureTemplate(page, 'Cap With JV', ROWS, {});
+  await page.evaluate((id) => {
+    AppState.recoSessions[id].data.find(r => r.Doc === 'D1').Status = 'Checked';
+  }, tplJ.id);
+  await genEntry(tplJ.id, ['D1', 'D2', 'D5'], 'good');   // D1+D2 → FAKE, D5 standard
+  const capJ = await lastEntry(tplJ.id);
+  const jr = (capJ.e.jvRestore || [])[0] || {};
+  check((capJ.e.jvRestore || []).length === 1 && jr.jvId === 'FAKE_good' && jr.ref === 'FAKE',
+    'the consumed Special JV is recorded in jvRestore, under its own id and ref', jr);
+  check((jr.lines || []).length === 2 && (jr.inputData || []).length === 2,
+    'with the lines and the input data the JV page was given — neither is in entry.specialJvs', 
+    { lines: (jr.lines || []).length, inputData: (jr.inputData || []).length });
+  check((jr.primaryKeys || []).join() === 'D1,D2' && (jr.sentPks || []).join() === 'D1,D2'
+     && (jr.claimedNotSent || []).length === 0 && !!jr.ts,
+    'and the key audit a pending carries, so it can go back exactly as it was', jr);
+  check(!!jr.jvId && !Object.prototype.hasOwnProperty.call(jr, '_fromCurrentSelection'),
+    'the preview\'s own _fromCurrentSelection flag is not restored as part of a pending', Object.keys(jr));
+  const restorable = await page.evaluate((id) => {
+    const h = AppState.entryHistory[id] || [];
+    const e = h[h.length - 1];
+    const fromRestore = SpecialJV.checkLines(((e.jvRestore || [])[0] || {}).lines, e.lineCols);
+    const fromSpecialJvs = SpecialJV.checkLines(((e.specialJvs || [])[0] || {}).lines, e.lineCols);
+    return { restoreOk: fromRestore.ok, restoreProblems: fromRestore.problems,
+             sjLines: ((e.specialJvs || [])[0] || {}).lines === undefined,
+             sjOk: fromSpecialJvs.ok, sjProblems: fromSpecialJvs.problems };
+  }, tplJ.id);
+  check(restorable.restoreOk && !restorable.restoreProblems.length,
+    'a pending rebuilt from jvRestore passes checkLines, so the next entry over those rows is not blocked', restorable);
+  check(restorable.sjLines && !restorable.sjOk && /no accounting lines/.test(restorable.sjProblems[0] || ''),
+    'and one rebuilt from entry.specialJvs does not — which is why jvRestore exists', restorable);
+  check(Object.keys(capJ.e.postedPrev || {}).sort().join() === 'D1,D2,D5'
+     && (capJ.e.postedPrev || {}).D1 === 'Checked' && (capJ.e.postedPrev || {}).D2 === ''
+     && (capJ.e.postedPrev || {}).D5 === '',
+    'postedPrev covers the JV rows and the standard rows alike', capJ.e.postedPrev);
+  check(capJ.status.D1 === 'Posted' && capJ.status.D2 === 'Posted' && capJ.status.D5 === 'Posted'
+     && capJ.status.D3 !== 'Posted',
+    'and only the rows this entry stamped were stamped', capJ.status);
+  check((capJ.e.lineCols || {}).dr === 'Dr' && capJ.sidesOnEveryLine,
+    'the JV lines and the standard lines share the captured side columns', capJ.e.lineCols);
+  check(errors.length === 0, 'no JavaScript errors generating an entry with both kinds of row', errors);
   await ctx.close();
 
 } finally {
