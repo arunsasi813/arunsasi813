@@ -410,9 +410,15 @@ try {
   // ── J3 column drag then edit under the Remarks header ──────────────────────
   await page.evaluate(() => { const ws = Reco._xlWorksheet; ws.moveColumn(__xv.x('Remarks'), __xv.x('Amount')); });
   await sleep(80);
-  const order3 = await page.evaluate(() => ({ names: __xv.names(), saved: __xv.sess().columnOrder }));
+  /* #25 moved the column order out of the shared session file: it is this
+     person's view preference now, kept in localStorage, so a colleague
+     dragging a column cannot rearrange anyone else's grid. Same assertion,
+     read from where the order actually lives. */
+  const order3 = await page.evaluate(() => ({ names: __xv.names(),
+    saved: Reco.userPref(__xv.tpl().id, 'columnOrder'), onShare: __xv.sess().columnOrder }));
   check(order3.names.indexOf('Remarks') === order3.names.indexOf('Amount') + 1, 'Remarks moved to the right of Amount', order3.names);
-  check(Array.isArray(order3.saved) && order3.saved.join() === order3.names.filter(n => n !== '_status_' && n !== '_rid').join(), 'column order persisted to sess.columnOrder', order3.saved);
+  check(Array.isArray(order3.saved) && order3.saved.join() === order3.names.filter(n => n !== '_status_' && n !== '_rid').join(), 'column order persisted to this user’s view preference', order3.saved);
+  check(order3.onShare == null, 'and NOT to the shared session file', order3.onShare);
   const statusBefore = await page.evaluate(() => Object.fromEntries(__xv.sess().data.map(r => [r.Doc, r.Status])));
   await typeInto(page, 'D4', 'Remarks', 'moved ok');
   await flush(page);
@@ -561,7 +567,9 @@ try {
   await page.evaluate(() => Reco._xlWorksheet.setWidth(__xv.x('Ref'), 211));
   await page.evaluate(() => Reco._xlWorksheet.orderBy(__xv.x('When'), 0));
   await sleep(100);
-  const j9a = await page.evaluate(() => ({ w: __xv.sess().columnWidths.Ref, sort: __xv.sess().columnSorts, order: __xv.sess().columnOrder.slice() }));
+  // order: per-user now (see J3) — widths and sort are still session state.
+  const j9a = await page.evaluate(() => ({ w: __xv.sess().columnWidths.Ref, sort: __xv.sess().columnSorts,
+    order: (Reco.userPref(__xv.tpl().id, 'columnOrder') || []).slice() }));
   check(j9a.w === 211 && j9a.sort.col === 'When' && j9a.sort.dir === 'asc', 'J9: width and sort saved to sess', j9a);
   await page.evaluate(() => App.navigate('home'));
   const goneHome = await page.waitForFunction(() => jspreadsheet.spreadsheet.length === 0 && !Reco._xlWorksheet, null, { timeout: 2000 }).then(() => true, () => false);

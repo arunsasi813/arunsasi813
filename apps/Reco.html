@@ -5952,9 +5952,32 @@ const XlSchema = {
       cols.push(d);
     };
 
-    Reco.effectiveDisplayCols(tpl, sess).forEach(n => { if (colDefs.has(n)) addTpl(n); });
+    /* In display order, dispatching per NAME - but in the schema's own TWO
+       BLOCKS: the file columns, then the added columns. The display order
+       positions columns WITHIN each block and never moves an added column in
+       among the file columns here.
+
+       That is deliberate, and it is the one place the schema does not follow
+       the grid. This list is the column order of a FILE that leaves the app -
+       the Excel-link workbook - and of the catalog built from it. Keeping the
+       two blocks means adopting a team order can reorder the columns of that
+       workbook but can never push a computed column into the middle of the
+       file columns a macro or a VLOOKUP is pasting against. The grid, which
+       nothing downstream reads, interleaves freely (effectiveColumnDescs).
+
+       opts.orderScope: 'team' takes tpl.displayOrder and ignores whoever is
+       at this PC - every export asks for that, because a colleague's drag
+       must not change which column a number lands in. */
+    const ordered = Reco.effectiveDisplayCols(tpl, sess, { order: opts.orderScope === 'team' ? 'team' : 'user' });
+    ordered.forEach(n => { if (colDefs.has(n)) addTpl(n); });
     if (opts.includeHidden) (tpl.columns || []).forEach(c => addTpl(c.name));
     if (toAcc && colDefs.has(toAcc) && !seen.has(toAcc)) addTpl(toAcc);
+    ordered.forEach(n => {
+      if (colDefs.has(n)) return;
+      const ac = extraByName.get(n);
+      if (ac) addExtra(ac);
+      else if (toAcc && n === toAcc) addExtra({ name: n, type: 'custom' }, true);
+    });
     const hidden = new Set((sess && sess.hiddenCols) || []);
     extras.forEach(ac => { if (opts.includeHidden || !hidden.has(ac.name) || ac.name === toAcc) addExtra(ac); });
     if (toAcc && !colDefs.has(toAcc) && !extraByName.has(toAcc)) addExtra({ name: toAcc, type: 'custom' }, true);
@@ -6365,9 +6388,14 @@ const ExcelLink = {
     if (scope === 'selected') { const sel = sess.selectedRows || {}; return sess.data.filter(r => sel[r._id]); }
     return Reco.applyTableFiltersSort(tpl, sess);
   },
+  /* orderScope 'team': the workbook this builds is a FILE that leaves the
+     app, so its columns follow tpl.displayOrder and never the order the
+     person at this PC happens to have dragged. _fpCols' "first three
+     read-only columns" fallback reads this list, so that identity set is
+     team-stable for the same reason. */
   schemaFor(tpl, sess, columnsMode) {
     return XlSchema.build(tpl, sess, { includeHidden: columnsMode === 'allTemplate', scope: 'template',
-      allowPkEdit: !!(tpl.excelView && tpl.excelView.allowPkEdit), showExtras: 'all' });
+      allowPkEdit: !!(tpl.excelView && tpl.excelView.allowPkEdit), showExtras: 'all', orderScope: 'team' });
   },
   canExport(tpl, sess) {
     if (!tpl || !sess || !sess.data || !sess.data.length) return { ok: false, reason: 'Load data first' };
@@ -8220,6 +8248,9 @@ const App = {
   closeModal() {
     // A Special JV iframe may still be listening; drop its handler with the modal.
     if (typeof SpecialJV !== 'undefined' && SpecialJV._activeHandler) SpecialJV._detach();
+    // A column picker is a modal inside a modal; let it drop its state rather
+    // than leaving it live against a body that is no longer on screen.
+    if (typeof ColPicker !== 'undefined' && ColPicker._st) ColPicker._abandon();
     const xm = document.querySelector('#appModal .modal');
     if (xm && xm.dataset._xlWidened) { xm.style.maxWidth = ''; delete xm.dataset._xlWidened; }
     document.getElementById('appModal').classList.remove('show');
@@ -8569,6 +8600,11 @@ defaultTemplate() {
       enableCorrections: false,
       groupsEnabled: false,
       displayColumns: [],
+      /* The TEAM display order, across file columns AND added columns.
+         null means "nobody has set one", which is not the same as an empty
+         array and must stay null: a new template renders in definition order
+         and nothing seeds this on load. */
+      displayOrder: null,
       editableColumns: [], // <-- Added tracking for editable columns
       additionalColumns: [],
       pivotEnabled: false,
@@ -8612,8 +8648,16 @@ defaultTemplate() {
       return h;
     }
 
-    h += '<div class="help">Order matters for cascading: each column can reference columns declared <b>above</b> it via <code>{ColName}</code> in formulas, or via the master-match dropdown.</div>';
-    h += '<table><thead><tr><th style="width:30px">↕</th><th>Name</th><th>Type</th><th>Configuration</th><th></th></tr></thead><tbody>';
+    /* These arrows are the EVALUATION order and are labelled so, because the
+       grid now has arrows of its own that mean something else entirely. Two
+       sets of arrows meaning two different things with no explanation is how
+       someone breaks a formula: moving a column here changes what it can
+       read; moving it on screen does not. */
+    h += '<div class="help"><b>Eval ↕ is the evaluation order, not the on-screen order.</b> Each column can reference '
+       + 'the columns declared <b>above</b> it via <code>{ColName}</code> in formulas, or via the master-match dropdown. '
+       + 'Where a column <i>appears</i> left to right is set separately, under <b>Display Order</b> — a column shown first '
+       + 'is still evaluated here, so a formula never reads a blank.</div>';
+    h += '<table><thead><tr><th style="width:60px" title="Evaluation order: a column can read the ones above it">Eval ↕</th><th>Name</th><th>Type</th><th>Configuration</th><th></th></tr></thead><tbody>';
 
     (t.additionalColumns||[]).forEach((ac,i) => {
       h += '<tr>';
@@ -9136,6 +9180,8 @@ defaultTemplate() {
     });
     h += '</div></div>';
 
+    h += RecoTemplate._displayOrderSection(t);
+
     // Editable Columns (NEW)
     h += '<div class="editor-section"><div class="section-head"><strong>Editable Columns</strong>';
     h += '<button class="small" onclick="RecoTemplate.toggleAllEditable(true); RecoTemplate.renderEditor()">All</button>';
@@ -9467,6 +9513,71 @@ defaultTemplate() {
     if (checked) { if (!t.displayColumns.includes(name)) t.displayColumns.push(name); }
     else t.displayColumns = t.displayColumns.filter(x=>x!==name);
   },
+
+  /* ---- #25: the TEAM display order lives on the template ----------------
+     Everyone's grid starts from this order, and every export follows it and
+     only it. A person who drags a header changes their own grid on their own
+     PC and nobody else's; this is where that order is published to the team. */
+  _displayOrderSection(t) {
+    const order = Array.isArray(t.displayOrder) ? t.displayOrder : null;
+    const mine = Reco.userPref(t.id, 'columnOrder');
+    const haveMine = Array.isArray(mine) && mine.length > 0;
+    let h = '<div class="editor-section"><div class="section-head"><strong>Display Order <span class="text-muted">(the team default)</span></strong>';
+    h += '<button class="small primary" onclick="RecoTemplate.openOrderPicker()">Set order…</button>';
+    if (haveMine) h += '<button class="small" onclick="RecoTemplate.adoptMyOrder()" title="Copy the column order you have arranged on this PC into the template, so it becomes everyone\'s starting order">Save my order as the team default</button>';
+    if (order) h += '<button class="small danger" onclick="RecoTemplate.clearTeamOrder()" title="Back to definition order">Clear</button>';
+    h += '</div>';
+    h += '<div class="help">Left to right, across file columns <b>and</b> added columns. Anyone who has not set '
+       + 'an order of their own sees this one, and every CSV / Excel export follows it — never one person’s own order, '
+       + 'so a colleague rearranging their screen cannot move a number into a different column of a file that feeds a macro. '
+       + 'Columns you do not place follow in their own order. This is only the order things are <b>shown</b> in: a formula '
+       + 'still reads the added columns declared above it (see <b>Eval ↕</b> under Additional Columns).</div>';
+    if (!order) h += '<div class="empty">No order set — columns show in the order they are defined.</div>';
+    else {
+      h += '<div style="margin-top:6px;">';
+      order.forEach((n, i) => { h += '<span class="tag">' + (i + 1) + '. ' + U.esc(n) + '</span>'; });
+      h += '</div>';
+    }
+    h += '</div>';
+    return h;
+  },
+
+  openOrderPicker() {
+    const t = RecoTemplate._editing;
+    ColPicker.openOrdered({
+      title: 'Display order' + (t.name ? ' — ' + t.name : ''),
+      help: 'The order everyone sees unless they have arranged their own grid, and the order every export writes. '
+          + 'Place only the columns whose position matters; the rest follow in their own order.',
+      catalog: Reco.pickerCatalog(t, null),
+      chosen: Array.isArray(t.displayOrder) ? t.displayOrder : [],
+      doneLabel: 'Use this order',
+      // The CALLER redraws its own screen here. Nothing inside the picker
+      // ever does (see the ColPicker contract).
+      onDone(names) {
+        RecoTemplate._editing.displayOrder = names.length ? names : null;
+        RecoTemplate.renderEditor();
+        U.toast(names.length ? 'Order set — Save Template to publish it to the team' : 'Order cleared', 'success');
+      },
+      onCancel() { RecoTemplate.renderEditor(); }
+    });
+  },
+
+  adoptMyOrder() {
+    const t = RecoTemplate._editing;
+    const mine = Reco.userPref(t.id, 'columnOrder');
+    if (!Array.isArray(mine) || !mine.length) {
+      U.toast('You have no column order of your own on this PC yet — drag a header in the grid first', 'error');
+      return;
+    }
+    t.displayOrder = mine.slice();
+    RecoTemplate.renderEditor();
+    U.toast('Your order is now the team default — Save Template to publish it', 'success');
+  },
+
+  clearTeamOrder() {
+    RecoTemplate._editing.displayOrder = null;
+    RecoTemplate.renderEditor();
+  },
   toggleEditable(name, checked) {
     const t = RecoTemplate._editing;
     t.editableColumns = t.editableColumns || [];
@@ -9615,7 +9726,19 @@ defaultTemplate() {
     // teaches getRowPK to resolve an added column; widening it any earlier
     // just keeps a broken key alive instead of repairing it.
     t.primaryKeys = (t.primaryKeys || []).filter(k => fileNames.has(k));
-    
+
+    /* The team display order, pruned against allNames - it positions FILE
+       columns and ADDED columns alike, so pruning it against t.columns would
+       delete every added column from the order on the next save.
+       A name no longer there is simply dropped; the column it used to
+       position falls to the end of the order, which is where an unmentioned
+       column goes anyway. An order that prunes to nothing becomes null so
+       _mergeOrder short-circuits and nothing is reordered at all. */
+    if (Array.isArray(t.displayOrder)) {
+      t.displayOrder = t.displayOrder.filter(n => allNames.has(n));
+      if (!t.displayOrder.length) t.displayOrder = null;
+    } else t.displayOrder = null;
+
     // Ensure display columns exist
     if (!t.displayColumns.length) t.displayColumns = t.columns.map(c=>c.name);
 
@@ -9664,6 +9787,282 @@ defaultTemplate() {
      open AND that this save is about to overwrite with the stale original. A
      field the user deliberately edited is not a conflict to report - they
      know what they typed - so only fields the editor left alone count. */
+};
+
+
+/* ================================================================
+   MODULE 7b — COLPICKER  (S5)
+   One column picker, two modes, used by every screen that has to ask
+   "which columns, and in what order?".
+
+     ColPicker.openOrdered(opts)   two panes: the chosen columns with a
+                                   position box each, and everything else.
+                                   For a display order.
+     ColPicker.openSet(opts)       one searchable pane of checkboxes with a
+                                   cap. For "show me these as well".
+
+   THE CONTRACT, and it is the reason this is a component and not two inline
+   lists: EVERY redraw IS SECTION-LOCAL. No handler here calls
+   RecoTemplate.renderEditor() or App.openModal() again, because
+   App.openModal assigns innerHTML to the whole modal body, which throws away
+   the filter text, the caret and the scroll position on every click - and
+   there is only one modal, so reopening it from inside itself is how a
+   picker loses the editor it was opened from. The static top row (filter box,
+   All / None / A to Z) is rendered ONCE and never replaced; only #cpPanes is
+   rewritten.
+
+   Done hands the result to opts.onDone and that callback may redraw whatever
+   it likes - including the editor it came from. Cancel restores the caller's
+   screen through opts.onCancel and changes nothing.
+   ================================================================ */
+const ColPicker = {
+  _st: null,
+
+  /* opts: { title, mode, catalog:[{ name, role, note?, disabled? }],
+             chosen:[name], cap, help, doneLabel, onDone(names), onCancel() }
+     `note` is shown in grey beside the name (e.g. "not shown"); `disabled`
+     greys a row out in openSet mode. */
+  _open(opts) {
+    const cat = (opts.catalog || []).filter(c => c && c.name);
+    const known = new Set(cat.map(c => c.name));
+    ColPicker._st = {
+      mode: opts.mode === 'set' ? 'set' : 'ordered',
+      title: opts.title || 'Columns',
+      help: opts.help || '',
+      cap: opts.cap || 0,
+      catalog: cat,
+      byName: new Map(cat.map(c => [c.name, c])),
+      // Dead names are dropped on open, not silently kept: the stored order
+      // may name a column that has since been renamed away.
+      chosen: (opts.chosen || []).filter(n => known.has(n)),
+      filter: '',
+      onDone: opts.onDone || null,
+      onCancel: opts.onCancel || null,
+      doneLabel: opts.doneLabel || 'Use this order'
+    };
+    const S = ColPicker._st;
+    let body = '';
+    if (S.help) body += '<div class="help">' + S.help + '</div>';
+    body += '<div id="cpTop" class="toolbar" style="margin:6px 0; gap:6px; flex-wrap:wrap;">';
+    body += '<input type="text" id="cpFilter" placeholder="Filter columns…" style="min-width:180px;"'
+          + ' oninput="ColPicker._onFilter(this.value)" />';
+    body += '<button class="small" onclick="ColPicker.allFiltered(true)" title="Add every column the filter leaves">All</button>';
+    body += '<button class="small" onclick="ColPicker.allFiltered(false)" title="Remove every column the filter leaves">None</button>';
+    if (S.mode === 'ordered') body += '<button class="small" onclick="ColPicker.sortAZ()" title="Sort the chosen columns by name">A to Z</button>';
+    body += '<span id="cpCount" class="text-muted"></span>';
+    body += '</div>';
+    body += '<div id="cpPanes"></div>';
+    const footer = '<button onclick="ColPicker.cancel()">Cancel</button><div style="flex:1"></div>'
+      + '<button class="success" onclick="ColPicker.done()">' + U.esc(S.doneLabel) + '</button>';
+    App.openModal(S.title, body, '<div style="display:flex;width:100%;align-items:center;">' + footer + '</div>');
+    ColPicker._redraw();
+  },
+
+  openOrdered(opts) { ColPicker._open(Object.assign({}, opts, { mode: 'ordered' })); },
+  openSet(opts)     { ColPicker._open(Object.assign({}, opts, { mode: 'set', doneLabel: opts.doneLabel || 'Use these columns' })); },
+
+  /* The filter box is OUTSIDE the redrawn section, so typing in it keeps its
+     caret and its focus while the panes under it change. */
+  _onFilter(v) {
+    if (!ColPicker._st) return;
+    ColPicker._st.filter = String(v || '');
+    ColPicker._redraw();
+  },
+
+  _match(name) {
+    const f = ColPicker._st.filter.trim().toLowerCase();
+    return !f || String(name).toLowerCase().includes(f);
+  },
+
+  /* A column that exists but is not on screen - Display Columns does not
+     tick it - can still be given a position; it just will not appear. Say so
+     where someone is choosing. */
+  _note(c) {
+    return (c && c.note) ? ' <span class="text-muted" style="font-size:9px;">' + U.esc(c.note) + '</span>' : '';
+  },
+
+  _badge(role) {
+    const map = { pk: 'PK', value: 'val', date: 'date', tag: 'extra', computed: 'formula',
+                  lookup: 'lookup', toAccount: 'To Account', status: 'status' };
+    const lbl = map[role] || '';
+    return lbl ? '<span class="tag" style="font-size:9px;">' + U.esc(lbl) + '</span> ' : '';
+  },
+
+  /* SECTION-LOCAL. Only #cpPanes and #cpCount are written. */
+  _redraw() {
+    const S = ColPicker._st;
+    const host = document.getElementById('cpPanes');
+    if (!S || !host) return;
+    host.innerHTML = S.mode === 'ordered' ? ColPicker._orderedHtml() : ColPicker._setHtml();
+    const c = document.getElementById('cpCount');
+    if (c) {
+      c.textContent = S.mode === 'set' && S.cap
+        ? S.chosen.length + ' of ' + S.cap + ' chosen'
+        : S.chosen.length + ' of ' + S.catalog.length + ' columns placed';
+    }
+  },
+
+  _orderedHtml() {
+    const S = ColPicker._st;
+    const chosenSet = new Set(S.chosen);
+    let h = '<div style="display:flex; gap:12px; align-items:flex-start;">';
+
+    h += '<div style="flex:1; min-width:0;"><b>In this order</b>';
+    h += '<div class="help">Type a position and press Enter to move a column there, or use the arrows. '
+       + 'Columns you do not place follow in their own order.</div>';
+    h += '<div style="max-height:46vh; overflow:auto; margin-top:4px;">';
+    if (!S.chosen.length) h += '<div class="empty">No columns placed yet.</div>';
+    else {
+      h += '<table><tbody>';
+      S.chosen.forEach((n, i) => {
+        const hidden = !ColPicker._match(n);
+        h += '<tr' + (hidden ? ' style="opacity:.35;"' : '') + '>';
+        h += '<td style="width:58px;"><input type="text" value="' + (i + 1) + '" style="width:46px;"'
+           + ' title="Position" onkeydown="if(event.key===\'Enter\'){event.preventDefault();ColPicker.moveTo(' + i + ',this.value);}"'
+           + ' onchange="ColPicker.moveTo(' + i + ',this.value)" /></td>';
+        h += '<td>' + ColPicker._badge((S.byName.get(n) || {}).role) + U.esc(n) + ColPicker._note(S.byName.get(n)) + '</td>';
+        h += '<td style="width:96px; white-space:nowrap;">'
+           + '<button class="small" title="Up" onclick="ColPicker.nudge(' + i + ',-1)">↑</button>'
+           + '<button class="small" title="Down" onclick="ColPicker.nudge(' + i + ',1)">↓</button>'
+           + '<button class="small danger" title="Remove" onclick="ColPicker.remove(' + i + ')">×</button>'
+           + '</td></tr>';
+      });
+      h += '</tbody></table>';
+    }
+    h += '</div></div>';
+
+    h += '<div style="flex:1; min-width:0;"><b>Not placed</b>';
+    h += '<div class="help">Click to append.</div>';
+    h += '<div style="max-height:46vh; overflow:auto; margin-top:4px;">';
+    const rest = S.catalog.filter(c => !chosenSet.has(c.name) && ColPicker._match(c.name));
+    if (!rest.length) h += '<div class="empty">Nothing left.</div>';
+    else rest.forEach(c => {
+      h += '<div><button class="small" style="width:100%; text-align:left;"'
+         + ' onclick="ColPicker.add(\'' + U.jsq(c.name) + '\')">+ ' + ColPicker._badge(c.role) + U.esc(c.name) + ColPicker._note(c) + '</button></div>';
+    });
+    h += '</div></div></div>';
+    return h;
+  },
+
+  _setHtml() {
+    const S = ColPicker._st;
+    const chosenSet = new Set(S.chosen);
+    const full = S.cap > 0 && S.chosen.length >= S.cap;
+    let h = '';
+    if (full) h += '<div class="help">The limit of ' + S.cap + ' is reached — clear one to pick another.</div>';
+    h += '<div style="max-height:52vh; overflow:auto;">';
+    const list = S.catalog.filter(c => ColPicker._match(c.name));
+    if (!list.length) h += '<div class="empty">No column matches that.</div>';
+    list.forEach(c => {
+      const on = chosenSet.has(c.name);
+      const dis = (!on && full) || c.disabled;
+      h += '<label class="inline"' + (dis ? ' style="opacity:.45;"' : '') + '>'
+         + '<input type="checkbox"' + (on ? ' checked' : '') + (dis ? ' disabled' : '')
+         + ' onchange="ColPicker.toggle(\'' + U.jsq(c.name) + '\', this.checked)"> '
+         + ColPicker._badge(c.role) + U.esc(c.name) + ColPicker._note(c) + '</label>';
+    });
+    h += '</div>';
+    return h;
+  },
+
+  /* ---- mutations: each one ends in the section-local redraw ---- */
+  add(name) {
+    const S = ColPicker._st;
+    if (!S || !S.byName.has(name) || S.chosen.includes(name)) return;
+    if (S.cap > 0 && S.chosen.length >= S.cap) { U.toast('At most ' + S.cap + ' columns', 'error'); return; }
+    S.chosen.push(name);
+    ColPicker._redraw();
+  },
+  remove(i) {
+    const S = ColPicker._st;
+    if (!S || i < 0 || i >= S.chosen.length) return;
+    S.chosen.splice(i, 1);
+    ColPicker._redraw();
+  },
+  toggle(name, on) {
+    if (on) ColPicker.add(name);
+    else {
+      const S = ColPicker._st;
+      if (!S) return;
+      const i = S.chosen.indexOf(name);
+      if (i >= 0) ColPicker.remove(i);
+      else ColPicker._redraw();
+    }
+  },
+  nudge(i, dir) {
+    const S = ColPicker._st;
+    if (!S) return;
+    const j = i + dir;
+    if (i < 0 || i >= S.chosen.length || j < 0 || j >= S.chosen.length) return;
+    const t = S.chosen[i]; S.chosen[i] = S.chosen[j]; S.chosen[j] = t;
+    ColPicker._redraw();
+  },
+  /* The position box is the primary mechanism, not a fallback: one
+     interaction for an arbitrary move, keyboard only, and still usable at 600
+     columns where dragging is not. */
+  moveTo(i, posRaw) {
+    const S = ColPicker._st;
+    if (!S || i < 0 || i >= S.chosen.length) return;
+    let p = parseInt(String(posRaw).trim(), 10);
+    if (!isFinite(p)) { ColPicker._redraw(); return; }
+    p = Math.max(1, Math.min(S.chosen.length, p)) - 1;
+    if (p === i) { ColPicker._redraw(); return; }
+    const name = S.chosen.splice(i, 1)[0];
+    S.chosen.splice(p, 0, name);
+    ColPicker._redraw();
+  },
+  /* All / None act on the FILTERED subset, so "None" after typing a word
+     cannot empty a list the user cannot see. */
+  allFiltered(on) {
+    const S = ColPicker._st;
+    if (!S) return;
+    const hits = S.catalog.filter(c => ColPicker._match(c.name)).map(c => c.name);
+    if (on) {
+      hits.forEach(n => {
+        if (S.chosen.includes(n)) return;
+        if (S.cap > 0 && S.chosen.length >= S.cap) return;
+        S.chosen.push(n);
+      });
+    } else {
+      const drop = new Set(hits);
+      S.chosen = S.chosen.filter(n => !drop.has(n));
+    }
+    ColPicker._redraw();
+  },
+  /* By the string the grid renders - the column NAME - not by a label the
+     user never sees. */
+  sortAZ() {
+    const S = ColPicker._st;
+    if (!S) return;
+    S.chosen = S.chosen.slice().sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }));
+    ColPicker._redraw();
+  },
+
+  /* The modal header's own Close button calls App.closeModal directly, so the
+     picker can go off screen without either of its own exits running. Called
+     from there, this drops the state and NOTHING else: Close means close, so
+     it must not call onCancel and have the editor reopen itself out of the
+     act of closing it. Whatever the editor holds is still in
+     RecoTemplate._editing, so reopening it loses nothing. */
+  _abandon() { ColPicker._st = null; },
+
+  done() {
+    const S = ColPicker._st;
+    if (!S) return;
+    const out = S.chosen.slice();
+    const cb = S.onDone;
+    ColPicker._st = null;
+    App.closeModal();
+    if (cb) cb(out);
+  },
+  cancel() {
+    const S = ColPicker._st;
+    if (!S) return;
+    const cb = S.onCancel;
+    ColPicker._st = null;
+    App.closeModal();
+    if (cb) cb();
+  }
 };
 
 /* ================================================================
@@ -9959,7 +10358,7 @@ _xlInit(tpl, sess) {
   let S, cols, rows, C, data, columns;
   try {
     S = XlSchema.build(tpl, sess, { scope: o.editScope, allowPkEdit: o.allowPkEdit, showStatus: o.showStatus, showExtras: o.showExtras });
-    cols = Reco._xlOrderCols(S.cols, sess);
+    cols = Reco._xlOrderCols(S.cols, tpl, sess);
     rows = Reco.applyTableFiltersSort(tpl, sess);
     if (rows.length > o.maxRows) {
       U.toast('Showing first ' + o.maxRows + ' rows — filter in Reco to narrow', 'warn');
@@ -10045,9 +10444,12 @@ _xlInit(tpl, sess) {
   Reco._xlUpdateUndoButtons();
 },
 
-/* Status first, then sess.columnOrder, then everything else in schema order. */
-_xlOrderCols(cols, sess) {
-  const order = Array.isArray(sess.columnOrder) ? sess.columnOrder : [];
+/* Status first, then the effective column order (this person's, else the
+   team's, else definition order), then anything the order does not mention.
+   The includeHidden order is used so a column's position is stable whether or
+   not it is hidden in the grid. */
+_xlOrderCols(cols, tpl, sess) {
+  const order = (tpl && sess) ? Reco.effectiveDisplayCols(tpl, sess, { includeHidden: true }) : [];
   if (!order.length) return cols.slice();
   const pos = new Map(order.map((n, i) => [n, i]));
   const status = cols.filter(d => d.role === 'status');
@@ -10667,10 +11069,18 @@ _xlOnMoveColumn(ws) {
   Reco._xlPersistOrder(ws);
   Reco._xlUpdateUndoButtons();
 },
+/* A column dragged in the sheet is this person's order, on this PC - the same
+   store the grid's header drag writes, so the two views agree and neither
+   moves a colleague's columns. The sheet only holds the columns it shows, so
+   the dragged sequence is slotted into the includeHidden order rather than
+   replacing it: a plain merge would push every hidden column to the end and
+   lose its position. */
 _xlPersistOrder(ws) {
   const C = Reco._xlCtx;
   if (!C) return;
-  C.sess.columnOrder = ws.options.columns.map(c => c && c.name).filter(n => n && n !== '_status_' && n !== '_rid');
+  const shown = ws.options.columns.map(c => c && c.name).filter(n => n && n !== '_status_' && n !== '_rid');
+  const base = Reco.effectiveDisplayCols(C.tpl, C.sess, { includeHidden: true });
+  Reco.setUserOrder(C.tpl, C.sess, Reco._reorderKeepingSlots(base, shown));
   AppState.save();
 },
 _xlOnSort(ws, x, ord) {
@@ -12568,8 +12978,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     return { tpl, sess, row, pk };
   },
 
+  /* The line that names a row on the timeline card. Team order, so the same
+     row reads the same way for everyone looking at the same history. */
   _rowSummary(tpl, row) {
-    const cols = (tpl.displayColumns||tpl.columns.map(c=>c.name)).slice(0, 3);
+    const cols = Reco.teamOrder((tpl.displayColumns && tpl.displayColumns.length)
+      ? tpl.displayColumns : tpl.columns.map(c=>c.name), tpl).slice(0, 3);
     return cols.map(c => row[c]).filter(v => v != null && v !== '').join(' · ');
   },
 
@@ -13030,7 +13443,13 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     sess.columnFilters = sess.columnFilters || {};   // { colName: [ {op,val,val2,enabled} ] }
     sess.columnSorts = sess.columnSorts || null;     // { col, dir }
     sess.columnWidths = sess.columnWidths || {};     // { colName: px }
-    sess.columnOrder  = sess.columnOrder || null;    // array of column names, overrides displayColumns order
+    /* LEGACY, read-only. The column order used to be kept here - in
+       recoSessions.json, one shared file on the folder keyed by template id -
+       so the last colleague to drag a header set it for the whole team. It is
+       now per person in localStorage (Reco.userPref); this field is migrated
+       into that store once, on first read, and never written again, and it is
+       left on disk so an older build keeps working. */
+    sess.columnOrder  = sess.columnOrder || null;    // DEPRECATED: see Reco._userOrder
     sess.zoom         = sess.zoom || 1;              // 0.5 .. 2.0
     sess.page = sess.page || 0;
     sess.pageSize = sess.pageSize || 200;
@@ -13118,7 +13537,8 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '<span id="zoomIndicator" class="text-muted">100%</span>';
     h += '<button class="small" onclick="Reco.zoomBy(0.1)" title="Zoom in">+</button>';
     h += '<button class="small" onclick="Reco.zoomReset()" title="Zoom to 100%">⌂</button>';
-    h += '<button class="small" onclick="Reco.resetTableView()" title="Reset column order, widths, and zoom">↺ Reset View</button>';
+    h += '<button class="small" onclick="Reco.openOrderPicker()" title="Set the left-to-right column order for yourself, on this PC">⇄ Columns</button>';
+    h += '<button class="small" onclick="Reco.resetTableView()" title="Drop your own column order (back to the template\'s), and reset widths and zoom">↺ Reset View</button>';
     h += '</div>';
         if (sess.spreadsheetMode) {
           h += '<button class="small" onclick="Reco.ssAddRow(false)" title="Add a session row (cleared on Clear Data)">+ Row</button>';
@@ -14045,38 +14465,212 @@ _sortKeyed(keyed, isDate, dir) {
     AppState.save();
     Reco.refreshGrid();
   },
-  // Build the effective ordered column list for the reco table.
-  // Honours: tpl.displayColumns, AEG-injected To Account column, and sess.columnOrder.
-  // A null session is a template with nothing open yet - a column catalog is
-  // still a sensible question to ask about it - so the session's view
-  // preferences simply read as absent instead of throwing.
-  effectiveDisplayCols(tpl, sess) {
-    sess = sess || {};
+  /* ===== #25 — THE ONE COLUMN-ORDER MODEL ==================================
+
+     THE INVARIANT THE WHOLE FEATURE IS BUILT AROUND:
+
+         An added column is EVALUATED in tpl.additionalColumns order and only
+         *RENDERED* in display order.
+
+     A formula may reference the columns declared above it, so an "Ageing
+     Bucket" shown to the LEFT of the "Ageing Days" it reads must still be
+     computed after it. The row is therefore built ONCE, in declaration order,
+     by Reco.rowFull, and the renderer only ever LOOKS UP full[name]. Never
+     rebuild the cascade inside a display-order loop: both token paths turn a
+     missing reference into '' (Formula._tokenValue and substituteTokens), so
+     IF("">90,…) would quietly print "0-90" for every row — no #ERR, no
+     console error — while the Excel view, the exports, the reports, the pivot
+     and the grid's own SORT on that same column all read the right value
+     through the shared resolver. That is T6.
+
+     WHAT DECIDES THE ORDER, applied in exactly this sequence:
+
+       tpl.displayColumns   WHICH file columns are shown. Unchanged, and still
+                            written in click order, so an older build picks up
+                            most of a new order for free.
+       visibleBase()        those, in their stored order, then the added
+                            columns in DECLARATION order. The one list in
+                            which the cascade is trivially correct.
+       tpl.displayOrder     the TEAM order: string[] | null. Set on the
+                            template, so it is the same for everyone on the
+                            folder, every day. Exports read this and NEVER a
+                            person's own order.
+       the per-user order   localStorage, this PC only (Reco.userPref). What
+                            the header drag and the Excel-view drag write, so
+                            a colleague dragging a column cannot move anyone
+                            else's grid.
+
+     Precedence in one sentence: your order beats the team order, the team
+     order beats definition order, a column nobody mentions goes last, and
+     hidden columns are removed last.
+
+     Backward compatibility is exact and is the gate on the change (T1): with
+     displayOrder absent and no per-user order, _mergeOrder(base, null)
+     returns `base` — the same array — and base is displayColumns order then
+     extras in declaration order, which is what the grid drew before. Nothing
+     auto-seeds displayOrder on load.
+
+     S15 (purity): every helper here takes (tpl, sess) explicitly and reads no
+     other session state, so a second pane with its own session is a second
+     call and not a rewrite. (XlSchema.toAccountCol still reads the global AEG
+     template list, exactly as the code it replaces did.) */
+
+  /* Listed names first, in listed order; unlisted appended in base order;
+     unknown names ignored. Written once, applied everywhere. */
+  _mergeOrder(base, order) {
+    if (!Array.isArray(order) || !order.length) return base;
+    const inBase = new Set(base);
+    const seen = new Set();
+    const out = [];
+    for (const n of order) if (inBase.has(n) && !seen.has(n)) { seen.add(n); out.push(n); }
+    for (const n of base)  if (!seen.has(n))                  { seen.add(n); out.push(n); }
+    return out;
+  },
+
+  /* Reorder `base` so the columns in `shownOrder` appear in that order while
+     every other name keeps its slot. Used by the Excel-view drag, whose list
+     holds only the columns that sheet shows: a plain merge would move every
+     hidden column to the end and lose its position. */
+  _reorderKeepingSlots(base, shownOrder) {
+    const baseSet = new Set(base);
+    const shown = (shownOrder || []).filter(n => baseSet.has(n));
+    const shownSet = new Set(shown);
+    if (base.filter(n => shownSet.has(n)).length !== shown.length) return Reco._mergeOrder(base, shown);
+    let k = 0;
+    return base.map(n => shownSet.has(n) ? shown[k++] : n);
+  },
+
+  /* ---- S7: per-user view preferences, on this PC only --------------------
+     recoSessions.json is ONE file on the shared folder keyed by template id,
+     so anything stored on `sess` is the whole team's. A column order kept
+     there is the likeliest reason an order set once never stuck: the next
+     colleague's drag overwrote it for everybody. These live in localStorage
+     instead, so they are per person and per machine, and they never travel
+     to the share. Read through a small memo because the scroll path asks for
+     the column signature on every frame. */
+  _prefKey(tplId, key) { return 'reco.view.v1.' + tplId + '.' + key; },
+  _prefMem: {},
+  userPref(tplId, key, value) {
+    const k = Reco._prefKey(tplId, key);
+    if (arguments.length >= 3) {
+      Reco._prefMem[k] = value;
+      if (value == null) { try { localStorage.removeItem(k); } catch (e) {} }
+      else ExcelLink._lsSet(k, value);
+      return value;
+    }
+    if (Object.prototype.hasOwnProperty.call(Reco._prefMem, k)) return Reco._prefMem[k];
+    const v = ExcelLink._lsGet(k, null);
+    Reco._prefMem[k] = v;
+    return v;
+  },
+
+  /* This person's column order for this template, or null.
+     sess.columnOrder is READ-ONLY legacy: whatever is in it was written by
+     whoever dragged a header last, on the shared file. It is migrated into
+     localStorage once, on first read, and then never written again — and it
+     is left on disk so an older build keeps working. The empty array is
+     stored deliberately: it records "this person has no order of their own",
+     which is what stops a Reset View from being undone by a re-migration of
+     the legacy field on the very next read. */
+  _userOrder(tpl, sess) {
+    let o = Reco.userPref(tpl.id, 'columnOrder');
+    if (!Array.isArray(o)) {
+      const legacy = (sess && Array.isArray(sess.columnOrder)) ? sess.columnOrder : null;
+      o = legacy ? legacy.slice() : [];
+      Reco.userPref(tpl.id, 'columnOrder', o);
+    }
+    return o.length ? o : null;
+  },
+
+  /* Write this person's order and nothing else. `sess.activeCell` and
+     `sess.selRange` hold column NAMES that _ssVisibleCols resolves back to
+     positions, so after a reorder the same stored pair denotes a different
+     SET of columns and a fill would take its source from the wrong one.
+     Clear both, the way turning sheet mode off already does. */
+  setUserOrder(tpl, sess, order) {
+    Reco.userPref(tpl.id, 'columnOrder', (order || []).slice());
+    if (sess) { sess.activeCell = null; sess.selRange = null; }
+  },
+
+  /* Which columns the grid could show, and in what order before any display
+     order is applied: file columns in tpl.displayColumns order, then the
+     added columns in DECLARATION order.
+     includeHidden keeps sess.hiddenCols in the list. Every order is BUILT
+     from the includeHidden base and only filtered at render time, so hiding
+     a column no longer erases its position — the drag used to seed from the
+     visible list, which rewrote the order with every hidden column left out
+     and returned it to the far right on unhide. */
+  visibleBase(tpl, sess, opts) {
+    sess = sess || {}; opts = opts || {};
+    const colNames = new Set((tpl.columns || []).map(c => c.name));
     let base = (tpl.displayColumns && tpl.displayColumns.length)
       ? tpl.displayColumns.slice()
-      : tpl.columns.map(c => c.name);
-
-    // Inject AEG-required "To Account" column if missing (mirrors original logic)
-    if (tpl.aegIntegration && tpl.aegIntegration.enabled && tpl.aegIntegration.aegTemplateId) {
-      const aegTpl = AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId);
-      if (aegTpl && aegTpl.toAccount && (aegTpl.toAccount.mode === 'input' || aegTpl.toAccount.mode === 'inputOrSelect')) {
-        const reqCol = aegTpl.toAccount.inputColumn;
-        if (reqCol && tpl.columns.find(c => c.name === reqCol) && !base.includes(reqCol)) {
-          base.push(reqCol);
-        }
-      }
+      : (tpl.columns || []).map(c => c.name);
+    const toAcc = XlSchema.toAccountCol(tpl);
+    // AEG-required "To Account" column, when it is a file column (as before).
+    if (toAcc && colNames.has(toAcc) && !base.includes(toAcc)) base.push(toAcc);
+    const have = new Set(base);
+    const extras = (tpl.additionalColumns || []).concat(sess.extraColumns || []);
+    extras.forEach(ac => { if (ac && ac.name && !have.has(ac.name)) { have.add(ac.name); base.push(ac.name); } });
+    // …and as a synthetic extra when it is not a column of the file at all.
+    const synthToAcc = !!(toAcc && !colNames.has(toAcc) && !have.has(toAcc));
+    if (synthToAcc) base.push(toAcc);
+    if (!opts.includeHidden) {
+      const hidden = new Set(sess.hiddenCols || []);
+      // The synthetic To Account column is never hidden away: the entry needs
+      // it. That exception is XlSchema.build's and is kept verbatim.
+      if (hidden.size) base = base.filter(n => !hidden.has(n) || (synthToAcc && n === toAcc));
     }
+    return base;
+  },
 
-    // Filter out hidden columns (Phase 1)
-    base = base.filter(c => !(sess.hiddenCols || []).includes(c));
+  /* The effective order. opts.order === 'team' ignores the per-user order —
+     that is what every export path asks for. opts.includeHidden as above. */
+  effectiveDisplayCols(tpl, sess, opts) {
+    sess = sess || {};
+    opts = opts || {};
+    const base = Reco.visibleBase(tpl, sess, opts);
+    const team = (tpl.displayOrder && tpl.displayOrder.length) ? tpl.displayOrder : null;
+    if (opts.order === 'team') return Reco._mergeOrder(base, team);
+    return Reco._mergeOrder(base, Reco._userOrder(tpl, sess) || team);
+  },
 
-    // Apply saved column order
-    const order = Array.isArray(sess.columnOrder) ? sess.columnOrder : [];
-    if (!order.length) return base;
+  /* The team order of an arbitrary base list (an export header, a report's
+     column list): the same list for everyone, every day. */
+  teamOrder(base, tpl) {
+    return Reco._mergeOrder(base, (tpl.displayOrder && tpl.displayOrder.length) ? tpl.displayOrder : null);
+  },
 
-    const ordered     = order.filter(c => base.includes(c));
-    const notOrdered  = base.filter(c => !ordered.includes(c));
-    return ordered.concat(notOrdered).filter(c => !(sess.hiddenCols || []).includes(c));
+  /* ONE descriptor list for the header, the body and the scroll handler to
+     walk, so they cannot disagree about which column a <td> belongs to.
+     `colDef` is resolved here, once per render, instead of a tpl.columns.find
+     per cell per row (60 columns x 200 rows was 720,000 comparisons a page).
+     A name that is neither a file column nor an added column — a rename left
+     in displayColumns — stays on the file-column branch, where it renders as
+     an empty cell exactly as it does today. */
+  effectiveColumnDescs(tpl, sess, opts) {
+    const colDefs = new Map((tpl.columns || []).map(c => [c.name, c]));
+    const extraByName = new Map();
+    ((tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []))
+      .forEach(ac => { if (ac && ac.name && !extraByName.has(ac.name)) extraByName.set(ac.name, ac); });
+    const toAcc = XlSchema.toAccountCol(tpl);
+    return Reco.effectiveDisplayCols(tpl, sess, opts).map(name => {
+      const isToAcct = !!toAcc && name === toAcc;
+      if (colDefs.has(name)) return { name, isExtra: false, isToAcct, colDef: colDefs.get(name), ac: null };
+      const ac = extraByName.get(name);
+      if (ac) return { name, isExtra: true, isToAcct, colDef: null, ac };
+      if (isToAcct) return { name, isExtra: true, isToAcct, colDef: null, ac: { name, type: 'custom' } };
+      return { name, isExtra: false, isToAcct, colDef: null, ac: null };
+    });
+  },
+
+  /* What the rendered header is, as one string. The virtual scroll handler
+     reuses the body layout the last render published, so it must be able to
+     tell that the columns have moved since — otherwise the body keeps the old
+     order while the <thead> shows the new one and every value is one column
+     out (T9). */
+  _colSigFor(tpl, sess) {
+    return Reco.effectiveDisplayCols(tpl, sess).join('\u0001');
   },
 
   /* Every column this template could show, as XlSchema descriptors: template
@@ -14085,9 +14679,30 @@ _sortKeyed(keyed, isDate, dir) {
      context view cannot disagree about what a column is or what role it
      plays. `rows: []` is deliberate - a catalog is a question about the
      template, so no sampling of row data is wanted and none is paid for. */
-  columnCatalog(tpl, sess) {
-    return XlSchema.build(tpl, sess, { scope: 'readonly', includeHidden: true,
-                                       showExtras: 'all', showStatus: false, rows: [] }).cols;
+  columnCatalog(tpl, sess, opts) {
+    return XlSchema.build(tpl, sess, Object.assign({ scope: 'readonly', includeHidden: true,
+                                       showExtras: 'all', showStatus: false, rows: [] }, opts || {})).cols;
+  },
+
+  /* The catalog as a column picker wants it: one name and one role badge per
+     column. Team-scoped on purpose - a picker is a list of what exists, and
+     whose grid order the person at this PC happens to have is not part of
+     that question. */
+  pickerCatalog(tpl, sess) {
+    /* An order may name a column that Display Columns does not tick. Nothing
+       breaks - _mergeOrder ignores a name that is not in the base - but the
+       column stays off screen, so the picker says so rather than letting
+       someone position a column and wonder why it never appears. */
+    const shown = new Set(Reco.visibleBase(tpl, sess, { includeHidden: true }));
+    return Reco.columnCatalog(tpl, sess, { orderScope: 'team' }).map(d => ({
+      name: d.name,
+      note: shown.has(d.name) ? '' : 'not shown',
+      role: d.isPk ? 'pk'
+          : d.role === 'toAccount' ? 'toAccount'
+          : d.role === 'computed' ? (d.computedType === 'formula' ? 'computed' : 'lookup')
+          : d.role === 'tag' ? 'tag'
+          : d.isDate ? 'date' : d.isValue ? 'value' : ''
+    }));
   },
 
   /* ---- S2: the one display rule ------------------------------------------
@@ -14314,13 +14929,26 @@ _measureVirtRow(sess) {
    Map on every animation frame, which is what made scrolling a large extract
    stutter. Anything that changes membership or order re-renders the table
    through renderRecoTable, which replaces this. */
-_virtState: null,
+/* S15: keyed by the SESSION OBJECT, not by a single slot validated against a
+   template id. Two panes on two templates each keep their own window instead
+   of evicting each other's, and a pane that goes away takes its cache with
+   it. A WeakMap also cannot be serialised to the shared folder by accident. */
+_virtStates: new WeakMap(),
+
+_virtPublish(sess, state) {
+  try { Reco._virtStates.set(sess, state); } catch (e) {}
+  return state;
+},
 
 _virtStateFor(tpl, sess) {
   const pageSize = sess.pageSize || 200;
-  const s = Reco._virtState;
+  const s = Reco._virtStates.get(sess);
   if (s && s.tplId === tpl.id && s.data === sess.data && s.page === sess.page
-      && s.pageSize === pageSize && Array.isArray(s.filtered)) return s;
+      && s.pageSize === pageSize && Array.isArray(s.filtered)
+      /* The column signature: without it a scroll repaints the body with the
+         layout the last render published while the <thead> already shows a
+         new order, and every value lands one column out (T9). */
+      && s.colSig === Reco._colSigFor(tpl, sess)) return s;
   return null;
 },
 
@@ -14340,10 +14968,10 @@ _refreshVirtBodyInner(tpl, sess, tbody) {
 
   const pageSize = sess.pageSize || 200;
   const cached = Reco._virtStateFor(tpl, sess);
-  let filtered, slice, displayCols, extraCols, idxMap;
+  let filtered, slice, descs, idxMap;
   if (cached) {
     filtered = cached.filtered; slice = cached.slice;
-    displayCols = cached.displayCols; extraCols = cached.extraCols; idxMap = cached.idxMap;
+    descs = cached.descs; idxMap = cached.idxMap;
     if (!slice.length) return;
     SpecialJV.resetOptions();
   } else {
@@ -14353,30 +14981,23 @@ _refreshVirtBodyInner(tpl, sess, tbody) {
     if (!slice.length) return;
     SpecialJV.resetOptions();
 
-    displayCols = Reco.effectiveDisplayCols(tpl, sess);
-    extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
-    if (tpl.aegIntegration && tpl.aegIntegration.enabled && tpl.aegIntegration.aegTemplateId) {
-      const aegTpl = AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId);
-      if (aegTpl && aegTpl.toAccount && (aegTpl.toAccount.mode === 'input' || aegTpl.toAccount.mode === 'inputOrSelect')) {
-        const reqCol = aegTpl.toAccount.inputColumn;
-        if (reqCol && !tpl.columns.find(c => c.name === reqCol) && !extraCols.find(c => c.name === reqCol)) {
-          extraCols.push({ name: reqCol, type: 'custom' });
-        }
-      }
-    }
+    // ONE list, the same one the <thead> was built from (see
+    // effectiveColumnDescs). The body and the header move in lockstep or not
+    // at all.
+    descs = Reco.effectiveColumnDescs(tpl, sess);
     idxMap = Reco._buildRowIdxMap(sess);
-    Reco._virtState = { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
-                        filtered, slice, displayCols, extraCols, idxMap };
+    Reco._virtPublish(sess, { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
+                              filtered, slice, descs, idxMap, colSig: Reco._colSigFor(tpl, sess) });
   }
   const win = Reco._computeVirtWindow(slice, sess);
-  const colspan = 2 + displayCols.length + extraCols.length;
+  const colspan = 2 + descs.length;
   let h = '';
   if (win.topPx > 0) {
     h += '<tr class="virt-spacer-top" style="height:'+win.topPx+'px;"><td colspan="'+colspan+'"></td></tr>';
   }
   for (let vi = win.startIdx; vi < win.endIdx; vi++) {
     const fidx = sess.page * pageSize + vi;
-    h += Reco._renderOneRow(tpl, sess, slice[vi], displayCols, extraCols, idxMap, fidx);
+    h += Reco._renderOneRow(tpl, sess, slice[vi], descs, idxMap, fidx);
   }
   if (win.botPx > 0) {
     h += '<tr class="virt-spacer-bot" style="height:'+win.botPx+'px;"><td colspan="'+colspan+'"></td></tr>';
@@ -14387,7 +15008,12 @@ _refreshVirtBodyInner(tpl, sess, tbody) {
   Reco._measureVirtRow(sess);
 },
 
-_renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
+/* ONE descriptor list, in display order, for the whole row.
+   `descs` comes from Reco.effectiveColumnDescs and is the same list the
+   <thead> was built from. The cascade is NOT rebuilt here: the enriched row
+   comes from Reco.rowFull in DECLARATION order and the extra branch only
+   looks up full[name] — see the invariant above effectiveDisplayCols. */
+_renderOneRow(tpl, sess, row, descs, idxMap, filteredIdx) {
   let h = '';
   const i = idxMap ? idxMap.get(row._id) : sess.data.indexOf(row);
   const isOffset = sess.offsets && sess.offsets[row._id];
@@ -14432,11 +15058,18 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
   statusHtml += Reco._postedBadge(tpl, row);
   h += '<td class="status-cell">' + statusHtml + '</td>';
 
-  displayCols.forEach(col => {
+  /* The enriched row, built once per row, in declaration order, and only if
+     something on screen actually needs it. */
+  let _full = null;
+  const fullOf = () => _full || (_full = Reco.rowFull(tpl, sess, row));
+
+  descs.forEach(desc => {
+    const col = desc.name;
+    if (desc.isExtra) { h += Reco._renderExtraCell(tpl, sess, row, desc, i, fullOf); return; }
     const dataAttr = ' data-col="' + U.escAttr(col) + '"';
-    const colDef = tpl.columns.find(c => c.name === col);
+    const colDef = desc.colDef;
     // The raw value, any per-cell formula and the date pass are all one rule
-    // now (Reco.displayCellValue). displayCols only ever holds template
+    // now (Reco.displayCellValue). This branch only ever holds template
     // columns, so the enriched row is not needed and not built.
     let val = Reco.displayCellValue(tpl, sess, row, col);
           // Phase 4: per-cell format
@@ -14448,11 +15081,9 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
     if (row['_corrected_'+col]) cls = 'cell-corrected';
     else if (colDef && colDef.formats && colDef.formats.length && !FMT.validate(val, colDef.formats)) cls = 'cell-error';
 
-    const aegTpl2 = (tpl.aegIntegration && tpl.aegIntegration.enabled)
-      ? AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId) : null;
-    const isToAcctCol = aegTpl2 && aegTpl2.toAccount &&
-      (aegTpl2.toAccount.mode === 'input' || aegTpl2.toAccount.mode === 'inputOrSelect') &&
-      aegTpl2.toAccount.inputColumn === col;
+    // Resolved once per render on the descriptor (XlSchema.toAccountCol is
+    // the same three conditions this used to re-test per cell per row).
+    const isToAcctCol = desc.isToAcct;
 
     if (isToAcctCol) {
       const opts = SpecialJV.buildToAccountOptions();
@@ -14482,70 +15113,114 @@ _renderOneRow(tpl, sess, row, displayCols, extraCols, idxMap, filteredIdx) {
     }
   });
 
-  const accum = Object.assign({}, row);
-  const fullCtx = Reco._fullCtx();
-  extraCols.forEach(ac => {
-    const dataAttr = ' data-col="' + U.escAttr(ac.name) + '"';
-
-    const aegTplX = (tpl.aegIntegration && tpl.aegIntegration.enabled)
-      ? AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId) : null;
-    const isToAcctExtra = aegTplX && aegTplX.toAccount &&
-      (aegTplX.toAccount.mode === 'input' || aegTplX.toAccount.mode === 'inputOrSelect') &&
-      aegTplX.toAccount.inputColumn === ac.name;
-    if (isToAcctExtra) {
-      const curVal = row[ac.name] != null ? String(row[ac.name]) : '';
-      const opts = SpecialJV.buildToAccountOptions();
-      h += '<td' + dataAttr + '><select onchange="Reco.editCell('+i+',\''+U.jsq(ac.name)+'\',this.value)" style="min-width:140px;">';
-      h += '<option value="">— select —</option>';
-      const masters = opts.filter(o => o.kind === 'master');
-      const jvs     = opts.filter(o => o.kind === 'jv');
-      if (masters.length) { h += '<optgroup label="Accounts Master">'; masters.forEach(o => { h += '<option value="'+U.escAttr(o.value)+'"'+(curVal===o.value?' selected':'')+'>'+U.esc(o.label)+'</option>'; }); h += '</optgroup>'; }
-      if (jvs.length)     { h += '<optgroup label="Special JVs">';     jvs.forEach(o => { h += '<option value="'+U.escAttr(o.value)+'"'+(curVal===o.value?' selected':'')+'>'+U.esc(o.label)+'</option>'; }); h += '</optgroup>'; }
-      if (curVal && !opts.find(o => o.value === curVal)) h += '<option value="'+U.escAttr(curVal)+'" selected>'+U.esc(curVal)+' (custom)</option>';
-      h += '</select></td>';
-      accum[ac.name] = curVal;
-      return;
-    }
-
-    /* One rule for what an additional column is worth: Reco._extraOwnValue.
-       The grid used to keep its own copy of that ladder - a lookup, a
-       formula, a tag - and the copy had drifted. Going through the helper
-       also hands the lookup the pass's Masters index instead of a per-row
-       scan of the master.
-       Two deltas, both confirmed invisible on screen: the lookup gains the
-       helper's try/catch -> '' (evalLookup has no throwing path today), and
-       the tag branch stops being String()'d before it lands in `accum`,
-       which only ever feeds Formula/Masters and both re-stringify. The
-       markup below still compares a String, so a numeric tag value still
-       matches its dropdown option rather than becoming "(custom)". */
-    let v;
-    if (ac.type === 'master' || ac.type === 'master_lookup') {
-      v = Reco._extraOwnValue(tpl, sess, accum, row, ac, fullCtx);
-      accum[ac.name] = v;
-      h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(v)+'</td>';
-    } else if (ac.type === 'formula') {
-      v = Reco._extraOwnValue(tpl, sess, accum, row, ac, fullCtx);
-      accum[ac.name] = v;
-      h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(v)+'</td>';
-    } else {
-      const own = Reco._extraOwnValue(tpl, sess, accum, row, ac, fullCtx);
-      accum[ac.name] = own;
-      const tagVal = own == null ? '' : String(own);
-      if (ac.type === 'dropdown') {
-        const dropOpts = Masters._extraDropdownOptions(tpl, ac);
-        h += '<td' + dataAttr + '><select onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)">';
-        h += '<option value="">—</option>';
-        dropOpts.forEach(o => { h += '<option value="'+U.escAttr(o)+'"'+(tagVal===o?' selected':'')+'>'+U.esc(o)+'</option>'; });
-        if (tagVal && dropOpts.indexOf(tagVal) === -1) h += '<option value="'+U.escAttr(tagVal)+'" selected>'+U.esc(tagVal)+' (custom)</option>';
-        h += '</select></td>';
-      } else {
-        h += '<td' + dataAttr + '><input type="text" value="'+U.escAttr(tagVal)+'" onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)" /></td>';
-      }
-    }
-  });
-
   h += '</tr>';
   return h;
+},
+
+/* One added column's cell, at whatever position the display order put it.
+   THE VALUE IS NEVER COMPUTED HERE. `fullOf()` is the row enriched in
+   DECLARATION order (Reco.rowFull), so a column that renders to the left of
+   the column its formula reads still reads the right value — which is the
+   whole point of #25 and is T6. The ladder that decides what an added column
+   is worth stays in Reco._extraOwnValue, through rowFull, and there is no
+   second evaluator. */
+_renderExtraCell(tpl, sess, row, desc, i, fullOf) {
+  const ac = desc.ac;
+  const dataAttr = ' data-col="' + U.escAttr(ac.name) + '"';
+  let h = '';
+
+  if (desc.isToAcct) {
+    /* Still read off the row: this cell is an account code someone picked,
+       not a computed value. (full[] holds the manual-tag-aware value for any
+       formula that references it, which is what every other reader already
+       sees through the shared resolver.) */
+    const curVal = row[ac.name] != null ? String(row[ac.name]) : '';
+    const opts = SpecialJV.buildToAccountOptions();
+    h += '<td' + dataAttr + '><select onchange="Reco.editCell('+i+',\''+U.jsq(ac.name)+'\',this.value)" style="min-width:140px;">';
+    h += '<option value="">— select —</option>';
+    const masters = opts.filter(o => o.kind === 'master');
+    const jvs     = opts.filter(o => o.kind === 'jv');
+    if (masters.length) { h += '<optgroup label="Accounts Master">'; masters.forEach(o => { h += '<option value="'+U.escAttr(o.value)+'"'+(curVal===o.value?' selected':'')+'>'+U.esc(o.label)+'</option>'; }); h += '</optgroup>'; }
+    if (jvs.length)     { h += '<optgroup label="Special JVs">';     jvs.forEach(o => { h += '<option value="'+U.escAttr(o.value)+'"'+(curVal===o.value?' selected':'')+'>'+U.esc(o.label)+'</option>'; }); h += '</optgroup>'; }
+    if (curVal && !opts.find(o => o.value === curVal)) h += '<option value="'+U.escAttr(curVal)+'" selected>'+U.esc(curVal)+' (custom)</option>';
+    h += '</select></td>';
+    return h;
+  }
+
+  const own = fullOf()[ac.name];
+  if (ac.type === 'master' || ac.type === 'master_lookup' || ac.type === 'formula') {
+    h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(own)+'</td>';
+    return h;
+  }
+  const tagVal = own == null ? '' : String(own);
+  if (ac.type === 'dropdown') {
+    const dropOpts = Masters._extraDropdownOptions(tpl, ac);
+    h += '<td' + dataAttr + '><select onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)">';
+    h += '<option value="">—</option>';
+    dropOpts.forEach(o => { h += '<option value="'+U.escAttr(o)+'"'+(tagVal===o?' selected':'')+'>'+U.esc(o)+'</option>'; });
+    if (tagVal && dropOpts.indexOf(tagVal) === -1) h += '<option value="'+U.escAttr(tagVal)+'" selected>'+U.esc(tagVal)+' (custom)</option>';
+    h += '</select></td>';
+  } else {
+    h += '<td' + dataAttr + '><input type="text" value="'+U.escAttr(tagVal)+'" onchange="Reco.setTag(\''+U.jsq(row._id)+'\',\''+U.jsq(ac.name)+'\',this.value)" /></td>';
+  }
+  return h;
+},
+
+/* ---- S5I: repaint ONE row in place ------------------------------------
+   The grid has never repainted a row after an edit: Reco.editCell and
+   Reco.setTag both end in applyEdits -> AppState.save() and nothing redraws,
+   so a formula column over the cell that just changed keeps showing the old
+   value until the whole screen is navigated. One descriptor list makes the
+   fix possible: the row's <tr> can be rebuilt from exactly the list the
+   header was built from, at the filtered index the row already carries.
+
+   Returns true when it repainted. Falls back to false - never to a
+   half-repaint - when the layout the last render published is no longer
+   valid, and the caller can then decide to re-render the grid.
+
+   Focus is restored to the same column's input or select, because the edit
+   handlers fire on change (blur / Enter / Tab) and the element the browser is
+   moving focus to may be the one inside this row. */
+_repaintRow(rowOrId) {
+  const id = AppState.activeRecoId;
+  const tpl = AppState.recoTemplates.find(x => x.id === id);
+  const sess = AppState.recoSessions[id];
+  if (!tpl || !sess) return false;
+  const row = (rowOrId && typeof rowOrId === 'object') ? rowOrId : Reco._rowById(sess, rowOrId);
+  if (!row) return false;
+  const tbody = document.querySelector('.reco-table-wrap tbody');
+  if (!tbody) return false;
+  const tr = tbody.querySelector('tr[data-rid="' + CSS.escape(String(row._id)) + '"]');
+  if (!tr) return false;
+  const st = Reco._virtStateFor(tpl, sess);
+  if (!st || !Array.isArray(st.descs)) return false;
+  const fidx = Number(tr.dataset.frow);
+  if (!isFinite(fidx)) return false;
+
+  const ae = document.activeElement;
+  const keepCol = (ae && tr.contains(ae)) ? (ae.closest('[data-col]') || {}).dataset : null;
+  const keepName = keepCol ? keepCol.col : null;
+  const keepTag = (ae && tr.contains(ae)) ? ae.tagName : null;
+
+  Reco._fullPass();
+  let html;
+  try { html = Reco._renderOneRow(tpl, sess, row, st.descs, st.idxMap, fidx); }
+  finally { Reco._fullEnd(); }
+
+  const holder = document.createElement('tbody');
+  holder.innerHTML = html;
+  const fresh = holder.firstElementChild;
+  if (!fresh) return false;
+  tr.replaceWith(fresh);
+
+  if (keepName) {
+    const td = fresh.querySelector('[data-col="' + CSS.escape(keepName) + '"]');
+    const el = td ? (td.matches('input,select,textarea') ? td : td.querySelector('input,select,textarea')) : null;
+    if (el && (!keepTag || el.tagName === keepTag)) { try { el.focus(); } catch (e) {} }
+  }
+  Reco._ssApplyHighlight();
+  Reco._applyRowFlash();
+  return true;
 },
 
 
@@ -14559,21 +15234,12 @@ renderRecoTable(tpl, sess) {
   _renderRecoTableInner(tpl, sess) {
     SpecialJV.resetOptions();
     Reco._postedIdxReset();
-    // 1. Effective display order (honours saved sess.columnOrder + AEG To Account injection)
-    const displayCols = Reco.effectiveDisplayCols(tpl, sess);
-    const extraCols = [...(tpl.additionalColumns || []), ...(sess.extraColumns || [])];
-
-    // 2. Inject "To Account" as an extra column only if it isn't already in standard columns
-    if (tpl.aegIntegration && tpl.aegIntegration.enabled && tpl.aegIntegration.aegTemplateId) {
-      const aegTpl = AppState.aegTemplates.find(at => at.id === tpl.aegIntegration.aegTemplateId);
-      if (aegTpl && aegTpl.toAccount && (aegTpl.toAccount.mode === 'input' || aegTpl.toAccount.mode === 'inputOrSelect')) {
-        const reqCol = aegTpl.toAccount.inputColumn;
-        if (reqCol && !tpl.columns.find(c => c.name === reqCol)) {
-          const isExtra = extraCols.find(c => c.name === reqCol);
-          if (!isExtra) extraCols.push({ name: reqCol, type: 'custom' });
-        }
-      }
-    }
+    /* 1. ONE ordered descriptor list — file columns and added columns
+       together, in the order this person sees them (their own order, else the
+       team's, else definition order), with the AEG To Account column injected
+       and hidden columns removed. The <thead> below, the <tbody> rows and the
+       virtual scroll handler all walk this same list. */
+    const descs = Reco.effectiveColumnDescs(tpl, sess);
 
     const filtered = Reco.applyTableFiltersSort(tpl, sess);
     const pageSize = sess.pageSize || 200;
@@ -14642,11 +15308,18 @@ renderRecoTable(tpl, sess) {
     // selecting every row the header still said nothing was selected.
     h += '<th style="width:30px;"><input type="checkbox" id="recoSelectAll" title="Select every row the filters leave" onchange="Reco.toggleAllRows(this.checked)" /></th>';
           h += '<th class="status-th" style="min-width:130px; white-space:nowrap;">Status<span class="col-filter-btn'+(Reco._anyStatusFilterActive(sess)?' active':'')+'" onclick="Reco.openStatusFilter(this, event)">▼</span></th>';
-    displayCols.forEach((col, ci) => {
+    /* ONE header loop over the same descriptor list the body walks. An added
+       column is draggable, takes sess.columnWidths and carries a resize
+       handle now that it can be positioned - the Excel view has always
+       written widths for extras by name, so one that was sized there a month
+       ago shows at that width here (release note). */
+    descs.forEach(desc => {
+      const col = desc.name;
       const cf = (sess.columnFilters[col]||[]).filter(c => c.enabled !== false);
       const hasFilter = cf.length > 0 || ((sess.slicers[col]||[]).length > 0);
       const isSorted = sess.columnSorts && sess.columnSorts.col === col;
       const w = sess.columnWidths[col] ? 'width:'+sess.columnWidths[col]+'px;' : '';
+      if (!desc.isExtra) {
       h += '<th class="col-draggable" '
          + 'draggable="true" '
          + 'data-col="'+U.escAttr(col)+'" '
@@ -14662,23 +15335,27 @@ renderRecoTable(tpl, sess) {
       h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.jsq(col)+'\', this, event)">▼</span>';
                h += '<span class="col-resize-handle" draggable="false" data-col="'+U.escAttr(col)+'" ondragstart="event.preventDefault(); event.stopPropagation();"></span>';
       h += '</th>';
-    });
-
-
-
-      extraCols.forEach(ac => {
-        const cf = (sess.columnFilters[ac.name]||[]).filter(c => c.enabled !== false);
-        const hasFilter = cf.length > 0 || ((sess.slicers[ac.name]||[]).length > 0);
-        const isSorted = sess.columnSorts && sess.columnSorts.col === ac.name;
+      } else {
+        const ac = desc.ac;
         const isAdded = !!ac._ssAdded;
-        h += '<th data-col="'+U.escAttr(ac.name)+'" class="'+(isAdded?'col-ss-added':'')+'" style="min-width:60px;">';
+        h += '<th data-col="'+U.escAttr(col)+'" class="col-draggable'+(isAdded?' col-ss-added':'')+'" '
+           + 'draggable="true" '
+           + 'style="'+w+'min-width:60px;" '
+           + 'ondragstart="Reco.onColDragStart(event, \''+U.jsq(col)+'\')" '
+           + 'ondragover="Reco.onColDragOver(event, \''+U.jsq(col)+'\')" '
+           + 'ondragleave="Reco.onColDragLeave(event)" '
+           + 'ondrop="Reco.onColDrop(event, \''+U.jsq(col)+'\')" '
+           + 'ondragend="Reco.onColDragEnd(event)">';
+        h += '<span class="col-grip" title="Drag to reorder">⋮⋮</span> ';
         if (isAdded) h += '<span class="col-marker" title="Added column">✚</span>';
         else h += '<span class="text-muted" style="font-size:9px;">extra</span> ';
-        h += U.esc(ac.name);
+        h += U.esc(col);
         if (ac._ssSingleUse) h += ' <span class="badge ss-single" title="Single-use">⏱</span>';
-      if (isSorted) h += ' <span class="text-muted">'+(sess.columnSorts.dir==='asc'?'▲':'▼')+'</span>';
-      h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.jsq(ac.name)+'\', this, event)">▼</span>';
-      h += '</th>';
+        if (isSorted) h += ' <span class="text-muted">'+(sess.columnSorts.dir==='asc'?'▲':'▼')+'</span>';
+        h += '<span class="col-filter-btn'+(hasFilter||isSorted?' active':'')+'" onclick="Reco.toggleColDropdown(\''+U.jsq(col)+'\', this, event)">▼</span>';
+        h += '<span class="col-resize-handle" draggable="false" data-col="'+U.escAttr(col)+'" ondragstart="event.preventDefault(); event.stopPropagation();"></span>';
+        h += '</th>';
+      }
     });
 
     // REMOVED: Actions Column Header
@@ -14687,18 +15364,18 @@ renderRecoTable(tpl, sess) {
 
     const idxMap = Reco._buildRowIdxMap(sess);
       // Publish what this render computed so the scroll handler can move the
-      // virtual window without re-running the pipeline (see _virtState).
-      Reco._virtState = { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
-                          filtered, slice, displayCols, extraCols, idxMap };
+      // virtual window without re-running the pipeline (see _virtStateFor).
+      Reco._virtPublish(sess, { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
+                                filtered, slice, descs, idxMap, colSig: Reco._colSigFor(tpl, sess) });
       const win = Reco._computeVirtWindow(slice, sess);
-      const colspan = 2 + displayCols.length + extraCols.length;
+      const colspan = 2 + descs.length;
       if (win.topPx > 0) {
         h += '<tr class="virt-spacer-top" style="height:'+win.topPx+'px;"><td colspan="'+colspan+'"></td></tr>';
       }
       
       for (let vi = win.startIdx; vi < win.endIdx; vi++) {
         const fidx = sess.page * pageSize + vi;
-        h += Reco._renderOneRow(tpl, sess, slice[vi], displayCols, extraCols, idxMap, fidx);
+        h += Reco._renderOneRow(tpl, sess, slice[vi], descs, idxMap, fidx);
       }
       if (win.botPx > 0) {
         h += '<tr class="virt-spacer-bot" style="height:'+win.botPx+'px;"><td colspan="'+colspan+'"></td></tr>';
@@ -14814,8 +15491,12 @@ renderRecoTable(tpl, sess) {
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) return;
 
-    // Start from current effective order
-    let order = Reco.effectiveDisplayCols(tpl, sess).slice();
+    /* Seeded from the includeHidden order, not from what is on screen. The
+       drag used to start from the VISIBLE list, so one header drag rewrote
+       the order with every hidden column left out, and unhiding then returned
+       a column to the far right instead of to where it was - permanently, and
+       (because the order lived in the shared session file) for everybody. */
+    let order = Reco.effectiveDisplayCols(tpl, sess, { includeHidden: true }).slice();
     order = order.filter(c => c !== sourceCol);
     const targetIdx = order.indexOf(targetCol);
     if (targetIdx < 0) { order.push(sourceCol); }
@@ -14825,9 +15506,46 @@ renderRecoTable(tpl, sess) {
       const isLeft = (ev.clientX - rect.left) < rect.width / 2;
       order.splice(isLeft ? targetIdx : targetIdx + 1, 0, sourceCol);
     }
-    sess.columnOrder = order;
-    AppState.save();
+    /* MINE, on this PC. Nothing about this drag reaches the shared folder:
+       the order goes to localStorage, and the session is only written when
+       the drag actually invalidated a stored cell selection - which also
+       takes an 85 MiB recoSessions serialise off a column drag at 200k
+       rows. */
+    const hadSel = !!(sess.activeCell || sess.selRange);
+    Reco.setUserOrder(tpl, sess, order);
+    if (hadSel) AppState.save();
     Reco.refreshGrid();   // only the table's columns moved
+  },
+
+  /* The same picker the template editor uses, in its ordered mode, writing
+     THIS PERSON's order. Dragging a header is the quick way for a short hop;
+     this is the one that works keyboard-only and at 600 columns, and it is
+     where someone who has never dragged anything can see what order they are
+     looking at. */
+  openOrderPicker() {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    const team = (tpl.displayOrder && tpl.displayOrder.length) ? tpl.displayOrder : null;
+    ColPicker.openOrdered({
+      title: 'Column order — my view',
+      help: 'Yours, on this PC: nobody else’s grid changes and no file written out of the app changes. '
+          + (team ? 'The template’s own order is the starting point, and <b>Reset View</b> goes back to it. '
+                  : 'Clear it again with <b>Reset View</b>. ')
+          + 'To set the order for everyone, use <b>Display Order</b> in the template editor.',
+      catalog: Reco.pickerCatalog(tpl, sess),
+      chosen: Reco.effectiveDisplayCols(tpl, sess, { includeHidden: true }),
+      doneLabel: 'Use this order',
+      onDone(names) {
+        const hadSel = !!(sess.activeCell || sess.selRange);
+        Reco.setUserOrder(tpl, sess, names);
+        if (hadSel) AppState.save();
+        Reco.refreshGrid();
+        U.toast('Column order set for you on this PC', 'success');
+      },
+      onCancel() { /* nothing to restore: the grid is still behind the modal */ }
+    });
   },
 
   onColDragEnd(ev) {
@@ -14837,18 +15555,25 @@ renderRecoTable(tpl, sess) {
     });
   },
 
-  // Reset column order (and optionally widths/zoom) back to template defaults
+  /* Reset the view: drop THIS PERSON's column order so the template's own
+     order applies again, and (unless told otherwise) widths and zoom.
+     The empty array is written deliberately - it records "no order of my
+     own", which is what stops the legacy shared sess.columnOrder from being
+     migrated back in on the very next read. */
   resetTableView(opts) {
     opts = opts || {};
     const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!sess) return;
-    sess.columnOrder = null;
+    if (tpl) Reco.setUserOrder(tpl, sess, []);
+    sess.columnOrder = null;        // legacy field: stop an older build using it too
     if (opts.widths !== false) sess.columnWidths = {};
     if (opts.zoom !== false) sess.zoom = 1;
     AppState.save();
     App.navigate('reco');
-    U.toast('Table view reset', 'success');
+    U.toast((tpl && tpl.displayOrder && tpl.displayOrder.length)
+      ? 'Using the template’s column order' : 'Table view reset', 'success');
   },
 
   /* ============== ZOOM ============== */
@@ -15679,6 +16404,11 @@ renderRecoTable(tpl, sess) {
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess || !sess.data[rowIdx]) return;
     Reco.applyEdits(tpl, sess, [{ row: sess.data[rowIdx], col, value: val }], { source: 'grid', trusted: true });
+    /* The grid has never repainted after an edit, so a formula or lookup
+       column over the cell that just changed kept showing the old value until
+       the screen was navigated away and back. One descriptor list makes a
+       single-row repaint possible; it is cheap and it keeps focus. */
+    Reco._repaintRow(sess.data[rowIdx]);
   },
 
   setTag(rowId, tagName, val) {
@@ -15687,7 +16417,11 @@ renderRecoTable(tpl, sess) {
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) return;
     const row = Reco._rowById(sess, rowId);
-    if (row) { Reco.applyEdits(tpl, sess, [{ row, col: tagName, value: val }], { source: 'grid', trusted: true }); return; }
+    if (row) {
+      Reco.applyEdits(tpl, sess, [{ row, col: tagName, value: val }], { source: 'grid', trusted: true });
+      Reco._repaintRow(row);   // a tag may feed a formula column (see editCell)
+      return;
+    }
     sess.manualTags = sess.manualTags || {};
     // No row to hand _tagKey, so the id is the key - which is what _tagKey
     // spells out for a row too.
@@ -15769,7 +16503,22 @@ renderRecoTable(tpl, sess) {
     const filtered = Reco.applyTableFiltersSort(tpl, sess);
     const cols = tpl.columns.map(c => c.name);
     const extraCols = (tpl.additionalColumns || []).concat(sess.extraColumns || []);
-    const header = ['Status', 'RecoId'].concat(cols, extraCols.map(ac => ac.name).filter(n => !cols.includes(n)));
+    /* THE TEAM ORDER, never this person's. An export is a file that may feed
+       a macro, a Power Query step or a VLOOKUP by column letter in another
+       workbook: if it followed whoever last dragged a header, Alice's 10:00
+       export and Carol's 11:00 export of the same data would put the same
+       number in different columns, with no error anywhere. tpl.displayOrder
+       is set on the template, so it is one auditable decision for everyone.
+       With no displayOrder this is the stable schema dump it always was.
+
+       Two blocks, as XlSchema.build keeps them and as this header always had
+       them: the file columns, then the added columns. The team order
+       positions columns within each block, so adopting an order can never
+       move a computed column in among the file columns of a file something
+       downstream is pasting against. */
+    const header = ['Status', 'RecoId']
+      .concat(Reco.teamOrder(cols, tpl))
+      .concat(Reco.teamOrder(extraCols.map(ac => ac.name).filter(n => !cols.includes(n)), tpl));
     const rows = filtered.map(r => {
       const full = Reco._rowWithExtras(tpl, sess, r);
       const o = { Status: sess.offsets?.[r._id] ? 'Offset' : 'Open', RecoId: r._recoId || '' };
@@ -16051,7 +16800,9 @@ renderRecoTable(tpl, sess) {
   renderOpenItemsReport(tpl, sess) {
     const openRows = sess.data.filter(r => !sess.offsets?.[r._id]);
     if (!openRows.length) return '<div class="empty" style="color:var(--success, #059669);">All items are offset!</div>';
-    const cols = tpl.columns.map(c => c.name);
+    // Team order (tpl.displayOrder), never the per-user one: this table and
+    // its Export CSV are the same for everyone, as they were before.
+    const cols = Reco.teamOrder(tpl.columns.map(c => c.name), tpl);
     const CAP = Reco.REPORT_ROW_CAP;
     let h = '<h3>Open Items ('+U.fmtInt(openRows.length)+')</h3>';
     h += '<button class="success small" onclick="Reco.exportRowsCsv(\'open_items\','+U.esc(JSON.stringify(cols))+')">Export CSV</button>';
@@ -18638,7 +19389,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     const { resolved, unresolved } = await Groups.resolveGroup(tpl, gid);
 
-    const displayCols = (tpl.displayColumns && tpl.displayColumns.length) ? tpl.displayColumns : tpl.columns.map(c=>c.name);
+    // Team order: a group's members are read across files and the modal is
+    // shared ground, so it must not follow one person's drag.
+    const displayCols = Reco.teamOrder(
+      (tpl.displayColumns && tpl.displayColumns.length) ? tpl.displayColumns : tpl.columns.map(c=>c.name), tpl);
 
     let h = '<div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">';
     h += '<span class="badge general" style="background:'+U.escAttr(g.color)+';color:#fff;">●</span>';
