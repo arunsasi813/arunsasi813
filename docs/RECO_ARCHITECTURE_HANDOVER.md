@@ -1183,3 +1183,175 @@ generation, are what let a post-change entry reverse into its own columns years 
   ledger" tick at allocation time (which would let the dialog know instead of asking), and a
   "Finish re-opening" action for the keys that were not in the loaded data (they are recorded in
   `reversal.notInSession`; reversing again once the right file is loaded is the manual route).
+
+---
+
+## 13. Two review panes side by side
+
+> *"option to parallelly open 2 segments and review and have each to have separate linked Excel"*
+
+**⫿ Split** puts a second pane beside the first. Two slices of one reconciliation, or a
+different template in each. Independent view, shared data, **one live Excel link per pane**.
+
+### 13.1 The one indirection that made it affordable
+
+`AppState.recoSessions[tplId]` is read in 123 places. None of them changed. Instead:
+
+| | before | after |
+|---|---|---|
+| the real sessions | `AppState.recoSessions` | **`AppState.recoSessionsOwned`** |
+| what the 123 readers see | the session | **a view table**: `tplId → the view of the pane that owns that template now` |
+| what is serialised to `reco/recoSessions.json` | `AppState.recoSessions` | `AppState._persistValue('recoSessions')` → the **owned** map |
+
+A *view* is a proxy built by `Panes._makeView`. Every key is classified exactly once:
+
+- **DATA (13)** — `data`, `loadedAt`, `clearedAt`, `activeVersionFile`, `corrections`,
+  `offsets`, `manualTags`, `cellFormulas`, `cellFormats`, `extraColumns`, `selectedRows`,
+  `_docMatches`, `columnOrder`. Read and written straight through to the owner, so both panes
+  see one reconciliation.
+- **VIEW (24)** — `activeSection`, `columnFilters`, `columnSorts`, `slicers`, `statusFilter`,
+  `requireAttachment`, `requireComment`, `requireGroup`, `page`, `pageSize`, `columnWidths`,
+  `hiddenCols`, `zoom`, `activeCell`, `selRange`, `selSig`, `spreadsheetMode`,
+  `formatToolbarOpen`, `excelViewActive`, `correctionExtraCols`, `_dismissDocMatches`,
+  `_virtRowHeight`, `_initialScrollTop`, `_fillDrag`. Private to the pane.
+- an **unclassified** key makes the view **refuse rather than guess** (`Panes.auditKeys()` is
+  asserted complete by the suite, so a new session key fails a test instead of leaking).
+
+Two classifications are against instinct and deliberate. `manualTags` is DATA: it is the typed
+value of an additional column for a row, i.e. content, not a preference. `columnOrder` is DATA:
+it is the legacy *team* order read by `_legacyTeamOrder`, so per-pane it would default to null
+in the second pane. **Consequence to state out loud: the column order is shared by both panes**
+(it is stored per reconciliation per PC via `Reco.userPref`, which is why the two panes converge
+on it rather than moving together — for one repaint they can show one template in two orders,
+each internally consistent; the suite pins that consistency).
+
+Slot 0's `view` is deliberately `null`, meaning *my view IS the owner session object*. That is
+what makes the no-split case byte-identical: `recoSessions[tplId] === recoSessionsOwned[tplId]`,
+and every expression in the grid renderer is character-for-character what it was.
+
+**Seven whole-session assignment sites** were converted (`Panes.ensureSession` /
+`replaceSession` / `dropSession`): boot load, backup export, backup import, the two lazy creates
+in `Reco.render` and `Reco.ingestData`, `restoreSession`, `clearSession` — and
+`RecoTemplate.remove`, which is a *delete* and is why a `recoSessions[x] =` grep could never
+find it. `AppState.flush` asserts the two maps agree on key set, which is what catches an eighth
+site being added later.
+
+### 13.2 Ids, and the rule that holds instead of the one that did not
+
+Two panes render the same markup twice, so `document.getElementById` is ambiguous.
+`Panes._ownIds` parks every id on `PANE_IDS` into the owning pane and strips it from the other,
+and `Panes.el(paneKey, id)` reads one pane's. `Panes.dupIdAudit()` counts **every** id in the
+document rather than only the listed ones — which is how `xlEditInExcelBtn` and
+`sessionRestoreFile` were caught.
+
+The build's original safety argument was *"by the time an emitted handler runs, its own pane owns
+both the ids and `AppState.activeRecoId`"*. That is true of the pane being **entered** and false
+of the pane being **left**. The rule that actually holds, and the one to work to:
+
+> A handler is pane-correct **iff the user gesture that fires it is also the gesture that last
+> set the owner.**
+
+98 functions open by resolving the pane from a global. 94 are correct by construction. Exactly
+two classes break the rule:
+
+1. **Commit-on-blur.** The gesture that moves the owner is the capture-phase `pointerdown` in
+   the *other* pane, which runs *before* the browser's blur — so the `change` handler re-reads
+   the pane the user clicked **into**. One chokepoint: `Panes.focus` flushes a pending
+   commit-on-blur before `Panes.install`, and `Panes.focusDom` moves the keyboard with the
+   ownership (F6 otherwise left the edit pending and already aimed at the wrong template, with
+   the window open until whatever blurred the cell minutes later).
+2. **A handler inside the one shared `#appModal`.** The modal is outside both pane roots, so
+   clicking it re-focuses nothing. There is **no chokepoint** here and N = 4, not 98: Find &
+   Replace and the slicer stamp the pane and template they were opened on, every write
+   re-resolves through the stamp and refuses with a sentence when that pane has moved on, and
+   `_replaceOne` re-finds its row by `_id`. The pane-switch hotkeys also grew the modal guard
+   the file already uses twice.
+
+### 13.3 What is refused, and why that is the feature working
+
+The row selection is **shared** — that is the point of the split. So each consumer that writes
+to the journal or the shared folder takes the key of the pane it was clicked in and refuses a
+selection that reaches outside what that pane shows, naming the count and the remedy:
+
+> *2 of your 5 selected rows are not in this pane. Preview Entry only acts on the rows this pane
+> shows, so nothing was posted. Clear this pane's filters to include them, or act in the pane
+> that shows them.*
+
+Pane-scoped and refusing: **Preview Entry**, **Mark Offset**, **Unmark**, the **three group
+actions** (group membership is a pk-keyed write that gates offsetting), and the Excel export's
+**Selected** row scope (its sibling *Shown in Reco now* always was). **`offsetSelected` is the
+sanctioned exception** and takes both panes' rows under one reco id, because offsetting two
+sides against each other is the whole reason to split.
+
+Four cross-pane DOM exceptions are sanctioned, each named in one comment with its reason so
+nobody tidies them back, and each keeping today's document-level lookup verbatim when there is
+no split: `updateSelSumBar`, `_syncVisibleSelection`, `_rowEl`/`_rowEls`, and `_repaintRow`
+(which otherwise drew an edit in the owner pane only — an edit invisible in the pane beside it
+is a wrong number on a screen two people are comparing).
+
+Also refused, each with a sentence rather than a silent `return false`: a **third pane**,
+**Excel View** and **Sheet mode** while split, and **two periods at once** (every edit appends
+to today's file, so two copies of one row collide in the edit batcher).
+
+### 13.4 One live Excel link per pane
+
+`ExcelLink._active` is keyed by **pane** (each entry carries its `tplId`); `_activeForTpl(tplId)`
+is the accessor for *the live link on this template*. `_watch` became `_watches`, one interval
+per pane; `_lookedUp` is per pane **and** template; and `_tick`'s `activeRecoId !== w.tplId`
+guard became *this pane still exists and still shows this template*. A pane that moves to
+another template **releases** its link rather than carrying it, and the link stays **open** on
+the share so it is adoptable from 📗 Links. The same row edited in both workbooks surfaces as a
+reviewed **conflict** in whichever is loaded back second, in either order, never pre-ticked.
+
+No Python change was needed for any of this.
+
+### 13.5 Three behaviour changes outside the split
+
+These apply whether or not a split is open, and the team should know:
+
+- **The Correction tab refuses an empty corrected value** — *"There is nothing in the
+  corrected-value box — nothing was changed."* Before, `FMT.validate` passed `''`, so a blank
+  Apply cleared a real reference, marked the row corrected so it left the tab looking done, and
+  wrote `{newVal: ''}` to the shared `correctionMaster`, where it re-blanked that key on every
+  future load for every colleague — with no `Cn` row anywhere to show it. If a field genuinely
+  needs blanking from that screen, that wants its own control, not an empty box reporting success.
+- **F6 and Ctrl+Alt+Arrow do nothing while a dialog is open**, and say so. Switching panes under
+  a dialog that belongs to one of them cannot be made to mean anything.
+- **Closing a pane no longer forgets its workbook.** `ExcelLink.confirmLeave` is the only gate on
+  *Return to hub*; a released pane's link is now still known to it, so a colleague cannot walk
+  away from a workbook whose edits are still sitting on the share.
+
+### 13.6 Costs, measured
+
+| | measured |
+|---|---|
+| a second pane's render, 200k rows **with a sort** | one pane 135–172 ms / **one** pipeline pass of 84–113 ms; two panes 267–315 ms / **two** passes |
+| the same, **unfiltered and unsorted** | `applyTableFiltersSort` is under 1 ms of a ~32 ms navigate |
+| `AppState.flush()` with **one** 200k-row template | 24.6 MiB serialised, 1,320–1,839 ms |
+| with **two** 200k-row templates loaded | 49.3 MiB, 3,372–3,893 ms — linear in the templates held |
+
+The second pane really does cost a second filter+sort pass, and the suite pins it at exactly one
+pass per pane with a ratio ceiling. **The memo that would remove it was refused on evidence, not
+skipped:** a memo keyed by the view object cannot make the second pane's pass a hit at all (two
+panes are two view objects, and once they carry different filters they can never share an entry),
+and the specified invalidation point knows nothing about `sess.offsets` — so under
+`statusFilter: 'open'` a Mark Offset would be served a stale hit. The cheaper alternative
+(repaint the second pane through `_refreshVirtBody`) was shimmed in and measured **drawing a row
+that had just been offset as still open**, which in a reconciliation workbench is a
+double-posting invitation. Ticket T-F2-1 records what a safe memo would need.
+
+The flush figure is not caused by the split — it only makes holding two big templates the normal
+way to work. It is the same whole-file shared JSON every other feature writes.
+
+### 13.7 Known limitations
+
+- **Two panes maximum**, and **not two periods** of one template at once.
+- **Excel View and Sheet mode** are unavailable while split (the four jspreadsheet singletons
+  would need lifting — its own ticket).
+- The **column order is shared** by both panes, per reconciliation per PC (§13.1).
+- `Reco._rowById`'s index memo is keyed on *(array identity, length)*, so an **in-place**
+  re-order of `sess.data` would hand back the wrong row. Nothing in the tree re-orders in place
+  today — every real route replaces the array — but A1, A6 and B2 all now address rows by `_id`
+  through it, so it is a shared latent single point of failure (ticket T-F1-1).
+- `Reco.applyCorrection` still writes **no `Cn` row** to the day file (pre-existing): the share's
+  only record of a correction is the `correctionMaster` entry.
