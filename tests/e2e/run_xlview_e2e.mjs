@@ -408,7 +408,28 @@ try {
   check(tbUndo === 'Open' && tbRedo === 'Cleared' && cnRows(root, tpl.dataFolder, 'D3').length === 3, 'toolbar ↶ / ↷ undo and redo through applyEdits', [tbUndo, tbRedo]);
 
   // ── J3 column drag then edit under the Remarks header ──────────────────────
-  await page.evaluate(() => { const ws = Reco._xlWorksheet; ws.moveColumn(__xv.x('Remarks'), __xv.x('Amount')); });
+  /* The drag is spied on, and the spy OUTLASTS THE DEBOUNCE on purpose.
+     #25 keeps the column order out of the shared session file, and the point
+     of that is partly cost: _xlPersistOrder used to end in an unconditional
+     AppState.save(), which arms a 250 ms timer and then serialises every
+     persisted key — 0.8-1.4 s of main-thread JSON.stringify on a 200k-row
+     session, for a write that had nothing in it to write. A spy read in the
+     same task as the drag cannot see that save at all, which is exactly how
+     it got past the gate. This is the live sheet drag, not a stand-in. */
+  const dragSpy = await page.evaluate(async () => {
+    await AppState.flush();
+    const spy = [];
+    const real = Store.serialize;
+    Store.serialize = function (k) { spy.push(k); return real.apply(Store, arguments); };
+    try {
+      const ws = Reco._xlWorksheet;
+      ws.moveColumn(__xv.x('Remarks'), __xv.x('Amount'));
+      await new Promise(r => setTimeout(r, AppState.SAVE_DELAY * 3));
+      return spy;
+    } finally { Store.serialize = real; }
+  });
+  check(!dragSpy.includes('recoSessions'),
+    'J3: a sheet column drag does not serialise the shared session, debounce included', dragSpy);
   await sleep(80);
   /* #25 moved the column order out of the shared session file: it is this
      person's view preference now, kept in localStorage, so a colleague

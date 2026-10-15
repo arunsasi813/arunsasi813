@@ -6341,7 +6341,12 @@ const ExcelLink = {
   async tier() { const c = await ExcelLink.caps(); return (c && c.openpyxl) ? 'P' : 'S'; },
   cfg(tpl) { return Object.assign({}, ExcelLink.LINK_DEFAULTS, (tpl && tpl.excelLink) || {}); },
   _lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
-  _lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  /* true when the value is actually stored. A full, blocked or private-mode
+     localStorage throws here, and a caller that reports "saved" on the way
+     past leaves the person with a preference that is gone at the next launch
+     - so the result is returned and the callers say so (Reco.setUserOrder,
+     _xlSavePrefs). */
+  _lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
   user() { return AppState.currentUser || 'user'; },
   _ctx() {
     const id = AppState.activeRecoId;
@@ -9537,6 +9542,15 @@ defaultTemplate() {
       h += '<div style="margin-top:6px;">';
       order.forEach((n, i) => { h += '<span class="tag">' + (i + 1) + '. ' + U.esc(n) + '</span>'; });
       h += '</div>';
+      /* Who published this order and when. An export's column order changing
+         one morning is otherwise untraceable (#25 finding 7). */
+      if (t.displayOrderBy || t.displayOrderAt) {
+        const at = t.displayOrderAt ? new Date(t.displayOrderAt) : null;
+        const when = (at && !isNaN(at.getTime())) ? U.fmtDate(at, 'DD-MMM-YY') : String(t.displayOrderAt || '');
+        h += '<div class="help" style="margin-top:4px;">Set by <b>' + U.esc(t.displayOrderBy || 'unknown') + '</b>'
+           + (when ? ' on ' + U.esc(when) : '')
+           + '. Saving a different order here re-orders every CSV and Excel workbook exported from this template.</div>';
+      }
     }
     h += '</div>';
     return h;
@@ -9555,6 +9569,7 @@ defaultTemplate() {
       // ever does (see the ColPicker contract).
       onDone(names) {
         RecoTemplate._editing.displayOrder = names.length ? names : null;
+        RecoTemplate._orderTouched();
         RecoTemplate.renderEditor();
         U.toast(names.length ? 'Order set — Save Template to publish it to the team' : 'Order cleared', 'success');
       },
@@ -9570,13 +9585,24 @@ defaultTemplate() {
       return;
     }
     t.displayOrder = mine.slice();
+    RecoTemplate._orderTouched();
     RecoTemplate.renderEditor();
     U.toast('Your order is now the team default — Save Template to publish it', 'success');
   },
 
   clearTeamOrder() {
     RecoTemplate._editing.displayOrder = null;
+    RecoTemplate._orderTouched();
     RecoTemplate.renderEditor();
+  },
+
+  /* Every editor route that changes the TEAM order ends here. The team order
+     is the one route that moves OTHER people's grids, so it needs the stored
+     cell selection cleared at least as much as a private drag does: that pair
+     holds column NAMES resolved back by POSITION (Reco._orderChanged). */
+  _orderTouched() {
+    const t = RecoTemplate._editing;
+    if (t && t.id) Reco._orderChanged(AppState.recoSessions[t.id]);
   },
   toggleEditable(name, checked) {
     const t = RecoTemplate._editing;
@@ -9738,6 +9764,40 @@ defaultTemplate() {
       t.displayOrder = t.displayOrder.filter(n => allNames.has(n));
       if (!t.displayOrder.length) t.displayOrder = null;
     } else t.displayOrder = null;
+
+    /* Publishing a team order is not a screen preference: it is the column
+       order of every CSV and every Excel-link workbook this template writes,
+       for everyone on the folder, and those files feed macros, Power Query
+       steps and VLOOKUPs that read by column position. One click here used to
+       re-order all of them silently and leave no record of who did it. So:
+       say what moves, in the exported file's terms, and stamp the change.
+       The stamp is the auditable half - with it the template editor can say
+       "set by <who>, <when>" instead of the order simply being different one
+       morning. (A colleague who saved this template since this editor opened
+       it is still not detected - that needs an async re-read of the stored
+       template and is called out as a known gap on the write path below.) */
+    const storedTpl = RecoTemplate._isNew ? null : AppState.recoTemplates.find(x => x.id === t.id);
+    const orderWas = (storedTpl && Array.isArray(storedTpl.displayOrder) && storedTpl.displayOrder.length)
+      ? storedTpl.displayOrder : null;
+    const orderNow = (Array.isArray(t.displayOrder) && t.displayOrder.length) ? t.displayOrder : null;
+    const orderMoved = JSON.stringify(orderWas) !== JSON.stringify(orderNow);
+    if (orderMoved && storedTpl) {
+      const head = orderNow
+        ? 'Publish this team column order?\n\n    ' + orderNow.join(' → ')
+        : 'Clear the team column order?\n\nColumns go back to the order they are defined in.';
+      const now = orderWas ? '\n\nToday it is:\n\n    ' + orderWas.join(' → ') : '';
+      if (!confirm(head + now
+        + '\n\nThis changes the column order of every CSV and every Excel workbook exported from this template, '
+        + 'for everyone on this folder. Any macro, Power Query step or VLOOKUP that reads an exported file by '
+        + 'column position needs checking.')) return;
+    }
+    if (orderMoved) {
+      t.displayOrderBy = AppState.currentUser || 'unknown';
+      t.displayOrderAt = new Date().toISOString();
+      // The effective order changes for every colleague with no order of
+      // their own, so the positional cell selection has to go (#3).
+      Reco._orderChanged(AppState.recoSessions[t.id]);
+    }
 
     // Ensure display columns exist
     if (!t.displayColumns.length) t.displayColumns = t.columns.map(c=>c.name);
@@ -10314,8 +10374,17 @@ _xlToolbarHtml(tpl, sess, o) {
   h += '</select></label>';
   h += '<button class="xl-btn" onclick="Reco._xlOpenSearch()" title="Find (Ctrl+F)">🔍</button>';
   h += sep;
-  h += '<button class="xl-btn" onclick="Reco._xlOpenInExcel()" title="Edit this data in Microsoft Excel and load the changes back">📗 Open in Excel</button>';
-  h += '<button class="xl-btn" onclick="Reco.exportData(\'csv\')" title="Download the current view as CSV">⬇ CSV</button>';
+  /* BOTH of these write a FILE, so both use the TEAM column order and not the
+     order of the sheet in front of the person: a file that leaves the app
+     feeds macros and VLOOKUPs by column position, and one colleague
+     rearranging their own sheet must not move a number into a different
+     column of it. The sheet itself follows this person's order, so the two
+     can differ - which is exactly why both titles say so rather than
+     claiming to download "the current view". (Ctrl+C in the sheet copies
+     what is on screen, in the sheet's order; that is the person's own
+     WYSIWYG action and is left alone.) */
+  h += '<button class="xl-btn" onclick="Reco._xlOpenInExcel()" title="Edit this data in Microsoft Excel and load the changes back. The workbook uses the team’s column order (Display Order on the template), not the order of this sheet, so a file that feeds a macro or a VLOOKUP is the same for everyone.">📗 Open in Excel</button>';
+  h += '<button class="xl-btn" onclick="Reco.exportData(\'csv\')" title="Download this data as CSV. The file uses the team’s column order (Display Order on the template), not the order of this sheet, so it is the same for everyone.">⬇ CSV</button>';
   h += sep;
   // jss_object keeps the sheet's selection when these are clicked.
   h += '<button class="xl-btn jss_object" onclick="Reco._xlFmt(\'bold\',\'toggle\')" title="Bold"><b>B</b></button>';
@@ -11080,8 +11149,16 @@ _xlPersistOrder(ws) {
   if (!C) return;
   const shown = ws.options.columns.map(c => c && c.name).filter(n => n && n !== '_status_' && n !== '_rid');
   const base = Reco.effectiveDisplayCols(C.tpl, C.sess, { includeHidden: true });
-  Reco.setUserOrder(C.tpl, C.sess, Reco._reorderKeepingSlots(base, shown));
-  AppState.save();
+  /* Exactly as onColDrop: the order goes to localStorage, and the SHARED
+     session file is written only when the reorder actually invalidated a
+     stored cell selection. The unconditional save that was here debounced
+     into flush() and serialised every persisted key - 0.8-1.4 s of
+     main-thread JSON.stringify on every sheet column drag at 200k rows, for a
+     write with nothing in it to write. */
+  const hadSel = !!(C.sess && (C.sess.activeCell || C.sess.selRange));
+  const ok = Reco.setUserOrder(C.tpl, C.sess, Reco._reorderKeepingSlots(base, shown));
+  if (hadSel) AppState.save();
+  if (!ok) U.toast('Column order applied for now — this computer does not allow saving it', 'warn');
 },
 _xlOnSort(ws, x, ord) {
   const C = Reco._xlCtx;
@@ -12689,6 +12766,10 @@ _ssSetActiveCell(fidx, col, extend) {
     sess.activeCell = { fidx, col };
     sess.selRange = null;
   }
+  /* Stamped with the order in force, so a later render can tell whether this
+     pair still denotes the columns it was made against - see _selCheck. */
+  const tplNow = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+  if (tplNow) sess.selSig = Reco._colSigFor(tplNow, sess);
   Reco._ssEnsureVisible(fidx);
   Reco._ssApplyHighlight();
 },
@@ -13443,13 +13524,15 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     sess.columnFilters = sess.columnFilters || {};   // { colName: [ {op,val,val2,enabled} ] }
     sess.columnSorts = sess.columnSorts || null;     // { col, dir }
     sess.columnWidths = sess.columnWidths || {};     // { colName: px }
-    /* LEGACY, read-only. The column order used to be kept here - in
+    /* LEGACY, READ-ONLY. The column order used to be kept here - in
        recoSessions.json, one shared file on the folder keyed by template id -
-       so the last colleague to drag a header set it for the whole team. It is
-       now per person in localStorage (Reco.userPref); this field is migrated
-       into that store once, on first read, and never written again, and it is
-       left on disk so an older build keeps working. */
-    sess.columnOrder  = sess.columnOrder || null;    // DEPRECATED: see Reco._userOrder
+       so the last colleague to drag a header set it for the whole team. A new
+       order is now per person in localStorage (Reco.userPref). This field is
+       never written again by anything: it is read as a TEAM-LEVEL fallback
+       below tpl.displayOrder (Reco._legacyTeamOrder), which is what keeps
+       every existing share rendering as it does today, and it is left on disk
+       so an older build keeps working. */
+    sess.columnOrder  = sess.columnOrder || null;    // DEPRECATED: see Reco._legacyTeamOrder
     sess.zoom         = sess.zoom || 1;              // 0.5 .. 2.0
     sess.page = sess.page || 0;
     sess.pageSize = sess.pageSize || 200;
@@ -14495,20 +14578,28 @@ _sortKeyed(keyed, isDate, dir) {
                             template, so it is the same for everyone on the
                             folder, every day. Exports read this and NEVER a
                             person's own order.
+       sess.columnOrder     the LEGACY shared order, READ-ONLY for ever: what
+                            the old build wrote into recoSessions.json when
+                            anybody dragged a header. A team-level FALLBACK
+                            below tpl.displayOrder, file columns only, never
+                            written and never promoted to anyone's private
+                            order (_legacyTeamOrder says why both matter).
        the per-user order   localStorage, this PC only (Reco.userPref). What
                             the header drag and the Excel-view drag write, so
                             a colleague dragging a column cannot move anyone
                             else's grid.
 
      Precedence in one sentence: your order beats the team order, the team
-     order beats definition order, a column nobody mentions goes last, and
-     hidden columns are removed last.
+     order beats the legacy shared order, that beats definition order, a
+     column nobody mentions goes last, and hidden columns are removed last.
 
      Backward compatibility is exact and is the gate on the change (T1): with
-     displayOrder absent and no per-user order, _mergeOrder(base, null)
-     returns `base` — the same array — and base is displayColumns order then
-     extras in declaration order, which is what the grid drew before. Nothing
-     auto-seeds displayOrder on load.
+     displayOrder absent, no per-user order and no legacy order,
+     _mergeOrder(base, null) returns `base` — the same array — and base is
+     displayColumns order then extras in declaration order, which is what the
+     grid drew before. With a legacy order on the share, the file-columns-only
+     fallback reproduces the old build's own arrangement (_legacyTeamOrder).
+     Nothing auto-seeds displayOrder on load.
 
      S15 (purity): every helper here takes (tpl, sess) explicitly and reads no
      other session state, so a second pane with its own session is a second
@@ -14550,13 +14641,17 @@ _sortKeyed(keyed, isDate, dir) {
      the column signature on every frame. */
   _prefKey(tplId, key) { return 'reco.view.v1.' + tplId + '.' + key; },
   _prefMem: {},
+  /* In setter mode this returns TRUE WHEN THE VALUE REACHED localStorage, not
+     the value: the memo is still set either way (the preference applies for
+     this session), but a caller that toasts "saved" without looking leaves
+     the person with an order that is gone at the next launch - which is the
+     complaint this whole feature answers. */
   userPref(tplId, key, value) {
     const k = Reco._prefKey(tplId, key);
     if (arguments.length >= 3) {
       Reco._prefMem[k] = value;
-      if (value == null) { try { localStorage.removeItem(k); } catch (e) {} }
-      else ExcelLink._lsSet(k, value);
-      return value;
+      if (value == null) { try { localStorage.removeItem(k); return true; } catch (e) { return false; } }
+      return ExcelLink._lsSet(k, value);
     }
     if (Object.prototype.hasOwnProperty.call(Reco._prefMem, k)) return Reco._prefMem[k];
     const v = ExcelLink._lsGet(k, null);
@@ -14564,32 +14659,104 @@ _sortKeyed(keyed, isDate, dir) {
     return v;
   },
 
-  /* This person's column order for this template, or null.
-     sess.columnOrder is READ-ONLY legacy: whatever is in it was written by
-     whoever dragged a header last, on the shared file. It is migrated into
-     localStorage once, on first read, and then never written again — and it
-     is left on disk so an older build keeps working. The empty array is
-     stored deliberately: it records "this person has no order of their own",
-     which is what stops a Reset View from being undone by a re-migration of
-     the legacy field on the very next read. */
+  /* This person's own column order for this template, or null. Nothing else:
+     a read of a preference never writes one.
+     This USED to migrate the legacy shared sess.columnOrder into localStorage
+     on first read, which was a design error - see _legacyTeamOrder. */
   _userOrder(tpl, sess) {
-    let o = Reco.userPref(tpl.id, 'columnOrder');
-    if (!Array.isArray(o)) {
-      const legacy = (sess && Array.isArray(sess.columnOrder)) ? sess.columnOrder : null;
-      o = legacy ? legacy.slice() : [];
-      Reco.userPref(tpl.id, 'columnOrder', o);
-    }
-    return o.length ? o : null;
+    const o = Reco.userPref(tpl.id, 'columnOrder');
+    if (!Array.isArray(o) || !o.length) return null;
+    /* An order none of whose names still exist is not an order, it is a
+       leftover - the template was renamed or tidied since this person last
+       dragged a header. Returning it would suppress the published team order
+       and drop the grid to definition order, which is the same "a team order
+       can never take effect" failure as the migration, in a narrower case. */
+    const known = new Set((tpl.columns || []).map(c => c.name)
+      .concat((tpl.additionalColumns || []).map(a => a && a.name))
+      .concat(((sess && sess.extraColumns) || []).map(a => a && a.name))
+      .filter(Boolean));
+    return o.some(n => known.has(n)) ? o : null;
   },
 
-  /* Write this person's order and nothing else. `sess.activeCell` and
-     `sess.selRange` hold column NAMES that _ssVisibleCols resolves back to
-     positions, so after a reorder the same stored pair denotes a different
-     SET of columns and a fill would take its source from the wrong one.
-     Clear both, the way turning sheet mode off already does. */
+  /* The legacy shared order as a TEAM-LEVEL FALLBACK. READ-ONLY, for ever.
+     sess.columnOrder lives in recoSessions.json on the folder, so whatever is
+     in it was written by whichever colleague dragged a header last - it was
+     never THIS person's choice. Promoting it to a private order (which is
+     what the one-time localStorage migration did) would hand one stranger's
+     drag to everybody as a personal override that permanently outranks the
+     published team order, so a team order could never take effect again.
+     As a fallback BELOW tpl.displayOrder it does the one job worth keeping:
+     every share that has such an order keeps rendering exactly as it does
+     today, and the first published team order replaces it everywhere.
+
+     FILE COLUMNS ONLY, and that is the byte-identity gate (T1), not a
+     detail: the build this replaces applied the shared order to the
+     file-column list alone and appended the added columns in declaration
+     order, so an added column's name in this array was silently dropped. The
+     unified base would now honour it and move that column - which is a
+     visible change to an existing share on upgrade. Dropping the names the
+     old build dropped keeps the grid, the Excel-link schema and the sheet's
+     file-column order identical to what the team sees today. */
+  _legacyTeamOrder(tpl, sess) {
+    const o = (sess && Array.isArray(sess.columnOrder)) ? sess.columnOrder : null;
+    if (!o || !o.length) return null;
+    const fileNames = new Set((tpl.columns || []).map(c => c.name));
+    const f = o.filter(n => fileNames.has(n));
+    return f.length ? f : null;
+  },
+
+  /* The effective order changed, so a stored cell selection no longer means
+     what it said. `sess.activeCell` and `sess.selRange` hold column NAMES
+     that _ssVisibleCols resolves back to POSITIONS, so after a reorder the
+     same stored pair denotes a different SET of columns and a fill would take
+     its source from the wrong one - silently, into the rows and the day file.
+     Clear both, the way turning sheet mode off already does.
+     Returns true when there was something to clear, which is also the only
+     reason any of these routes has to write the shared session file at all.
+     CALL THIS FROM EVERY ROUTE THAT CHANGES THE EFFECTIVE ORDER - the team
+     order moves other people's grids, so it needs this at least as much as a
+     private drag does. (hideCol/unhideAllCols/toggleDisplay have the same
+     gap for the same reason; that one is pre-existing and is its own ticket.) */
+  _orderChanged(sess) {
+    if (!sess) return false;
+    const had = !!(sess.activeCell || sess.selRange);
+    sess.activeCell = null;
+    sess.selRange = null;
+    sess.selSig = null;
+    return had;
+  },
+
+  /* The same guarantee, from the other end, and this is the one that holds.
+     Clearing from each route that changes the order cannot be complete: a
+     colleague PUBLISHES a team order, this PC reloads, and no local route ever
+     fires - the stored pair arrives off the shared folder already stale, and a
+     fill takes its source from the wrong column without a word.
+     So the pair is stamped with the column signature it was made under
+     (_ssSetActiveCell) and checked against the order in force here, on every
+     grid render. A pair with no stamp came from a build that did not write one:
+     adopt the current signature rather than throwing away a selection we cannot
+     prove is wrong, which is the only safe reading of "unknown". */
+  _selCheck(tpl, sess) {
+    if (!sess || (!sess.activeCell && !sess.selRange)) {
+      if (sess && sess.selSig) sess.selSig = null;
+      return false;
+    }
+    const sig = Reco._colSigFor(tpl, sess);
+    if (!sess.selSig) { sess.selSig = sig; return false; }
+    if (sess.selSig === sig) return false;
+    sess.activeCell = null;
+    sess.selRange = null;
+    sess.selSig = null;
+    return true;
+  },
+
+  /* Write this person's order and nothing else. Returns false when this PC
+     would not store it (see userPref), so the caller can say "applied for
+     now" instead of "saved". */
   setUserOrder(tpl, sess, order) {
-    Reco.userPref(tpl.id, 'columnOrder', (order || []).slice());
-    if (sess) { sess.activeCell = null; sess.selRange = null; }
+    const ok = Reco.userPref(tpl.id, 'columnOrder', (order || []).slice());
+    Reco._orderChanged(sess);
+    return ok !== false;
   },
 
   /* Which columns the grid could show, and in what order before any display
@@ -14615,24 +14782,49 @@ _sortKeyed(keyed, isDate, dir) {
     // …and as a synthetic extra when it is not a column of the file at all.
     const synthToAcc = !!(toAcc && !colNames.has(toAcc) && !have.has(toAcc));
     if (synthToAcc) base.push(toAcc);
+    /* The To Account column is an EXTRA in both of the shapes that are not a
+       file column: an additionalColumns entry of that name, or the synthetic
+       one just pushed. That is the distinction the hide guard below needs. */
+    const extraToAcc = !!(toAcc && !colNames.has(toAcc));
     if (!opts.includeHidden) {
       const hidden = new Set(sess.hiddenCols || []);
-      // The synthetic To Account column is never hidden away: the entry needs
-      // it. That exception is XlSchema.build's and is kept verbatim.
-      if (hidden.size) base = base.filter(n => !hidden.has(n) || (synthToAcc && n === toAcc));
+      /* The To Account column is never hidden away when it is an ADDED or a
+         synthetic column: the entry flow needs that cell, and the grid is the
+         only place to pick it. That exception is XlSchema.build's extras
+         guard (`ac.name === toAcc`) and is now kept verbatim - it used to
+         read `synthToAcc && n === toAcc`, which is false whenever the To
+         Account name is itself an additionalColumns entry, so hiding that
+         column left the entry with nowhere to pick an account while
+         XlSchema.build still listed it.
+         A To Account column that is a FILE column follows hiddenCols here
+         exactly as the build before this change did (T1); that the schema
+         keeps it and the grid does not is pre-existing and is its own
+         ticket - repairing it here would change an existing share's grid. */
+      if (hidden.size) base = base.filter(n => !hidden.has(n) || (extraToAcc && n === toAcc));
     }
     return base;
   },
 
-  /* The effective order. opts.order === 'team' ignores the per-user order —
-     that is what every export path asks for. opts.includeHidden as above. */
+  /* The effective order, in ONE precedence chain:
+
+       my order  >  the team order (tpl.displayOrder)  >  the legacy shared
+       sess.columnOrder, file columns only  >  definition order
+
+     opts.order === 'team' drops the first step and nothing else - that is
+     what every export path asks for, so a colleague's drag can never move a
+     number into a different column of a file that feeds a macro. The legacy
+     fallback stays in the team chain deliberately: it is what the Excel-link
+     workbook of an existing share is built from today, and leaving it out
+     would re-order that file on upgrade for every share anyone has ever
+     dragged a header on. opts.includeHidden as above. */
   effectiveDisplayCols(tpl, sess, opts) {
     sess = sess || {};
     opts = opts || {};
     const base = Reco.visibleBase(tpl, sess, opts);
     const team = (tpl.displayOrder && tpl.displayOrder.length) ? tpl.displayOrder : null;
-    if (opts.order === 'team') return Reco._mergeOrder(base, team);
-    return Reco._mergeOrder(base, Reco._userOrder(tpl, sess) || team);
+    const shared = team || Reco._legacyTeamOrder(tpl, sess);
+    if (opts.order === 'team') return Reco._mergeOrder(base, shared);
+    return Reco._mergeOrder(base, Reco._userOrder(tpl, sess) || shared);
   },
 
   /* The team order of an arbitrary base list (an export header, a report's
@@ -14940,16 +15132,43 @@ _virtPublish(sess, state) {
   return state;
 },
 
+/* The published layout, when it is still true for this (template, session,
+   page) AND for the columns on screen. Null otherwise - a caller that wants
+   to know WHY asks _virtColsStale. */
 _virtStateFor(tpl, sess) {
-  const pageSize = sess.pageSize || 200;
-  const s = Reco._virtStates.get(sess);
-  if (s && s.tplId === tpl.id && s.data === sess.data && s.page === sess.page
-      && s.pageSize === pageSize && Array.isArray(s.filtered)
-      /* The column signature: without it a scroll repaints the body with the
-         layout the last render published while the <thead> already shows a
-         new order, and every value lands one column out (T9). */
-      && s.colSig === Reco._colSigFor(tpl, sess)) return s;
+  const s = Reco._virtRowsState(tpl, sess);
+  /* The column signature: without it a scroll repaints the body with the
+     layout the last render published while the <thead> shows another one, and
+     every value lands one column out (T9). */
+  if (s && s.colSig === Reco._colSigFor(tpl, sess)) return s;
   return null;
+},
+
+/* The published layout when the ROWS it describes are still the right ones -
+   same template, same data array, same page - whatever the columns have done
+   since. The two kinds of staleness have to be told apart because they need
+   opposite repairs (see _virtColsStale). */
+_virtRowsState(tpl, sess) {
+  const pageSize = sess.pageSize || 200;
+  let s = null;
+  try { s = Reco._virtStates.get(sess); } catch (e) { return null; }
+  if (s && s.tplId === tpl.id && s.data === sess.data && s.page === sess.page
+      && s.pageSize === pageSize && Array.isArray(s.filtered)) return s;
+  return null;
+},
+
+/* True when the ONLY thing that has gone stale is the column layout: the rows
+   are the same, the columns have moved.
+   This is not a case for a body-only repaint. The <thead> on screen was built
+   from the OLD order and nothing but the full render rewrites it, so
+   rebuilding the <tbody> from the NEW order puts every cell under the wrong
+   column name - silently, which is the very failure the signature was added
+   to prevent, moved one step along. The caller escalates to Reco.refreshGrid,
+   which rebuilds the header and the body from one descriptor list and keeps
+   the scroll position. */
+_virtColsStale(tpl, sess) {
+  const s = Reco._virtRowsState(tpl, sess);
+  return !!s && s.colSig !== Reco._colSigFor(tpl, sess);
 },
 
 _refreshVirtBody() {
@@ -14959,6 +15178,11 @@ _refreshVirtBody() {
   if (!tpl || !sess) return;
   const tbody = document.querySelector('.reco-table-wrap tbody');
   if (!tbody) return;
+  /* Columns moved without a re-render: the header on screen and a body built
+     now would disagree, so this is a full render's job, not a body repaint
+     (see _virtColsStale). Checked out here, before _fullPass, because
+     renderRecoTable opens a pass of its own. */
+  if (Reco._virtColsStale(tpl, sess)) { Reco.refreshGrid(); return; }
   Reco._fullPass();
   try { return Reco._refreshVirtBodyInner(tpl, sess, tbody); }
   finally { Reco._fullEnd(); }
@@ -15181,12 +15405,24 @@ _renderExtraCell(tpl, sess, row, desc, i, fullOf) {
    Focus is restored to the same column's input or select, because the edit
    handlers fire on change (blur / Enter / Tab) and the element the browser is
    moving focus to may be the one inside this row. */
+/* Deferred by one task at the call sites, so the row handle may be stale by
+   the time this runs: sess.data can be replaced in between by a reload, a new
+   file or a restore. Re-resolve against the session actually on screen and do
+   nothing if the row is not in it - painting a row that is no longer there puts
+   values in a grid they do not belong to.
+   One visible consequence of that deferral, worth knowing when reading this
+   code or a test: for one macrotask after an edit the DOM still shows the old
+   value, so a caller that needs the new markup has to await a task. */
 _repaintRow(rowOrId) {
   const id = AppState.activeRecoId;
   const tpl = AppState.recoTemplates.find(x => x.id === id);
   const sess = AppState.recoSessions[id];
   if (!tpl || !sess) return false;
-  const row = (rowOrId && typeof rowOrId === 'object') ? rowOrId : Reco._rowById(sess, rowOrId);
+  /* Re-resolved against the session ON SCREEN, never trusted as a handle. The
+     call sites defer by one task, and in that gap sess.data can be replaced by
+     a reload, a new file or a restore - and the row the caller is holding may
+     then belong to a session, or a template, that is no longer displayed. */
+  const row = Reco._rowById(sess, (rowOrId && typeof rowOrId === 'object') ? rowOrId._id : rowOrId);
   if (!row) return false;
   const tbody = document.querySelector('.reco-table-wrap tbody');
   if (!tbody) return false;
@@ -15232,6 +15468,9 @@ renderRecoTable(tpl, sess) {
     finally { Reco._fullEnd(); }
   },
   _renderRecoTableInner(tpl, sess) {
+    // Before anything reads it: a stored cell selection made under a different
+    // column order no longer denotes those columns.
+    Reco._selCheck(tpl, sess);
     SpecialJV.resetOptions();
     Reco._postedIdxReset();
     /* 1. ONE ordered descriptor list — file columns and added columns
@@ -15512,8 +15751,9 @@ renderRecoTable(tpl, sess) {
        takes an 85 MiB recoSessions serialise off a column drag at 200k
        rows. */
     const hadSel = !!(sess.activeCell || sess.selRange);
-    Reco.setUserOrder(tpl, sess, order);
+    const ok = Reco.setUserOrder(tpl, sess, order);
     if (hadSel) AppState.save();
+    if (!ok) U.toast('Column order applied for now — this computer does not allow saving it', 'warn');
     Reco.refreshGrid();   // only the table's columns moved
   },
 
@@ -15539,10 +15779,12 @@ renderRecoTable(tpl, sess) {
       doneLabel: 'Use this order',
       onDone(names) {
         const hadSel = !!(sess.activeCell || sess.selRange);
-        Reco.setUserOrder(tpl, sess, names);
+        const ok = Reco.setUserOrder(tpl, sess, names);
         if (hadSel) AppState.save();
         Reco.refreshGrid();
-        U.toast('Column order set for you on this PC', 'success');
+        U.toast(ok ? 'Column order set for you on this PC'
+                   : 'Column order applied for now — this computer does not allow saving it',
+                ok ? 'success' : 'warn');
       },
       onCancel() { /* nothing to restore: the grid is still behind the modal */ }
     });
@@ -15555,25 +15797,31 @@ renderRecoTable(tpl, sess) {
     });
   },
 
-  /* Reset the view: drop THIS PERSON's column order so the template's own
-     order applies again, and (unless told otherwise) widths and zoom.
-     The empty array is written deliberately - it records "no order of my
-     own", which is what stops the legacy shared sess.columnOrder from being
-     migrated back in on the very next read. */
+  /* Reset the view: drop THIS PERSON's column order so the shared order
+     applies again, and (unless told otherwise) widths and zoom. The empty
+     array is written deliberately - it records "no order of my own", so this
+     PC falls back to the team order rather than to nothing.
+     IT MUST NOT TOUCH sess.columnOrder. That field is on the shared folder,
+     so nulling it here - a purely personal action on one PC - deleted the
+     column order of every colleague on that folder: the people still on the
+     old build lost their layout outright, and everyone on this build lost the
+     fallback that keeps their grid as it was. It is read-only for ever
+     (Reco._legacyTeamOrder). */
   resetTableView(opts) {
     opts = opts || {};
     const id = AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!sess) return;
-    if (tpl) Reco.setUserOrder(tpl, sess, []);
-    sess.columnOrder = null;        // legacy field: stop an older build using it too
+    let ok = true;
+    if (tpl) ok = Reco.setUserOrder(tpl, sess, []);
     if (opts.widths !== false) sess.columnWidths = {};
     if (opts.zoom !== false) sess.zoom = 1;
     AppState.save();
     App.navigate('reco');
-    U.toast((tpl && tpl.displayOrder && tpl.displayOrder.length)
-      ? 'Using the template’s column order' : 'Table view reset', 'success');
+    if (!ok) { U.toast('Table view reset for now — this computer does not allow saving it', 'warn'); return; }
+    U.toast((tpl && ((tpl.displayOrder && tpl.displayOrder.length) || Reco._legacyTeamOrder(tpl, sess)))
+      ? 'Using the team’s column order' : 'Table view reset', 'success');
   },
 
   /* ============== ZOOM ============== */
@@ -16403,12 +16651,25 @@ renderRecoTable(tpl, sess) {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess || !sess.data[rowIdx]) return;
-    Reco.applyEdits(tpl, sess, [{ row: sess.data[rowIdx], col, value: val }], { source: 'grid', trusted: true });
+    /* Held by identity, not by index: the repaint below happens one task
+       later, and an index read then could be a different row if anything has
+       reloaded sess.data in between. _repaintRow finds the <tr> by _id. */
+    const row = sess.data[rowIdx];
+    Reco.applyEdits(tpl, sess, [{ row, col, value: val }], { source: 'grid', trusted: true });
     /* The grid has never repainted after an edit, so a formula or lookup
        column over the cell that just changed kept showing the old value until
        the screen was navigated away and back. One descriptor list makes a
-       single-row repaint possible; it is cheap and it keeps focus. */
-    Reco._repaintRow(sess.data[rowIdx]);
+       single-row repaint possible; it is cheap and it keeps focus.
+
+       DEFERRED ONE TASK, and that is the whole point: this runs from the
+       cell's `change`, which fires DURING the browser's focus move on Tab.
+       Repainting there replaces the <tr> while the browser is still moving
+       focus, so the element it had chosen is detached and focus lands on
+       <body> - i.e. Tab stops working along the row, which is how this screen
+       is actually used. One task later the move has finished, and _repaintRow
+       reads document.activeElement when it runs, so it restores the cell the
+       user has ARRIVED in. Enter is unaffected (focus never leaves). */
+    setTimeout(() => Reco._repaintRow(row), 0);
   },
 
   setTag(rowId, tagName, val) {
@@ -16419,7 +16680,8 @@ renderRecoTable(tpl, sess) {
     const row = Reco._rowById(sess, rowId);
     if (row) {
       Reco.applyEdits(tpl, sess, [{ row, col: tagName, value: val }], { source: 'grid', trusted: true });
-      Reco._repaintRow(row);   // a tag may feed a formula column (see editCell)
+      // A tag may feed a formula column; deferred for the Tab move (see editCell).
+      setTimeout(() => Reco._repaintRow(row), 0);
       return;
     }
     sess.manualTags = sess.manualTags || {};
@@ -20045,7 +20307,17 @@ renderCustomReport(tpl, sess, rpt, idx) {
         if (d.template && d.template.id && d.template.id !== id) {
           if (!confirm('This backup was taken from template "' + (d.template.name || d.template.id) + '", not "' + (cur ? cur.name : id) + '". Restore it into the current template anyway?' + revWarn)) return;
         } else if (!confirm('Replace the loaded data, manual offsets, corrections, document numbers and entries of this template with the backup?' + revWarn)) return;
-        if (d.session) AppState.recoSessions[id] = d.session;
+        /* The legacy shared column order is READ-ONLY (Reco._legacyTeamOrder),
+           and a restore is the second route that used to write it: the backup
+           carries whatever array was on the session when it was taken, and
+           assigning it republished that to the whole folder - either
+           resurrecting an order the team had moved on from or wiping the one
+           they are using. Carry the stored value across untouched instead. */
+        if (d.session) {
+          const keepLegacy = (AppState.recoSessions[id] || {}).columnOrder || null;
+          AppState.recoSessions[id] = d.session;
+          d.session.columnOrder = keepLegacy;
+        }
         if (d.manualOffsetMaster) AppState.manualOffsetMaster[id] = d.manualOffsetMaster;
         if (d.correctionMaster) AppState.correctionMaster[id] = d.correctionMaster;
         if (d.docNumberMaster) AppState.docNumberMaster[id] = d.docNumberMaster;

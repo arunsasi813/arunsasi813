@@ -64,11 +64,19 @@ function note(msg, extra) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+/* Run the WHOLE suite against another build without touching the working
+   tree: APP_REV=<rev> builds every app root from `git show <rev>:apps/Reco.html`.
+   That is how the assertions here were shown to FAIL on the build before the
+   fix each one guards (APP_REV=d5d73ad). */
+const APP_REV = process.env.APP_REV || null;
+if (APP_REV) console.log('APP_REV=' + APP_REV + ' — running against that build, not the working tree');
+
 /* `fromRev` builds the root around the app as it was at that commit instead
    of the working tree, so T1 can diff two builds that are otherwise running
    on identical, separate shares. Returns root:null when the revision is not
    available. */
 function makeRoot(name, fromRev) {
+  fromRev = fromRev || APP_REV;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'reco-colorder-'));
   const root = path.join(base, name);
   const cp = (src, dst) => {
@@ -831,7 +839,7 @@ try {
      [9] _repaintRow — the row the edit touched, and the pre-existing bug
      ==================================================================== */
   console.log('\n[9] _repaintRow: the grid repaints the row after an edit');
-  const t10 = await page.evaluate((id) => {
+  const t10 = await page.evaluate(async (id) => {
     const t = AppState.recoTemplates.find(x => x.id === id);
     RecoTemplate.open(t.id);
     const s = AppState.recoSessions[t.id];
@@ -847,15 +855,22 @@ try {
     // The edit path a user takes: the editable cell's onchange.
     const idx = s.data.findIndex(r => r._id === 'r0');
     Reco.editCell(idx, 'C03', '999');
+    /* The repaint is DEFERRED ONE TASK on purpose - it runs from `change`,
+       which fires in the middle of the browser's focus move on Tab (see
+       [9b]). So the row is still the old one in this same task… */
+    const sameTask = cell('r0', 'Calc');
+    await new Promise(r => setTimeout(r, 0));
     const after = cell('r0', 'Calc');
     const otherRow = cell('r1', 'Calc');
     const rowCount = document.querySelectorAll('.reco-table-wrap tbody tr:not(.virt-spacer-top):not(.virt-spacer-bot)').length;
-    return { before, after, otherRow, rowCount, raw: s.data[idx].C03 };
+    return { before, sameTask, after, otherRow, rowCount, raw: s.data[idx].C03 };
   }, TPL);
   check(t10.before === '200' && t10.raw === '999',
     'the fixture starts at 200 and the edit landed', t10);
   check(t10.after === '1998',
-    'the formula column over the edited cell repaints immediately — and it is rendered ABOVE the column it reads', t10);
+    'the formula column over the edited cell repaints — and it is rendered ABOVE the column it reads', t10);
+  check(t10.sameTask === '200',
+    'and the repaint is deferred one task, not done inside the change handler (this is what keeps Tab working)', t10);
   check(t10.otherRow === '400' && t10.rowCount === 12, 'only that row was repainted; the rest of the body is untouched', t10);
 
   const t10b = await page.evaluate(() => {
@@ -886,48 +901,294 @@ try {
     '_repaintRow refuses rather than half-repainting when the grid is not what is on screen', t10c);
 
   /* ====================================================================
-     [10] Legacy sess.columnOrder: migrated once, never written again
+     [9b] TAB ALONG THE ROW — the REAL keyboard, which is how this screen is
+     used. This is the assertion whose absence let a blocker ship: [9] above
+     calls Reco._repaintRow() directly, so it can only prove that focus
+     survives a PROGRAMMATIC repaint. The flow that breaks is the user
+     LEAVING the cell: Tab starts the focus move -> blur fires `change` ->
+     editCell -> _repaintRow -> tr.replaceWith() detaches the element the
+     browser had already chosen, and focus lands on <body>. Nothing but a
+     real page.keyboard.press('Tab') can see it.
      ==================================================================== */
-  console.log('\n[10] the legacy shared order migrates into this PC, once');
+  console.log('\n[9b] Tab, Shift+Tab and Enter after typing in a cell (real keystrokes)');
+  /* A clean, undisturbed grid: no team order, no order of my own — and three
+     ADJACENT editable file columns, because that is the flow being tested.
+     (Tabbing to an editor that is off to the RIGHT of the viewport is a
+     different, pre-existing matter: the browser scrolls the wrap to reveal
+     it, the scroll handler rebuilds the <tbody>, and the focused input goes
+     with it. Verified identical on 76dffed, so it is not this change's and
+     it is not what finding 1 was about.) */
+  await page.evaluate((id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[id];
+    t.displayOrder = null;
+    Reco.setUserOrder(t, s, []);
+    s.spreadsheetMode = false;
+    window.__editableWas = (t.editableColumns || []).slice();
+    t.editableColumns = ['C04', 'C05', 'C07'];
+    App.navigate('reco');
+  }, TPL);
+
+  /* Where focus is, and which cell SHOULD have it: the next cell of the same
+     row that has an editor, computed off the DOM rather than hard-coded, so
+     the fixture's own column order decides. */
+  const FOCUS = `(function (rid, from, dir) {
+    const ae = document.activeElement;
+    const td = ae && ae.closest ? ae.closest('[data-col]') : null;
+    const tr = ae && ae.closest ? ae.closest('tr') : null;
+    const row = [...document.querySelectorAll('.reco-table-wrap tbody tr')].find(x => x.dataset.rid === rid);
+    const editable = row ? [...row.querySelectorAll('[data-col] input, [data-col] select, [data-col] textarea')]
+      .filter(el => el.type !== 'checkbox')
+      .map(el => el.closest('[data-col]').dataset.col) : [];
+    const i = editable.indexOf(from);
+    const want = i < 0 ? null : editable[i + (dir === 'back' ? -1 : 1)];
+    return { tag: ae ? ae.tagName : null, col: td ? td.dataset.col : null, rid: tr ? tr.dataset.rid : null,
+             onBody: ae === document.body, editable, want };
+  })`;
+  const focusInfo = (rid, from, dir) =>
+    page.evaluate(new Function('a', 'return ' + FOCUS + '(a[0],a[1],a[2])'), [rid, from, dir]);
+
+  // Typing into C05 of r4 and pressing Tab must land in the next editable
+  // cell OF THE SAME ROW — which is what the old build did.
+  await page.click('.reco-table-wrap tbody tr[data-rid="r4"] [data-col="C05"] input');
+  await page.keyboard.type('ZZ');
+  await page.keyboard.press('Tab');
+  await sleep(250);
+  const tabFwd = await focusInfo('r4', 'C05', 'fwd');
+  check(!tabFwd.onBody, 'TAB OUT OF AN EDITED CELL KEEPS FOCUS IN THE GRID (it landed on <body> before this fix)', tabFwd);
+  check(tabFwd.rid === 'r4', 'and in the same row', tabFwd);
+  check(tabFwd.want && tabFwd.col === tabFwd.want,
+    'and in the next editable cell of that row (' + tabFwd.want + ')', tabFwd);
+  const tabEdit = await page.evaluate((id) => {
+    const s = AppState.recoSessions[id];
+    const row = s.data.find(r => r._id === 'r4');
+    const tr = [...document.querySelectorAll('.reco-table-wrap tbody tr')].find(x => x.dataset.rid === 'r4');
+    const td = tr ? tr.querySelector('[data-col="C05"]') : null;
+    const inp = td ? td.querySelector('input') : null;
+    return { stored: row.C05, onScreen: inp ? inp.value : null };
+  }, TPL);
+  check(/ZZ$/.test(String(tabEdit.stored || '')) && tabEdit.stored === tabEdit.onScreen,
+    'the edit itself still landed and the repainted row shows it', tabEdit);
+
+  // Shift+Tab back out of the cell Tab arrived in.
+  const nextCol = tabFwd.want;
+  await page.keyboard.type('QQ');
+  await page.keyboard.press('Shift+Tab');
+  await sleep(250);
+  const tabBack = await focusInfo('r4', nextCol, 'back');
+  check(!tabBack.onBody && tabBack.rid === 'r4' && tabBack.col === tabBack.want,
+    'Shift+Tab goes back to the previous editable cell of the row (' + tabBack.want + ')', tabBack);
+
+  // Enter must leave focus exactly where it is — unchanged by the deferral.
+  await page.click('.reco-table-wrap tbody tr[data-rid="r5"] [data-col="C05"] input');
+  await page.keyboard.type('EE');
+  await page.keyboard.press('Enter');
+  await sleep(250);
+  const onEnter = await focusInfo('r5', 'C05', 'fwd');
+  check(!onEnter.onBody && onEnter.rid === 'r5' && onEnter.col === 'C05',
+    'Enter keeps the caret in the cell the user is in', onEnter);
+
+  /* The ADDED-column cell, which goes through setTag and not editCell. Both
+     it and its neighbour are at the right-hand end, so the wrap is parked
+     there first: a Tab that needs the grid to SCROLL is the pre-existing
+     case above, and this assertion is about the repaint. */
+  await page.evaluate(() => {
+    const w = document.querySelector('.reco-table-wrap');
+    if (w) w.scrollLeft = w.scrollWidth;
+  });
+  await sleep(250);
+  const tagTab = await page.evaluate(() => {
+    const tr = [...document.querySelectorAll('.reco-table-wrap tbody tr')].find(x => x.dataset.rid === 'r6');
+    const inp = tr ? tr.querySelector('[data-col="Note"] input') : null;
+    if (!inp) return { has: false };
+    const w = document.querySelector('.reco-table-wrap');
+    const r = inp.getBoundingClientRect(), wr = w.getBoundingClientRect();
+    const g = tr.querySelector('[data-col="Grade"] select');
+    const gr = g ? g.getBoundingClientRect() : null;
+    return { has: true, noteVisible: r.left >= wr.left && r.right <= wr.right,
+             gradeVisible: !!gr && gr.left >= wr.left && gr.right <= wr.right };
+  });
+  if (tagTab.has && tagTab.noteVisible && tagTab.gradeVisible) {
+    await page.click('.reco-table-wrap tbody tr[data-rid="r6"] [data-col="Note"] input');
+    await page.keyboard.type('nn');
+    await page.keyboard.press('Tab');
+    await sleep(250);
+    const noteTab = await focusInfo('r6', 'Note', 'fwd');
+    check(!noteTab.onBody && noteTab.rid === 'r6' && noteTab.col === 'Grade',
+      'Tab out of an ADDED column cell (the setTag path) also keeps focus in the row', noteTab);
+    const noteStored = await page.evaluate((id) => {
+      const t = AppState.recoTemplates.find(x => x.id === id);
+      const s = AppState.recoSessions[id];
+      const row = s.data.find(r => r._id === 'r6');
+      return Reco._rowWithExtras(t, s, row).Note;
+    }, TPL);
+    check(/nn$/.test(String(noteStored || '')), 'and the tag value landed', noteStored);
+  } else note('could not park both added-column cells in view; added-column Tab not asserted', tagTab);
+
+  // Put the fixture's editable columns back exactly as they were.
+  await page.evaluate((id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    t.editableColumns = (window.__editableWas || ['C05']).slice();
+    const w = document.querySelector('.reco-table-wrap');
+    if (w) w.scrollLeft = 0;
+    App.navigate('reco');
+  }, TPL);
+
+  /* ====================================================================
+     [10] Legacy sess.columnOrder: a TEAM-LEVEL FALLBACK, read-only for ever.
+     It lives in recoSessions.json on the folder, so whatever is in it was
+     written by whichever colleague dragged a header last — it was never THIS
+     person's choice. It must therefore NOT become anyone's private order
+     (that would outrank the published team order for ever, on every PC), and
+     it must NOT be written (that is a colleague's layout). What it does do is
+     keep every existing share rendering as it does today.
+     ==================================================================== */
+  console.log('\n[10] the legacy shared order: a team-level fallback, never promoted, never written');
   const t11 = await page.evaluate((id) => {
     const t = AppState.recoTemplates.find(x => x.id === id);
     const s = AppState.recoSessions[t.id];
-    // Wipe this PC's preference and plant what an older build left on the
-    // share: the order whichever colleague dragged last.
-    localStorage.removeItem(Reco._prefKey(t.id, 'columnOrder'));
-    delete Reco._prefMem[Reco._prefKey(t.id, 'columnOrder')];
+    const key = Reco._prefKey(t.id, 'columnOrder');
+    // A colleague who has never touched this template on this PC…
+    localStorage.removeItem(key);
+    delete Reco._prefMem[key];
+    t.displayOrder = null;
+    // …and what an older build left on the share: the last drag, by anybody.
     s.columnOrder = ['C07', 'C02'];
-    const first = Reco._userOrder(t, s).slice();
-    const stored = Reco.userPref(t.id, 'columnOrder');
-    // a second read must not re-migrate, and the legacy field is untouched
-    s.columnOrder = ['SOMETHING', 'ELSE'];
-    const second = Reco._userOrder(t, s).slice();
-    // after a reset, the legacy field must NOT come back
+    const out = {};
+    out.mine = Reco._userOrder(t, s);                       // must stay null
+    out.head = (() => { App.navigate('reco');
+      return [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col); })();
+    out.storedAfterRead = localStorage.getItem(key);        // must stay null
+    out.memoAfterRead = Reco._prefMem[key];                 // a read cache: null, never the legacy array
+    out.legacy = s.columnOrder.slice();
+    // A published team order must take effect immediately, over the legacy one.
+    t.displayOrder = ['C05', 'C08'];
+    App.navigate('reco');
+    out.headTeam = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    // And my own order still beats both.
+    Reco.setUserOrder(t, s, ['C08', 'C01']);
+    App.navigate('reco');
+    out.headMine = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    // Back to no private order: the team order, not the legacy one.
     Reco.setUserOrder(t, s, []);
-    const afterReset = Reco._userOrder(t, s);
-    return { first, stored, second, afterReset, legacyStillOnSession: s.columnOrder };
+    t.displayOrder = null;
+    App.navigate('reco');
+    out.headBack = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    out.legacyAtEnd = s.columnOrder;
+    return out;
   }, TPL);
-  check(same(t11.first, ['C07', 'C02']) && same(t11.stored, ['C07', 'C02']),
-    'the legacy shared order is adopted once, into localStorage', t11);
-  check(same(t11.second, ['C07', 'C02']), 'a later change to the shared field is ignored', t11.second);
-  check(t11.afterReset === null, 'and after Reset View the legacy field is not migrated back', t11.afterReset);
-  check(same(t11.legacyStillOnSession, ['SOMETHING', 'ELSE']),
-    'the legacy field itself is left alone, so an older build keeps working', t11.legacyStillOnSession);
+  check(t11.mine === null && t11.storedAfterRead === null && t11.memoAfterRead == null,
+    'READING the order never writes one: the shared field is NOT migrated into this PC’s private order', t11);
+  check(t11.head[0] === 'C07' && t11.head[1] === 'C02',
+    'the legacy shared order still arranges the grid, so an existing share renders as it does today', t11.head.slice(0, 4));
+  check(t11.headTeam[0] === 'C05' && t11.headTeam[1] === 'C08',
+    'A PUBLISHED TEAM ORDER OUTRANKS IT AND TAKES EFFECT IMMEDIATELY (it could never do that when the legacy field was promoted to a private override)',
+    t11.headTeam.slice(0, 4));
+  check(t11.headMine[0] === 'C08' && t11.headMine[1] === 'C01',
+    'and my own order still beats both', t11.headMine.slice(0, 4));
+  check(t11.headBack[0] === 'C07' && t11.headBack[1] === 'C02',
+    'with no team order and no order of my own, the legacy fallback applies again', t11.headBack.slice(0, 4));
+  check(same(t11.legacyAtEnd, ['C07', 'C02']),
+    'and nothing in any of that wrote the shared field', t11.legacyAtEnd);
 
-  const t11b = await page.evaluate((id) => {
+  /* The legacy order is applied to FILE COLUMNS ONLY, and that is T1, not a
+     detail: the old build filtered the shared order against a file-columns
+     base, so an ADDED column's name in it was silently dropped. Honouring it
+     now would move that column in every existing share on upgrade. */
+  const t11leg = await page.evaluate((id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[t.id];
+    Reco.setUserOrder(t, s, []);
+    t.displayOrder = null;
+    s.columnOrder = ['Calc', 'C07'];      // 'Calc' is an ADDED column
+    App.navigate('reco');
+    const head = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    return { head, resolved: typeof Reco._legacyTeamOrder === 'function' ? Reco._legacyTeamOrder(t, s) : 'NO SUCH HELPER',
+             first: head[0], calcAt: head.indexOf('Calc'),
+             last3: head.slice(-3) };
+  }, TPL);
+  check(same(t11leg.resolved, ['C07']),
+    'an added column named in the legacy shared order is dropped, exactly as the old build dropped it', t11leg.resolved);
+  check(t11leg.first === 'C07' && t11leg.calcAt === t11leg.head.length - 1,
+    'so the file column moves and the added column stays in its own block at the end (T1 for an existing share)', t11leg);
+
+  /* THE SERIALISE SPY, and it has to OUTLAST THE DEBOUNCE. AppState.save()
+     only arms a 250 ms timer; the serialising happens in the flush it fires.
+     A spy read in the same task can therefore never see the save that the
+     sheet drag was doing — which is exactly how the gate "zero recoSessions
+     serialises when an order is set" held for the header drag while
+     _xlPersistOrder ended in an unconditional AppState.save() (0.8-1.4 s of
+     main-thread JSON.stringify at 200k rows, for a write with nothing in it). */
+  await page.waitForFunction(() => AppState.pendingCount() === 0, null, { timeout: 8000 }).catch(() => {});
+  const t11b = await page.evaluate(async (id) => {
     const t = AppState.recoTemplates.find(x => x.id === id);
     const s = AppState.recoSessions[t.id];
     s.columnOrder = null;
+    s.activeCell = null; s.selRange = null;
     Reco.setUserOrder(t, s, ['C09', 'C01']);
+    await AppState.flush();
     const spy = [];
     const real = Store.serialize;
     Store.serialize = function (key, val) { spy.push(key); return real.apply(Store, arguments); };
-    Reco.setUserOrder(t, s, ['C01', 'C09']);
-    Store.serialize = real;
-    return { spy, onShare: s.columnOrder };
+    const settle = () => new Promise(r => setTimeout(r, AppState.SAVE_DELAY * 3));
+    try {
+      // the grid's header drag route
+      Reco.setUserOrder(t, s, ['C01', 'C09']);
+      await settle();
+      const afterGrid = spy.slice();
+      // the sheet's own drag, on the same store and down the same route
+      spy.length = 0;
+      const prevCtx = Reco._xlCtx;
+      const ws = { options: { columns: [{ name: '_status_' }, { name: '_rid' },
+                                        { name: 'C05' }, { name: 'C01' }] } };
+      Reco._xlCtx = { tpl: t, sess: s, ws };
+      Reco._xlPersistOrder(ws);
+      await settle();
+      const afterSheet = spy.slice();
+      Reco._xlCtx = prevCtx;
+      const stored = Reco.userPref(t.id, 'columnOrder') || [];
+      return { afterGrid, afterSheet, onShare: s.columnOrder,
+               movedC05Before01: stored.indexOf('C05') < stored.indexOf('C01'),
+               storedHead: stored.slice(0, 4) };
+    } finally { Store.serialize = real; }
   }, TPL);
-  check(t11b.spy.length === 0 && t11b.onShare === null,
-    'setting an order serialises nothing at all — no 85 MiB recoSessions write for a view preference', t11b);
+  check(!t11b.afterGrid.includes('recoSessions') && t11b.onShare === null,
+    'setting an order from the grid serialises nothing at all — no 85 MiB recoSessions write for a view preference', t11b);
+  check(!t11b.afterSheet.includes('recoSessions'),
+    'AND NEITHER DOES THE SHEET DRAG, debounce included (_xlPersistOrder used to end in an unconditional AppState.save())',
+    t11b.afterSheet);
+  check(t11b.movedC05Before01,
+    'while the sheet drag still applies the order it was given, in the slots it was given', t11b.storedHead);
+
+  /* …and the one reason either of them has to write the shared file: a
+     stored cell selection that had to be cleared. */
+  const t11c = await page.evaluate(async (id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[t.id];
+    await AppState.flush();
+    const spy = [];
+    const real = Store.serialize;
+    const prevCtx = Reco._xlCtx;
+    try {
+      s.spreadsheetMode = true;
+      s.activeCell = { fidx: 0, col: 'C05' };
+      s.selRange = { startFidx: 0, endFidx: 1, startCol: 'C05', endCol: 'C08' };
+      const ws = { options: { columns: [{ name: '_status_' }, { name: 'C08' }, { name: 'C05' }] } };
+      Reco._xlCtx = { tpl: t, sess: s, ws };
+      Store.serialize = function (key) { spy.push(key); return real.apply(Store, arguments); };
+      Reco._xlPersistOrder(ws);
+      await new Promise(r => setTimeout(r, AppState.SAVE_DELAY * 3));
+      return { spy, activeCell: s.activeCell, selRange: s.selRange };
+    } finally {
+      Store.serialize = real;
+      Reco._xlCtx = prevCtx;
+      s.spreadsheetMode = false;
+    }
+  }, TPL);
+  check(t11c.activeCell === null && t11c.selRange === null,
+    'a sheet drag clears the stored cell selection too (it is positional)', t11c);
+  check(t11c.spy.includes('recoSessions'),
+    'and THAT is when the shared session is written — because something actually changed in it', t11c.spy);
 
   /* ====================================================================
      [11] Reset View goes back to the template's order
@@ -962,7 +1223,39 @@ try {
   check(t12.note === 'not shown' && t12.noteShown === '',
     'and the picker says "not shown" against it, so nobody positions it and wonders why', t12);
   check(same(t12.after, ['C05', 'C02']), 'Reset View falls back to the template’s order', t12);
-  check(/template/i.test(t12.toast || '') && same(t12.pref, []), 'and says so', t12);
+  check(/team/i.test(t12.toast || '') && same(t12.pref, []), 'and says so', t12);
+
+  /* Reset View is a PERSONAL action on ONE PC. It used to null
+     sess.columnOrder and save — i.e. delete the column order of every
+     colleague on the folder: the ones still on the old build lost their
+     layout outright, and the ones on this build lost the fallback that keeps
+     their grid as it was. Asserted on the FILE, because that is where the
+     damage was. */
+  const t12b = await page.evaluate(async (id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[t.id];
+    t.displayOrder = null;
+    s.columnOrder = ['C04', 'C01'];       // a colleague's drag, on the share
+    Reco.setUserOrder(t, s, ['C08', 'C02']);
+    AppState.save();
+    Reco.resetTableView();          // saves on its own
+    AppState.save();
+    const head = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    return { onSession: s.columnOrder, head: head.slice(0, 2), pref: Reco.userPref(t.id, 'columnOrder') };
+  }, TPL);
+  await page.waitForFunction(() => AppState.pendingCount() === 0, null, { timeout: 8000 }).catch(() => {});
+  await sleep(400);
+  const sessOnDisk = (() => {
+    try { return JSON.parse(fs.readFileSync(path.join(root, 'reco/recoSessions.json'), 'utf8')); }
+    catch (e) { return null; }
+  })();
+  const sessRec = sessOnDisk ? (sessOnDisk[TPL] || Object.values(sessOnDisk)[0] || {}) : {};
+  check(same(t12b.onSession, ['C04', 'C01']),
+    'RESET VIEW DOES NOT TOUCH THE SHARED LEGACY ORDER (it used to null it for the whole team)', t12b.onSession);
+  check(same(sessRec.columnOrder, ['C04', 'C01']),
+    'and the shared file on the folder still holds the colleague’s order', sessRec.columnOrder);
+  check(same(t12b.pref, []) && same(t12b.head, ['C04', 'C01']),
+    'while THIS PC drops its own order and falls back to the shared one', t12b);
 
   /* ====================================================================
      [12] T9 — 200,000 rows: header and body still agree after a scroll
@@ -1039,6 +1332,67 @@ try {
     });
   check(t13.valueMatchesHeader, 'T9: and every value is under the header that names it', t13.valueMatchesHeader);
 
+  /* ------------------------------------------------------------------
+     T9, the part the signature did NOT cover: what happens ON the miss.
+     A column-signature miss used to drop through to the body-only repaint,
+     which rebuilds the <tbody> from the freshly computed layout while the
+     <thead> on screen is still the old one — i.e. it turned a consistent
+     stale body into an inconsistent fresh one, which is the exact failure
+     the signature was added to prevent, one step along. Only the full render
+     writes the <thead>, so a column-only miss has to escalate to it.
+     ------------------------------------------------------------------ */
+  const t13c = await BS.page.evaluate(async (id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[id];
+    const raf = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    t.displayOrder = null;
+    Reco.setUserOrder(t, s, []);
+    App.navigate('reco');
+    await raf();
+    const wrap = document.querySelector('.reco-table-wrap');
+    const out = { headBefore: [...wrap.querySelectorAll('thead th[data-col]')].map(th => th.dataset.col) };
+    /* The order changes with NO re-render — a view-state change that redraws
+       one pane and not the other, which is what S15's two panes will do. */
+    Reco.setUserOrder(t, s, ['B02', 'Ref', 'Calc']);
+    // defensive so the same suite can be run against the build before the fix
+    out.colsStale = typeof Reco._virtColsStale === 'function' ? Reco._virtColsStale(t, s) : 'NO SUCH HELPER';
+    out.rowsStillGood = typeof Reco._virtRowsState === 'function' ? !!Reco._virtRowsState(t, s) : 'NO SUCH HELPER';
+    out.windowGone = !Reco._virtStateFor(t, s);
+    // …and then a scroll, which goes to the body-repaint path.
+    wrap.scrollTop = 9000;
+    wrap.dispatchEvent(new Event('scroll'));
+    await raf(); await raf();
+    const w2 = document.querySelector('.reco-table-wrap');
+    out.scrollKept = w2.scrollTop;
+    out.head = [...w2.querySelectorAll('thead th[data-col]')].map(th => th.dataset.col);
+    const tr = [...w2.querySelectorAll('tbody tr:not(.virt-spacer-top):not(.virt-spacer-bot)')][0];
+    out.body = tr ? [...tr.querySelectorAll('[data-col]')].map(td => td.dataset.col) : [];
+    out.valuesOk = (() => {
+      if (!tr) return false;
+      const row = s.data.find(r => r._id === tr.dataset.rid);
+      const full = Reco.rowFull(t, s, row);
+      return [...tr.querySelectorAll('[data-col]')].every(td => {
+        if (td.querySelector('input,select')) return true;
+        const want = full[td.dataset.col] == null ? '' : String(full[td.dataset.col]);
+        return td.textContent.trim() === want.trim();
+      });
+    })();
+    // back to the fixture's own order, re-rendered, for whoever comes next
+    Reco.setUserOrder(t, s, []);
+    App.navigate('reco');
+    await raf();
+    return out;
+  }, BIGTPL);
+  check(t13c.colsStale && t13c.rowsStillGood && t13c.windowGone,
+    'a column move is reported as stale COLUMNS while the rows it describes are still good (the two are told apart)', t13c);
+  check(t13c.head[0] === 'B02' && t13c.head[1] === 'Ref',
+    'T9b: A COLUMN-ONLY MISS ESCALATES TO THE FULL RENDER, so the <thead> on screen is the NEW order (a body-only repaint left it on the old one)',
+    { head: t13c.head.slice(0, 4), before: t13c.headBefore.slice(0, 4) });
+  check(same(t13c.head, t13c.body),
+    'T9b: and the header and the body agree after that scroll', { h: t13c.head.slice(0, 4), b: t13c.body.slice(0, 4) });
+  check(t13c.valuesOk, 'T9b: every value is under the header that names it', t13c.valuesOk);
+  check(t13c.scrollKept > 0, 'and the escalation keeps the scroll position instead of jumping to the top', t13c.scrollKept);
+
   /* Two sessions keep their own window — the WeakMap, not one slot. */
   const t13b = await BS.page.evaluate((id) => {
     const t = AppState.recoTemplates.find(x => x.id === id);
@@ -1102,6 +1456,320 @@ try {
     const cols = h.split(',');
     return same(cols.slice(0, 5), wantHead) && cols.length === 65 && cols[5] === 'C01' && cols[6] === 'C02';
   }), 'the day CSV header is still _pk,_ver,_ts,_src,_by + tpl.columns ORDER — the display order never reaches the archive', hdrs);
+
+  /* ====================================================================
+     [14] EVERY route that changes the effective order clears the stored
+     cell selection — not just the per-user one.
+     activeCell/selRange hold column NAMES that _ssVisibleCols resolves back
+     by POSITION, so after a reorder the same stored pair denotes a different
+     SET of columns and a fill takes its source from the wrong one. The clear
+     was only on setUserOrder; publishing a TEAM order is the one route that
+     moves OTHER people's grids and it cleared nothing.
+     ==================================================================== */
+  console.log('\n[14] a team-order change clears the positional cell selection too');
+  const t15 = await page.evaluate((id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[id];
+    const plant = () => {
+      s.spreadsheetMode = true;
+      s.activeCell = { fidx: 0, col: 'C05' };
+      s.selRange = { startFidx: 0, endFidx: 1, startCol: 'C05', endCol: 'C08' };
+    };
+    const gone = () => s.activeCell === null && s.selRange === null;
+    const out = {};
+    out.helper = typeof Reco._orderChanged === 'function';
+
+    // the editor's order picker
+    plant();
+    RecoTemplate.edit(id);
+    RecoTemplate._step = 3;
+    RecoTemplate.renderEditor();
+    RecoTemplate.openOrderPicker();
+    ColPicker.add('C08');
+    ColPicker.done();
+    out.picker = gone();
+
+    // "Save my order as the team default"
+    plant();
+    Reco.setUserOrder(t, s, ['C08', 'C01']);
+    plant();                                  // setUserOrder clears; plant again
+    RecoTemplate.edit(id);
+    RecoTemplate.adoptMyOrder();
+    out.adopt = gone();
+
+    // Clear
+    plant();
+    RecoTemplate.edit(id);
+    RecoTemplate._editing.displayOrder = ['C08'];
+    RecoTemplate.clearTeamOrder();
+    out.clear = gone();
+
+    // Save Template with a different displayOrder from the stored one
+    RecoTemplate.edit(id);
+    RecoTemplate._editing.displayOrder = ['C02', 'C04'];
+    RecoTemplate.saveTemplate();              // publishes, so now the stored one is ['C02','C04']
+    plant();
+    RecoTemplate.edit(id);
+    RecoTemplate._editing.displayOrder = ['C04', 'C02'];
+    RecoTemplate.saveTemplate();
+    out.save = gone();
+    out.published = (AppState.recoTemplates.find(x => x.id === id) || {}).displayOrder;
+
+    // …and a save that does NOT move the order leaves a selection alone:
+    // this is a view-state clear, not a reflex on every template save.
+    plant();
+    RecoTemplate.edit(id);
+    RecoTemplate.saveTemplate();
+    out.unchangedSaveKeeps = !gone();
+
+    s.spreadsheetMode = false;
+    s.activeCell = null; s.selRange = null;
+    return out;
+  }, TPL);
+  check(t15.helper, 'the clear is one named helper (Reco._orderChanged), not two lines copied per route', t15.helper);
+  check(t15.picker, 'the editor’s order picker clears it', t15);
+  check(t15.adopt, '"Save my order as the team default" clears it', t15);
+  check(t15.clear, 'clearing the team order clears it', t15);
+  check(t15.save && same(t15.published, ['C04', 'C02']),
+    'SAVE TEMPLATE WITH A CHANGED TEAM ORDER CLEARS IT — the route that moves other people’s grids', t15);
+  check(t15.unchangedSaveKeeps, 'and a save that does not touch the order leaves the selection alone', t15);
+
+  /* ====================================================================
+     [15] A localStorage that refuses the write must not be reported as
+     success. The order applies for the session either way; what must not
+     happen is a success toast over an order that is gone at next launch —
+     which is the user's original complaint.
+     ==================================================================== */
+  console.log('\n[15] a localStorage that will not store the order says so');
+  const t16 = await page.evaluate((id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[id];
+    const key = Reco._prefKey(t.id, 'columnOrder');
+    t.displayOrder = null;
+    Reco.setUserOrder(t, s, []);
+    localStorage.removeItem(key);
+    delete Reco._prefMem[key];
+    const realSet = localStorage.setItem.bind(localStorage);
+    localStorage.setItem = function () { const e = new Error('quota'); e.name = 'QuotaExceededError'; throw e; };
+    const out = {};
+    try {
+      out.ret = Reco.setUserOrder(t, s, ['C08', 'C04']);
+      out.applied = (Reco.userPref(t.id, 'columnOrder') || []).slice(0, 2);   // in memory, this session
+      out.stored = localStorage.getItem(key);                                  // nothing on the disk
+      window.__toasts = [];
+      Reco.openOrderPicker();
+      ColPicker.add('C02');
+      ColPicker.done();
+      out.pickerToast = (window.__toasts[0] || {});
+      // the header drag, down its own route
+      window.__toasts = [];
+      App.navigate('reco');
+      const ths = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')];
+      const src = ths[1], tgt = ths[0];
+      Reco._dragCol = src.dataset.col;
+      Reco.onColDrop({ preventDefault() {}, currentTarget: tgt, clientX: tgt.getBoundingClientRect().left + 2 },
+                     tgt.dataset.col);
+      out.dragToast = (window.__toasts.find(x => /does not allow/.test(x.msg)) || {});
+      // and the sheet drag
+      window.__toasts = [];
+      const prevCtx = Reco._xlCtx;
+      const ws = { options: { columns: [{ name: '_status_' }, { name: 'C04' }, { name: 'C01' }] } };
+      Reco._xlCtx = { tpl: t, sess: s, ws };
+      Reco._xlPersistOrder(ws);
+      Reco._xlCtx = prevCtx;
+      out.sheetToast = (window.__toasts.find(x => /does not allow/.test(x.msg)) || {});
+    } finally {
+      localStorage.setItem = realSet;
+    }
+    out.okAgain = Reco.setUserOrder(t, s, []);
+    return out;
+  }, TPL);
+  check(t16.ret === false, 'setUserOrder reports FALSE when the write did not land (it returned nothing before)', t16);
+  check(same(t16.applied, ['C08', 'C04']) && t16.stored === null,
+    'the order still applies for this session, and really is not stored', t16);
+  check(/applied for now/i.test(t16.pickerToast.msg || '') && t16.pickerToast.kind !== 'success',
+    'the picker says "applied for now", not "set for you on this PC"', t16.pickerToast);
+  check(/applied for now/i.test(t16.dragToast.msg || ''), 'the header drag warns too', t16.dragToast);
+  check(/applied for now/i.test(t16.sheetToast.msg || ''), 'and so does the sheet drag', t16.sheetToast);
+  check(t16.okAgain === true, 'and with a working localStorage it reports true again', t16.okAgain);
+
+  /* ====================================================================
+     [16] Save Template: the export contract is the same for everyone, so
+     changing it is confirmed and stamped.
+     One Save Template re-orders every CSV and every Excel-link workbook of
+     this template, for the whole folder. It used to do that silently and
+     leave no record of who did it or when.
+     ==================================================================== */
+  console.log('\n[16] publishing a team order is confirmed and stamped');
+  const t17 = await page.evaluate((id) => {
+    const out = {};
+    const asked = [];
+    const realConfirm = window.confirm;
+    try {
+      // 1. a save that does not move the order asks nothing
+      window.confirm = (m) => { asked.push(String(m)); return true; };
+      RecoTemplate.edit(id);
+      RecoTemplate.saveTemplate();
+      out.askedOnUnchanged = asked.length;
+
+      // 2. CANCEL: nothing is published
+      asked.length = 0;
+      const before = (AppState.recoTemplates.find(x => x.id === id) || {}).displayOrder;
+      window.confirm = (m) => { asked.push(String(m)); return false; };
+      RecoTemplate.edit(id);
+      RecoTemplate._editing.displayOrder = ['C07', 'C02'];
+      RecoTemplate.saveTemplate();
+      out.cancelMsg = asked[0] || '';
+      out.afterCancel = (AppState.recoTemplates.find(x => x.id === id) || {}).displayOrder;
+      out.before = before;
+
+      // 3. OK: published, and stamped with who and when
+      asked.length = 0;
+      window.confirm = (m) => { asked.push(String(m)); return true; };
+      AppState.currentUser = AppState.currentUser || 'tester';
+      RecoTemplate.edit(id);
+      RecoTemplate._editing.displayOrder = ['C07', 'C02'];
+      RecoTemplate.saveTemplate();
+      const t = AppState.recoTemplates.find(x => x.id === id);
+      out.published = t.displayOrder;
+      out.by = t.displayOrderBy;
+      out.at = t.displayOrderAt;
+      out.okMsg = asked[0] || '';
+      // the editor shows the stamp
+      RecoTemplate.edit(id);
+      RecoTemplate._step = 3;
+      RecoTemplate.renderEditor();
+      out.editorText = document.getElementById('appModalBody').textContent.replace(/\s+/g, ' ');
+      App.closeModal();
+    } finally { window.confirm = realConfirm; }
+    return out;
+  }, TPL);
+  check(t17.askedOnUnchanged === 0, 'a save that does not change the order asks nothing (no nag on every save)', t17.askedOnUnchanged);
+  check(/CSV/i.test(t17.cancelMsg) && /Excel/i.test(t17.cancelMsg) && /column order/i.test(t17.cancelMsg),
+    'CHANGING THE TEAM ORDER IS CONFIRMED, naming what moves: every CSV and every Excel workbook exported from this template',
+    t17.cancelMsg.slice(0, 260));
+  check(same(t17.afterCancel, t17.before), 'Cancel publishes nothing', t17);
+  check(same(t17.published, ['C07', 'C02']), 'OK publishes the order', t17.published);
+  check(!!t17.by && !!t17.at && !isNaN(Date.parse(t17.at)),
+    'and stamps displayOrderBy / displayOrderAt so the change is traceable', { by: t17.by, at: t17.at });
+  check(/Set by/.test(t17.editorText) && t17.editorText.includes(t17.by),
+    'which the editor shows, so nobody has to guess why an export moved', (t17.editorText.match(/Set by[^.]*\./) || [''])[0]);
+
+  /* ====================================================================
+     [17] The To-Account column when it is an ADDED column: hiding it must
+     not take away the only cell the entry flow has to pick an account in.
+     ==================================================================== */
+  console.log('\n[17] the AEG To-Account column as an added column, hidden');
+  const t18 = await page.evaluate(() => {
+    if (!(AppState.aegTemplates || []).length) return { noAeg: true };
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'tpl_toacc_colorder';
+    t.name = 'TOACC';
+    t.columns = ['Doc', 'Amount', 'Ref'].map(n => ({ name: n, label: n, formats: [], isValue: n === 'Amount' }));
+    t.primaryKeys = ['Doc'];
+    t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Amount', 'Ref'];
+    /* The AEG template's To Account input column is 'ToAccount', and here it
+       is an ADDED column rather than a column of the file. */
+    t.additionalColumns = [{ name: 'ToAccount', type: 'custom' }, { name: 'Note', type: 'custom' }];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id, keywordColumn: '',
+                         keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'tpl_toacc_colorder');
+    if (!tpl) return { noTpl: true };
+    RecoTemplate.open(tpl.id);
+    const sess = AppState.recoSessions[tpl.id];
+    Reco.ensureSessionShape(sess);
+    sess.data = [{ _id: 'a', _pk: 'D1', _ver: 'upload', Doc: 'D1', Amount: '10', Ref: 'R1' }];
+    App.navigate('reco');
+    const toAcc = XlSchema.toAccountCol(tpl);
+    const headShown = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    sess.hiddenCols = ['ToAccount'];
+    App.navigate('reco');
+    const headHidden = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    const tr = document.querySelector('.reco-table-wrap tbody tr[data-rid="a"]');
+    const cell = tr ? !!tr.querySelector('[data-col="ToAccount"]') : null;
+    const schema = XlSchema.build(tpl, sess, { scope: 'template', showExtras: 'all' }).cols.map(d => d.name);
+    // a different added column IS hidden, as declared
+    sess.hiddenCols = ['Note'];
+    App.navigate('reco');
+    const noteHidden = [...document.querySelectorAll('.reco-table-wrap thead th[data-col]')].map(th => th.dataset.col);
+    sess.hiddenCols = [];
+    return { toAcc, headShown, headHidden, cell, schema, noteHidden };
+  });
+  if (t18.noAeg || t18.noTpl) check(false, '[17] could not build the AEG fixture', t18);
+  else {
+    check(t18.toAcc === 'ToAccount' && t18.headShown.includes('ToAccount'),
+      'the premise: the AEG To-Account column is an added column and the grid shows it', t18);
+    check(t18.headHidden.includes('ToAccount') && t18.cell === true,
+      'HIDING IT DOES NOT REMOVE IT: the entry needs that cell, and the grid is the only place to pick an account',
+      t18.headHidden);
+    check(t18.schema.includes('ToAccount'),
+      'which is also what XlSchema.build does — the exception is now the same in both', t18.schema);
+    check(!t18.noteHidden.includes('Note'),
+      'while hiding an ordinary added column still hides it (the declared change)', t18.noteHidden);
+  }
+
+  /* ====================================================================
+     [18] The Excel view's own toolbar: the sheet follows this person's
+     order, both buttons write a FILE in the team order. Say which is which.
+     ==================================================================== */
+  console.log('\n[18] the Excel view toolbar says which order a file uses');
+  const t19 = await page.evaluate((id) => {
+    RecoTemplate.open(id);
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const s = AppState.recoSessions[id];
+    const h = Reco._xlToolbarHtml(t, s, Reco.xlOptions(t));
+    const titleOf = (label) => {
+      const re = new RegExp('<button[^>]*title="([^"]*)"[^>]*>' + label, 'i');
+      const m = h.match(re);
+      return m ? m[1] : null;
+    };
+    return { csv: titleOf('⬇ CSV'), excel: titleOf('📗 Open in Excel') };
+  }, TPL);
+  check(t19.csv && /team/i.test(t19.csv) && !/current view/i.test(t19.csv),
+    'the ⬇ CSV button no longer calls a team-ordered file "the current view"', t19.csv);
+  check(t19.excel && /team/i.test(t19.excel),
+    'and the Edit-in-Excel tooltip says the workbook uses the team order', t19.excel);
+
+  /* ====================================================================
+     [19] …and the OTHER route that used to write the shared legacy order:
+     restoring a session backup. It assigned the backup's whole session
+     object, so whatever columnOrder the file carried was republished to the
+     folder — resurrecting an order the team had moved on from, or wiping the
+     one they are using. The field is read-only, so a restore must carry the
+     stored value across untouched.
+     ==================================================================== */
+  console.log('\n[19] restoring a session backup does not republish a column order');
+  const t20 = await page.evaluate(async (id) => {
+    const s = AppState.recoSessions[id];
+    const keep = s;                                   // put it back afterwards
+    s.columnOrder = ['C04', 'C01'];                   // what is on the folder now
+    const backupSession = JSON.parse(JSON.stringify(s));
+    backupSession.columnOrder = ['FROM_THE_BACKUP', 'C07'];
+    backupSession.data = (s.data || []).slice(0, 3);
+    const payload = JSON.stringify({ session: backupSession, exportedAt: new Date().toISOString() });
+    const file = new File([payload], 'backup.json', { type: 'application/json' });
+    const realConfirm = window.confirm;
+    window.confirm = () => true;
+    try {
+      Reco.restoreSession({ target: { files: [file], value: 'x' } });
+      // the FileReader is async
+      for (let i = 0; i < 40 && AppState.recoSessions[id] === keep; i++) await new Promise(r => setTimeout(r, 25));
+      await new Promise(r => setTimeout(r, 50));
+    } finally { window.confirm = realConfirm; }
+    const now = AppState.recoSessions[id];
+    const out = { replaced: now !== keep, columnOrder: now ? now.columnOrder : 'NO SESSION',
+                  rows: now && now.data ? now.data.length : -1 };
+    AppState.recoSessions[id] = keep;                 // leave the fixture as it was
+    App.navigate('reco');
+    return out;
+  }, TPL);
+  check(t20.replaced && t20.rows === 3, 'the premise: the backup really did replace the session', t20);
+  check(same(t20.columnOrder, ['C04', 'C01']),
+    'RESTORING A BACKUP LEAVES THE SHARED LEGACY ORDER AS IT IS — the backup’s own copy is not republished to the team',
+    t20.columnOrder);
 
   const toasts = await readToasts(page);
   check(!toasts.some(t => t.kind === 'error'), 'no error toast anywhere in the run',
