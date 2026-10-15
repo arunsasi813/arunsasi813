@@ -1974,17 +1974,28 @@ try {
   // pull the fake Special JV into the preview, which is a different test.
   const aG2 = await genEntry(page, tF.id, ['D1'], false);
   const busyOpen = await page.evaluate(async ([id, aid]) => {
+    /* FLAKED ONE RUN IN FIVE, and only under load: a 5 ms sampler can slip
+       straight over a message that is on the page for less than one tick on a
+       six-row fixture, and this check (unlike the one above) had no second
+       instrument. A MutationObserver on the modal cannot miss it — it reads
+       the live DOM at the moment the DOM changed, so it still proves the text
+       was really on the page and not merely asked for. The sampler is kept
+       alongside it and the two are unioned, so this only ever sees MORE. */
     const seen = [];
-    const iv = setInterval(() => {
+    const sample = () => {
       const t = document.getElementById('recoBusyText');
       if (t) seen.push(t.textContent);
-    }, 5);
+    };
+    const mo = new MutationObserver(sample);
+    mo.observe(document.getElementById('appModal'),
+               { childList: true, subtree: true, characterData: true });
+    const iv = setInterval(sample, 5);
     const old = Reco.BUSY_ROWS;
     Reco.BUSY_ROWS = 1;
     AppState.activeRecoId = id;
     App.closeModal();
     try { await Reco.openReverseEntryModal(aid); }
-    finally { Reco.BUSY_ROWS = old; clearInterval(iv); }
+    finally { Reco.BUSY_ROWS = old; clearInterval(iv); mo.disconnect(); }
     const out = { seen: Array.from(new Set(seen)),
                   title: (document.getElementById('appModalTitle') || {}).textContent || '' };
     App.closeModal();

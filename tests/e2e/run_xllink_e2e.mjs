@@ -133,7 +133,10 @@ const rowOf = (page, tplId, doc) => page.evaluate(([id, doc]) => { const r = App
 
 /* Export through the dialog with its defaults; returns {exportId, file, head}. */
 async function exportViaDialog(page, root, tplId, before) {
-  const prev = await page.evaluate((id) => ExcelLink._active[id] ? ExcelLink._active[id].exportId : '', tplId);
+  /* ExcelLink._active is keyed by PANE KEY since the per-pane Excel link
+     (one pane, one live link); _activeForTpl(tplId) is the accessor for "the
+     live link on this template", which is what this helper has always meant. */
+  const prev = await page.evaluate((id) => { const a = ExcelLink._activeForTpl(id); return a ? a.exportId : ''; }, tplId);
   await page.click('#xlEditInExcelBtn');
   // An open link with unloaded saves asks first: "Load it back first / Open it again / Create a new one"
   await page.waitForSelector('#xlCreateBtn, #appModalFooter button:has-text("Create a new one")', { timeout: 10000 });
@@ -143,8 +146,8 @@ async function exportViaDialog(page, root, tplId, before) {
   }
   if (before) await before();
   await page.click('#xlCreateBtn');
-  await page.waitForFunction(([id, prev]) => ExcelLink._active[id] && ExcelLink._active[id].exportId !== prev && !ExcelLink._busy, [tplId, prev], { timeout: 30000 });
-  const exportId = await page.evaluate((id) => ExcelLink._active[id].exportId, tplId);
+  await page.waitForFunction(([id, prev]) => { const a = ExcelLink._activeForTpl(id); return a && a.exportId !== prev && !ExcelLink._busy; }, [tplId, prev], { timeout: 30000 });
+  const exportId = await page.evaluate((id) => ExcelLink._activeForTpl(id).exportId, tplId);
   const df = await page.evaluate((id) => Versioning.folderFor(AppState.recoTemplates.find(t => t.id === id)), tplId);
   const headPath = path.join(root, 'reco_excel', df, '_links', exportId + '.json');
   const head = fs.existsSync(headPath) ? JSON.parse(fs.readFileSync(headPath, 'utf8')) : null;
@@ -152,7 +155,7 @@ async function exportViaDialog(page, root, tplId, before) {
   return { exportId, head, headPath, file, basePath: path.join(root, 'reco_excel', df, '_links', exportId + '.base.json') };
 }
 async function waitSaved(page, tplId, timeout = 20000) {
-  await page.waitForFunction((id) => { const a = ExcelLink._active[id]; return a && a.status && a.status.state === 'saved' && a.status.newSinceLastImport; }, tplId, { timeout });
+  await page.waitForFunction((id) => { const a = ExcelLink._activeForTpl(id); return a && a.status && a.status.state === 'saved' && a.status.newSinceLastImport; }, tplId, { timeout });
 }
 /* Load back (review modal open) → summary of the plan. */
 async function loadBack(page, source) {
@@ -218,7 +221,7 @@ try {
   check(X.head && X.head.status === 'open' && X.head.session.exportedRows === 70, 'E1 manifest head records the export', X.head && X.head.session);
   const log = (await calls(B)).calls.map(c => c.method);
   check(log.includes('excel_link_open'), 'E1 Excel was asked to open the workbook');
-  await page.waitForFunction((id) => ExcelLink._active[id] && ExcelLink._active[id].status, tpl.id, { timeout: 10000 });
+  await page.waitForFunction((id) => { const a = ExcelLink._activeForTpl(id); return a && a.status; }, tpl.id, { timeout: 10000 });
   check(/not saved yet/.test(await page.textContent('#xlLinkBanner')), 'E1 banner: linked, not saved yet', await page.textContent('#xlLinkBanner'));
 
   // E2 — round trip

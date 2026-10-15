@@ -283,7 +283,9 @@ th.col-ss-added .col-marker {
 
 /* Make inputs inside cells inherit formatting */
 .reco-table-wrap td input,
-.reco-table-wrap td select {
+.reco-table-wrap-parked td input,
+.reco-table-wrap td select,
+.reco-table-wrap-parked td select {
   font-weight: inherit;
   font-style: inherit;
   text-decoration: inherit;
@@ -382,14 +384,18 @@ th.col-ss-added .col-marker {
   font-size: 9px;
   margin-right: 2px;
 }
-  .reco-table-wrap.ss-mode { user-select: none; }
-  .reco-table-wrap.ss-mode td { cursor: cell; }
-  .reco-table-wrap td.ss-active-cell {
+  .reco-table-wrap.ss-mode,
+  .reco-table-wrap-parked.ss-mode { user-select: none; }
+  .reco-table-wrap.ss-mode td,
+  .reco-table-wrap-parked.ss-mode td { cursor: cell; }
+  .reco-table-wrap td.ss-active-cell,
+  .reco-table-wrap-parked td.ss-active-cell {
     outline: 2px solid var(--primary, #2563eb);
     outline-offset: -2px;
     position: relative; z-index: 2;
   }
-  .reco-table-wrap td.ss-selected-cell {
+  .reco-table-wrap td.ss-selected-cell,
+  .reco-table-wrap-parked td.ss-selected-cell {
     background: rgba(37, 99, 235, 0.12) !important;
   }
   .ss-statusbar {
@@ -405,21 +411,49 @@ th.col-ss-added .col-marker {
   .ss-statusbar code { background: var(--th-bg, #f3f4f6); padding: 1px 5px; border-radius: 3px; }
 
   .reco-shell { display: flex; flex-direction: column; height: calc(100vh - 95px); }
+
+  /* ---- F7: two panes side by side (MODULE 4b) --------------------------
+     The shell's own height is a fixed calc() because it is normally the only
+     thing on the page; inside a split it fills its pane instead. The parked
+     pane's grid wrapper carries .reco-table-wrap-parked, which every rule
+     here lists beside .reco-table-wrap, so it looks and scrolls exactly the
+     same — the border and the chip are the only difference, and deliberately
+     so: both panes have to stay readable. */
+  .reco-split { display: flex; flex-direction: row; align-items: stretch; height: calc(100vh - 95px); }
+  body.reco-fullheight .reco-split { height: calc(100vh - 50px); }
+  .reco-split .reco-pane { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  .reco-split .reco-shell { height: 100%; min-height: 0; }
+  .reco-split .reco-pane.owner { box-shadow: inset 0 0 0 2px var(--primary, #2563eb); }
+  .reco-split .reco-pane:not(.owner) .reco-topbar { opacity: .82; }
+  .reco-splitter { flex: 0 0 6px; cursor: col-resize; background: var(--border, #e5e7eb); }
+  .reco-splitter:hover, .reco-splitter.dragging { background: var(--primary, #2563eb); }
+  .pane-chip { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 9px; border: 1px solid var(--border, #e5e7eb); color: var(--text-muted, #6b7280); }
+  .pane-chip.on { color: var(--primary, #2563eb); border-color: var(--primary, #2563eb); }
+  .pane-note { font-size: 10px; }
+
   .reco-topbar { padding: 8px 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; background: var(--panel-bg, #fff); border-bottom: 1px solid var(--border, #e5e7eb); }
   .reco-content-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; position: relative; }
-  .reco-table-wrap { flex: 1; overflow: auto; max-height: 100%; position: relative; padding: 10px 14px; }
-  .reco-table-wrap table { width: max-content; min-width: 100%; }
-  .reco-table-wrap th { position: sticky; top: 0; z-index: 5; background: var(--th-bg, #f9fafb); white-space: nowrap; }
+  .reco-table-wrap,
+  .reco-table-wrap-parked { flex: 1; overflow: auto; max-height: 100%; position: relative; padding: 10px 14px; }
+  .reco-table-wrap table,
+  .reco-table-wrap-parked table { width: max-content; min-width: 100%; }
+  .reco-table-wrap th,
+  .reco-table-wrap-parked th { position: sticky; top: 0; z-index: 5; background: var(--th-bg, #f9fafb); white-space: nowrap; }
   /* Prevent text selection while dragging across the table */
-  .reco-table-wrap tbody { user-select: none; -webkit-user-select: none; }
+  .reco-table-wrap tbody,
+  .reco-table-wrap-parked tbody { user-select: none; -webkit-user-select: none; }
   
   /* Ensure inputs are still selectable/editable */
-  .reco-table-wrap tbody input, 
-  .reco-table-wrap tbody select { user-select: auto; -webkit-user-select: auto; }
+  .reco-table-wrap tbody input,
+  .reco-table-wrap-parked tbody input,
+  .reco-table-wrap tbody select,
+  .reco-table-wrap-parked tbody select { user-select: auto; -webkit-user-select: auto; }
   
   /* Visual indicator for selected rows */
-  .reco-table-wrap tbody tr { cursor: pointer; transition: background-color 0.1s; }
-  .reco-table-wrap tbody tr.selected td { background: var(--row-selected-bg, #eaf4ff) !important; }
+  .reco-table-wrap tbody tr,
+  .reco-table-wrap-parked tbody tr { cursor: pointer; transition: background-color 0.1s; }
+  .reco-table-wrap tbody tr.selected td,
+  .reco-table-wrap-parked tbody tr.selected td { background: var(--row-selected-bg, #eaf4ff) !important; }
 
   /* column filter dropdown */
   .col-filter-btn { cursor: pointer; margin-left: 4px; opacity: 0.6; font-size: 10px; vertical-align: middle; }
@@ -485,7 +519,8 @@ th.col-ss-added .col-marker {
 
 
   /* Row drop hover */
-  .reco-table-wrap tbody tr.row-drop-hover td { background: var(--badge-amber-bg, #fef3c7) !important; outline: 1px dashed var(--primary, #2563eb); }
+  .reco-table-wrap tbody tr.row-drop-hover td,
+  .reco-table-wrap-parked tbody tr.row-drop-hover td { background: var(--badge-amber-bg, #fef3c7) !important; outline: 1px dashed var(--primary, #2563eb); }
 
   /* Row context menu */
   .row-ctx-menu { padding: 6px; }
@@ -505,7 +540,8 @@ th.col-ss-added .col-marker {
   transform: scale(1.25);
   background: var(--primary-hover, #1d4ed8);
 }
-.reco-table-wrap td.ss-fill-preview {
+.reco-table-wrap td.ss-fill-preview,
+.reco-table-wrap-parked td.ss-fill-preview {
   outline: 2px dashed var(--primary, #2563eb);
   outline-offset: -2px;
 }
@@ -554,7 +590,8 @@ th.col-ss-added .col-marker {
   body.reco-fullheight .reco-shell { height: calc(100vh - 50px); }
 
   /* Zoom container needs to allow overflow */
-  .reco-table-wrap { transform-origin: top left; }
+  .reco-table-wrap,
+  .reco-table-wrap-parked { transform-origin: top left; }
 
   /* Find/Replace highlight */
   mark { background: var(--badge-amber-bg, #fef3c7); color: var(--badge-amber, #92400e); padding: 0 1px; border-radius: 2px; font-weight: 600; }
@@ -6294,9 +6331,50 @@ const ExcelLink = {
   _busy: false,
   _cancel: false,
   _jobId: null,
-  _watch: null,
-  _active: {},        // tplId -> { exportId, fileName, tier, status, loaded:{at,count}, sawOwner }
-  _lookedUp: {},      // tplId -> true once the shared link list was checked
+  /* =====================================================================
+     ONE LIVE LINK PER PANE — "have each to have separate linked Excel"
+
+     THE KEY CHANGED, NOT THE MODEL. Everything that makes a load-back
+     correct is already per EXPORT ID and needs no change at all: the
+     manifest at reco_excel/<folder>/_links/<exportId>.json, its baseline
+     beside it, the three-way diff against that baseline, the ~$ owner-file
+     detection (derived from the workbook's own path) and every launcher
+     call (_find_head, status, manifest, read_start, close). No Python
+     change — verified again here, and nothing in this commit touches it.
+
+     What was keyed by TEMPLATE, and is now keyed by PANE:
+
+       _active     the live link a pane is showing. Keyed by tplId, a second
+                   export for one template silently replaced the first's
+                   banner entry (F33) — which is also why it was possible to
+                   lose a link today, single-pane, by exporting twice.
+       _watches    ONE setInterval per pane. It was one global watcher, so a
+                   second export stopped polling the first (F34).
+       _lookedUp   per pane AND template, so a pane that moves to another
+                   template can still adopt that template's link.
+
+     And _tick's guard was `AppState.activeRecoId !== w.tplId` (F35), which
+     in a split means the unfocused pane's link never notices a save. It is
+     now "this pane still exists and still shows this template" — with no
+     split, slot 0's tplId IS AppState.activeRecoId, so that is the same
+     comparison it always was.
+
+     TWO LIVE LINKS ON ONE TEMPLATE CANNOT STEAL EACH OTHER'S ROWS, and that
+     is a property of the data model rather than of this page: each diffs its
+     OWN baseline, rows absent from a sheet are counted and never written,
+     and the "Reco now" side of the diff pulls the shared history written
+     since that export — so a value already loaded from workbook A shows up
+     as a CONFLICT in workbook B's review, for the user to decide, in
+     whichever order they are loaded back.
+
+     _busy stays ONE global flight (F39): the launcher would allow four, the
+     page would not, and serialising two Excel jobs is the safer bargain.
+     The toast now says which pane and which template is holding it.
+     ===================================================================== */
+  _watches: {},       // paneKey -> { paneKey, tplId, exportId, timer, ... } — one interval each
+  _active: {},        // paneKey -> { tplId, exportId, fileName, tier, status, loaded:{at,count}, sawOwner, missingFor }
+  _lookedUp: {},      // paneKey + '|' + tplId -> true once the shared link list was checked
+  _busyWhat: null,    // what the one global flight is doing, so the busy toast can name it
 
   ERRORS: {
     no_bridge: 'This needs the Automation Hub launcher.',
@@ -6348,9 +6426,123 @@ const ExcelLink = {
      _xlSavePrefs). */
   _lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
   user() { return AppState.currentUser || 'user'; },
-  _ctx() {
+  /* The (template, session) ONE PANE is looking at, plus its key. Called
+     without a pane key it is the owner pane, which is what every existing
+     caller means: by the time an emitted handler runs, the pane that was
+     clicked is already the owner (MODULE 4b's capture-phase pointerdown).
+     With no split this is the two lines it replaces, plus the key. */
+  _ctx(paneKey) {
+    if (paneKey && typeof Panes !== 'undefined' && Panes.isSplit()) {
+      const c = Panes.ctx(paneKey);
+      if (c && c.tpl && c.sess) return { tpl: c.tpl, sess: c.sess, paneKey: c.paneKey };
+    }
     const id = AppState.activeRecoId;
-    return { tpl: AppState.recoTemplates.find(x => x.id === id), sess: AppState.recoSessions[id] };
+    return { tpl: AppState.recoTemplates.find(x => x.id === id), sess: AppState.recoSessions[id],
+             paneKey: ExcelLink._ownerKey() };
+  },
+  _ownerKey() { return ((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0'; },
+  /* The session one pane holds for a template. With no split, and for the
+     owner pane, this is AppState.recoSessions[tplId] — the same object. */
+  _sessFor(paneKey, tplId) {
+    if (paneKey && typeof Panes !== 'undefined' && Panes.isSplit()) {
+      const v = Panes.viewFor(paneKey, tplId);
+      if (v) return v;
+    }
+    return AppState.recoSessions[tplId];
+  },
+
+  /* ---------------- the live-link map, by pane ---------------- */
+
+  /* This pane's live link, or null. With a template given, null unless the
+     entry is for that template: a pane that has moved on must not paint the
+     old template's banner. */
+  _activeFor(paneKey, tplId) {
+    const a = ExcelLink._active[paneKey || ExcelLink._ownerKey()];
+    if (!a) return null;
+    if (tplId != null && a.tplId !== tplId) return null;
+    return a;
+  },
+  /* Any pane's live link for this template, the owner pane's first. For the
+     two places that know only a template, and for tests that used to read
+     ExcelLink._active[tplId] directly. */
+  _activeForTpl(tplId) {
+    const own = ExcelLink._active[ExcelLink._ownerKey()];
+    if (own && own.tplId === tplId) return own;
+    const k = Object.keys(ExcelLink._active).find(p => ExcelLink._active[p] && ExcelLink._active[p].tplId === tplId);
+    return k ? ExcelLink._active[k] : null;
+  },
+  /* The pane holding this export id. An export id is held by at most one
+     pane, which is what makes a load, an apply or a close find the right
+     banner even when it was started from the other pane's Links panel. */
+  _byExportId(exportId) {
+    if (!exportId) return null;
+    const k = Object.keys(ExcelLink._active).find(p => ExcelLink._active[p] && ExcelLink._active[p].exportId === exportId);
+    return k ? { paneKey: k, a: ExcelLink._active[k] } : null;
+  },
+  _heldElsewhere(paneKey, exportId) {
+    return Object.keys(ExcelLink._active).some(p => p !== paneKey
+      && ExcelLink._active[p] && ExcelLink._active[p].exportId === exportId);
+  },
+  _eachWatch(fn) {
+    Object.keys(ExcelLink._watches).forEach(k => { const w = ExcelLink._watches[k]; if (w) fn(w); });
+  },
+  /* Poll now rather than at the next interval: after opening Excel, after an
+     apply. With an export id, only that link's watcher. */
+  _pokeWatch(exportId) {
+    ExcelLink._eachWatch(w => {
+      if (exportId && w.exportId !== exportId) return;
+      w.lastPoll = 0;
+      ExcelLink._tick(w.paneKey);
+    });
+  },
+  /* F39: one global flight, deliberately. "An Excel task is already running"
+     beside two panes is a puzzle, so the message says whose. */
+  _busyMsg() {
+    const b = ExcelLink._busyWhat;
+    const base = 'An Excel task is already running';
+    if (!b || !b.tplName) return base;
+    const where = (typeof Panes !== 'undefined' && Panes.isSplit() && b.paneKey)
+      ? (b.paneKey === 'p0' ? ' in the left pane' : ' in the right pane') : '';
+    return base + ' — ' + b.what + ' ' + b.tplName + where;
+  },
+
+  /* ---------------- a pane opening and closing ---------------- */
+
+  /* A pane is going away. The LINK IS NOT CLOSED: it stays open on the share
+     with its manifest and baseline intact, so it can be adopted again from
+     📗 Links into either pane. Only this page stops watching it. */
+  releasePane(paneKey) {
+    if (!paneKey) return;
+    ExcelLink.unwatch(paneKey);
+    delete ExcelLink._active[paneKey];
+    Object.keys(ExcelLink._lookedUp).forEach(k => { if (k.indexOf(paneKey + '|') === 0) delete ExcelLink._lookedUp[k]; });
+  },
+  /* Closing a pane whose workbook has saves that are not loaded back asks
+     first, with the sentence confirmLeave uses — because the alternative is
+     that the amber banner disappears with the pane and the user never finds
+     out. Returns false to abort the close. */
+  confirmPaneClose(paneKey) {
+    const a = ExcelLink._active[paneKey];
+    if (!a || !a.status || a.status.state !== 'saved' || !a.status.newSinceLastImport) return true;
+    return confirm('Excel has saved changes that are not loaded back into Reco yet ('
+      + (a.fileName || a.exportId) + '). Closing this pane leaves the link open — you can load it '
+      + 'back later from 📗 Links. Close the pane anyway?');
+  },
+  /* The split collapsed to one pane. The closed pane's link is released; if
+     the pane that SURVIVED is the second one, its link moves to slot 0 with
+     its template, because slot 0 is the pane that always exists. */
+  panesCollapsed(closedKey, keptKey) {
+    ExcelLink.releasePane(closedKey);
+    if (!keptKey || keptKey === 'p0') return;
+    const a = ExcelLink._active[keptKey];
+    ExcelLink.unwatch(keptKey);
+    delete ExcelLink._active[keptKey];
+    Object.keys(ExcelLink._lookedUp).forEach(k => { if (k.indexOf(keptKey + '|') === 0) delete ExcelLink._lookedUp[k]; });
+    if (!a) return;
+    ExcelLink._active.p0 = a;
+    ExcelLink._lookedUp['p0|' + a.tplId] = true;
+    if (a.tier === 'P') ExcelLink.watch('p0', a.tplId, a.exportId, true);
+    ExcelLink._paintBanner('p0');
   },
   _sleep(ms) { return new Promise(r => setTimeout(r, ms)); },
   _err(r) {
@@ -6414,31 +6606,38 @@ const ExcelLink = {
     const chk = ExcelLink.canExport(tpl, sess);
     return '<button class="success small" id="xlEditInExcelBtn"' + (chk.ok ? '' : ' disabled') + ' title="'
       + U.escAttr(chk.ok ? 'Open these rows in Microsoft Excel with dropdowns, then load the edits back' : chk.reason)
-      + '" onclick="ExcelLink.openDialog()">📗 Edit in Excel</button>';
+      + '" onclick="ExcelLink.openDialog(null,\'' + U.jsq(ExcelLink._ownerKey()) + '\')">📗 Edit in Excel</button>';
   },
 
-  async openDialog(tplId) {
-    const tpl = AppState.recoTemplates.find(x => x.id === (tplId || AppState.activeRecoId));
-    const sess = tpl && AppState.recoSessions[tpl.id];
+  async openDialog(tplId, paneKey) {
+    const pk = paneKey || ExcelLink._ownerKey();
+    const pane = (typeof Panes !== 'undefined' && Panes.isSplit()) ? Panes.byKey(pk) : null;
+    const tpl = AppState.recoTemplates.find(x => x.id === (tplId || (pane && pane.tplId) || AppState.activeRecoId));
+    const sess = tpl && ExcelLink._sessFor(pk, tpl.id);
     const chk = ExcelLink.canExport(tpl, sess);
     if (!chk.ok) { U.toast(chk.reason, 'error'); return; }
     try { await Versioning.flushQueue(); await AppState.flush(); } catch (e) {}
     const tier = await ExcelLink.tier();
     if (tier === 'P') {
       const links = await ExcelLink.listLinks(tpl);
-      const mine = links.filter(l => l.tplId === tpl.id && l.status === 'open' && l.exportedBy === ExcelLink.user() && l.newSinceLastImport);
+      /* "Your workbook has unloaded changes" is about THIS pane's workbook.
+         A link the OTHER pane is holding has its own amber banner over
+         there, and must not stand in the way of this pane making its own —
+         that is the whole point of a link per pane. */
+      const mine = links.filter(l => l.tplId === tpl.id && l.status === 'open' && l.exportedBy === ExcelLink.user()
+        && l.newSinceLastImport && !ExcelLink._heldElsewhere(pk, l.exportId));
       if (mine.length) {
         const l = mine[0];
         App.openModal('Edit in Excel',
           '<div class="help" style="font-size:12px;">Your workbook <b>' + U.esc(l.fileName) + '</b> has changes saved in Excel that are not loaded back yet.</div>',
           '<button onclick="App.closeModal()">Cancel</button>'
-          + '<button onclick="ExcelLink._renderDialog(\'' + U.jsq(tpl.id) + '\', \'P\')">Create a new one</button>'
+          + '<button onclick="ExcelLink._renderDialog(\'' + U.jsq(tpl.id) + '\', \'P\', \'' + U.jsq(pk) + '\')">Create a new one</button>'
           + '<button onclick="App.closeModal(); ExcelLink.openInExcel(\'' + U.jsq(l.exportId) + '\')">Open it again</button>'
-          + '<button class="primary" onclick="App.closeModal(); ExcelLink.load({exportId:\'' + U.jsq(l.exportId) + '\'})">Load it back first</button>');
+          + '<button class="primary" onclick="App.closeModal(); ExcelLink.load({exportId:\'' + U.jsq(l.exportId) + '\',paneKey:\'' + U.jsq(pk) + '\'})">Load it back first</button>');
         return;
       }
     }
-    ExcelLink._renderDialog(tpl.id, tier);
+    ExcelLink._renderDialog(tpl.id, tier, pk);
   },
 
   _dialogPrefs(tpl) {
@@ -6450,9 +6649,10 @@ const ExcelLink = {
     out.autoReview = !!ExcelLink._lsGet('reco.xl.autoReview', false);
     return out;
   },
-  _renderDialog(tplId, tier) {
+  _renderDialog(tplId, tier, paneKey) {
+    const pk = paneKey || ExcelLink._ownerKey();
     const tpl = AppState.recoTemplates.find(x => x.id === tplId);
-    const sess = AppState.recoSessions[tplId];
+    const sess = ExcelLink._sessFor(pk, tplId);
     if (!tpl || !sess) return;
     const p = ExcelLink._dialogPrefs(tpl);
     const nSel = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]).length;
@@ -6461,7 +6661,11 @@ const ExcelLink = {
       open: sess.data.filter(r => !(sess.offsets && sess.offsets[r._id])).length, selected: nSel, all: sess.data.length };
     const opt = (name, val, cur, label, dis) => '<label class="inline" style="margin-right:12px;"><input type="radio" name="' + name + '" value="' + val + '"'
       + (cur === val ? ' checked' : '') + (dis ? ' disabled' : '') + ' onchange="ExcelLink._dlgUpdate()"> ' + label + '</label>';
-    let h = '<div id="xlDlg" data-tpl="' + U.escAttr(tpl.id) + '" data-tier="' + tier + '" style="font-size:12px;">';
+    /* The pane travels on the dialog element, not in a closure: the dialog
+       re-renders itself on every radio change, and the export it starts must
+       belong to the pane it was opened from even though the modal is shared
+       and the focus can move while it is open. */
+    let h = '<div id="xlDlg" data-tpl="' + U.escAttr(tpl.id) + '" data-pane="' + U.escAttr(pk) + '" data-tier="' + tier + '" style="font-size:12px;">';
     if (tier === 'S') h += '<div class="xl-warn">This launcher cannot add dropdowns, colours or protection. The workbook is downloaded; after editing, save it and use <b>Load from file…</b>.</div>';
     h += '<div class="xl-dlg-row"><b>Rows</b><div>' + opt('xlRows', 'view', p.rows, 'Shown in Reco now (' + counts.view + ')')
       + opt('xlRows', 'open', p.rows, 'Open rows (' + counts.open + ')') + opt('xlRows', 'selected', p.rows, 'Selected (' + counts.selected + ')', !counts.selected)
@@ -6494,7 +6698,7 @@ const ExcelLink = {
     if (!el) return null;
     const val = (name, d) => { const x = el.querySelector('input[name="' + name + '"]:checked'); return x ? x.value : d; };
     const chk = (id, d) => { const x = document.getElementById(id); return x ? x.checked : d; };
-    return { tplId: el.dataset.tpl, tier: el.dataset.tier, rows: val('xlRows', 'view'), columns: val('xlCols', 'asShown'),
+    return { tplId: el.dataset.tpl, paneKey: el.dataset.pane || ExcelLink._ownerKey(), tier: el.dataset.tier, rows: val('xlRows', 'view'), columns: val('xlCols', 'asShown'),
       includeComputed: chk('xlComputed', true), protect: val('xlProt', 'soft'), dateFormat: val('xlDate', 'dd-mmm-yyyy'),
       area: val('xlArea', 'shared'), openAfter: chk('xlOpenAfter', true), autoReview: chk('xlAutoReview', false) };
   },
@@ -6502,7 +6706,7 @@ const ExcelLink = {
     const o = ExcelLink._dlgRead();
     if (!o) return;
     const tpl = AppState.recoTemplates.find(x => x.id === o.tplId);
-    const sess = AppState.recoSessions[o.tplId];
+    const sess = ExcelLink._sessFor(o.paneKey, o.tplId);
     const S = ExcelLink.schemaFor(tpl, sess, o.columns);
     const cols = S.cols.filter(d => o.includeComputed || d.role !== 'computed');
     const ed = cols.filter(d => d.editable);
@@ -6527,7 +6731,11 @@ const ExcelLink = {
     const o = ExcelLink._dlgRead();
     if (!o) return;
     const tpl = AppState.recoTemplates.find(x => x.id === o.tplId);
-    const sess = AppState.recoSessions[o.tplId];
+    /* "As shown" means as shown IN THIS PANE: rowsFor uses this session's
+       filters for scope 'view' and schemaFor honours its hidden columns, so
+       two panes on one template genuinely export two different workbooks
+       with no new export plumbing at all. */
+    const sess = ExcelLink._sessFor(o.paneKey, o.tplId);
     ExcelLink._lsSet('reco.xl.export.v1.' + tpl.id, { rows: o.rows, columns: o.columns, includeComputed: o.includeComputed,
       protect: o.protect, dateFormat: o.dateFormat, area: o.area, openAfter: o.openAfter });
     ExcelLink._lsSet('reco.xl.autoReview', !!o.autoReview);
@@ -6763,8 +6971,10 @@ const ExcelLink = {
 
   /* ---------------- export ---------------- */
   async exportNow(tpl, sess, o) {
-    if (ExcelLink._busy) { U.toast('An Excel task is already running', 'error'); return; }
+    if (ExcelLink._busy) { U.toast(ExcelLink._busyMsg(), 'error'); return; }
     ExcelLink._busy = true; ExcelLink._cancel = false;
+    ExcelLink._busyWhat = { paneKey: (o && o.paneKey) || ExcelLink._ownerKey(),
+                            tplName: tpl && tpl.name, what: 'building a workbook for' };
     const tier = o.tier || await ExcelLink.tier();
     try {
       ExcelLink._progress('Preparing rows…', 3);
@@ -6776,7 +6986,7 @@ const ExcelLink = {
       if (built.sanitized) U.toast(built.sanitized + ' value(s) had characters Excel cannot hold; those cells cannot be loaded back', 'error');
     } catch (e) {
       if (e.code !== 'cancelled') { App.closeModal(); U.toast('Excel export failed: ' + e.message, 'error'); console.error(e); }
-    } finally { ExcelLink._busy = false; }
+    } finally { ExcelLink._busy = false; ExcelLink._busyWhat = null; }
   },
   async _exportP(tpl, built, o) {
     const n = built.cells.length;
@@ -6799,8 +7009,10 @@ const ExcelLink = {
     const job = await ExcelLink._waitJob(r.job_id, j => ExcelLink._progress('Writing workbook ' + (j.percent || 0) + '%', 50 + 0.45 * (j.percent || 0)));
     try { ExcelLink.api().excel_link_job_release(r.job_id); } catch (e) {}
     const res = job.result || {};
-    ExcelLink._active[tpl.id] = { exportId: built.head.exportId, fileName: res.name || built.head.fileName, tier: 'P', status: null, sawOwner: false };
-    ExcelLink._lookedUp[tpl.id] = true;
+    const pkP = (o && o.paneKey) || ExcelLink._ownerKey();
+    ExcelLink._active[pkP] = { tplId: tpl.id, exportId: built.head.exportId, fileName: res.name || built.head.fileName,
+                               tier: 'P', status: null, sawOwner: false };
+    ExcelLink._lookedUp[pkP + '|' + tpl.id] = true;
     (res.warnings || []).forEach(w => {
       if (w === 'pathTooLong' || w === 'sharedNotWritable') U.toast('The shared folder could not take the workbook; it was saved on this PC instead', 'error');
     });
@@ -6810,7 +7022,7 @@ const ExcelLink = {
       catch (e) { U.toast(e.message, 'error'); }
     }
     App.closeModal();
-    ExcelLink.watch(tpl.id, built.head.exportId);
+    ExcelLink.watch(pkP, tpl.id, built.head.exportId);
     App.navigate('reco');
     U.toast('Workbook ready: ' + (res.name || built.head.fileName) + ' (' + built.rows.length + ' rows)', 'success');
   },
@@ -6885,8 +7097,9 @@ const ExcelLink = {
     App.closeModal();
     const saved = await U.downloadWorkbook(wb, head.fileName);
     if (saved === false) { U.toast('Export cancelled', 'error'); return; }
-    ExcelLink._active[tpl.id] = { exportId: head.exportId, fileName: head.fileName, tier: 'S', status: null };
-    ExcelLink._lookedUp[tpl.id] = true;
+    const pkS = (o && o.paneKey) || ExcelLink._ownerKey();
+    ExcelLink._active[pkS] = { tplId: tpl.id, exportId: head.exportId, fileName: head.fileName, tier: 'S', status: null };
+    ExcelLink._lookedUp[pkS + '|' + tpl.id] = true;
     App.navigate('reco');
   },
 
@@ -6899,23 +7112,31 @@ const ExcelLink = {
     } catch (e) { console.error('excel_link_list', e); return []; }
   },
   bannerHtml(tpl) {
-    setTimeout(() => ExcelLink.ensureWatch(tpl), 0);
-    const a = ExcelLink._active[tpl.id];
-    return '<div id="xlLinkBanner" class="xl-link-banner' + (a ? '' : ' empty') + '" data-tpl="' + U.escAttr(tpl.id) + '">' + (a ? ExcelLink._bannerInner(a) : '') + '</div>';
+    /* The pane being rendered owns the screen for the duration of its render
+       (Panes.withOwner), so this is ITS key — and the timer below must
+       capture it rather than read it when it fires: ensureWatch runs after
+       the render returns, when the owner may be the other pane again. That
+       is PLAN2 F7 change #4's async-holder rule, applied to the one site in
+       this module that defers. */
+    const pk = ExcelLink._ownerKey();
+    setTimeout(() => ExcelLink.ensureWatch(pk, tpl), 0);
+    const a = ExcelLink._activeFor(pk, tpl.id);
+    return '<div id="xlLinkBanner" class="xl-link-banner' + (a ? '' : ' empty') + '" data-tpl="' + U.escAttr(tpl.id) + '" data-pane="' + U.escAttr(pk) + '">' + (a ? ExcelLink._bannerInner(a, pk) : '') + '</div>';
   },
-  _bannerInner(a) {
+  _bannerInner(a, paneKey) {
     const id = U.jsq(a.exportId);
+    const pk = U.jsq(paneKey || ExcelLink._ownerKey());
     const b = (label, fn, cls) => '<button class="small' + (cls ? ' ' + cls : '') + '" onclick="' + fn + '">' + label + '</button>';
     const file = '<b>' + U.esc(a.fileName || a.exportId) + '</b>';
-    const fromFile = b('Load from file…', 'ExcelLink.pickAndLoad()');
-    const close = b('Close link', 'ExcelLink.closeLink(\'' + id + '\')');
+    const fromFile = b('Load from file…', 'ExcelLink.pickAndLoad(\'' + pk + '\')');
+    const close = b('Close link', 'ExcelLink.closeLink(\'' + id + '\', false, \'' + pk + '\')');
     const openB = b('Open again', 'ExcelLink.openInExcel(\'' + id + '\')');
-    const loadB = cls => b('Load back', 'ExcelLink.load({exportId:\'' + id + '\'})', cls);
-    const links = b('Links…', 'ExcelLink.openLinksPanel()');
+    const loadB = cls => b('Load back', 'ExcelLink.load({exportId:\'' + id + '\',paneKey:\'' + pk + '\'})', cls);
+    const links = b('Links…', 'ExcelLink.openLinksPanel(null,\'' + pk + '\')');
     let cls = '', text = '', btns = '';
     if (a.tier === 'S') {
       text = '📗 ' + file + ' was downloaded. Open it in Excel, edit, save, then <b>Load from file…</b>';
-      btns = b('Load from file…', 'ExcelLink.pickAndLoad()', 'primary') + close;
+      btns = b('Load from file…', 'ExcelLink.pickAndLoad(\'' + pk + '\')', 'primary') + close;
     } else {
       const st = a.status;
       if (!st) { text = '📗 Linked to ' + file + ' · checking…'; btns = openB + loadB('') + links; }
@@ -6938,49 +7159,93 @@ const ExcelLink = {
     }
     return '<span class="xl-banner-text ' + cls + '">' + text + '</span><span class="xl-banner-btns">' + btns + '</span>';
   },
-  _paintBanner(tplId) {
-    const el = document.getElementById('xlLinkBanner');
-    if (!el || el.dataset.tpl !== tplId) return;
-    const a = ExcelLink._active[tplId];
+  /* Paint ONE pane's banner. F36: this used to be
+     document.getElementById('xlLinkBanner'), which in a split is the owner
+     pane's — so the unfocused pane's banner never changed, and when the
+     owner held another template no banner painted at all. */
+  _paintBanner(paneKey) {
+    const pk = paneKey || ExcelLink._ownerKey();
+    const el = (typeof Panes !== 'undefined' && Panes.isSplit())
+      ? Panes.el(pk, 'xlLinkBanner') : document.getElementById('xlLinkBanner');
+    if (!el) return;
+    const a = ExcelLink._active[pk] || null;
+    /* The banner on screen belongs to whatever template that pane last
+       rendered; an entry for another template must not paint over it. */
+    if (a && el.dataset.tpl !== a.tplId) return;
     el.classList.toggle('empty', !a);
-    el.innerHTML = a ? ExcelLink._bannerInner(a) : '';
+    el.innerHTML = a ? ExcelLink._bannerInner(a, pk) : '';
   },
-  async ensureWatch(tpl) {
+  /* Adopt the newest open link this user has for this template — F37, now
+     per pane, and skipping any export id ANOTHER pane is already holding, or
+     both panes would show one workbook and the first to close it would take
+     the other's banner down with it. Split a template that already has two
+     open links and each pane adopts one. */
+  async ensureWatch(paneKey, tpl) {
     if (!tpl) return;
-    const a = ExcelLink._active[tpl.id];
-    if (a) { if (a.tier === 'P') ExcelLink.watch(tpl.id, a.exportId, true); return; }
-    if (ExcelLink._lookedUp[tpl.id]) return;
-    ExcelLink._lookedUp[tpl.id] = true;
+    const pk = paneKey || ExcelLink._ownerKey();
+    const a = ExcelLink._active[pk];
+    if (a && a.tplId !== tpl.id) {
+      /* This pane moved to another template. Let go of the link: it stays
+         OPEN on the share and is adoptable again, by this pane or the other
+         one, from 📗 Links. A link is never auto-closed. */
+      ExcelLink.releasePane(pk);
+    } else if (a) {
+      if (a.tier === 'P') ExcelLink.watch(pk, tpl.id, a.exportId, true);
+      return;
+    }
+    const seen = pk + '|' + tpl.id;
+    if (ExcelLink._lookedUp[seen]) return;
+    ExcelLink._lookedUp[seen] = true;
     if ((await ExcelLink.tier()) !== 'P') return;
-    const links = (await ExcelLink.listLinks(tpl)).filter(l => l.status === 'open' && l.exportedBy === ExcelLink.user() && l.exists !== false);
+    const links = (await ExcelLink.listLinks(tpl)).filter(l => l.status === 'open' && l.exportedBy === ExcelLink.user()
+      && l.exists !== false && !ExcelLink._heldElsewhere(pk, l.exportId));
     if (!links.length) return;
     links.sort((x, y) => String(y.exportedAt).localeCompare(String(x.exportedAt)));
     const l = links[0];
-    ExcelLink._active[tpl.id] = { exportId: l.exportId, fileName: l.fileName, tier: 'P', status: null,
+    ExcelLink._active[pk] = { tplId: tpl.id, exportId: l.exportId, fileName: l.fileName, tier: 'P', status: null,
       loaded: l.lastImport ? { at: l.lastImport.at, count: (l.lastImport.count != null ? l.lastImport.count : '') } : null };
-    ExcelLink.watch(tpl.id, l.exportId);
-    ExcelLink._paintBanner(tpl.id);
+    ExcelLink.watch(pk, tpl.id, l.exportId);
+    ExcelLink._paintBanner(pk);
   },
-  watch(tplId, exportId, quiet) {
-    const w = ExcelLink._watch;
-    if (w && w.exportId === exportId) { if (!quiet) { w.lastPoll = 0; ExcelLink._tick(); } return; }
-    ExcelLink.unwatch();
-    ExcelLink._watch = { tplId, exportId, lastPoll: 0, lastChange: Date.now(), key: '', inflight: false, notified: null, missingSince: 0,
-      timer: setInterval(() => ExcelLink._tick(), ExcelLink.POLL_MS) };
+  /* ONE INTERVAL PER PANE (F34: it was one global watcher, so a second
+     export stopped polling the first). Two links = two excel_link_status
+     calls per POLL_MS; the existing back-off to SLOW_MS after ten quiet
+     minutes applies per watcher. */
+  watch(paneKey, tplId, exportId, quiet) {
+    const pk = paneKey || ExcelLink._ownerKey();
+    const w = ExcelLink._watches[pk];
+    if (w && w.exportId === exportId) { if (!quiet) { w.lastPoll = 0; ExcelLink._tick(pk); } return; }
+    ExcelLink.unwatch(pk);
+    ExcelLink._watches[pk] = { paneKey: pk, tplId, exportId, lastPoll: 0, lastChange: Date.now(), key: '', inflight: false, notified: null, missingSince: 0,
+      timer: setInterval(() => ExcelLink._tick(pk), ExcelLink.POLL_MS) };
     if (!ExcelLink._focusWired) {
       ExcelLink._focusWired = true;
-      window.addEventListener('focus', () => { if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); } });
+      window.addEventListener('focus', () => ExcelLink._pokeWatch());
     }
-    ExcelLink._tick();
+    ExcelLink._tick(pk);
   },
-  unwatch() {
-    if (ExcelLink._watch) clearInterval(ExcelLink._watch.timer);
-    ExcelLink._watch = null;
+  /* No argument stops every watcher — the shape any older caller expects. */
+  unwatch(paneKey) {
+    if (paneKey == null) { Object.keys(ExcelLink._watches).forEach(k => ExcelLink.unwatch(k)); return; }
+    const w = ExcelLink._watches[paneKey];
+    if (w) clearInterval(w.timer);
+    delete ExcelLink._watches[paneKey];
   },
-  async _tick() {
-    const w = ExcelLink._watch;
+  async _tick(paneKey) {
+    const w = ExcelLink._watches[paneKey || ExcelLink._ownerKey()];
     if (!w || w.inflight) return;
-    if (AppState.currentPage !== 'reco' || AppState.activeRecoId !== w.tplId) return;
+    if (AppState.currentPage !== 'reco') return;
+    /* F35. The guard was `AppState.activeRecoId !== w.tplId`, which in a
+       split means the UNFOCUSED pane's link never notices a save — and
+       noticing it is the point of the feature. It is now "this pane still
+       exists and still shows this template". With no split, slot 0's tplId
+       IS AppState.activeRecoId, so this is the same comparison as before.
+       A pane that has GONE can never come back, so its watcher stops; a
+       pane merely showing something else is left alone, because the user may
+       switch back and ensureWatch decides on the next render. */
+    const pane = (typeof Panes !== 'undefined') ? Panes.byKey(w.paneKey) : null;
+    if (!pane) { ExcelLink.unwatch(w.paneKey); return; }
+    if (pane.tplId !== w.tplId) return;
     if (document.visibilityState && document.visibilityState !== 'visible') return;
     const now = Date.now();
     const interval = now - w.lastChange > 600000 ? ExcelLink.SLOW_MS : ExcelLink.POLL_MS - 100;
@@ -6990,11 +7255,11 @@ const ExcelLink = {
     let st = null;
     try { st = await ExcelLink.api().excel_link_status(w.exportId); } catch (e) { st = null; }
     finally { w.inflight = false; }
-    if (ExcelLink._watch !== w) return;
-    const a = ExcelLink._active[w.tplId];
+    if (ExcelLink._watches[w.paneKey] !== w) return;
+    const a = ExcelLink._active[w.paneKey];
     if (!a || a.exportId !== w.exportId) return;
     if (!st || st.ok === false) {
-      if (st && st.code === 'missing_manifest') { delete ExcelLink._active[w.tplId]; ExcelLink.unwatch(); ExcelLink._paintBanner(w.tplId); }
+      if (st && st.code === 'missing_manifest') { delete ExcelLink._active[w.paneKey]; ExcelLink.unwatch(w.paneKey); ExcelLink._paintBanner(w.paneKey); }
       return;
     }
     const key = [st.state, st.mtimeNs, st.ownerFile, st.newSinceLastImport].join('|');
@@ -7006,12 +7271,14 @@ const ExcelLink = {
     if (st.state === 'saved' && st.newSinceLastImport && st.mtimeNs !== w.notified) {
       w.notified = st.mtimeNs;
       if (ExcelLink._lsGet('reco.xl.autoReview', false) && !ExcelLink._busy && !document.getElementById('appModal').classList.contains('show')) {
-        ExcelLink.load({ exportId: w.exportId });
+        ExcelLink.load({ exportId: w.exportId, paneKey: w.paneKey });
       } else {
-        ExcelLink._actionToast('Saved in Excel at ' + ExcelLink._hhmm(st.mtime), 'Load back', () => ExcelLink.load({ exportId: w.exportId }));
+        ExcelLink._actionToast('Saved in Excel at ' + ExcelLink._hhmm(st.mtime)
+          + (typeof Panes !== 'undefined' && Panes.isSplit() ? ' · ' + (a.fileName || '') : ''),
+          'Load back', () => ExcelLink.load({ exportId: w.exportId, paneKey: w.paneKey }));
       }
     }
-    ExcelLink._paintBanner(w.tplId);
+    ExcelLink._paintBanner(w.paneKey);
   },
   _actionToast(msg, label, fn) {
     const t = document.createElement('div');
@@ -7035,23 +7302,29 @@ const ExcelLink = {
   async openInExcel(exportId) {
     try { const r = await ExcelLink._call('excel_link_open', exportId); if (r.action === 'skipped') U.toast('Opening Excel is disabled here', 'success'); }
     catch (e) { U.toast(e.message, 'error'); }
-    if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); }
+    ExcelLink._pokeWatch(exportId);
   },
-  async closeLink(exportId, quiet) {
-    const { tpl } = ExcelLink._ctx();
-    const a = tpl && ExcelLink._active[tpl.id];
+  /* The link being closed may be the OTHER pane's: the Links panel lists
+     every link for the template, and closing one from this pane must take
+     down the banner of whichever pane holds it. So the entry is found BY
+     EXPORT ID — which also fixes a single-pane bug on the way past, where
+     closing link X while the banner held link Y deleted Y's entry. */
+  async closeLink(exportId, quiet, paneKey) {
+    const hit = ExcelLink._byExportId(exportId);
+    const pk = (hit && hit.paneKey) || paneKey || ExcelLink._ownerKey();
+    const a = hit ? hit.a : null;
     if (a && a.tier === 'S') {
-      delete ExcelLink._active[tpl.id];
-      ExcelLink._paintBanner(tpl.id);
+      delete ExcelLink._active[pk];
+      ExcelLink._paintBanner(pk);
       return;
     }
-    if (!quiet && a && a.exportId === exportId && a.status && a.status.newSinceLastImport
+    if (!quiet && a && a.status && a.status.newSinceLastImport
         && !confirm('Excel saved changes that were not loaded back. Close the link anyway?')) return;
     try {
       const r = await ExcelLink._call('excel_link_close', exportId, true);
       if (!quiet) U.toast(r.deferred ? 'Link closed — the workbook is still open in Excel and will be removed later' : 'Link closed', 'success');
     } catch (e) { U.toast(e.message, 'error'); }
-    if (tpl && a && a.exportId === exportId) { delete ExcelLink._active[tpl.id]; ExcelLink.unwatch(); ExcelLink._paintBanner(tpl.id); }
+    if (a) { delete ExcelLink._active[pk]; ExcelLink.unwatch(pk); ExcelLink._paintBanner(pk); }
   },
   async reveal(exportId) { try { await ExcelLink._call('excel_link_reveal', exportId); } catch (e) { U.toast(e.message, 'error'); } },
   async saveCopy(exportId) {
@@ -7060,29 +7333,40 @@ const ExcelLink = {
   },
 
   /* ---------------- Load back ---------------- */
-  async pickAndLoad() {
+  async pickAndLoad(paneKey) {
+    const pk = paneKey || ExcelLink._ownerKey();
     if (await ExcelLink.tier() === 'P' && ExcelLink._has('excel_link_pick_file')) {
       try {
         const r = await ExcelLink.api().excel_link_pick_file();
         if (!r || r.cancelled || !r.token) return;
         if (r.ok === false) throw ExcelLink._err(r);
-        return ExcelLink.load({ token: r.token, name: r.name });
+        return ExcelLink.load({ token: r.token, name: r.name, paneKey: pk });
       } catch (e) { U.toast(e.message, 'error'); return; }
     }
     let inp = document.getElementById('xlLoadFileInput');
     if (!inp) {
       inp = document.createElement('input');
       inp.type = 'file'; inp.id = 'xlLoadFileInput'; inp.accept = '.xlsx,.xlsm'; inp.style.display = 'none';
-      inp.onchange = ev => { const f = ev.target.files && ev.target.files[0]; ev.target.value = ''; if (f) ExcelLink.load({ file: f }); };
       document.body.appendChild(inp);
     }
+    /* Re-bound every time: the one hidden input is shared, and the pane that
+       asked for the file must be the pane the rows come back into. */
+    inp.onchange = ev => { const f = ev.target.files && ev.target.files[0]; ev.target.value = ''; if (f) ExcelLink.load({ file: f, paneKey: pk }); };
     inp.click();
   },
+  /* `source.paneKey` is the pane this load belongs to. For a link it is
+     settled by the link itself — an export id is held by at most one pane,
+     and a Load back started from the other pane's Links panel still belongs
+     to the pane holding it. For a pick-a-file load there is no export id, so
+     the caller passes its own key. */
   async load(source, readOpts) {
-    const { tpl, sess } = ExcelLink._ctx();
+    source = source || {};
+    const held = source.exportId ? ExcelLink._byExportId(source.exportId) : null;
+    const { tpl, sess, paneKey } = ExcelLink._ctx(source.paneKey || (held && held.paneKey));
     if (!tpl || !sess) { U.toast('Open the template first', 'error'); return; }
-    if (ExcelLink._busy) { U.toast('An Excel task is already running', 'error'); return; }
+    if (ExcelLink._busy) { U.toast(ExcelLink._busyMsg(), 'error'); return; }
     ExcelLink._busy = true; ExcelLink._cancel = false;
+    ExcelLink._busyWhat = { paneKey: paneKey, tplName: tpl.name, what: 'loading a workbook back into' };
     try {
       try { await Versioning.flushQueue(); await AppState.flush(); } catch (e) {}
       ExcelLink._progress('Reading the workbook…', 5);
@@ -7115,7 +7399,7 @@ const ExcelLink = {
       App.closeModal();
       U.toast('Load back failed: ' + e.message, 'error');
       console.error(e);
-    } finally { ExcelLink._busy = false; }
+    } finally { ExcelLink._busy = false; ExcelLink._busyWhat = null; }
   },
   async _readP(source, readOpts) {
     const src = source.exportId ? { exportId: source.exportId } : { token: source.token };
@@ -7358,7 +7642,8 @@ const ExcelLink = {
     }
     if (plan.file.sha256 && head.exportSha256 && plan.file.sha256 === head.exportSha256)
       plan.banners.push({ kind: 'info', text: 'Nothing has been saved in Excel yet — press Ctrl+S in Excel to include your edits.' });
-    else if (ExcelLink._active[tpl.id] && ExcelLink._active[tpl.id].status && ExcelLink._active[tpl.id].status.ownerFile)
+    else if (ExcelLink._byExportId(head.exportId) && ExcelLink._byExportId(head.exportId).a.status
+             && ExcelLink._byExportId(head.exportId).a.status.ownerFile)
       plan.banners.push({ kind: 'info', text: 'The workbook is still open in Excel: only its last save is loaded (press Ctrl+S in Excel to include newer edits).' });
     if (mf.baselineSource === 'workbook') plan.banners.push({ kind: 'info', text: 'The baseline was read from inside the workbook (the shared link record was not found).' });
     if (mf.baselineSource === 'none') plan.banners.push({ kind: 'error', text: 'No baseline found: conflicts cannot be detected and nothing is ticked. Review each change.' });
@@ -7893,8 +8178,9 @@ const ExcelLink = {
       await ExcelLink._updateManifest(tpl, plan, patch);
       ExcelLink._plan = null;
       try { AppState.save(); await AppState.flush(); } catch (e) {}
-      const a = ExcelLink._active[tpl.id];
-      if (a && a.exportId === plan.exportId) {
+      const hitA = ExcelLink._byExportId(plan.exportId);
+      const a = hitA ? hitA.a : null;
+      if (a) {
         a.loaded = { at, count: picks.length };
         if (a.status) a.status = Object.assign({}, a.status, { newSinceLastImport: false });
       }
@@ -7903,7 +8189,7 @@ const ExcelLink = {
       if (plan.reRunOffset && res.applied) Reco.recalcOffsets();
       else App.navigate('reco');
       U.toast('Applied ' + picks.length + ' change' + (picks.length === 1 ? '' : 's') + ' to ' + new Set(picks.map(x => x.row)).size + ' row(s)', 'success');
-      if (ExcelLink._watch) { ExcelLink._watch.lastPoll = 0; ExcelLink._tick(); }
+      ExcelLink._pokeWatch(plan.exportId);
     } finally { ExcelLink._busy = false; }
   },
   /* Nothing to apply: log the read so the "changes not loaded" state clears. */
@@ -7918,13 +8204,16 @@ const ExcelLink = {
         lastImport: { at, by: ExcelLink.user(), sha256: f.sha256 || '', mtimeNs: f.mtimeNs || '', size: f.size || 0, count: 0 }
       });
     } catch (e) { return; }
-    const a = ExcelLink._active[tpl.id];
-    if (a && a.exportId === plan.exportId) {
-      a.loaded = { at, count: 0 };
-      if (a.status) a.status = Object.assign({}, a.status, { newSinceLastImport: false });
-      ExcelLink._paintBanner(tpl.id);
+    const hit = ExcelLink._byExportId(plan.exportId);
+    if (hit) {
+      hit.a.loaded = { at, count: 0 };
+      if (hit.a.status) hit.a.status = Object.assign({}, hit.a.status, { newSinceLastImport: false });
+      ExcelLink._paintBanner(hit.paneKey);
     }
-    if (ExcelLink._watch) ExcelLink._watch.notified = (plan.file || {}).mtimeNs || ExcelLink._watch.notified;
+    ExcelLink._eachWatch(w => {
+      if (w.exportId !== plan.exportId) return;
+      w.notified = (plan.file || {}).mtimeNs || w.notified;
+    });
   },
   async _updateManifest(tpl, plan, patch) {
     if (!plan.exportId || (plan.head && plan.head._synthetic)) return;
@@ -7954,8 +8243,8 @@ const ExcelLink = {
   },
 
   /* ---------------- Excel links panel ---------------- */
-  async openLinksPanel(filter) {
-    const { tpl } = ExcelLink._ctx();
+  async openLinksPanel(filter, paneKey) {
+    const { tpl, paneKey: pk } = ExcelLink._ctx(paneKey);
     if (!tpl) return;
     const tier = await ExcelLink.tier();
     ExcelLink._panelFilter = filter || ExcelLink._panelFilter || { who: 'mine', status: '' };
@@ -7981,11 +8270,11 @@ const ExcelLink = {
     if (fl.status === 'saved') shown = shown.filter(l => l.status === 'open' && l.newSinceLastImport);
     if (fl.status === 'closed') shown = shown.filter(l => l.status === 'closed');
     if (fl.status === 'stale') shown = shown.filter(stale);
-    const chip = (k, label, n) => '<span class="tag' + (fl.status === k ? ' active' : '') + '" onclick="ExcelLink.openLinksPanel({who:\'' + fl.who + '\',status:\'' + (fl.status === k ? '' : k) + '\'})">' + label + ' (' + n + ')</span>';
+    const chip = (k, label, n) => '<span class="tag' + (fl.status === k ? ' active' : '') + '" onclick="ExcelLink.openLinksPanel({who:\'' + fl.who + '\',status:\'' + (fl.status === k ? '' : k) + '\'},\'' + U.jsq(pk) + '\')">' + label + ' (' + n + ')</span>';
     let h = '<div style="font-size:12px;">';
     if (tier !== 'P') h += '<div class="xl-warn">This launcher keeps no shared list of Excel links. Use <b>Load from file…</b> to load an edited workbook.</div>';
-    h += '<div class="pill-row"><label class="inline"><input type="radio" name="xlWho"' + (fl.who === 'mine' ? ' checked' : '') + ' onchange="ExcelLink.openLinksPanel({who:\'mine\',status:\'' + fl.status + '\'})"> Mine</label>'
-      + '<label class="inline"><input type="radio" name="xlWho"' + (fl.who !== 'mine' ? ' checked' : '') + ' onchange="ExcelLink.openLinksPanel({who:\'all\',status:\'' + fl.status + '\'})"> Everyone</label>'
+    h += '<div class="pill-row"><label class="inline"><input type="radio" name="xlWho"' + (fl.who === 'mine' ? ' checked' : '') + ' onchange="ExcelLink.openLinksPanel({who:\'mine\',status:\'' + fl.status + '\'},\'' + U.jsq(pk) + '\')"> Mine</label>'
+      + '<label class="inline"><input type="radio" name="xlWho"' + (fl.who !== 'mine' ? ' checked' : '') + ' onchange="ExcelLink.openLinksPanel({who:\'all\',status:\'' + fl.status + '\'},\'' + U.jsq(pk) + '\')"> Everyone</label>'
       + chip('open', 'Open', counts.open) + chip('saved', 'Saved, not loaded', counts.saved) + chip('closed', 'Closed', counts.closed) + chip('stale', 'Stale', counts.stale) + '</div>';
     h += '<table class="xl-rv-table"><thead><tr><th>File</th><th>Created</th><th>Rows</th><th>Status</th><th>Last saved</th><th>Last import</th><th></th></tr></thead><tbody>';
     shown.forEach(l => {
@@ -7995,42 +8284,51 @@ const ExcelLink = {
       h += '<tr><td>' + U.esc(l.fileName) + (l.ownerFile ? ' <span class="xl-badge" title="open in Excel">open</span>' : '') + '</td><td>' + U.esc((l.exportedBy || '') + ' ' + ExcelLink._when(l.exportedAt))
         + '</td><td>' + (l.rows != null ? l.rows : '') + '</td><td>' + st + (stale(l) ? ' <span class="xl-badge">stale</span>' : '') + '</td><td>' + U.esc(l.savedSinceExport ? ExcelLink._when(l.mtime) : '') + '</td><td>' + li + '</td><td style="white-space:nowrap;">';
       if (l.status !== 'closed' && l.exists && !l.otherPc) {
-        h += '<button class="small primary" onclick="App.closeModal(); ExcelLink._loadFromPanel(\'' + id + '\',' + (l.ownerFile && l.exportedBy !== me ? 'true' : 'false') + ')">Load back</button>'
+        h += '<button class="small primary" onclick="App.closeModal(); ExcelLink._loadFromPanel(\'' + id + '\',' + (l.ownerFile && l.exportedBy !== me ? 'true' : 'false') + ',\'' + U.jsq(pk) + '\')">Load back</button>'
           + '<button class="small" onclick="ExcelLink.openInExcel(\'' + id + '\')">Open</button>'
           + '<button class="small" onclick="ExcelLink.reveal(\'' + id + '\')">Show in folder</button>'
           + '<button class="small" onclick="ExcelLink.saveCopy(\'' + id + '\')">Save a copy…</button>';
       }
-      if (l.status !== 'closed') h += '<button class="small" onclick="ExcelLink._closeFromPanel(\'' + id + '\')">Close link</button>';
+      if (l.status !== 'closed') h += '<button class="small" onclick="ExcelLink._closeFromPanel(\'' + id + '\',\'' + U.jsq(pk) + '\')">Close link</button>';
       h += '</td></tr>';
     });
     h += '</tbody></table>';
     if (!shown.length) h += '<div class="empty">No Excel links' + (fl.who === 'mine' ? ' of yours' : '') + '.</div>';
     h += '</div>';
     App.openModal('📗 Excel links — ' + tpl.name, h,
-      (counts.stale ? '<button style="margin-right:auto;" onclick="ExcelLink._closeStale()">Close stale links</button>' : '')
-      + '<button onclick="App.closeModal(); ExcelLink.pickAndLoad()">Load from file…</button><button class="primary" onclick="App.closeModal()">Done</button>');
+      (counts.stale ? '<button style="margin-right:auto;" onclick="ExcelLink._closeStale(\'' + U.jsq(pk) + '\')">Close stale links</button>' : '')
+      + '<button onclick="App.closeModal(); ExcelLink.pickAndLoad(\'' + U.jsq(pk) + '\')">Load from file…</button><button class="primary" onclick="App.closeModal()">Done</button>');
     const m = document.querySelector('#appModal .modal');
     if (m) { m.style.maxWidth = '1100px'; m.dataset._xlWidened = '1'; }
   },
-  _loadFromPanel(exportId, othersOpen) {
+  /* A link nobody holds is loaded into the pane the panel was opened from;
+     one the other pane holds goes back into THAT pane, because its baseline,
+     its banner and its watcher are there (ExcelLink.load re-resolves it). */
+  _loadFromPanel(exportId, othersOpen, paneKey) {
     if (othersOpen) U.toast('Someone has this workbook open in Excel — only their last save is loaded', 'error');
-    ExcelLink.load({ exportId });
+    ExcelLink.load({ exportId, paneKey: paneKey });
   },
-  async _closeFromPanel(exportId) {
-    await ExcelLink.closeLink(exportId, false);
-    ExcelLink.openLinksPanel();
+  async _closeFromPanel(exportId, paneKey) {
+    await ExcelLink.closeLink(exportId, false, paneKey);
+    ExcelLink.openLinksPanel(null, paneKey);
   },
-  async _closeStale() {
-    const { tpl } = ExcelLink._ctx();
+  async _closeStale(paneKey) {
+    const { tpl } = ExcelLink._ctx(paneKey);
     const cfg = ExcelLink.cfg(tpl);
     const links = await ExcelLink.listLinks(tpl);
     const now = Date.now();
     const stale = links.filter(l => l.status === 'open' && now - new Date(l.exportedAt || 0).getTime() > cfg.staleDays * 86400000 && !l.newSinceLastImport);
     if (!stale.length) { U.toast('No stale links without unloaded saves', 'success'); return; }
     if (!confirm('Close ' + stale.length + ' stale link(s)? Their workbooks are deleted.')) return;
-    for (const l of stale) { try { await ExcelLink._call('excel_link_close', l.exportId, true); } catch (e) {} }
+    for (const l of stale) {
+      try { await ExcelLink._call('excel_link_close', l.exportId, true); } catch (e) {}
+      /* A stale link may be the one a pane is showing: drop its entry too,
+         or that banner keeps offering a workbook that has been removed. */
+      const hit = ExcelLink._byExportId(l.exportId);
+      if (hit) { delete ExcelLink._active[hit.paneKey]; ExcelLink.unwatch(hit.paneKey); ExcelLink._paintBanner(hit.paneKey); }
+    }
     U.toast('Closed ' + stale.length + ' link(s)', 'success');
-    ExcelLink.openLinksPanel();
+    ExcelLink.openLinksPanel(null, paneKey);
   }
 };
 
@@ -8040,7 +8338,16 @@ const ExcelLink = {
 const AppState = {
   currentPage: 'home',
   recoTemplates: [],
+  /* THE VIEW TABLE: { tplId -> the view of the pane that owns tplId now }.
+     NOT persisted, and assigning a whole session into it does NOT persist
+     that session — go through Panes.ensureSession / Panes.replaceSession.
+     See the comment block at MODULE 4b. With no split open this holds the
+     very same objects as recoSessionsOwned. */
   recoSessions: {},
+  /* The real sessions, and the only thing written to the shared folder. It
+     is serialised under the key name 'recoSessions', so the file on disk is
+     unchanged and an older build reads it as it always did. */
+  recoSessionsOwned: {},
   activeRecoId: null,
   aegTemplates: [],
   aegMaster: [],
@@ -8068,6 +8375,15 @@ const AppState = {
                  'docNumberMaster','manualOffsetMaster','correctionMaster','pendingSpecialJV',
                  'groupMaster','attachmentMaster','commentMaster','customMasters'],
   SAVE_DELAY: 250,
+
+  /* The value WRITTEN for a persisted key. One key's in-memory home differs
+     from its name: the file for 'recoSessions' holds the real sessions
+     (recoSessionsOwned), never the view table, which is per-pane
+     indirection and must never reach the shared folder. See MODULE 4b. */
+  _persistValue(key) {
+    return key === 'recoSessions' ? AppState.recoSessionsOwned : AppState[key];
+  },
+
   _snap: {},             // key -> serialised text last loaded/saved
   _saveTimer: null,
   _saveWaiters: [],
@@ -8087,14 +8403,31 @@ const AppState = {
     AppState._saveTimer = null;
     const waiters = AppState._saveWaiters.splice(0);
     try {
+      /* DEV ASSERTION (MODULE 4b). The view table and the owned map must hold
+         the same template ids. A disagreement means a session was inserted
+         into or deleted from one map and not the other, i.e. a pane is about
+         to read a session that is not on disk, or a session is on disk that
+         no pane can reach. It is checked here because this is the moment the
+         owned map becomes the file. */
+      if (typeof Panes !== 'undefined') {
+        const drift = Panes.keySetDrift();
+        if (drift.ownedOnly.length || drift.viewOnly.length) {
+          console.error('AppState.flush: recoSessions (the view table) and recoSessionsOwned '
+            + 'disagree on key set \u2014 only in the saved map: [' + drift.ownedOnly.join(', ')
+            + '], only in the view table: [' + drift.viewOnly.join(', ')
+            + ']. Route whole-session assignments through Panes.ensureSession / '
+            + 'Panes.replaceSession (see MODULE 4b).');
+        }
+      }
       AppState.PERSIST_KEYS.forEach(key => {
         if (Store.readOnlyKeys[key]) return;
+        const value = AppState._persistValue(key);
         let text;
-        try { text = Store.serialize(key, AppState[key]); }
+        try { text = Store.serialize(key, value); }
         catch (e) { console.error('serialize failed for ' + key, e); return; }
         if (text === AppState._snap[key]) return;
         AppState._snap[key] = text;
-        Store.save(key, AppState[key], text);
+        Store.save(key, value, text);
       });
       await Promise.all([Store.idle(), Versioning.idle()]);
     } finally {
@@ -8145,12 +8478,13 @@ const AppState = {
         AppState._keyWanted = null;
         const out = { written: [], skipped: [], failed: [] };
         batch.forEach(key => {
+          const value = AppState._persistValue(key);
           let text;
-          try { text = Store.serialize(key, AppState[key]); }
+          try { text = Store.serialize(key, value); }
           catch (e) { console.error('serialize failed for ' + key, e); out.failed.push(key); return; }
           if (text === AppState._snap[key]) { out.skipped.push(key); return; }
           AppState._snap[key] = text;
-          Store.save(key, AppState[key], text);
+          Store.save(key, value, text);
           out.written.push(key);
         });
         await Promise.all([Store.idle(), Versioning.idle()]);
@@ -8171,7 +8505,12 @@ const AppState = {
     AppState.aegTemplates        = d.aegTemplates || [];
     AppState.aegMaster           = d.aegMaster || [];
     AppState.aegSettings         = Object.assign({}, AppState.aegSettings, d.aegSettings || {});
-    AppState.recoSessions        = d.recoSessions || {};
+    /* The file holds the REAL sessions; the view table is rebuilt from them
+       (MODULE 4b). With no split open the two maps then hold the same
+       objects, so every existing AppState.recoSessions[id] read is unchanged. */
+    AppState.recoSessionsOwned   = d.recoSessions || {};
+    AppState.recoSessions        = {};
+    Panes.syncViewTable();
     AppState.entryHistory        = d.entryHistory || {};
     AppState.docNumberMaster     = d.docNumberMaster || {};
     AppState.manualOffsetMaster  = d.manualOffsetMaster || {};
@@ -8184,7 +8523,8 @@ const AppState = {
 
     // Snapshot what is on disk so the first save only writes real changes.
     AppState.PERSIST_KEYS.forEach(k => {
-      try { AppState._snap[k] = Store.serialize(k, AppState[k]); } catch (e) { AppState._snap[k] = null; }
+      try { AppState._snap[k] = Store.serialize(k, AppState._persistValue(k)); }
+      catch (e) { AppState._snap[k] = null; }
     });
 
     if (!AppState.aegTemplates.length) {
@@ -8200,6 +8540,1232 @@ const AppState = {
     AppState.currentUser = String(who || '').trim();
   }
   
+};
+
+/* ================================================================
+   MODULE 4b — PANES  (session ownership)
+   ================================================================
+
+   WHAT THIS IS FOR. The user asked to "parallelly open 2 segments and review
+   and have each to have separate linked Excel". A pane is a (template, view)
+   pair; a template has ONE data record and ONE view per pane; exactly one
+   pane owns the DOM, the keyboard and AppState.activeRecoId at any instant.
+
+   THIS COMMIT IS THE OWNERSHIP MODEL AND NOTHING ELSE. There is no split to
+   open yet: one pane owns the screen, its view IS the session object, and
+   every existing path behaves exactly as it did before. The point of landing
+   it on its own is that getting ownership wrong is how one pane silently
+   reads or writes another pane's session, and that is not a thing to debug
+   at the same time as a DOM split.
+
+   THE ONE INDIRECTION, and the hazard that comes with it:
+
+     AppState.recoSessionsOwned   the real sessions. THE ONLY THING PERSISTED
+                                  (serialised to reco/recoSessions.json under
+                                  the key name 'recoSessions', unchanged on
+                                  disk, so an older build reads it fine).
+     AppState.recoSessions        the VIEW TABLE: { tplId: the view of the
+                                  pane that owns tplId right now }
+
+   With no split the two maps hold the SAME objects, so all 123 existing
+   `AppState.recoSessions[id]` reads keep working and keep meaning "the pane I
+   am looking at" with no edit at the call site.
+
+   >>> HAZARD. Assigning a whole session into AppState.recoSessions[x] no
+   >>> longer persists it: the view table is not written to disk. There are
+   >>> six such assignments in this file and every one of them now goes
+   >>> through Panes.ensureSession / Panes.replaceSession. If you add a
+   >>> seventh, route it the same way. AppState.flush carries a dev assertion
+   >>> that the two maps agree on key set, which catches a stray insert or
+   >>> delete; it cannot catch a stray re-point of an existing key, which is
+   >>> why this comment is here and why the lazy-create path re-points on
+   >>> every render so a divergence self-heals.
+
+   DATA vs VIEW. See DATA_KEYS and VIEW_KEYS below. A key in neither list is
+   per-pane BY CONSTRUCTION (the view is a plain object and only DATA_KEYS get
+   the pass-through accessors), and that default is the silent one — a typed
+   value living on an unclassified key would never leave the pane it was typed
+   in. So _makeView REFUSES to build a view while any unclassified key is on
+   the session: v1 will decline to open a split rather than guess. */
+const Panes = {
+
+  MAX: 2,
+
+  /* ---------------------------------------------------------------------
+     DATA — one per template, shared by every pane on that template.
+
+     These are the keys a view proxies straight through to the owner, so an
+     edit in one pane is an edit in both and reaches reco/recoSessions.json
+     once. Two panes on one template share sess.data BY REFERENCE, which is
+     what makes `offsets` and `selectedRows` (keyed by the per-load row._id)
+     coherent across panes at all, and what keeps the 150 ms per-template
+     edit batcher correct.
+
+     Per key, where it is not obvious:
+
+     - manualTags      The typed value of an additional column for a row,
+                       keyed row._id + '||' + name. DATA: it is content, not
+                       a preference. It is written by applyEdits — the one
+                       write path, which also writes cellFormulas — and read
+                       back by Reco._manualTag on every render and every
+                       export. Per-pane it would mean a value typed on the
+                       left is invisible on the right and ambiguous to the
+                       batcher. (PLAN2 expected S10 to have moved this off
+                       the session into a pk-keyed store by now. S10 is not
+                       built, so it is still here — and note that S10's
+                       direction of travel is MORE shared, not less: a store
+                       shares it across files as well as panes. When S10
+                       lands, this name comes off this list and nothing else
+                       about the pane model changes.)
+     - selectedRows    Shared on purpose: the headline action is "tick these
+                       three off against those two", and offsetSelected
+                       records by pk so it survives a reload. The protection
+                       against a cross-pane selection reaching a journal
+                       entry is a refusal in the ledger-writing consumers,
+                       which is commit (c), NOT a per-pane selection.
+     - extraColumns    A column added in one pane is a column of the data, so
+                       it exists in both.
+     - cellFormats     Display-only, but keyed per row and written by the
+                       Excel view; shared so one cell has one colour.
+     - columnOrder     LEGACY and READ-ONLY (Reco._legacyTeamOrder): it is the
+                       team-level order fallback that arrives off the shared
+                       folder. Per-pane it would default to null in the second
+                       pane and that pane would silently render its columns in
+                       a different order from the first.
+     - _docMatches     Computed from the data and docNumberMaster, keyed by
+                       row._id — a fact about the rows. The DISMISSAL of its
+                       banner (_dismissDocMatches) is per pane and is VIEW.
+     - loadedAt /      Which file this template's rows came from and when.
+       activeVersionFile  Two panes always show the same loaded file: two
+                       PERIODS at once is refused (every edit appends to
+                       today's file, and two loaded copies of one row key
+                       collide in the edit batcher), so this cannot diverge.
+     --------------------------------------------------------------------- */
+  DATA_KEYS: [
+    'data', 'loadedAt', 'clearedAt', 'activeVersionFile',
+    'corrections', 'offsets', 'manualTags',
+    'cellFormulas', 'cellFormats', 'extraColumns',
+    'selectedRows', '_docMatches', 'columnOrder'
+  ],
+
+  /* ---------------------------------------------------------------------
+     VIEW — one per pane. Independent filters, slicers, sort, page, size,
+     widths, hidden columns, zoom and cell cursor are the feature.
+
+     - selSig          The column signature activeCell/selRange were stamped
+                       under (Reco._selCheck). It travels with the pair it
+                       stamps, so it is VIEW wherever they are.
+     - hiddenCols      VIEW even though extraColumns is DATA: hiding a column
+                       is looking away, adding one is changing the data.
+     - _virtRowHeight  Two panes may be at different zooms, so each measures
+                       its own row height.
+     - excelViewActive / spreadsheetMode
+                       VIEW, but in v1 at most one pane may be in either:
+                       Excel View and Sheet mode are FORBIDDEN while a split
+                       is open (commit (b) enforces it). _xlInstance, _xlCtx,
+                       ssFillHandle and ssStatusBar are hard singletons and
+                       _xlLive is an identity check against the view table,
+                       which flips on any focus change.
+
+     The last three names are NOT on the session yet: they are globals
+     (AppState.activeSubSection, AppState._correctionCol, AppState._activeReport)
+     and moving them is a later commit. They are listed now so the VIEW
+     whitelist that commit (b)'s localStorage restore checks against is
+     already complete — an unknown key in a stored blob must never reach a
+     DATA setter.
+     --------------------------------------------------------------------- */
+  VIEW_KEYS: [
+    'activeSection',
+    'columnFilters', 'columnSorts', 'slicers', 'statusFilter',
+    'requireAttachment', 'requireComment', 'requireGroup',
+    'page', 'pageSize', 'columnWidths', 'hiddenCols', 'zoom',
+    'activeCell', 'selRange', 'selSig',
+    'spreadsheetMode', 'formatToolbarOpen', 'excelViewActive',
+    'correctionExtraCols', '_dismissDocMatches',
+    '_virtRowHeight', '_initialScrollTop', '_fillDrag'
+  ],
+
+  /* VIEW keys that are not on the session YET: they are still the globals
+     AppState.activeSubSection, AppState._correctionCol and
+     AppState._activeReport, and moving them is a later commit. Listed now so
+     the VIEW whitelist commit (b)'s localStorage restore checks against is
+     already complete — an unknown key in a stored blob must never reach a
+     DATA setter — and so the audit below does not report them as missing. */
+  VIEW_KEYS_PENDING: ['subSection', 'correctionCol', 'activeReport'],
+
+  /* Keys that are neither DATA nor VIEW because they must never be on a
+     session at all. ensureSessionShape deletes _autoLoadAttempted for the
+     same reason (it is per-run state older builds persisted). */
+  DEAD_KEYS: ['_autoLoadAttempted'],
+
+  /* ---------------------------------------------------------------------
+     PANE RECORDS. Slot 0 is the pane that exists today and always; its
+     `view` is null, which MEANS "my view is the owner session object
+     itself", not "I have no view". That is what makes the no-split case
+     byte-identical: same object, same file, same behaviour. Only slot 1
+     ever gets a built view.
+     --------------------------------------------------------------------- */
+  _panes: null,
+  _owner: null,
+
+  _slot0() {
+    const p = { key: 'p0', view: null, root: null, _tplId: null };
+    /* WHILE SLOT 0 OWNS THE SCREEN its template IS the one
+       AppState.activeRecoId names — an accessor rather than a field so that
+       no existing navigation path, and none of the emitted inline handlers,
+       has to be taught to update a pane record. With no split that is always
+       the case, which is what makes the single-pane build unchanged.
+
+       WHILE THE OTHER PANE OWNS IT, activeRecoId belongs to THAT pane (it is
+       how the keyboard, the toolbar and every `AppState.recoSessions[id]`
+       read find it), so this pane remembers its own template instead.
+       Without that distinction, focusing pane 1 would make BOTH panes report
+       pane 1's template: the repaint rule would then repaint the wrong pane,
+       and closing the focused pane would leave the survivor showing the
+       template of the pane that was closed. install() snapshots the outgoing
+       pane's template at the moment focus leaves it. */
+    const mine = () => (!Panes._panes || Panes._panes.length < 2 || Panes._owner === p);
+    Object.defineProperty(p, 'tplId', {
+      enumerable: true, configurable: true,
+      get() { return mine() ? AppState.activeRecoId : p._tplId; },
+      set(v) { p._tplId = v; if (mine()) AppState.activeRecoId = v; }
+    });
+    return p;
+  },
+
+  panes() {
+    if (!Panes._panes) {
+      Panes._panes = [Panes._slot0()];
+      Panes._owner = Panes._panes[0];
+    }
+    return Panes._panes;
+  },
+  owner() { Panes.panes(); return Panes._owner; },
+  byKey(k) { return Panes.panes().find(p => p.key === k) || null; },
+  count() { return Panes.panes().length; },
+  isSplit() { return Panes.count() > 1; },
+
+  /* Every pane currently showing this template. */
+  panesFor(tplId) { return Panes.panes().filter(p => p.tplId === tplId); },
+  eachPane(fn) { Panes.panes().slice().forEach(fn); },
+
+  /* ---------------------------------------------------------------------
+     OWNERSHIP
+     --------------------------------------------------------------------- */
+
+  /* Make `pane` the pane that owns the DOM, the keyboard and activeRecoId. */
+  install(pane) {
+    if (!pane) return null;
+    Panes.panes();
+    const prev = Panes._owner;
+    /* Snapshot what the outgoing pane was showing BEFORE the global it reads
+       that from starts belonging to the incoming one; and read the incoming
+       pane's own template before _owner moves, for the same reason in
+       reverse (see _slot0). */
+    if (prev && prev !== pane) prev._tplId = prev.tplId;
+    const want = pane.tplId;
+    Panes._owner = pane;
+    if (want) {
+      pane._tplId = want;
+      AppState.activeRecoId = want;
+      if (AppState.recoSessionsOwned[want]) Panes._repoint(want);
+    }
+    /* THE CHOKEPOINT: the owner pane is the only ADDRESSABLE pane. Both are
+       no-ops while there is no split, so the single-pane DOM is untouched. */
+    Panes._ownIds(pane);
+    Panes._paintFocus();
+    return pane;
+  },
+
+  /* Render or act as a NON-focused pane and hand ownership back afterwards.
+     Focus is just "the owner when nothing is being rendered". */
+  withOwner(pane, fn) {
+    const prev = Panes.owner();
+    Panes.install(pane);
+    try { return fn(); } finally { if (prev && prev !== pane) Panes.install(prev); }
+  },
+
+  /* ---------------------------------------------------------------------
+     THE VIEW TABLE
+     --------------------------------------------------------------------- */
+
+  /* Point AppState.recoSessions[tplId] at the view of whichever pane owns
+     this template right now, and make sure each pane showing it has a view.
+     Called on every lazy create, so a stray direct write to the view table
+     is corrected on the next render instead of persisting as a divergence. */
+  _repoint(tplId) {
+    if (tplId == null) return null;
+    const owner = AppState.recoSessionsOwned[tplId];
+    if (!owner) {
+      /* No owner: the key must leave the view table too, or flush's key-set
+         assertion is lying about what is on disk. */
+      delete AppState.recoSessions[tplId];
+      Panes.eachPane(p => { if (p.tplId === tplId && p.view) p.view = null; });
+      return null;
+    }
+    Panes.eachPane(p => {
+      if (p.tplId !== tplId) return;
+      if (p.key === 'p0') { p.view = null; return; }     // slot 0 IS the owner
+      if (!p.view || p.view._paneTplId !== tplId) p.view = Panes._makeView(tplId);
+    });
+    const cur = Panes.owner();
+    AppState.recoSessions[tplId] =
+      (cur && cur.tplId === tplId && cur.view) ? cur.view : owner;
+    return AppState.recoSessions[tplId];
+  },
+
+  /* Rebuild the whole view table from the owned map. For the two places that
+     replace the map wholesale: AppState.load and App.importBackup. */
+  syncViewTable() {
+    Object.keys(AppState.recoSessions).forEach(k => {
+      if (!AppState.recoSessionsOwned[k]) delete AppState.recoSessions[k];
+    });
+    Panes.eachPane(p => { p.view = null; });            // rebuilt by _repoint below
+    /* THE ONE PLACE A VIEW REFUSAL CAN ESCAPE, and the reason it must not.
+       Every view is dropped and rebuilt here, so a session map that has just
+       arrived from a backup written by a LATER build — carrying a key that is
+       in neither DATA_KEYS nor VIEW_KEYS — makes _makeView refuse (rightly:
+       an unclassified key is per-pane by construction, so a value typed in
+       one pane would silently never reach the other pane or the shared file).
+       Letting it throw would land in App.importBackup's catch, which says
+       "Invalid backup" over a backup that WAS applied. The sessions are fine;
+       only the SECOND VIEW cannot be built. So drop to one pane and say so. */
+    const failed = [];
+    Object.keys(AppState.recoSessionsOwned).forEach(k => {
+      try { Panes._repoint(k); }
+      catch (e) { failed.push({ tplId: k, msg: (e && e.message) || String(e) }); }
+    });
+    if (failed.length) Panes._degradeToOnePane(failed[0].msg);
+    return AppState.recoSessions;
+  },
+
+  /* Give up the second pane, keeping the data and the first pane intact. The
+     only reason for this is a view that cannot be built; the panes are a
+     convenience and the rows are not. */
+  _degradeToOnePane(why) {
+    if (Panes._panes && Panes._panes.length > 1) {
+      /* No confirm here: this is an error path, not a choice. The second
+         pane's link is released, which leaves it open on the share. */
+      if (typeof ExcelLink !== 'undefined' && ExcelLink.releasePane) {
+        try { ExcelLink.releasePane('p1'); } catch (e) {}
+      }
+      Panes._panes = [Panes._panes[0]];
+      Panes.layout().split = false;
+      try { Panes._saveLayout(); } catch (e) {}
+    }
+    if (Panes._panes) { Panes._owner = Panes._panes[0]; Panes._owner.view = null; Panes._owner.root = null; }
+    Object.keys(AppState.recoSessionsOwned || {}).forEach(k => {
+      try { Panes._repoint(k); } catch (e) {}
+    });
+    if (typeof U !== 'undefined' && U.toast) U.toast('The second pane was closed: ' + why, 'error');
+    else console.error('Panes: dropped to one pane — ' + why);
+  },
+
+  /* The view this pane should be handed for this template, or null when the
+     pane is not showing it. This is the comparison _xlLive will make once
+     Excel View is per pane: Panes.viewFor(C.paneKey, C.tplId) === C.sess. */
+  viewFor(paneKey, tplId) {
+    const p = Panes.byKey(paneKey);
+    if (!p || p.tplId !== tplId) return null;
+    const owner = AppState.recoSessionsOwned[tplId];
+    if (!owner) return null;
+    return p.view || owner;
+  },
+
+  /* Everything a deferred callback needs, resolved at the moment it runs.
+     REQUIRED at every site that holds a `sess` across an await or into a
+     timer: AppState.recoSessions is keyed by tplId and structurally cannot
+     hold two views of one template, so a re-read after an await gets
+     whichever pane owns the template THEN. Returns null when the pane has
+     gone or no longer shows that template, which is the caller's cue to
+     drop the result rather than apply it to the wrong pane. */
+  ctx(paneKey) {
+    const p = (paneKey ? Panes.byKey(paneKey) : Panes.owner());
+    if (!p || !p.tplId) return null;
+    const sess = Panes.viewFor(p.key, p.tplId);
+    if (!sess) return null;
+    return {
+      paneKey: p.key, pane: p, tplId: p.tplId, sess: sess,
+      tpl: AppState.recoTemplates.find(x => x.id === p.tplId) || null
+    };
+  },
+
+  /* ---------------------------------------------------------------------
+     CREATING AND REPLACING SESSIONS — the only four doors
+     --------------------------------------------------------------------- */
+
+  /* The one path that brings a template's first session into existence, and
+     the one that re-points the view table afterwards. Both lazy creates in
+     this file call it; so does anything else that needs a session to exist.
+     Returns the view the OWNER pane should use, which with no split is the
+     session object itself — so `const sess = Panes.ensureSession(id);` is a
+     drop-in for the two lines it replaces. */
+  ensureSession(tplId) {
+    if (tplId == null) return null;
+    if (!AppState.recoSessionsOwned[tplId]) {
+      AppState.recoSessionsOwned[tplId] = Panes._newSession();
+    }
+    return Panes._repoint(tplId);
+  },
+
+  /* Replace a template's whole session: Clear Loaded Data and Restore Session
+     both do this, and after it the object every view resolves through must be
+     the new one. NEVER write AppState.recoSessions[id] directly for this —
+     the new session would not be persisted and the old one would stay on
+     disk and come back on the next load. */
+  replaceSession(tplId, fresh) {
+    if (tplId == null) return null;
+    if (!fresh) return Panes.ensureSession(tplId);
+    AppState.recoSessionsOwned[tplId] = fresh;
+    return Panes._repoint(tplId);
+  },
+
+  /* Forget a template's session entirely (template deleted). */
+  dropSession(tplId) {
+    delete AppState.recoSessionsOwned[tplId];
+    Panes._repoint(tplId);
+  },
+
+  _newSession() {
+    if (typeof Reco === 'undefined' || typeof Reco.makeSession !== 'function') {
+      throw new Error('Panes: Reco.makeSession is not available yet — a session cannot be created before MODULE 8 has loaded');
+    }
+    return Reco.makeSession();
+  },
+
+  /* ---------------------------------------------------------------------
+     THE VIEW OBJECT
+
+     A view looks like a session, so every existing (tpl, sess) function keeps
+     working untouched. The DATA keys are accessors that re-resolve the owner
+     on EVERY read and write: the owner object is REPLACED wholesale by Clear
+     Loaded Data and by Restore, so a captured reference is a bug by
+     construction.
+     --------------------------------------------------------------------- */
+  _makeView(tplId) {
+    const owner = AppState.recoSessionsOwned[tplId];
+    if (!owner) {
+      throw new Error('Panes._makeView: template ' + tplId + ' has no session — call Panes.ensureSession(tplId) first');
+    }
+    const un = Panes.unclassifiedKeys(owner);
+    if (un.length) {
+      throw new Error('Panes._makeView: session key(s) ' + un.join(', ')
+        + ' are in neither Panes.DATA_KEYS nor Panes.VIEW_KEYS. A view cannot be built '
+        + 'until they are classified: an unclassified key is per-pane by construction, so if '
+        + 'it is really shared data a value written in one pane would silently never reach the '
+        + 'other pane or the shared file.');
+    }
+    const v = {};
+    Object.defineProperty(v, '_paneTplId', { value: tplId, enumerable: false, configurable: true });
+    Panes.DATA_KEYS.forEach(k => Object.defineProperty(v, k, {
+      enumerable: true, configurable: true,
+      get() { return Panes._own(tplId, k, 'read')[k]; },
+      set(x) { Panes._own(tplId, k, 'write')[k] = x; }
+    }));
+    /* Fills the VIEW keys with today's defaults. Safe on this object: its
+       `v.data = v.data || []` style assignments read and write through to the
+       owner, which already has them. */
+    Reco.ensureSessionShape(v);
+    return v;
+  },
+
+  /* Resolve the owner for one accessor. CREATE-AND-RETRY, deliberately, and
+     deliberately loud: PLAN2's blocker #1 is that a silent no-op here is how
+     a pane drops `sess.data = sess.data || []` and then throws on the next
+     line with no clue where the session went. The only ways to get here are
+     a wholesale replacement of the owned map (load / importBackup) or a
+     template deleted while a pane still shows it; both are bugs in the
+     ownership plumbing, so say so rather than papering over it. */
+  _own(tplId, key, mode) {
+    const o = AppState.recoSessionsOwned[tplId];
+    if (o) return o;
+    if (Panes._reviving) {
+      throw new Error('Panes: re-entrant revive while resolving sess.' + key + ' for template ' + tplId);
+    }
+    Panes._reviving = true;
+    try {
+      const fresh = Panes._newSession();
+      AppState.recoSessionsOwned[tplId] = fresh;
+      Panes._repoint(tplId);
+      console.error('Panes: no session owned template ' + tplId + ' on ' + mode
+        + ' of sess.' + key + ' — a fresh one was created so nothing is silently dropped. '
+        + 'A pane is pointed at a template whose session was replaced or removed.');
+      return fresh;
+    } finally { Panes._reviving = false; }
+  },
+  _reviving: false,
+
+  /* ---------------------------------------------------------------------
+     CLASSIFICATION AUDIT
+     --------------------------------------------------------------------- */
+
+  /* Own keys of this session that are in neither list. Enumerable own keys
+     only: the accessors a view carries are enumerable, so auditing a view
+     audits the same names as auditing an owner. */
+  unclassifiedKeys(sess) {
+    if (!sess) return [];
+    const known = Panes.DATA_KEYS.concat(Panes.VIEW_KEYS, Panes.VIEW_KEYS_PENDING, Panes.DEAD_KEYS);
+    return Object.keys(sess).filter(k => known.indexOf(k) < 0);
+  },
+
+  /* Is every key a fresh session carries classified, and is nothing on two
+     lists at once? Returns a report rather than logging, so it can be
+     asserted in a test without putting an error on a user's console.
+
+     `notOnFreshSession` is INFORMATIONAL and not part of `ok`: _fillDrag,
+     _initialScrollTop and selSig are real VIEW keys that only appear once the
+     user drags a fill handle, scrolls or puts a cell cursor down, so a fresh
+     session legitimately has none of them. It is here to catch a typo in a
+     list, not to demand a default. */
+  auditKeys() {
+    const all = Panes.DATA_KEYS.concat(Panes.VIEW_KEYS, Panes.VIEW_KEYS_PENDING, Panes.DEAD_KEYS);
+    const dupes = all.filter((k, i) => all.indexOf(k) !== i);
+    let fresh = null, err = '';
+    try { fresh = Panes._newSession(); } catch (e) { err = String(e && e.message || e); }
+    const unclassified = fresh ? Panes.unclassifiedKeys(fresh) : [];
+    const notOnFreshSession = fresh
+      ? Panes.DATA_KEYS.concat(Panes.VIEW_KEYS).filter(k => !(k in fresh))
+      : [];
+    return { ok: !dupes.length && !unclassified.length && !err,
+             dupes, unclassified, notOnFreshSession, error: err };
+  },
+
+  /* The invariant AppState.flush asserts: the view table and the owned map
+     hold the same template ids. Returns the offending ids, not a boolean, so
+     the message can name them. */
+  keySetDrift() {
+    const a = Object.keys(AppState.recoSessionsOwned || {});
+    const b = Object.keys(AppState.recoSessions || {});
+    return {
+      ownedOnly: a.filter(k => b.indexOf(k) < 0),
+      viewOnly:  b.filter(k => a.indexOf(k) < 0)
+    };
+  },
+
+  /* =====================================================================
+     THE SPLIT — THE DOM, AND ID OWNERSHIP
+
+     THE PROBLEM. The screen is one shell carrying one set of element ids,
+     and about forty-five lookups resolve those ids from `document`: 13
+     verbatim `document.querySelector('.reco-table-wrap')`, every
+     `document.getElementById('recoTableArea' | 'selSumBar' | 'zoomIndicator'
+     | 'recoSelectAll' | …)`, and every inline handler the shell emits. With
+     two shells on screen each of those returns THE FIRST ONE IN DOCUMENT
+     ORDER — whichever pane is on the left — so a pane would silently read
+     and write the other pane's rows.
+
+     THE ANSWER IS ONE INVARIANT, not a sweep of forty-five call sites:
+     THE OWNER PANE IS THE ONLY ADDRESSABLE PANE. On every ownership change
+     the other pane's ids are parked on `data-pid` and its grid wrapper's
+     class is parked to `.reco-table-wrap-parked` — every `.reco-table-wrap`
+     rule in the stylesheet carries that class in its selector list too, so
+     the parked pane looks and scrolls exactly the same. Ownership moves on a
+     capture-phase pointerdown or wheel over a pane, on F6 /
+     Ctrl+Alt+Left|Right, and for the duration of a non-focused pane's render
+     (withOwner). Capture on the pane root fires before the row's own
+     `onmousedown="Reco.startDragSelect(…)"`, and pointerdown precedes
+     mousedown, so by the time an emitted handler runs its own pane owns the
+     ids AND AppState.activeRecoId — which is why the grid renderer, the
+     slicer bar, the zoom code and the spreadsheet layer need no edit.
+
+     Namespacing every id (`p0-recoTableArea`) and sweeping every lookup is
+     the "make it good" version of this. It is a much larger diff for the
+     same result, and it would land in exactly the regions under concurrent
+     edit.
+
+     THE TWO PLACES WHERE THE CHOKEPOINT IS NOT ENOUGH, both handled here:
+
+       1. renderRecoTable's trailing `setTimeout(…, 0)` fixups run AFTER the
+          render returns, i.e. after withOwner has handed ownership back.
+          They are wrapped in Panes.wrapFixups, which re-installs the pane
+          that was rendering for the duration. MEASURED without it (the
+          mutation is in run_panes_e2e [6] and [7]): the just-rendered pane
+          gets NO fixups at all — no zoom on its wrapper, and no scroll
+          handler, because _attachVirtScroll finds the OTHER pane's wrapper,
+          sees `wrap._virtWired` already set and returns, so that pane's
+          scrollbar does nothing for as long as it is on screen. Its row
+          height is also measured from the other pane's rows, which is wrong
+          whenever the two zooms differ. (The spec predicted the zoom would
+          cross from one pane to the other; it does not, because the session
+          lookup and the DOM lookup both resolve to the same wrong pane.)
+
+       2. A SCROLLBAR DRAG in the unfocused pane dispatches no pointerdown
+          and no wheel, so nothing transfers ownership before the `scroll`
+          event fires. Scrolling therefore does not go through ownership at
+          all: _attachVirtScroll captures its pane and its wrap in the
+          closure, and _refreshVirtBody / _computeVirtWindow take them as
+          arguments. A wheel-only test would pass while the scrollbar path
+          shipped broken, so the suite drives it by setting scrollTop.
+
+     WHAT v1 DOES NOT DO, and says so rather than silently not doing it:
+     Excel View and Sheet mode are refused while a split is open (one
+     jspreadsheet instance, one _xlCtx, one ssFillHandle, one ssStatusBar,
+     and _xlLive is an identity check against the view table which flips on
+     any focus change); at most two panes; side by side only; and both panes
+     always show the same loaded file, because every edit appends to today's
+     file and two loaded copies of one row key collide in the edit batcher.
+     A DIFFERENT template in the other pane is allowed and carries a note:
+     offsets are per session and the offset master is keyed by template and
+     row, so rows in two templates can never be ticked off against each
+     other.
+     ===================================================================== */
+
+  /* Every id the Reco shell emits, from the render path. `entrySearch` is on
+     the list because activeSection is a VIEW key, so both panes can be on
+     the Entries tab at once. Ids that live in the ONE shared modal
+     (appModal, recoBusyText, recoBusyBar, slicerItems, slicerCount,
+     slicerSearch, sessionRestoreFile, revGo, revReason, vhArchive,
+     ssNewColName, entryDetail_*, alloc_*) are deliberately NOT here: only
+     one modal is ever open, and parking them would break it.
+
+     The Excel-view and Sheet-mode ids (xlViewWrap, excelViewHost,
+     xlSelSumBar, xlFsBtn, xlUndoBtn, xlRedoBtn, cellAddr, formulaInput,
+     ssFillHandle, ssStatusBar) cannot duplicate in v1 because both modes are
+     refused while split. They are listed anyway so that the invariant test
+     covers them the day that restriction is lifted. */
+  PANE_IDS: [
+    'recoFileInput', 'recoPasteBox', 'recoPasteData',
+    'recoContentArea', 'recoTableArea', 'recoSlicerBar', 'recoFilterSetBtn',
+    'recoSelectAll', 'recoGotoPage', 'recoGotoRow',
+    'selSumBar', 'zoomIndicator', 'xlLinkBanner', 'xlEditInExcelBtn', 'entrySearch',
+    'xlViewWrap', 'excelViewHost', 'xlSelSumBar', 'xlFsBtn',
+    'xlUndoBtn', 'xlRedoBtn', 'cellAddr', 'formulaInput',
+    'ssFillHandle', 'ssStatusBar'
+  ],
+
+  /* The ids that must be on screen exactly once whenever the Action tab is
+     drawn. The rest of PANE_IDS is conditional (a filter button needs rows,
+     a banner needs a link), and absent is fine — DUPLICATED is the bug. */
+  PANE_IDS_ALWAYS: ['recoFileInput', 'recoContentArea', 'selSumBar', 'zoomIndicator'],
+
+  /* No id the reco shell emits may appear twice in the document, whether or
+     not it is on the list above: the list is what the chokepoint PARKS, and a
+     duplicate outside it is a lookup waiting to resolve to the wrong pane.
+     Returned rather than logged so the suite can assert it; the modal is
+     excluded because only one is ever open and parking its ids would break
+     it. 'xlEditInExcelBtn' was found this way and added to PANE_IDS. */
+  dupIdAudit() {
+    const n = {}, out = [];
+    document.querySelectorAll('[id]').forEach(el => {
+      if (el.closest && el.closest('#appModal')) return;
+      n[el.id] = (n[el.id] || 0) + 1;
+    });
+    Object.keys(n).forEach(k => { if (n[k] > 1) out.push(k + '×' + n[k]); });
+    return { ok: !out.length, dupes: out };
+  },
+
+  /* ---------------------------------------------------------------------
+     ROOTS AND ELEMENTS
+     --------------------------------------------------------------------- */
+
+  /* The element a pane renders into. With no split that is #appMain itself,
+     which is where the single shell has always gone. */
+  rootOf(pane) {
+    const p = pane || Panes.owner();
+    if (p && p.root && document.contains(p.root)) return p.root;
+    return document.getElementById('appMain');
+  },
+
+  _roots() {
+    return Panes.panes().map(p => Panes.rootOf(p)).filter((r, i, a) => r && a.indexOf(r) === i);
+  },
+
+  /* The grid wrapper inside a root, parked or not. */
+  wrapIn(root) {
+    if (!root) return null;
+    return root.querySelector('.reco-table-wrap, .reco-table-wrap-parked');
+  },
+
+  /* One pane's element by the id it carries when it owns the DOM. */
+  el(paneKey, id) {
+    const p = paneKey ? Panes.byKey(paneKey) : Panes.owner();
+    const root = Panes.rootOf(p);
+    if (!root) return null;
+    return root.querySelector('#' + id + ', [data-pid="' + id + '"]');
+  },
+
+  /* THE CHOKEPOINT. Park every PANE_IDS id (and the grid wrapper class) on
+     every pane, then un-park the owner's. Called on every ownership change;
+     a no-op when there is no split, so the single-pane DOM is never touched. */
+  _ownIds(pane) {
+    if (!Panes.isSplit()) return;
+    const own = Panes.rootOf(pane);
+    const roots = Panes._roots();
+    if (!own || roots.length < 2) return;
+    roots.forEach(root => {
+      const mine = (root === own);
+      Panes.PANE_IDS.forEach(id => {
+        const el = root.querySelector('#' + id + ', [data-pid="' + id + '"]');
+        if (!el) return;
+        if (mine) {
+          if (el.id !== id) el.id = id;
+          if (el.dataset.pid) delete el.dataset.pid;
+        } else {
+          if (el.id) el.removeAttribute('id');
+          if (el.dataset.pid !== id) el.dataset.pid = id;
+        }
+      });
+      /* The one CLASS that is looked up globally, thirteen times verbatim. */
+      const w = root.querySelector('.reco-table-wrap, .reco-table-wrap-parked');
+      if (w) {
+        w.classList.toggle('reco-table-wrap', mine);
+        w.classList.toggle('reco-table-wrap-parked', !mine);
+      }
+    });
+  },
+
+  /* Which PANE_IDS ids are on screen more than once, and which of the
+     always-on ones are missing. The invariant this module exists to keep;
+     returned rather than logged so a test can assert it. */
+  idAudit() {
+    const dupes = [], counts = {};
+    Panes.PANE_IDS.forEach(id => {
+      const n = document.querySelectorAll('[id="' + id + '"]').length;
+      counts[id] = n;
+      if (n > 1) dupes.push(id + '×' + n);
+    });
+    const missing = Panes.PANE_IDS_ALWAYS.filter(id => counts[id] !== 1);
+    return { ok: !dupes.length, dupes, missing, counts };
+  },
+
+  /* ---------------------------------------------------------------------
+     FOCUS
+     --------------------------------------------------------------------- */
+
+  focus(paneKey) {
+    const p = Panes.byKey(paneKey);
+    if (!p || p === Panes.owner()) return null;
+    Panes.install(p);
+    return p;
+  },
+
+  focusNext() {
+    if (!Panes.isSplit()) return null;
+    const list = Panes.panes();
+    const i = list.indexOf(Panes.owner());
+    return Panes.focus(list[(i + 1) % list.length].key);
+  },
+
+  focusSlot(i) {
+    const p = Panes.panes()[i];
+    return p ? Panes.focus(p.key) : null;
+  },
+
+  /* The border and the ● Active chip. Ownership is otherwise invisible, and
+     an invisible focus is how a user types into the pane they are not
+     looking at. No re-render: a repaint of a 200k-row grid to move a border
+     would be absurd, and it would lose the scroll position. */
+  _paintFocus() {
+    if (!Panes._panes) return;
+    Panes.eachPane(p => {
+      const root = (p.root && document.contains(p.root)) ? p.root : null;
+      if (!root) return;
+      const mine = (p === Panes.owner()) && Panes.isSplit();
+      root.classList.toggle('owner', mine);
+      const chip = root.querySelector('[data-pane-chip]');
+      if (chip) {
+        chip.textContent = mine ? '● Active' : '○';
+        chip.classList.toggle('on', mine);
+        chip.title = mine
+          ? 'This pane has the keyboard and the toolbar. F6 or Ctrl+Alt+Arrow switches.'
+          : 'Click this pane, or press F6, to act on it';
+      }
+    });
+  },
+
+  /* The fixups timer at the end of renderRecoTable (and renderExcelView's
+     _xlInit timer) run after withOwner has handed ownership back, so they
+     would apply to the wrong pane. Wrapping the timer body re-installs the
+     pane that was rendering for its duration. With no split this is a plain
+     pass-through — the single-pane path keeps running exactly today's code. */
+  wrapFixups(fn) {
+    const pane = Panes.owner();
+    return function () {
+      if (!Panes.isSplit() || Panes.owner() === pane) return fn.apply(this, arguments);
+      return Panes.withOwner(pane, () => fn.apply(this, arguments));
+    };
+  },
+
+  /* ---------------------------------------------------------------------
+     THE SPLIT ITSELF
+     --------------------------------------------------------------------- */
+
+  _LAYOUT_KEY: 'reco.panes.v1',
+  _VIEW_KEY: 'reco.paneView.v1.',
+  _lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  _lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
+  _lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} },
+
+  /* The split layout is PER MACHINE and never reaches the shared folder: it
+     is where this user put their panes, not a fact about the reconciliation.
+     A colleague who never splits sees byte-identical behaviour. */
+  _layout: null,
+  layout() {
+    if (!Panes._layout) {
+      const d = Panes._lsGet(Panes._LAYOUT_KEY, null) || {};
+      Panes._layout = {
+        split: !!d.split,
+        tplId: d.tplId || null,          // what the SECOND pane was showing
+        ratio: (typeof d.ratio === 'number' && d.ratio > 0.15 && d.ratio < 0.85) ? d.ratio : 0.5
+      };
+    }
+    return Panes._layout;
+  },
+  _saveLayout() {
+    const l = Panes.layout();
+    const p1 = Panes.byKey('p1');
+    l.split = Panes.isSplit();
+    if (p1) l.tplId = p1.tplId;
+    Panes._lsSet(Panes._LAYOUT_KEY, l);
+  },
+
+  /* Slot 1's view state, per machine, keyed by template, so re-opening the
+     split brings back the slice the user had. THE WHITELIST IS THE POINT:
+     a stored blob that contained `data` would, assigned through the view's
+     accessor, overwrite the template's rows — on the shared folder. Only
+     VIEW keys are ever copied in, and only ones of a plausible type. */
+  _restoreView(view, tplId) {
+    if (!view || !tplId) return false;
+    const d = Panes._lsGet(Panes._VIEW_KEY + tplId, null);
+    if (!d || typeof d !== 'object') return false;
+    const ok = Panes.VIEW_KEYS.concat(Panes.VIEW_KEYS_PENDING);
+    let n = 0;
+    Object.keys(d).forEach(k => {
+      if (ok.indexOf(k) < 0) return;                 // never a DATA key, never an unknown one
+      const v = d[k];
+      if (v !== null && typeof v === 'function') return;
+      try { view[k] = v; n++; } catch (e) {}
+    });
+    return n > 0;
+  },
+  saveViews() {
+    Panes.eachPane(p => {
+      if (!p.view || !p.tplId) return;               // slot 0's view IS the shared session
+      const out = {};
+      Panes.VIEW_KEYS.forEach(k => { if (k in p.view) out[k] = p.view[k]; });
+      delete out._fillDrag;                          // a drag in flight is not a preference
+      Panes._lsSet(Panes._VIEW_KEY + p.tplId, out);
+    });
+  },
+  saveViewsSoon() {
+    if (!Panes.isSplit()) return;
+    clearTimeout(Panes._viewSaveTimer);
+    Panes._viewSaveTimer = setTimeout(() => { try { Panes.saveViews(); } catch (e) {} }, 500);
+  },
+  _viewSaveTimer: null,
+  /* Templates that no longer exist should not keep a slice on this machine. */
+  pruneViews() {
+    let keys = [];
+    try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); } catch (e) { return; }
+    const live = (AppState.recoTemplates || []).map(t => t.id);
+    keys.forEach(k => {
+      if (!k || k.indexOf(Panes._VIEW_KEY) !== 0) return;
+      if (live.indexOf(k.slice(Panes._VIEW_KEY.length)) < 0) Panes._lsDel(k);
+    });
+  },
+
+  /* Open the second pane. `tplId` defaults to the template the owner is
+     showing, which is the primary case: two slices of ONE template, because
+     offsets are per session and the offset master is keyed by template and
+     row. A different template is allowed and noted in the header. */
+  openSplit(tplId) {
+    if (Panes.isSplit()) {
+      /* WHAT v1 DOES NOT DO, SAID OUT LOUD. The model is N-safe, but the
+         keyboard story, the Excel polling cost and the splitter UI are not
+         worth generalising for an ask that says "2" — so the limit is real
+         and it is named rather than being a silent no-op. */
+      U.toast('Two panes is the maximum. Close one of them first, or point one of these panes at another reconciliation.', 'error');
+      return false;
+    }
+    if (AppState.currentPage !== 'reco') { U.toast('Open a reconciliation first', 'error'); return false; }
+    const owner = Panes.owner();
+    const id = tplId || owner.tplId;
+    if (!id || !AppState.recoTemplates.find(x => x.id === id)) {
+      U.toast('That template is not available', 'error'); return false;
+    }
+    /* v1: Excel View and Sheet mode are singletons (_xlInstance, _xlCtx,
+       ssFillHandle, ssStatusBar) and _xlLive is an identity check against the
+       view table, which flips on any focus change — so a typed amount would
+       silently never reach its row while the user got a "the data changed"
+       toast. Leave them, and SAY so. */
+    const left = [];
+    if ((AppState.activeSubSection || 'reco') === 'excel') { AppState.activeSubSection = 'reco'; left.push('Excel View'); }
+    const osess = AppState.recoSessions[owner.tplId];
+    if (osess && osess.spreadsheetMode) {
+      osess.spreadsheetMode = false; osess.activeCell = null; osess.selRange = null;
+      left.push('Sheet mode');
+    }
+    if (Reco._xlInstance) Reco._xlDestroy();
+
+    Panes.ensureSession(id);
+    const p1 = { key: 'p1', view: null, root: null, tplId: id };
+    Panes.panes().push(p1);
+    try {
+      Panes._repoint(id);
+      if (owner.tplId !== id) Panes._repoint(owner.tplId);
+    } catch (e) {
+      /* _makeView refuses while a session carries a key that is in neither
+         DATA_KEYS nor VIEW_KEYS: an unclassified key is per-pane by
+         construction, so a value typed in one pane would silently never
+         reach the other pane or the shared file. Declining to split is the
+         right answer, but it must not leave half a split behind. */
+      Panes._panes = Panes._panes.filter(x => x !== p1);
+      Panes._owner = Panes._panes[0];
+      try { Panes._repoint(owner.tplId); } catch (e2) {}
+      U.toast('The second pane could not be opened: ' + ((e && e.message) || e), 'error');
+      return false;
+    }
+    Panes._restoreView(p1.view, id);
+    Panes.layout().split = true;
+    Panes.layout().tplId = id;
+    Panes._saveLayout();
+    Panes.pruneViews();
+    App.navigate('reco');
+    Panes.install(owner);
+    U.toast('Two panes open'
+      + (left.length ? ' — ' + left.join(' and ') + ' closed (not available while split)' : '')
+      + '. Click a pane, or press F6, to act on it.', 'success');
+    return true;
+  },
+
+  /* Close a pane. "Close this pane" means the OTHER one stays and keeps
+     showing what it was showing, so slot 0 — which always exists — adopts
+     the survivor's template. */
+  closeSplit(paneKey) {
+    if (!Panes.isSplit()) return false;
+    const p1 = Panes.byKey('p1');
+    const key = paneKey || (Panes.owner() === p1 ? 'p1' : 'p0');
+    const keepTpl = (key === 'p0') ? p1.tplId : Panes.panes()[0].tplId;
+    /* A pane holding an Excel link whose workbook has saves that are not
+       loaded back asks first — otherwise the amber banner goes away with the
+       pane and the edits are never found. The link is left OPEN on the share
+       either way, adoptable again from 📗 Links (MODULE 3k). */
+    if (typeof ExcelLink !== 'undefined' && ExcelLink.confirmPaneClose
+        && !ExcelLink.confirmPaneClose(key)) return false;
+    try { Panes.saveViews(); } catch (e) {}
+    Panes._panes = [Panes.panes()[0]];
+    Panes._owner = Panes._panes[0];
+    Panes._owner.view = null;
+    Panes._owner.root = null;
+    Panes._owner.tplId = keepTpl;          // slot 0's setter IS AppState.activeRecoId
+    p1.view = null; p1.root = null;
+    Panes.layout().split = false;
+    Panes._saveLayout();
+    Panes._repoint(keepTpl);
+    /* The surviving pane is always slot 0 — it adopts the template of
+       whichever pane stayed — so a link held by slot 1 moves to slot 0 with
+       it, and the closed pane's link is released (not closed). */
+    if (typeof ExcelLink !== 'undefined' && ExcelLink.panesCollapsed) {
+      try { ExcelLink.panesCollapsed(key, key === 'p0' ? 'p1' : 'p0'); } catch (e) { console.error('ExcelLink.panesCollapsed', e); }
+    }
+    if (AppState.currentPage === 'reco') App.navigate('reco');
+    return true;
+  },
+
+  /* Point a pane at another template. Offsets and selections do not cross
+     templates, which the header says. */
+  setPaneTemplate(paneKey, tplId) {
+    const p = Panes.byKey(paneKey);
+    if (!p || !tplId) return false;
+    if (!AppState.recoTemplates.find(x => x.id === tplId)) { U.toast('That template is not available', 'error'); return false; }
+    if (p.tplId === tplId) return false;
+    try { Panes.saveViews(); } catch (e) {}
+    const was = p.tplId;
+    Panes.ensureSession(tplId);
+    p.view = null;
+    p.tplId = tplId;
+    try {
+      Panes._repoint(tplId);
+      if (was && was !== tplId) Panes._repoint(was);
+    } catch (e) {
+      p.tplId = was; p.view = null;
+      try { Panes._repoint(was); } catch (e2) {}
+      U.toast('That template could not be opened in this pane: ' + ((e && e.message) || e), 'error');
+      return false;
+    }
+    if (p.view) Panes._restoreView(p.view, tplId);
+    if (p === Panes.owner()) AppState.activeRecoId = tplId;
+    Panes._saveLayout();
+    App.navigate('reco');
+    return true;
+  },
+
+  /* Make the owner show this template. With no split this is exactly what
+     App.navigate's `AppState.activeRecoId = param` always did, because slot
+     0's tplId accessor IS AppState.activeRecoId. */
+  setOwnerTemplate(tplId) {
+    const o = Panes.owner();
+    o.tplId = tplId;
+    if (o.key !== 'p0') AppState.activeRecoId = tplId;
+    return o;
+  },
+
+  /* ---------------------------------------------------------------------
+     RENDERING
+     --------------------------------------------------------------------- */
+
+  /* A stored split is rebuilt the first time the reco page is entered in
+     this run. Nothing is restored if the template has gone. */
+  _layoutRestored: false,
+  _restoreLayoutOnce() {
+    if (Panes._layoutRestored) return;
+    Panes._layoutRestored = true;
+    const l = Panes.layout();
+    if (!l.split || Panes.isSplit()) return;
+    const id = l.tplId && AppState.recoTemplates.find(x => x.id === l.tplId) ? l.tplId : Panes.owner().tplId;
+    if (!id) return;
+    const owner = Panes.owner();
+    Panes.ensureSession(id);
+    const p1 = { key: 'p1', view: null, root: null, tplId: id };
+    Panes.panes().push(p1);
+    try {
+      Panes._repoint(id);
+      if (owner.tplId !== id) Panes._repoint(owner.tplId);
+      Panes._restoreView(p1.view, id);
+    } catch (e) {
+      Panes._panes = Panes._panes.filter(x => x !== p1);
+      Panes._owner = Panes._panes[0];
+      l.split = false; Panes._saveLayout();
+      console.error('Panes: the remembered split could not be restored', e);
+    }
+  },
+
+  /* THE ENTRY POINT App.navigate('reco') uses. With no split this is the one
+     line it replaced — Reco.render(main, param) into #appMain — so the
+     single-pane path is unchanged down to the DOM it produces. */
+  renderReco(main, param) {
+    Panes._restoreLayoutOnce();
+    if (!Panes.isSplit()) {
+      Panes.panes()[0].root = null;
+      Reco.render(main, param);
+      return;
+    }
+    const built = Panes._ensureSplitDom(main);
+    const owner = Panes.owner();
+    /* The asymmetric repaint rule: the focused pane, AND any other pane
+       showing the same template — because the data-changing actions
+       (offsetSelected, recalcOffsets, every applyEdits caller) all repaint
+       through this same call and the other pane's rows must change too. A
+       pane on a DIFFERENT template is left alone, which is the whole saving:
+       renderRecoTable re-runs applyTableFiltersSort over every row. */
+    Panes.renderPane(owner);
+    Panes.panes().forEach(p => {
+      if (p !== owner && (built || p.tplId === owner.tplId)) Panes.renderPane(p);
+    });
+    Panes._ownIds(owner);
+    Panes._paintFocus();
+    Panes.saveViewsSoon();
+  },
+
+  renderPane(pane) {
+    const root = Panes.rootOf(pane);
+    if (!root) return false;
+    Panes.withOwner(pane, () => {
+      /* A pane can outlive its template: deleting one is allowed from Home
+         while a split is open. "Template not found. Go back to Home." is the
+         right sentence for a whole screen and the wrong one for half of it. */
+      const gone = pane.tplId && !AppState.recoTemplates.find(x => x.id === pane.tplId);
+      if (!pane.tplId || gone) {
+        root.innerHTML = '<div class="empty" style="padding:30px;">'
+          + (gone ? 'This reconciliation has been deleted.' : 'Pick a reconciliation for this pane.')
+          + '<div style="margin-top:10px;"><button class="small" onclick="Panes.closeSplit(\'' + U.jsq(pane.key) + '\')">✕ Close pane</button></div>'
+          + '</div>';
+        return;
+      }
+      Reco.render(root, pane.tplId);
+    });
+    return true;
+  },
+
+  /* Repaint every pane showing this template (or all of them). */
+  repaint(tplId) {
+    if (AppState.currentPage !== 'reco') return;
+    if (!Panes.isSplit()) { App.navigate('reco'); return; }
+    const list = (tplId == null) ? Panes.panes() : Panes.panesFor(tplId);
+    if (!list.length) return;
+    const main = document.getElementById('appMain');
+    if (Panes._ensureSplitDom(main)) { Panes.renderReco(main); return; }
+    const owner = Panes.owner();
+    list.forEach(p => Panes.renderPane(p));
+    Panes._ownIds(owner);
+    Panes._paintFocus();
+  },
+
+  /* The split container, built once and then kept: rebuilding it on every
+     navigate would throw away both panes' DOM (and their scroll positions)
+     for a repaint of one. Returns true when it had to (re)build. */
+  _ensureSplitDom(main) {
+    if (!main) return false;
+    const cur = main.querySelector('.reco-split');
+    const haveAll = cur && Panes.panes().every(p => p.root && cur.contains(p.root));
+    if (haveAll) {
+      Panes._applyRatio();
+      return false;
+    }
+    const n = Panes.count();
+    let h = '<div class="reco-split" data-layout="cols" data-panes="' + n + '">';
+    for (let i = 0; i < n; i++) {
+      if (i) h += '<div class="reco-splitter" title="Drag to resize the panes"></div>';
+      h += '<div class="reco-pane" data-pane="' + i + '"></div>';
+    }
+    h += '</div>';
+    main.innerHTML = h;
+    const roots = [...main.querySelectorAll('.reco-pane')];
+    Panes.panes().forEach((p, i) => {
+      p.root = roots[i] || null;
+      if (p.root) Panes._wirePaneRoot(p.root);
+    });
+    const sp = main.querySelector('.reco-splitter');
+    if (sp) Panes._wireSplitter(sp, main.querySelector('.reco-split'));
+    Panes._applyRatio();
+    return true;
+  },
+
+  _applyRatio() {
+    const panes = Panes.panes().map(p => p.root).filter(Boolean);
+    if (panes.length < 2) return;
+    const r = Panes.layout().ratio;
+    panes[0].style.flex = '0 0 ' + (r * 100).toFixed(2) + '%';
+    for (let i = 1; i < panes.length; i++) panes[i].style.flex = '1 1 auto';
+  },
+
+  /* Focus follows a capture-phase pointerdown or wheel on the pane root.
+     Capture fires before the row's own handlers, and pointerdown precedes
+     mousedown, so the click that focuses a pane is also correctly routed by
+     it. The pane is resolved from the DOM rather than closed over, so a
+     re-created pane record cannot leave a stale binding behind.
+
+     Ownership changes nothing persisted and nothing in flight — the view
+     objects exist independently at all times — which is why this is safe to
+     hang off a wheel event. */
+  _wirePaneRoot(root) {
+    if (!root || root._paneWired) return;
+    root._paneWired = true;
+    const take = () => {
+      if (!Panes.isSplit()) return;
+      const i = Number(root.dataset.pane || 0);
+      const p = Panes.panes()[i];
+      if (!p || p === Panes.owner()) return;
+      Panes.focus(p.key);
+    };
+    root.addEventListener('pointerdown', take, true);
+    root.addEventListener('wheel', take, { capture: true, passive: true });
+    root.addEventListener('focusin', take, true);
+  },
+
+  _wireSplitter(sp, box) {
+    if (!sp || sp._paneWired) return;
+    sp._paneWired = true;
+    let dragging = false;
+    const move = (e) => {
+      if (!dragging || !box) return;
+      const r = box.getBoundingClientRect();
+      if (!r.width) return;
+      let ratio = (e.clientX - r.left) / r.width;
+      if (ratio < 0.2) ratio = 0.2;
+      if (ratio > 0.8) ratio = 0.8;
+      Panes.layout().ratio = ratio;
+      Panes._applyRatio();
+    };
+    const up = () => {
+      if (!dragging) return;
+      dragging = false;
+      sp.classList.remove('dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      Panes._saveLayout();
+      /* The columns are laid out from the wrapper's width, and the virtual
+         window is measured against it, so the body is repainted once at the
+         end of the drag rather than on every frame. */
+      Panes.eachPane(p => { try { Reco._refreshVirtBody(p); } catch (e) {} });
+    };
+    sp.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      sp.classList.add('dragging');
+      e.preventDefault();
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+  },
+
+  /* The topbar control: open the split, or close this pane. Emitted with the
+     pane's own key baked in, because by the time the handler runs the click
+     has already made this pane the owner — but the markup was built while it
+     was being rendered, which is the same pane. */
+  topbarHtml(tpl) {
+    /* The pane being rendered is the owner for the duration of its render
+       (withOwner), so its key is the one to bake into these handlers and
+       `tpl` is this pane's own template. */
+    const key = Panes.owner().key;
+    const split = Panes.isSplit();
+    let h = '<div class="view-controls">';
+    if (!split) {
+      h += '<button class="small" onclick="Panes.openSplit()" '
+        + 'title="Open a second pane beside this one — two slices of this reconciliation, each with its own filters, page, zoom and linked Excel. Max 2 panes. Excel View and Sheet mode are not available while split.">⫿ Split</button>';
+    } else {
+      /* Without a visible mark for which pane the toolbar and the keyboard
+         act on, a user types into the pane they are not looking at. */
+      h += '<span class="pane-chip on" data-pane-chip>● Active</span>';
+      h += '<select class="small" onchange="Panes.setPaneTemplate(\'' + U.jsq(key) + '\', this.value)" '
+        + 'title="Show another reconciliation in this pane. Offsets and selections do not cross templates. Both panes always show the same loaded file — two periods at once is not supported.">';
+      (AppState.recoTemplates || []).forEach(t => {
+        if (!t || !t.id) return;
+        h += '<option value="' + U.escAttr(t.id) + '"' + (t.id === tpl.id ? ' selected' : '') + '>' + U.esc(t.name) + '</option>';
+      });
+      h += '</select>';
+      h += '<button class="small" onclick="Panes.closeSplit(\'' + U.jsq(key) + '\')" title="Close this pane; the other one stays">✕ Close pane</button>';
+    }
+    h += '</div>';
+    if (split) {
+      const ids = Panes.panes().map(p => p.tplId);
+      if (ids[0] !== ids[1]) {
+        h += '<span class="pane-note text-muted" title="Offsets are per session and the offset master is keyed by template and row">'
+          + 'Two templates: offsets and selections do not cross templates</span>';
+      }
+    }
+    return h;
+  },
+
+  /* ---------------------------------------------------------------------
+     DATA REPLACED UNDER A PANE
+     --------------------------------------------------------------------- */
+
+  /* Clear Loaded Data, a Restore, and loading another saved file all replace
+     sess.data wholesale. The OWNER's own cursor is reset by the code that
+     does the replacing; the other pane's view has its own page, cell cursor
+     and selection signature, and they point into an array that no longer
+     exists. A no-op when there is no split — slot 0's view IS the session. */
+  onDataReplaced(tplId) {
+    Panes.eachPane(p => {
+      if (!p.view || (tplId != null && p.tplId !== tplId)) return;
+      p.view.page = 0;
+      p.view.activeCell = null;
+      p.view.selRange = null;
+      p.view.selSig = null;
+      p.view._initialScrollTop = 0;
+      try { Reco._virtStates.delete(p.view); } catch (e) {}
+    });
+  },
+
+  /* replaceSession builds a view, and _makeView REFUSES while a session
+     carries a key that is in neither list. That is right — an unclassified
+     key is per-pane by construction, so a value typed in one pane would
+     silently never reach the other pane or the shared folder — but it must
+     not escape into Clear Loaded Data or Restore Session and leave the user
+     with a stack trace and half a restore. The session IS replaced either
+     way (the owned map is written before any view is built); on a refusal
+     the split closes and the reason is on screen. */
+  replaceSessionGuarded(tplId, fresh) {
+    try { return Panes.replaceSession(tplId, fresh); }
+    catch (e) {
+      /* Only reachable when a view has to be BUILT here — a pane showing this
+         template whose view was dropped. A pane that already holds a view for
+         it keeps working, because the view's accessors re-resolve the owner on
+         every read: that is the whole point of them. */
+      Panes._degradeToOnePane((e && e.message) || String(e));
+      return AppState.recoSessions[tplId];
+    }
+  }
 };
 
 /* ================================================================
@@ -8221,13 +9787,22 @@ const App = {
     // Reco.render resolves its template as (param || activeRecoId), so letting
     // the two disagree would load one template's data and then decline to
     // repaint it. No shipped caller does that; this keeps it that way.
-    if (page === 'reco' && param) AppState.activeRecoId = param;
+    /* "Open this template" means: load it into the FOCUSED pane. With no
+       split that is the one pane, and Panes.setOwnerTemplate is literally
+       `AppState.activeRecoId = param`, because slot 0's tplId accessor IS
+       AppState.activeRecoId (MODULE 4b). */
+    if (page === 'reco' && param) Panes.setOwnerTemplate(param);
     document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page===page));
     // Body class for full-height reco shell
     document.body.classList.toggle('reco-fullheight', page === 'reco');
     const main = document.getElementById('appMain');
     if (page === 'home') Home.render(main);
-    else if (page === 'reco') Reco.render(main, param);
+    /* All 68 App.navigate('reco') sites mean "repaint the screen I am
+       looking at". Routing the one line through Panes keeps every one of them
+       correct and makes it mean "the focused pane, plus any other pane showing
+       the same template" once a split is open. With no split it IS
+       Reco.render(main, param) — same call, same DOM (MODULE 4b). */
+    else if (page === 'reco') Panes.renderReco(main, param);
     else if (page === 'aeg') AEG.render(main);
   },
   openModal(title, bodyHtml, footerHtml) {
@@ -8269,7 +9844,7 @@ const App = {
       aegMaster: AppState.aegMaster,
       pendingSpecialJV: AppState.pendingSpecialJV,
       aegSettings: AppState.aegSettings,
-      recoSessions: AppState.recoSessions,
+      recoSessions: AppState.recoSessionsOwned,   // the real sessions, not the view table
       entryHistory: AppState.entryHistory,
       docNumberMaster: AppState.docNumberMaster,
       manualOffsetMaster: AppState.manualOffsetMaster,
@@ -8287,6 +9862,17 @@ const App = {
     App._hotkeysWired = true;
     document.addEventListener('keydown', (e) => {
       if (AppState.currentPage !== 'reco') return;
+      /* Pane switch from the keyboard. Focus otherwise follows a
+         capture-phase pointerdown or wheel on a pane (MODULE 4b), which a
+         keyboard user never produces — and neither does a scrollbar drag. */
+      if (e.key === 'F6'
+          || ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))) {
+        if (!Panes.isSplit()) return;
+        e.preventDefault();
+        if (e.key === 'F6') Panes.focusNext();
+        else Panes.focusSlot(e.key === 'ArrowLeft' ? 0 : 1);
+        return;
+      }
       // Ctrl/Cmd + F → Find & Replace
       if ((e.ctrlKey || e.metaKey) && e.key && e.key.toLowerCase() === 'f') {
         e.preventDefault();
@@ -8353,7 +9939,11 @@ const App = {
         if (d.aegTemplates) AppState.aegTemplates = d.aegTemplates;
         if (d.aegMaster) AppState.aegMaster = d.aegMaster;
         if (d.aegSettings) AppState.aegSettings = Object.assign(AppState.aegSettings, d.aegSettings);
-        if (d.recoSessions) AppState.recoSessions = d.recoSessions;
+        if (d.recoSessions) {
+          AppState.recoSessionsOwned = d.recoSessions;
+          AppState.recoSessions = {};
+          Panes.syncViewTable();
+        }
         /* A reversal is a one-way fact: restoring a backup taken before one
            must not un-reverse the entry and leave the ledger short. The marks
            on the current history are re-applied to the matching ids. */
@@ -8951,10 +10541,18 @@ defaultTemplate() {
     if (!confirm('Delete the reconciliation template "' + t.name + '"?\n\nIts session, entry history, masters, groups, comments and pending Special JVs are deleted' + (nAtt ? ', together with ' + nAtt + ' attachment file(s)' : '') + '. The version history in reco_data/ is kept on disk.')) return;
     const atts = Object.values((AppState.attachmentMaster || {})[id] || {});
     AppState.recoTemplates = AppState.recoTemplates.filter(x => x.id !== id);
-    ['recoSessions','entryHistory','docNumberMaster','manualOffsetMaster','correctionMaster',
+    /* The session lives in AppState.recoSessionsOwned; AppState.recoSessions
+       is the view table (MODULE 4b). Deleting the key there would leave the
+       real session on the share, bring it back on the next load, and trip
+       flush's key-set assertion — so this is the SEVENTH whole-session site,
+       the one the `recoSessions[x] =` grep could never find because it is a
+       delete. Panes.dropSession removes the owner AND un-points every pane. */
+    Panes.dropSession(id);
+    ['entryHistory','docNumberMaster','manualOffsetMaster','correctionMaster',
      'pendingSpecialJV','groupMaster','attachmentMaster','commentMaster'].forEach(k => {
       if (AppState[k]) delete AppState[k][id];
     });
+    try { Panes._lsDel(Panes._VIEW_KEY + id); } catch (e) {}
     if (Store._hasApi()) {
       atts.forEach(a => {
         if (a.storedPath && a.storedPath.indexOf('localStorage:') !== 0) {
@@ -10356,7 +11954,7 @@ renderExcelView(tpl, sess) {
   h += '<div class="excel-view-host" id="excelViewHost"><div class="xl-loading"><span class="xl-spin"></span>Loading the spreadsheet…</div></div>';
   h += '<div class="sel-sum-bar" id="xlSelSumBar"></div>';
   h += '</div>';
-  setTimeout(() => Reco._xlInit(tpl, sess), 30);
+  setTimeout(Panes.wrapFixups(() => Reco._xlInit(tpl, sess)), 30);
   return h;
 },
 
@@ -12622,6 +14220,14 @@ _ssCommitFill(fd) {
 toggleSpreadsheetMode() {
   const sess = AppState.recoSessions[AppState.activeRecoId];
   if (!sess) return;
+  /* v1: refused while a split is open, and it says so rather than half
+     working. ssFillHandle and ssStatusBar are created once, by id, and
+     appended to the one `.reco-shell` the lookup finds first, so the second
+     pane's handle would appear over the first pane's grid (MODULE 4b). */
+  if (Panes.isSplit() && !sess.spreadsheetMode) {
+    U.toast('Sheet mode is not available while two panes are open — the fill handle and the status bar are one shared pair. Close one pane to use it.', 'error');
+    return;
+  }
   sess.spreadsheetMode = !sess.spreadsheetMode;
   if (!sess.spreadsheetMode) { sess.activeCell = null; sess.selRange = null; }
   AppState.save();
@@ -12652,13 +14258,15 @@ _ssVisibleCols() {
   return Array.from(wrap.querySelectorAll('thead th[data-col]')).map(th => th.dataset.col);
 },
 
-_ssApplyHighlight() {
-  const wrap = document.querySelector('.reco-table-wrap');
+/* `wrap` and `sess` are the pane's own when a repaint is driven by that
+   pane's scrollbar; omitted they are the focused pane's, as before. */
+_ssApplyHighlight(wrap, sess) {
+  wrap = wrap || document.querySelector('.reco-table-wrap');
   if (!wrap) return;
   wrap.querySelectorAll('td.ss-active-cell, td.ss-selected-cell').forEach(td => {
     td.classList.remove('ss-active-cell', 'ss-selected-cell');
   });
-  const sess = AppState.recoSessions[AppState.activeRecoId];
+  sess = sess || AppState.recoSessions[AppState.activeRecoId];
   if (!sess || !sess.spreadsheetMode) { wrap.classList.remove('ss-mode'); return; }
   wrap.classList.add('ss-mode');
 
@@ -13209,9 +14817,24 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
        column of a released key is not reverted under a success toast. */
     sess.loadedAt = new Date().toISOString();
     Reco.runAutoOffset(tpl, sess);
+    /* Both panes always show the same loaded file — two periods at once is
+       refused — so the OTHER pane's rows have just been replaced under it and
+       its page and cell cursor point into an array that is gone (MODULE 4b). */
+    Panes.onDataReplaced(id);
     AppState.save();
     Reco._repaintIfOpen(id);
     U.toast('Loaded '+active.length+' active rows ('+total+' versioned rows'+(applied ? ', '+applied+' later edit(s) applied' : '')+')','success');
+    /* WHAT v1 DOES NOT DO, SAID OUT LOUD. Two PERIODS of one reconciliation
+       open at once is refused by design: every edit appends to today's file,
+       and two loaded copies of one row key collide in the 150 ms per-template
+       edit batcher. The rows are one record per template, so this load has
+       just moved BOTH panes to this file — which is a surprise worth a
+       sentence if the user opened the second pane to compare two months. */
+    if (Panes.isSplit() && Panes.panesFor(id).length > 1) {
+      U.toast('Both panes now show ' + String(fullPath || "").split('/').pop()
+        + ' — one reconciliation has one loaded file, so two periods side by side is not supported. '
+        + 'Point one pane at another reconciliation instead.', 'error');
+    }
     return { ok: true };
   },
 
@@ -13298,10 +14921,15 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     if (cb) cb.checked = isSelected;
   },
 
-  bulkMarkOffset(markAsOffset) {
-    const id = AppState.activeRecoId;
-    const tpl = AppState.recoTemplates.find(x => x.id === id);
-    const sess = AppState.recoSessions[id];
+  /* LEDGER-WRITE REFUSAL 2 OF 2. Mark Offset writes sess.offsets, stamps
+     _recoId on the row and writes the pk into manualOffsetMaster on the
+     SHARED FOLDER, so it is as much a write as Preview Entry is — and it
+     sits in this pane's own toolbar, two centimetres from this pane's rows.
+     The refusal covers unmark as well: both branches act on "the rows I
+     ticked in this pane", and smartUnmark can drop a whole offset group. */
+  bulkMarkOffset(markAsOffset, paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!sess || !tpl) return;
 
     const selectedIds = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k] === true);
@@ -13309,6 +14937,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       U.toast('Select rows first using the checkboxes or drag-select', 'error');
       return;
     }
+
+    const outside = Reco._selOutsidePane(tpl, sess, selectedIds,
+      markAsOffset ? 'Mark Offset' : 'Unmark',
+      markAsOffset ? 'nothing was marked' : 'nothing was unmarked');
+    if (outside) { U.toast(outside.msg, 'error'); return; }
 
     if (markAsOffset) {
       // Tolerance check on eligible (non-offset) rows
@@ -13328,7 +14961,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       });
     } else {
       // Smart unmark — see Patch C
-      Reco.smartUnmark(selectedIds);
+      Reco.smartUnmark(selectedIds, S.paneKey);
       return;
     }
 
@@ -13336,10 +14969,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     AppState.save();
     App.navigate('reco');
   },
-  smartUnmark(selectedIds) {
-    const id = AppState.activeRecoId;
-    const tpl = AppState.recoTemplates.find(x => x.id === id);
-    const sess = AppState.recoSessions[id];
+  smartUnmark(selectedIds, paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
 
     selectedIds = (selectedIds||[]).filter(rid => sess.offsets[rid]);
@@ -13474,7 +15106,12 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   /* Repaint only if the user is still looking at this template. A slow read for
      Alpha must never paint over the Beta screen the user has moved to. */
   _repaintIfOpen(tplId) {
-    if (AppState.currentPage === 'reco' && AppState.activeRecoId === tplId) App.navigate('reco');
+    if (AppState.currentPage !== 'reco') return;
+    /* With no split this is the line it replaced. With one, the question
+       becomes "does ANY pane show it" — a slow read for Alpha must still
+       never paint over a pane showing Beta (MODULE 4b). */
+    if (!Panes.isSplit()) { if (AppState.activeRecoId === tplId) App.navigate('reco'); return; }
+    Panes.repaint(tplId);
   },
 
   /* What to say when the grid is empty. Three different situations used to
@@ -13564,15 +15201,22 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   render(root, templateId) {
     if (Reco._xlInstance) Reco._xlDestroy();
     // Preserve scroll across re-renders
-    const _oldWrap = root.querySelector('.reco-table-wrap');
+    /* …-parked too: the non-owner pane's wrapper carries the parked class
+       (MODULE 4b), and this root may be that pane's. */
+    const _oldWrap = Panes.wrapIn(root);
     const _savedScrollTop  = _oldWrap ? _oldWrap.scrollTop  : null;
     const _savedScrollLeft = _oldWrap ? _oldWrap.scrollLeft : null;
 
     const id = templateId || AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     if (!tpl) { root.innerHTML = '<div class="empty">Template not found. Go back to Home.</div>'; return; }
-    if (!AppState.recoSessions[id]) AppState.recoSessions[id] = Reco.makeSession();
-    const sess = AppState.recoSessions[id];
+    /* Creates the session if this is the template's first open, and re-points
+       the view table at the view of the pane being rendered (MODULE 4b). With
+       no split that view IS the session object, so this is the same object
+       the two lines it replaced produced. Called unconditionally, not only
+       when the session is missing, so a stray direct write to the view table
+       is corrected here instead of persisting as a divergence. */
+    const sess = Panes.ensureSession(id);
     Reco.ensureSessionShape(sess);
 
 
@@ -13623,6 +15267,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '<button class="small" onclick="Reco.openOrderPicker()" title="Set the left-to-right column order for yourself, on this PC">⇄ Columns</button>';
     h += '<button class="small" onclick="Reco.resetTableView()" title="Drop your own column order (back to the template\'s), and reset widths and zoom">↺ Reset View</button>';
     h += '</div>';
+    /* ⫿ Split / ✕ Close pane, the ● Active chip and this pane's template
+       picker. Built per pane, with the pane's own key baked in (MODULE 4b). */
+    h += Panes.topbarHtml(tpl);
         if (sess.spreadsheetMode) {
           h += '<button class="small" onclick="Reco.ssAddRow(false)" title="Add a session row (cleared on Clear Data)">+ Row</button>';
           h += '<button class="small" onclick="Reco.ssAddRow(true)"  title="Add a persistent row (written to versioned CSV)">+ Persistent Row</button>';
@@ -13630,7 +15277,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
         } 
     if (sess.data.length) {
       h += '<div class="view-controls">';
-      h += '<button class="small'+(sess.spreadsheetMode?' active':'')+'" onclick="Reco.toggleSpreadsheetMode()" title="Spreadsheet mode — cell selection, arrow keys, formulas">📊 Sheet</button>';
+      h += '<button class="small'+(sess.spreadsheetMode?' active':'')+'" onclick="Reco.toggleSpreadsheetMode()" title="'
+        + (Panes.isSplit()
+            ? 'Not available while two panes are open — the fill handle and the status bar are one shared pair for the whole page'
+            : 'Spreadsheet mode — cell selection, arrow keys, formulas')
+        + '">📊 Sheet</button>';
             h += '<button class="small'+(sess.formatToolbarOpen?' active':'')+'" onclick="Reco.toggleFormatToolbar()" title="Toggle formatting toolbar (Alt+H)">🎨 Format</button>';
 
      if ((sess.hiddenCols||[]).length) {
@@ -13714,7 +15365,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
 
           // Restore scroll position after the new DOM lands
           if (_savedScrollTop != null) {
-            const _newWrap = root.querySelector('.reco-table-wrap');
+            const _newWrap = Panes.wrapIn(root);
             if (_newWrap) {
               _newWrap.scrollTop  = _savedScrollTop;
               _newWrap.scrollLeft = _savedScrollLeft;
@@ -13729,6 +15380,19 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
       Reco.setSection('entries');
       setTimeout(() => Reco.openEntryByAccountingId(eid), 80);
     }
+  },
+
+  /* The Reco / Pivot / Excel chooser. A function rather than three inline
+     `AppState.activeSubSection='…'` assignments, so that Excel View can be
+     REFUSED with a sentence while a split is open instead of rendering a
+     second spreadsheet against the one shared instance (MODULE 4b). */
+  setSubSection(name) {
+    if (name === 'excel' && Panes.isSplit()) {
+      U.toast('Excel View is not available while two panes are open — the spreadsheet is one shared instance, so a value typed in one pane would never reach its row. Close one pane to use it.', 'error');
+      return;
+    }
+    AppState.activeSubSection = name;
+    App.navigate('reco');
   },
 
   setSection(sec) {
@@ -13763,8 +15427,10 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
 
   ingestData(tpl, rawData, rawFields) {
     const id = tpl.id;
-    if (!AppState.recoSessions[id]) AppState.recoSessions[id] = Reco.makeSession();
-    const sess = AppState.recoSessions[id];
+    /* The other path that brings a template's first session into existence
+       (pasting or uploading into a template never yet opened). Same door as
+       Reco.render's — see MODULE 4b. */
+    const sess = Panes.ensureSession(id);
     Reco.ensureSessionShape(sess);
     // An auto-load still in flight must not replace what the user just added.
     Reco._runState(id).loadGen++;
@@ -13833,6 +15499,10 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     }
 
     Reco.runAutoOffset(tpl, sess);
+    /* sess.data is a NEW array after the concat above, and the other pane's
+       view holds its own page and cell cursor against the old one
+       (MODULE 4b). */
+    Panes.onDataReplaced(tpl.id);
     AppState.save();
     App.navigate('reco');
     U.toast('Loaded '+mapped.length+' rows','success');
@@ -14104,14 +15774,31 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
   },
   /* ============== ACTION SECTION ============== */
   renderAction(tpl, sess) {
-    const sub = AppState.activeSubSection || 'reco';
+    /* v1: Excel View is refused while a split is open. _xlInstance, _xlCtx,
+       ssFillHandle and ssStatusBar are hard singletons, Reco.render destroys
+       the instance at the top of EVERY render (so repainting either pane
+       would tear the other's spreadsheet down), and _xlLive is an identity
+       check against the view table — which flips on any focus change, so a
+       typed amount would silently never reach its row while the user got a
+       misleading "the data changed" toast. The sub-section is one global, so
+       forcing it here covers both panes at once; Reco.setSubSection refuses
+       the click and says why (MODULE 4b). */
+    let sub = AppState.activeSubSection || 'reco';
+    const subBlocked = (sub === 'excel' && Panes.isSplit());
+    if (subBlocked) sub = 'reco';
     let h = '';
     // Group the top controls and give them padding so they don't sit flush with the edges
     h += '<div style="padding: 10px 14px 0 14px; flex-shrink: 0;">';
     h += '<div class="toolbar">';
-    h += '<button class="small '+(sub==='reco'?'primary':'')+'" onclick="AppState.activeSubSection=\'reco\'; App.navigate(\'reco\')">Reco View</button>';
-    if (tpl.pivotEnabled) h += '<button class="small '+(sub==='pivot'?'primary':'')+'" onclick="AppState.activeSubSection=\'pivot\'; App.navigate(\'reco\')">Pivot View</button>';
-    h += '<button class="small '+(sub==='excel'?'primary':'')+'" onclick="AppState.activeSubSection=\'excel\'; App.navigate(\'reco\')">🆗 Excel View</button>';
+    h += '<button class="small '+(sub==='reco'?'primary':'')+'" onclick="Reco.setSubSection(\'reco\')">Reco View</button>';
+    if (tpl.pivotEnabled) h += '<button class="small '+(sub==='pivot'?'primary':'')+'" onclick="Reco.setSubSection(\'pivot\')">Pivot View</button>';
+    h += '<button class="small '+(sub==='excel'?'primary':'')+'" onclick="Reco.setSubSection(\'excel\')" title="'
+      + (Panes.isSplit() ? 'Not available while two panes are open — the spreadsheet is one shared instance' : 'Edit the rows in a spreadsheet grid')
+      + '">🆗 Excel View</button>';
+    if (subBlocked) {
+      h += '<span class="pane-note text-muted" title="One jspreadsheet instance, one formula bar and one fill handle are shared by the whole page">'
+        + 'Excel View is off while two panes are open</span>';
+    }
     h += '<div class="toolbar spacer"></div>';
     h += '<label class="inline"><input type="radio" name="recoStatus" value="all" '+(sess.statusFilter==='all'?'checked':'')+' onchange="Reco.setStatusFilter(\'all\')"> All</label>';
     h += '<label class="inline"><input type="radio" name="recoStatus" value="open" '+(sess.statusFilter==='open'?'checked':'')+' onchange="Reco.setStatusFilter(\'open\')"> Open</label>';
@@ -14120,7 +15807,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle) {
     h += '<button class="success small" onclick="Reco.exportData(\'csv\')">CSV</button>';
     h += '<button class="success small" onclick="Reco.exportData(\'xlsx\')">XLSX</button>';
     h += ExcelLink.buttonHtml(tpl, sess);
-    h += '<button class="small" onclick="ExcelLink.openLinksPanel()" title="Workbooks opened with Edit in Excel: load back, reopen, load from file">📗 Links</button>';
+    h += '<button class="small" onclick="ExcelLink.openLinksPanel(null,\'' + U.jsq(ExcelLink._ownerKey()) + '\')" title="Workbooks opened with Edit in Excel: load back, reopen, load from file. Each pane has its own link.">📗 Links</button>';
     h += '</div>';
     h += ExcelLink.bannerHtml(tpl);
 
@@ -14982,13 +16669,19 @@ _VIRT_WINDOW: 110,
 _VIRT_BUFFER: 20,
 _VIRT_DEFAULT_H: 32,
 
-_computeVirtWindow(slice, sess) {
+/* `wrap` is the pane's own grid wrapper. Omitted (every single-pane caller)
+   it is the one the document holds, exactly as before. Passed, this window is
+   computed from the scrollTop of the pane being scrolled — which is the whole
+   of F7's scroll correctness: a scrollbar drag in the unfocused pane fires no
+   pointerdown and no wheel, so ownership has not moved and the global lookup
+   would read the OTHER pane's scrollTop (MODULE 4b). */
+_computeVirtWindow(slice, sess, wrap) {
   const total = slice.length;
   const rowH = sess._virtRowHeight || Reco._VIRT_DEFAULT_H;
   if (total <= Reco._VIRT_WINDOW) {
     return { startIdx: 0, endIdx: total, topPx: 0, botPx: 0, rowH };
   }
-  const wrap = document.querySelector('.reco-table-wrap');
+  wrap = wrap || document.querySelector('.reco-table-wrap');
   const scrollTop = wrap ? wrap.scrollTop : (sess._initialScrollTop || 0);
   let startIdx = Math.max(0, Math.floor(scrollTop / rowH) - Reco._VIRT_BUFFER);
   let endIdx = Math.min(total, startIdx + Reco._VIRT_WINDOW);
@@ -15093,8 +16786,12 @@ async _withBusy(cost, text, work) {
   finally { Reco._busyDone(); }
 },
 
-_attachVirtScroll() {
-  const wrap = document.querySelector('.reco-table-wrap');
+/* The PANE is captured in the closure, not resolved when the event fires.
+   Called from the fixups timer, which runs inside Panes.wrapFixups, so
+   Panes.owner() there is the pane that was being rendered (MODULE 4b). */
+_attachVirtScroll(pane) {
+  const p = pane || Panes.owner();
+  const wrap = Reco._gridWrapFor(p);
   if (!wrap || wrap._virtWired) return;
   wrap._virtWired = true;
   let pending = false;
@@ -15103,14 +16800,54 @@ _attachVirtScroll() {
     pending = true;
     requestAnimationFrame(() => {
       pending = false;
-      Reco._refreshVirtBody();
+      Reco._refreshVirtBody(p);
     });
   }, { passive: true });
 },
 
-_measureVirtRow(sess) {
+/* The grid wrapper and tbody of one pane. With no split these are the two
+   document-level lookups they replaced, character for character, so the
+   single-pane path cannot drift. With a split, the owner pane carries the
+   real `.reco-table-wrap` class and the other carries the parked one, which
+   every rule in the stylesheet matches too. */
+_gridWrapFor(pane) {
+  if (!Panes.isSplit()) return document.querySelector('.reco-table-wrap');
+  return Panes.wrapIn(Panes.rootOf(pane || Panes.owner()));
+},
+_gridTbodyFor(pane) {
+  if (!Panes.isSplit()) return document.querySelector('.reco-table-wrap tbody');
+  const w = Reco._gridWrapFor(pane);
+  return w ? w.querySelector('tbody') : null;
+},
+
+/* Everything one pane's grid repaint needs, resolved together. The no-split
+   branch is today's globals; the split branch resolves the pane's own
+   session (which may not be the one AppState.activeRecoId names, because a
+   scrollbar drag moves no focus) and the pane's own DOM. */
+_gridTarget(pane) {
+  if (!Panes.isSplit() || !pane || pane === Panes.owner()) {
+    const id = AppState.activeRecoId;
+    return {
+      pane: pane || Panes.owner(),
+      tpl: AppState.recoTemplates.find(x => x.id === id),
+      sess: AppState.recoSessions[id],
+      wrap: Reco._gridWrapFor(pane),
+      tbody: Reco._gridTbodyFor(pane)
+    };
+  }
+  const c = Panes.ctx(pane.key);
+  if (!c) return null;
+  const wrap = Reco._gridWrapFor(pane);
+  return { pane, tpl: c.tpl, sess: c.sess, wrap, tbody: wrap ? wrap.querySelector('tbody') : null };
+},
+
+/* Measured per VIEW, because two panes may be at different zooms: `sess`
+   here is the pane's own view and `_virtRowHeight` is a VIEW key. */
+_measureVirtRow(sess, wrap) {
   if (sess._virtRowHeight) return; // measure once, then keep stable
-  const sample = document.querySelector('.reco-table-wrap tbody tr:not(.virt-spacer-top):not(.virt-spacer-bot)');
+  const sel = 'tbody tr:not(.virt-spacer-top):not(.virt-spacer-bot)';
+  const sample = wrap ? wrap.querySelector(sel)
+                      : document.querySelector('.reco-table-wrap ' + sel);
   if (sample && sample.offsetHeight) sess._virtRowHeight = sample.offsetHeight;
 },
 
@@ -15171,24 +16908,30 @@ _virtColsStale(tpl, sess) {
   return !!s && s.colSig !== Reco._colSigFor(tpl, sess);
 },
 
-_refreshVirtBody() {
-  const id = AppState.activeRecoId;
-  const tpl = AppState.recoTemplates.find(x => x.id === id);
-  const sess = AppState.recoSessions[id];
-  if (!tpl || !sess) return;
-  const tbody = document.querySelector('.reco-table-wrap tbody');
+/* `pane` is the pane whose scrollbar moved. Omitted it is the focused one,
+   which is what every other caller means. */
+_refreshVirtBody(pane) {
+  const g = Reco._gridTarget(pane);
+  if (!g || !g.tpl || !g.sess) return;
+  const tbody = g.tbody;
   if (!tbody) return;
   /* Columns moved without a re-render: the header on screen and a body built
      now would disagree, so this is a full render's job, not a body repaint
      (see _virtColsStale). Checked out here, before _fullPass, because
      renderRecoTable opens a pass of its own. */
-  if (Reco._virtColsStale(tpl, sess)) { Reco.refreshGrid(); return; }
+  if (Reco._virtColsStale(g.tpl, g.sess)) {
+    /* refreshGrid rebuilds #recoTableArea, which only the OWNER pane has —
+       so for any other pane the escalation is that pane's own render. */
+    if (g.pane && g.pane !== Panes.owner()) Panes.renderPane(g.pane);
+    else Reco.refreshGrid();
+    return;
+  }
   Reco._fullPass();
-  try { return Reco._refreshVirtBodyInner(tpl, sess, tbody); }
+  try { return Reco._refreshVirtBodyInner(g.tpl, g.sess, tbody, g.wrap); }
   finally { Reco._fullEnd(); }
 },
 
-_refreshVirtBodyInner(tpl, sess, tbody) {
+_refreshVirtBodyInner(tpl, sess, tbody, wrap) {
 
   const pageSize = sess.pageSize || 200;
   const cached = Reco._virtStateFor(tpl, sess);
@@ -15213,7 +16956,7 @@ _refreshVirtBodyInner(tpl, sess, tbody) {
     Reco._virtPublish(sess, { tplId: tpl.id, data: sess.data, page: sess.page, pageSize,
                               filtered, slice, descs, idxMap, colSig: Reco._colSigFor(tpl, sess) });
   }
-  const win = Reco._computeVirtWindow(slice, sess);
+  const win = Reco._computeVirtWindow(slice, sess, wrap);
   const colspan = 2 + descs.length;
   let h = '';
   if (win.topPx > 0) {
@@ -15227,9 +16970,9 @@ _refreshVirtBodyInner(tpl, sess, tbody) {
     h += '<tr class="virt-spacer-bot" style="height:'+win.botPx+'px;"><td colspan="'+colspan+'"></td></tr>';
   }
   tbody.innerHTML = h;
-  Reco._ssApplyHighlight();
-  Reco._applyRowFlash();
-  Reco._measureVirtRow(sess);
+  Reco._ssApplyHighlight(wrap, sess);
+  Reco._applyRowFlash(wrap);
+  Reco._measureVirtRow(sess, wrap);
 },
 
 /* ONE descriptor list, in display order, for the whole row.
@@ -15523,15 +17266,20 @@ renderRecoTable(tpl, sess) {
     h += '<div style="flex:1"></div>';
     
     // NEW: Bulk Offset Actions (Replacing the removed Actions column)
-    h += '<button class="small" onclick="Reco.bulkMarkOffset(true)" style="margin-right:4px;">Mark Offset</button>';
-    h += '<button class="small" onclick="Reco.bulkMarkOffset(false)" style="margin-right:12px;">Unmark</button>';
+    /* The pane being rendered owns the screen for the duration of its render
+       (Panes.withOwner), so its key is the one to bake into the handlers it
+       emits — and these three write to the journal or the offset master, so
+       they must know which pane's rows they were asked about (MODULE 4b). */
+    const pkey = U.jsq(((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0');
+    h += '<button class="small" onclick="Reco.bulkMarkOffset(true,\''+pkey+'\')" style="margin-right:4px;">Mark Offset</button>';
+    h += '<button class="small" onclick="Reco.bulkMarkOffset(false,\''+pkey+'\')" style="margin-right:12px;">Unmark</button>';
 
     if (tpl.groupsEnabled) {
       h += '<button class="small" onclick="Reco.openGroupMenu(this)" style="margin-right:12px;">📁 Group ▾</button>';
     }
 
     if (tpl.aegIntegration && tpl.aegIntegration.enabled) {
-      h += '<button class="small primary" onclick="Reco.previewEntryFromSelection(true)">Preview Entry</button>';
+      h += '<button class="small primary" onclick="Reco.previewEntryFromSelection(true,\''+pkey+'\')">Preview Entry</button>';
       h += '<span class="text-muted" style="margin-left:4px;" title="Top button uses all open rows when nothing selected; selection-bar Preview always uses selection.">ⓘ</span>';
     }
 
@@ -15545,7 +17293,9 @@ renderRecoTable(tpl, sess) {
     // The box is set from the real selection after the render (see
     // _syncSelectAllBox): it used to draw unchecked every time, so after
     // selecting every row the header still said nothing was selected.
-    h += '<th style="width:30px;"><input type="checkbox" id="recoSelectAll" title="Select every row the filters leave" onchange="Reco.toggleAllRows(this.checked)" /></th>';
+    h += '<th style="width:30px;"><input type="checkbox" id="recoSelectAll" title="Select every row the filters leave'
+       + (typeof Panes !== 'undefined' && Panes.isSplit() ? ' in this pane — the other pane\'s ticks are left alone' : '')
+       + '" onchange="Reco.toggleAllRows(this.checked,\''+pkey+'\')" /></th>';
           h += '<th class="status-th" style="min-width:130px; white-space:nowrap;">Status<span class="col-filter-btn'+(Reco._anyStatusFilterActive(sess)?' active':'')+'" onclick="Reco.openStatusFilter(this, event)">▼</span></th>';
     /* ONE header loop over the same descriptor list the body walks. An added
        column is draggable, takes sess.columnWidths and carries a resize
@@ -15625,7 +17375,13 @@ renderRecoTable(tpl, sess) {
 
     h += '</tbody></table></div>';
 
-    setTimeout(() => {
+    /* These fixups run AFTER the render returns — i.e. after withOwner has
+       handed ownership back — so they would resolve the OTHER pane's wrapper
+       and session. wrapFixups re-installs the pane that was rendering for the
+       duration, and is a plain pass-through when there is no split. Measured
+       without it, the just-rendered pane gets no zoom and no scroll handler at
+       all, for as long as it is on screen; the detail is in MODULE 4b. */
+    setTimeout(Panes.wrapFixups(() => {
       Reco._attachResizeHandlers();
       Reco._attachZoomHandler();
       Reco._applyZoom();
@@ -15634,7 +17390,7 @@ renderRecoTable(tpl, sess) {
       Reco._ssAttachHandlers();
       Reco._ssApplyHighlight();
       Reco._syncSelectAllBox();
-    }, 0);
+    }), 0);
     return h;
   },
 
@@ -15642,12 +17398,17 @@ renderRecoTable(tpl, sess) {
      selected, half-ticked when only some of it is, and empty when none is.
      Counted against the filtered list the render just produced, so it costs
      nothing extra. */
-  _syncSelectAllBox() {
-    const box = document.getElementById('recoSelectAll');
+  _syncSelectAllBox(paneKey) {
+    /* Part of sanctioned exception 2: _syncVisibleSelection loops the panes
+       and this is what it paints in each. With no split, or called without a
+       pane, it is today's lookup. */
+    const split = !!paneKey && typeof Panes !== 'undefined' && Panes.isSplit();
+    const box = split ? Panes.el(paneKey, 'recoSelectAll') : document.getElementById('recoSelectAll');
     if (!box) return;
-    const id = AppState.activeRecoId;
+    const pane = split ? Panes.byKey(paneKey) : null;
+    const id = pane ? pane.tplId : AppState.activeRecoId;
     const tpl = AppState.recoTemplates.find(x => x.id === id);
-    const sess = AppState.recoSessions[id];
+    const sess = pane ? Panes.viewFor(pane.key, id) : AppState.recoSessions[id];
     if (!tpl || !sess) return;
     const st = Reco._virtStateFor(tpl, sess);
     // Counted inside the filtered list: a session-wide count read "all
@@ -15963,9 +17724,11 @@ renderRecoTable(tpl, sess) {
   _flashFrow: null,
   _flashLeft: 0,
 
-  _applyRowFlash() {
+  _applyRowFlash(wrap) {
     if (Reco._flashFrow == null) return;
-    const tr = document.querySelector('.reco-table-wrap tbody tr[data-frow="' + Reco._flashFrow + '"]');
+    const tr = wrap
+      ? wrap.querySelector('tbody tr[data-frow="' + Reco._flashFrow + '"]')
+      : document.querySelector('.reco-table-wrap tbody tr[data-frow="' + Reco._flashFrow + '"]');
     if (tr) tr.classList.add('row-flash');
     if (--Reco._flashLeft <= 0) Reco._flashFrow = null;
   },
@@ -16381,23 +18144,162 @@ renderRecoTable(tpl, sess) {
 
   /* Row selection + sum bar */
 
-  /* One rendered row, by its _id. Only the virtualised window is in the DOM,
-     so this is a lookup over ~110 nodes. */
-  _rowEl(rowId) {
-    return [...document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]')]
-      .find(tr => tr.dataset.rid === rowId) || null;
+  /* =====================================================================
+     THE SHARED SELECTION ACROSS TWO PANES — THE REFUSALS AND THE THREE
+     SANCTIONED EXCEPTIONS  (PLAN2 F7 blocker #3 and change #8)
+
+     THE SELECTION IS SHARED ON PURPOSE. The headline action of the whole
+     feature is "tick these three off against those two": three rows on the
+     left, two on the right, Sigma nets to zero, Offset Selected. Making the
+     selection per pane removes the feature, and offsetSelected records by pk
+     so a cross-pane offset survives a reload. So selectedRows stays DATA.
+
+     WHAT THAT COSTS, and the two things that pay for it:
+
+     1. THE LEDGER-WRITE REFUSALS. Preview Entry, with a selection present,
+        ignores the filters entirely (`sess.data.filter(r => sel.has(r._id))`)
+        — then stamps postedPks and CLEARS the selection, so nothing on screen
+        afterwards shows what went in. In a split that would post the OTHER
+        pane's rows into this pane's journal entry. So every consumer that
+        writes to the journal or to the offset master on the shared folder
+        takes the key of the pane it was clicked in and REFUSES when the
+        selection reaches outside what that pane shows, naming the count.
+        `offsetSelected` is the deliberate exception: it IS the cross-pane
+        action, it is only offered once the selection is within tolerance,
+        and it keeps the full shared set.
+
+        With no split open `Panes.isSplit()` is false and the refusal is a
+        no-op, so nothing about single-pane behaviour changes. Selecting rows
+        and then filtering them away still posts them, exactly as it does
+        today — that hazard is older than the panes and is NOT what this
+        commit is for. What makes it worth refusing in a split is that the
+        rows are in another pane, under another filter, and the remedy is a
+        different sentence ("do it in the pane that shows them").
+
+     2. THREE SANCTIONED EXCEPTIONS to MODULE 4b's one invariant, THE OWNER
+        PANE IS THE ONLY ADDRESSABLE PANE. They are named here so nobody
+        reinstates the bug by "tidying" them back to a document-level lookup:
+
+          1  updateSelSumBar     — one shared selection, two Sigma bars. Only
+                                   the owner's #selSumBar is addressable, so
+                                   without this the other pane shows a stale
+                                   total and possibly a stale "Within
+                                   tolerance ✓" beside live rows.
+          2  _syncVisibleSelection — the ticks and row highlights. Same
+                                   reason: ticking a row must mark it in both
+                                   panes that show it, with no re-render.
+          3  _rowEl / _rowEls    — one row's <tr>, which exists once per pane
+                                   showing that template.
+
+        Each resolves through `Panes.el(paneKey, id)` / `Panes.wrapIn` and
+        loops `Panes.eachPane`, and each keeps today's document-level lookup
+        verbatim when there is no split, so the single-pane path cannot
+        drift. Nothing else gets an exception: a sum bar is painted on every
+        tick of a checkbox, which is why it cannot wait for a render, and
+        everything that CAN wait for a render does.
+     ===================================================================== */
+
+  /* The (template, session) a selection action must act on: the pane whose
+     button was clicked. By the time an emitted handler runs, that pane is
+     already the owner (MODULE 4b's capture-phase pointerdown), so the pane
+     key is belt and braces for the click path — and the only correct answer
+     for a programmatic call, a deferred one, or a second pane's sum bar.
+     With no split this is the three lines it replaces, in the same order. */
+  _paneSel(paneKey) {
+    if (paneKey && typeof Panes !== 'undefined' && Panes.isSplit()) {
+      const c = Panes.ctx(paneKey);
+      if (c && c.tpl && c.sess) return { id: c.tplId, tpl: c.tpl, sess: c.sess, paneKey: c.paneKey };
+    }
+    const id = AppState.activeRecoId;
+    return { id: id, tpl: AppState.recoTemplates.find(x => x.id === id),
+             sess: AppState.recoSessions[id], paneKey: ((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0' };
   },
 
-  /* Bring every rendered row's tick and highlight back in line with
-     sess.selectedRows. Touches only what is on screen. */
-  _syncVisibleSelection() {
-    const sess = AppState.recoSessions[AppState.activeRecoId];
-    if (!sess) return;
-    const sel = sess.selectedRows || {};
-    document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]').forEach(tr => {
-      Reco._updateVisualRow(tr, !!sel[tr.dataset.rid]);
+  /* The _ids this pane's own filters leave, from the list the last render
+     already produced where that is still valid — the same memo
+     _filteredCount and toggleAllRows use, so a refusal check costs nothing
+     on the common path. `memoOnly` returns null rather than re-filtering
+     200k rows, which is what the sum bar wants on every tick. */
+  _selVisibleIds(tpl, sess, memoOnly) {
+    const st = Reco._virtRowsState(tpl, sess);
+    if (!st && memoOnly) return null;
+    const list = st ? st.filtered : Reco.applyTableFiltersSort(tpl, sess);
+    const out = new Set();
+    for (const r of list) out.add(r._id);
+    return out;
+  },
+
+  /* THE LEDGER-WRITE REFUSAL. Null means "go ahead". A report with a sentence
+     means this pane does not show every selected row, so the action must not
+     run: `what` is the button's own name and `didNot` is what did not happen,
+     because a refusal that does not say what it protected reads as a bug. */
+  _selOutsidePane(tpl, sess, selectedIds, what, didNot) {
+    if (typeof Panes === 'undefined' || !Panes.isSplit()) return null;
+    if (!tpl || !sess || !selectedIds || !selectedIds.length) return null;
+    const vis = Reco._selVisibleIds(tpl, sess);
+    const out = selectedIds.filter(k => !vis.has(k));
+    if (!out.length) return null;
+    return { out: out, n: out.length, total: selectedIds.length,
+      msg: out.length + ' of your ' + selectedIds.length + ' selected rows '
+         + (out.length === 1 ? 'is' : 'are') + ' not in this pane. ' + what
+         + ' only acts on the rows this pane shows, so ' + didNot
+         + '. Clear this pane\'s filters to include them, or act in the pane that shows them.' };
+  },
+
+  /* SANCTIONED EXCEPTION 3 OF 3. Every rendered <tr> for this row, in every
+     pane showing this template — ticking a row must mark it in both panes.
+     Only the virtualised window is in the DOM, so this is a lookup over
+     ~110 nodes per pane. The template filter matters: a row _id is minted
+     per load and two templates can carry the same one, so without it a tick
+     in one pane could paint an unrelated row in the other. */
+  _rowEls(rowId, tplId) {
+    if (typeof Panes === 'undefined' || !Panes.isSplit()) {
+      return [...document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]')]
+        .filter(tr => tr.dataset.rid === rowId);
+    }
+    const want = tplId || Panes.owner().tplId;
+    const out = [];
+    Panes.eachPane(p => {
+      if (p.tplId !== want) return;
+      const w = Panes.wrapIn(Panes.rootOf(p));
+      if (!w) return;
+      w.querySelectorAll('tbody tr[data-rid]').forEach(tr => { if (tr.dataset.rid === rowId) out.push(tr); });
     });
-    Reco._syncSelectAllBox();
+    return out;
+  },
+  _rowEl(rowId, tplId) { return Reco._rowEls(rowId, tplId)[0] || null; },
+
+  /* SANCTIONED EXCEPTION 2 OF 3. Bring every rendered row's tick and
+     highlight back in line with sess.selectedRows, in every pane. Touches
+     only what is on screen. */
+  _syncVisibleSelection() {
+    if (typeof Panes === 'undefined' || !Panes.isSplit()) {
+      const sess = AppState.recoSessions[AppState.activeRecoId];
+      if (!sess) return;
+      const sel = sess.selectedRows || {};
+      document.querySelectorAll('.reco-table-wrap tbody tr[data-rid]').forEach(tr => {
+        Reco._updateVisualRow(tr, !!sel[tr.dataset.rid]);
+      });
+      Reco._syncSelectAllBox();
+      return;
+    }
+    Panes.eachPane(p => {
+      const sess = p.tplId ? Panes.viewFor(p.key, p.tplId) : null;
+      const w = Panes.wrapIn(Panes.rootOf(p));
+      if (!sess || !w) return;
+      const sel = sess.selectedRows || {};
+      w.querySelectorAll('tbody tr[data-rid]').forEach(tr => {
+        Reco._updateVisualRow(tr, !!sel[tr.dataset.rid]);
+      });
+      Reco._syncSelectAllBox(p.key);
+    });
+  },
+
+  /* Every pane's header select-all box. Called where one tick changes what
+     the box should say but no render follows. */
+  _syncSelectAllBoxes() {
+    if (typeof Panes === 'undefined' || !Panes.isSplit()) { Reco._syncSelectAllBox(); return; }
+    Panes.eachPane(p => Reco._syncSelectAllBox(p.key));
   },
 
   /* Ticking one checkbox used to re-render the entire Reconciliation screen —
@@ -16413,17 +18315,17 @@ renderRecoTable(tpl, sess) {
     if (checked) sess.selectedRows[rowId] = true;
     else delete sess.selectedRows[rowId];
 
-    const tr = Reco._rowEl(rowId);
-    if (tr) Reco._updateVisualRow(tr, !!checked);
-    Reco._syncSelectAllBox();
+    Reco._rowEls(rowId, id).forEach(tr => Reco._updateVisualRow(tr, !!checked));
+    Reco._syncSelectAllBoxes();
     Reco.updateSelSumBar();
   },
 
-  async toggleAllRows(checked) {
-    const id = AppState.activeRecoId;
-    const sess = AppState.recoSessions[id];
+  async toggleAllRows(checked, paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const id = S.id;
+    const sess = S.sess;
     if (!sess) return;
-    const tpl = AppState.recoTemplates.find(t => t.id === id);
+    const tpl = S.tpl;
 
     // Half weight: writing one key per row is far cheaper than sorting, so the
     // overlay only earns its place on the really large extracts. Totalling the
@@ -16433,13 +18335,32 @@ renderRecoTable(tpl, sess) {
       const nSel = Reco._filteredCount(tpl, sess);
       await Reco._withBusy(checked ? nSel / 2 : 0,
         'Selecting ' + U.fmtInt(nSel) + ' rows…', () => {
-          sess.selectedRows = {};
-          if (checked) {
-            // Everything the current filters leave visible, as before — from
-            // the list the last render already produced where that is valid.
+          if (typeof Panes !== 'undefined' && Panes.isSplit()) {
+            /* PANE-SCOPED WHILE SPLIT, and only while split. The header box
+               has always REPLACED the whole selection, which across two panes
+               on one template would silently throw away the ticks the user
+               put in the other pane — the very thing the shared selection
+               exists for. So in a split it adds or removes only the rows this
+               pane's own filters leave. (spec_panes Q4 recommended this
+               unconditionally and flagged the knock-on: single-pane, rows
+               that are selected but filtered OUT would stop being wiped by
+               the box. That is a visible change to behaviour the user has
+               lived with and fourteen suites pin, so it is applied only where
+               the knock-on cannot arise.) */
             const st = Reco._virtStateFor(tpl, sess);
             const filtered = st ? st.filtered : Reco.applyTableFiltersSort(tpl, sess);
-            for (const r of filtered) sess.selectedRows[r._id] = true;
+            sess.selectedRows = sess.selectedRows || {};
+            if (checked) for (const r of filtered) sess.selectedRows[r._id] = true;
+            else for (const r of filtered) delete sess.selectedRows[r._id];
+          } else {
+            sess.selectedRows = {};
+            if (checked) {
+              // Everything the current filters leave visible, as before — from
+              // the list the last render already produced where that is valid.
+              const st = Reco._virtStateFor(tpl, sess);
+              const filtered = st ? st.filtered : Reco.applyTableFiltersSort(tpl, sess);
+              for (const r of filtered) sess.selectedRows[r._id] = true;
+            }
           }
           Reco._syncVisibleSelection();
           Reco.updateSelSumBar();
@@ -16447,11 +18368,27 @@ renderRecoTable(tpl, sess) {
     } catch (e) { Reco._busyDone(); U.toast('Could not change the selection: ' + e.message, 'error'); }
   },
 
+  /* SANCTIONED EXCEPTION 1 OF 3. One shared selection, one Sigma bar per
+     pane: only the owner's #selSumBar is addressable, so without this the
+     other pane keeps the total it had at its last render and can sit there
+     saying "Within tolerance ✓" beside rows that are no longer part of the
+     net. It is painted on every tick of a checkbox, so it cannot wait for a
+     render — which is exactly why it needs an exception. */
   updateSelSumBar() {
-    const bar = document.getElementById('selSumBar');
+    if (typeof Panes === 'undefined' || !Panes.isSplit()) { Reco._paintSelSumBar(null); return; }
+    Panes.eachPane(p => Reco._paintSelSumBar(p));
+  },
+
+  /* One pane's bar. With no split (pane null) every lookup here is today's,
+     and the three buttons carry the owner's key, which is the only pane. */
+  _paintSelSumBar(pane) {
+    const split = !!pane && typeof Panes !== 'undefined' && Panes.isSplit();
+    const bar = split ? Panes.el(pane.key, 'selSumBar') : document.getElementById('selSumBar');
     if (!bar) return;
-    const sess = AppState.recoSessions[AppState.activeRecoId];
-    const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+    const pkey = U.jsq(split ? pane.key : ((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0');
+    const id = split ? pane.tplId : AppState.activeRecoId;
+    const sess = split ? Panes.viewFor(pane.key, id) : AppState.recoSessions[AppState.activeRecoId];
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
     if (!sess || !tpl) { bar.classList.remove('show'); return; }
     const ids = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]);
     if (!ids.length) { bar.classList.remove('show'); bar.innerHTML=''; return; }
@@ -16467,23 +18404,42 @@ renderRecoTable(tpl, sess) {
     let h = '<span>Selected: <b>'+count+'</b></span>';
     h += '<span>Σ '+U.esc(tpl.valueColumn||'value')+': <b>'+U.fmtNum(sum)+'</b></span>';
     h += within ? '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;">Within tolerance ✓</span>' : '<span style="background:rgba(220,38,38,0.85); padding:2px 8px; border-radius:8px;">Outside tolerance (±'+tolLabel+')</span>';
-    if (count > 0 && within) h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco.offsetSelected()">Offset Selected</button>';
-    if (tpl.aegIntegration && tpl.aegIntegration.enabled) h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco.previewEntryFromSelection()">Preview Entry</button>';
-    h += '<button class="small" style="background:transparent;color:#fff;border-color:#fff;" onclick="Reco.clearSelection()">Clear</button>';
+    /* SAY IT BEFORE THE REFUSAL. In a split the selection can reach outside
+       this pane, and Preview Entry will then refuse — so the bar names the
+       count here, where the user is looking, rather than only after the
+       click. Counted from the render's own memo only: re-filtering a quarter
+       of a million rows on every tick of a checkbox is what this bar was
+       rewritten to stop doing. */
+    if (split) {
+      const vis = Reco._selVisibleIds(tpl, sess, true);
+      const outN = vis ? ids.filter(k => !vis.has(k)).length : 0;
+      if (outN) h += '<span style="background:rgba(255,255,255,0.18); padding:2px 8px; border-radius:8px;" '
+        + 'title="Offset Selected uses all of them — it is the cross-pane action. Preview Entry and Mark Offset act only on what this pane shows, and refuse while the selection reaches outside it.">'
+        + outN + ' not in this pane</span>';
+    }
+    if (count > 0 && within) h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco.offsetSelected(\''+pkey+'\')">Offset Selected</button>';
+    if (tpl.aegIntegration && tpl.aegIntegration.enabled) h += '<button class="small" style="background:#fff;color:var(--primary);" onclick="Reco.previewEntryFromSelection(false,\''+pkey+'\')">Preview Entry</button>';
+    h += '<button class="small" style="background:transparent;color:#fff;border-color:#fff;" onclick="Reco.clearSelection(\''+pkey+'\')">Clear</button>';
     bar.innerHTML = h;
     bar.classList.add('show');
   },
-  clearSelection() {
-    const sess = AppState.recoSessions[AppState.activeRecoId];
+  clearSelection(paneKey) {
+    const sess = Reco._paneSel(paneKey).sess;
+    if (!sess) return;
     sess.selectedRows = {};
     Reco._syncVisibleSelection();
     Reco.updateSelSumBar();
   },
 
-  offsetSelected() {
-    const id = AppState.activeRecoId;
-    const tpl = AppState.recoTemplates.find(x => x.id === id);
-    const sess = AppState.recoSessions[id];
+  /* THE ONE CROSS-PANE WRITE THAT IS MEANT TO BE ONE: offsetting a selection
+     that nets to zero across the two panes IS the feature. It keeps the full
+     shared set deliberately — no refusal — and records each row by pk in
+     manualOffsetMaster, so the offset survives a reload and a colleague sees
+     it. It is only offered once the selection is within tolerance, which is
+     the check that makes "all of them" the right scope. */
+  offsetSelected(paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
 
     const selectedIds = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]);
@@ -18950,10 +20906,19 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
   /* Preview entry before generating: shows the user the lines that will be created */
 
-  previewEntryFromSelection(forceAll) {
-    const id = AppState.activeRecoId;
-    const tpl = AppState.recoTemplates.find(x => x.id === id);
-    const sess = AppState.recoSessions[id];
+  /* LEDGER-WRITE REFUSAL 1 OF 2, and the one PLAN2 calls a blocker. This is
+     the function that turns ticked rows into a journal entry: with a
+     selection present it ignores the filters ENTIRELY (the sess.data filter
+     below), and when the entry is generated it stamps postedPks and clears
+     the selection — so a cross-pane selection would post the other pane's
+     rows and leave nothing on screen showing what went in.
+
+     `paneKey` is the pane whose button was clicked; `forceAll` is the
+     existing first argument (the grid toolbar passes true, the sum bar does
+     not) and is kept in place because seven suites pass it positionally. */
+  previewEntryFromSelection(forceAll, paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
     const aeg = tpl.aegIntegration || {};
     if (!aeg.enabled) { U.toast('AEG integration not enabled for this template','error'); return; }
@@ -18967,6 +20932,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
       originals = Reco.applyTableFiltersSort(tpl, sess).filter(r => !sess.offsets[r._id]);
       if (!originals.length) { U.toast('No open rows to preview','error'); return; }
     } else {
+      const outside = Reco._selOutsidePane(tpl, sess, selectedIds, 'Preview Entry', 'nothing was posted');
+      if (outside) { U.toast(outside.msg, 'error'); return; }
       const sel = new Set(selectedIds);
       originals = sess.data.filter(r => sel.has(r._id));
     }
@@ -20315,8 +22282,19 @@ renderCustomReport(tpl, sess, rpt, idx) {
            they are using. Carry the stored value across untouched instead. */
         if (d.session) {
           const keepLegacy = (AppState.recoSessions[id] || {}).columnOrder || null;
-          AppState.recoSessions[id] = d.session;
           d.session.columnOrder = keepLegacy;
+          /* Replaces the OWNED session and re-points every view at it. A
+             direct write to AppState.recoSessions[id] would not be persisted,
+             so the restored session would vanish on the next load and the
+             replaced one would come back (MODULE 4b). Guarded because a
+             backup written by a later build can carry a session key that is
+             in neither DATA_KEYS nor VIEW_KEYS, and building a view then
+             refuses rather than guessing: the restore still happens, the
+             second pane closes, and the reason is on screen. */
+          Panes.replaceSessionGuarded(id, d.session);
+          /* The other pane's view has its own page and cell cursor, and they
+             point into an array this restore has just replaced. */
+          Panes.onDataReplaced(id);
         }
         if (d.manualOffsetMaster) AppState.manualOffsetMaster[id] = d.manualOffsetMaster;
         if (d.correctionMaster) AppState.correctionMaster[id] = d.correctionMaster;
@@ -20344,7 +22322,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
       run.autoLoadTried = true;
       run.loadGen++;
       fresh.clearedAt = new Date().toISOString();
-      AppState.recoSessions[id] = fresh;
+      Panes.replaceSessionGuarded(id, fresh);   // owned map + every view (MODULE 4b)
+      Panes.onDataReplaced(id);                 // the other pane's page/cursor pointed into the cleared array
       AppState.save();
       App.navigate('reco');
       U.toast('Loaded data cleared','success');
