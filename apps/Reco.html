@@ -11558,6 +11558,22 @@ defaultTemplate() {
       if (!t.displayOrder.length) t.displayOrder = null;
     } else t.displayOrder = null;
 
+    /* #27's team correction context, pruned against allNames for the same
+       reason the display order is: it names FILE columns and ADDED columns
+       alike, so pruning against t.columns would delete every added column
+       from the team's list on the next save of the template. The field goes
+       away entirely when it prunes to nothing, because an empty team default
+       and no team default are the same state - "none" is a per-person choice
+       only (the tri-state in Reco.correctionCols), and there is no route by
+       which an operator can ask for the team to see nothing.
+       Dropped quietly here and counted at read time, where the chip row says
+       so: a save is not the place to interrupt someone about a column they
+       removed on purpose. */
+    if (Array.isArray(t.correctionContextCols)) {
+      t.correctionContextCols = t.correctionContextCols.filter(n => allNames.has(n));
+      if (!t.correctionContextCols.length) delete t.correctionContextCols;
+    }
+
     /* Publishing a team order is not a screen preference: it is the column
        order of every CSV and every Excel-link workbook this template writes,
        for everyone on the folder, and those files feed macros, Power Query
@@ -11869,15 +11885,26 @@ const ColPicker = {
   allFiltered(on) {
     const S = ColPicker._st;
     if (!S) return;
-    const hits = S.catalog.filter(c => ColPicker._match(c.name)).map(c => c.name);
+    const hits = S.catalog.filter(c => ColPicker._match(c.name));
     if (on) {
-      hits.forEach(n => {
-        if (S.chosen.includes(n)) return;
+      hits.forEach(c => {
+        /* A ROW THIS PICKER DRAWS AS UNPICKABLE MUST NOT BE PICKABLE BY
+           ANOTHER CONTROL IN THE SAME TOOLBAR. The checkbox is rendered
+           disabled and "All" pushed it anyway, so three clicks - Show
+           columns, All, Done - stored the column being corrected and the
+           primary key, and the correction row then printed each of them
+           TWICE, the two prints of the format column disagreeing (the
+           context cell formatted, Current Value raw) three columns apart in
+           one row. 'None' still clears a disabled name that is already
+           chosen: the active format column IS allowed in the stored list
+           (decision F), it is only not addable from here. */
+        if (c.disabled) return;
+        if (S.chosen.includes(c.name)) return;
         if (S.cap > 0 && S.chosen.length >= S.cap) return;
-        S.chosen.push(n);
+        S.chosen.push(c.name);
       });
     } else {
-      const drop = new Set(hits);
+      const drop = new Set(hits.map(c => c.name));
       S.chosen = S.chosen.filter(n => !drop.has(n));
     }
     ColPicker._redraw();
@@ -13690,6 +13717,21 @@ _ssFmtClass(fmt) {
   return ' fmt-' + fmt.fontSize;
 },
 
+/* THE ONE PLACE A PER-CELL NUMBER FORMAT REACHES A DISPLAY VALUE. Both
+   readers of a read-only cell go through here: the grid's cell loop and the
+   correction panel's context cells. They did not, and the correction panel
+   simply never applied it - a VAT rate the whole team reads as 5.00% in the
+   grid and in the Excel view read 0.05 in the one column the operator was
+   looking at to decide what a wrong value should be, a hundredfold
+   difference in the column they were told to trust. An amount the team reads
+   as (1,234.50) read -1234.5.
+   AFTER the date pass, never before: _ssApplyNumFmt's own date formats parse
+   what U.formatExcelDate produced, so a serial under 'date_long' is
+   01-Jan-2024 in both places only in this order. */
+_ssFmtApply(val, fmt) {
+  return (fmt && fmt.numFmt) ? Reco._ssApplyNumFmt(val, fmt.numFmt) : val;
+},
+
 _ssApplyNumFmt(val, numFmt) {
   if (val == null || val === '' || !numFmt || numFmt === 'general') return val;
 
@@ -15380,7 +15422,16 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     sess.excelViewActive = !!sess.excelViewActive; // toggled by the Excel View tab
     sess.slicers = sess.slicers || {};               // { colName: [selected values] }
     sess._dismissDocMatches = sess._dismissDocMatches || false;
-    sess.correctionExtraCols = sess.correctionExtraCols || [];
+    /* LEGACY, READ-ONLY, for the same reason as sess.columnOrder above: this
+       lives in recoSessions.json, ONE file on the shared folder keyed by
+       template id, so anything stored here is the whole team's and the last
+       writer wins. #27 reads it as the BOTTOM fallback below
+       tpl.correctionContextCols (Reco.correctionCols) and never writes it.
+       It is [] in every real session - it was declared years before anything
+       read it - and it is classified a per-pane VIEW key, so a write would
+       also be invisible to the other pane. Left on disk so an older build
+       keeps working. */
+    sess.correctionExtraCols = sess.correctionExtraCols || [];   // DEPRECATED: see Reco.correctionCols
     sess.spreadsheetMode = !!sess.spreadsheetMode;
     sess.cellFormulas = sess.cellFormulas || {}; // { rowKey: { col: '=formula' } }
     sess.cellFormats = sess.cellFormats || {}; // { rowKey: { col: { bg, fg, bold, italic, align, fontSize, numFmt } } }
@@ -16825,17 +16876,23 @@ _sortKeyed(keyed, isDate, dir) {
      an additional column, so a caller rendering template columns may leave it
      out and pays nothing.
 
-     The per-cell number format is NOT applied here: today only the read-only
-     branch of the row renderer applies it, and it is applied after the
-     format-error class has been decided from the unformatted value. Moving it
-     in would change both of those. */
-  displayCellValue(tpl, sess, row, col, full) {
+     The per-cell number format (sess.cellFormats) is applied only when
+     opts.withCellFormat is passed, and it is the LAST step - see
+     Reco._ssFmtApply. The grid cannot ask for it here because it decides the
+     format-error class from the UNFORMATTED value and must keep doing so: a
+     cell is red or not red by what is stored, not by how it is displayed.
+     Every reader that has no class to decide - the correction panel's
+     context and identifying cells - passes the flag, and then there is one
+     rule for "what this cell says" again instead of a branch private to the
+     grid's row renderer. */
+  displayCellValue(tpl, sess, row, col, full, opts) {
     const desc = Reco._dispDesc(tpl, sess, col);
     let val = XlSchema.currentValue(desc, row, full, sess);
     const cellFormula = (sess && sess.spreadsheetMode)
       ? ((sess.cellFormulas || {})[Reco._ssRowKey(row)] || {})[col] : null;
     if (cellFormula) val = Reco._ssEvalFormula(cellFormula, row, tpl);
     if (col.toLowerCase().includes('date')) val = U.formatExcelDate(val);
+    if (opts && opts.withCellFormat) val = Reco._ssFmtApply(val, Reco._ssFmtFor(sess, row, col));
     return val;
   },
 
@@ -17326,7 +17383,7 @@ _renderOneRow(tpl, sess, row, descs, idxMap, filteredIdx) {
       const isEditable = (tpl.editableColumns || []).includes(col);
       if (isEditable) h += Reco._renderEditableCell(tpl, i, col, val, cls + fmtCls, fmtStyle, cellArgs);
       else {
-                 if (fmt && fmt.numFmt) val = Reco._ssApplyNumFmt(val, fmt.numFmt);
+                 val = Reco._ssFmtApply(val, fmt);
                  h += '<td' + dataAttr + ' class="' + cls + fmtCls + '" style="white-space:nowrap; padding: 6px;' + fmtStyle + '">' + U.esc(val) + '</td>';
                }
     }
@@ -19113,6 +19170,399 @@ renderRecoTable(tpl, sess) {
     return U.downloadWorkbook(wb, name + '.xlsx');
   },
   /* ============== CORRECTION SECTION ============== */
+
+  /* ---- #27: the columns to show beside the bad value ----------------------
+     "correction should have otpiont to display more selected columns when
+     needed". Two homes and one order, the same shape #25's display order
+     shipped with, and for the same reason: recoSessions.json is ONE file on
+     the shared folder keyed by template id, so a view preference kept on the
+     session is the whole team's and the last writer wins. Priya ticks six
+     columns, Arun on another PC opens the same reco and sees six he did not
+     pick, picks two of his own, and Priya's six are gone - each of those
+     clicks a 474-733 ms / 54 MB serialise and a network write, for a screen
+     preference.
+
+     So: this person on this PC in localStorage (Reco.userPref, S7), the team
+     default on the template behind an explicit button and a confirm, and the
+     legacy sess.correctionExtraCols READ as the bottom fallback and NEVER
+     written. Nothing has ever written it - it is [] in every real session -
+     and it is a per-pane VIEW key, so a write to it would be invisible to the
+     other pane and would never reach the share.
+
+     THE TRI-STATE IS LOAD-BEARING. absent/null means "I have not chosen" and
+     falls through; [] means "I want none" and does not. Without it an
+     operator can add to the team's list but never subtract from it, and Clear
+     has to reach for tpl.correctionContextCols - a shared write from a modal
+     any operator can open, with no confirm. */
+  CORR_CTX_CAP: 6,
+  CORR_ROW_CAP: 200,
+  /* These cells are read-only and have no format-error class to decide, so
+     they ask displayCellValue for the per-cell number format the grid's
+     read-only cell applies - see Reco._ssFmtApply. One object, not one per
+     cell: this is read once per context cell per rendered row. */
+  CORR_DISP: { withCellFormat: true },
+
+  /* Every name this template could legitimately offer. Built here rather than
+     taken from pickerCatalog because a stale name has to be COUNTED, and
+     ColPicker drops dead names on open without telling anyone. */
+  _corrKnown(tpl, sess) {
+    return new Set((tpl.columns || []).map(c => c && c.name)
+      .concat((tpl.additionalColumns || []).map(a => a && a.name))
+      .concat(((sess && sess.extraColumns) || []).map(a => a && a.name))
+      .filter(Boolean));
+  },
+
+  /* The list in force, the names dropped as no longer existing, and which
+     store answered. A read never writes: a preference the operator has not
+     set must stay unset, or the first person to open the tab silently becomes
+     the author of whatever the team default happened to be that morning. */
+  correctionCols(tpl, sess) {
+    if (!tpl) return { cols: [], dropped: 0, scope: 'none' };
+    const mine = Reco.userPref(tpl.id, 'correctionCols');
+    const team = (Array.isArray(tpl.correctionContextCols) && tpl.correctionContextCols.length)
+      ? tpl.correctionContextCols : null;
+    const legacy = (Array.isArray(sess && sess.correctionExtraCols) && sess.correctionExtraCols.length)
+      ? sess.correctionExtraCols : null;
+    let raw = [], scope = 'none';
+    if (Array.isArray(mine)) { raw = mine; scope = 'mine'; }   // [] included: that is a choice
+    else if (team)   { raw = team;   scope = 'team'; }
+    else if (legacy) { raw = legacy; scope = 'legacy'; }
+    const known = Reco._corrKnown(tpl, sess);
+    let cols = raw.filter(n => known.has(n));
+    let dropped = raw.length - cols.length;
+    /* A PER-USER LIST THAT LOST EVERY NAME IS NOT AN EMPTY CHOICE. [] is the
+       tri-state's "I want none" and still outranks everything below it - that
+       is what Clear writes and T7 pins. A list that HAD names and lost all of
+       them to a template change says nothing at all, and letting it stand in
+       for "none" suppressed the team default for the colleagues who had once
+       picked a column that has since been deleted: their tab then showed no
+       context column, with the one muted "no longer in this template" line as
+       the only hint, while the person next to them saw the team's three.
+       ONLY the per-user store falls through. The team list is pruned against
+       allNames by saveTemplate (decision I) so an all-dead team list is a
+       transient, and what sits below it is the legacy session field, which is
+       [] in every real session. */
+    if (scope === 'mine' && raw.length && !cols.length) {
+      const next = team || legacy;
+      const nc = next ? next.filter(n => known.has(n)) : [];
+      if (nc.length) {
+        cols = nc;
+        dropped += next.length - nc.length;
+        scope = team ? 'team' : 'legacy';
+      }
+    }
+    return { cols: cols, dropped: dropped, scope: scope };
+  },
+
+  /* THE EARLY STOP (S1's uptoName). _rowWithExtras breaks BEFORE the extra it
+     is given, so uptoName is the first extra NOT to evaluate: the one declared
+     after the last chosen one. Ticking one plain tag column used to pay for
+     every extra on the template, because needsFull was one all-or-nothing
+     boolean - 200 rendered rows x one master_lookup over a 50k master
+     measured 4,009 ms, PER RENDER, and applyCorrection ends in
+     App.navigate('reco') so every Apply click paid it again.
+     null when no chosen column is an additional column at all, which is the
+     common case and costs nothing: no enriched row is built. `upto`
+     undefined means "walk them all" - the last chosen extra IS the last
+     declared one. */
+  _corrUpto(tpl, sess, cols) {
+    const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
+    const want = new Set(cols);
+    let last = -1;
+    extras.forEach((ac, i) => { if (ac && ac.name && want.has(ac.name)) last = i; });
+    if (last < 0) return null;
+    const next = extras[last + 1];
+    return { upto: (next && next.name) ? next.name : undefined };
+  },
+
+  /* "Show 200 more" raises this. MODULE-LEVEL on purpose: it is not a
+     preference, so it must not reach localStorage where it would outlive the
+     question, and it is not the team's, so it must not reach the session
+     where it would go to the share - correctionExtraCols is classified a VIEW
+     key for that reason, and a write to one would be invisible to the other
+     pane anyway. It resets whenever the question changes: a different format
+     tab or a different chosen set is a different list, and a cap carried
+     across would show 400 rows of one and 200 of the next with nothing on
+     screen to explain it.
+
+     ONE ENTRY PER PANE, and that is not tidiness. A single (signature, count)
+     pair was wrong the moment two panes sat on this tab: Panes.repaint()
+     renders p0 and then p1, so p0's render - a different template, a
+     different signature - RESET the count p1 had just raised, and "Show 200
+     more" in the right-hand pane did nothing whatever while the left pane was
+     showing a different reconciliation. Keyed by pane, each pane's own
+     signature check still does the decision-B reset. */
+  _corrMore: {},
+
+  _corrSig(tpl, colName, cols) {
+    const SEP = String.fromCharCode(31);
+    return (tpl ? tpl.id : '') + SEP + colName + SEP + cols.join('|');
+  },
+  /* Reading it is also what ARMS it: the entry is stamped with the signature
+     of the list being drawn, so the button the next click lands on belongs to
+     the list it was drawn under and not to whatever was on screen before. */
+  _corrExtra(paneKey, tpl, colName, cols) {
+    const k = paneKey || 'p0';
+    const sig = Reco._corrSig(tpl, colName, cols);
+    const e = Reco._corrMore[k];
+    if (!e || e.sig !== sig) { Reco._corrMore[k] = { sig: sig, n: 0 }; return 0; }
+    return e.n;
+  },
+  showMoreCorrectionRows(paneKey) {
+    const S = Reco._paneSel(paneKey);
+    if (!S.tpl || !S.sess) return;
+    const e = Reco._corrMore[S.paneKey || 'p0'];
+    // The render that drew the button created the entry; no entry means the
+    // screen has moved on, and a blind += would raise the wrong list's cap.
+    if (e) e.n += Reco.CORR_ROW_CAP;
+    Reco._corrRepaint(S);
+  },
+
+  /* The correction section has no partial refresh - every route into it ends
+     in App.navigate('reco'), and refreshGrid bails out to exactly that unless
+     the Action tab is the thing on screen. So the owner's repaint is the full
+     navigate, and a pane that is NOT the owner is rendered directly, which is
+     the idiom _slicerRepaint already uses for the same reason. */
+  _corrRepaint(S) {
+    const pane = (typeof Panes !== 'undefined' && S && S.paneKey) ? Panes.byKey(S.paneKey) : null;
+    if (pane && typeof Panes !== 'undefined' && Panes.isSplit() && pane !== Panes.owner()) Panes.renderPane(pane);
+    else App.navigate('reco');
+  },
+
+  /* THE PANE THE BUTTON WAS PRESSED IN, STAMPED AT OPEN. The picker lives in
+     the ONE shared #appModal, so clicking inside it re-focuses NO pane: by
+     the time Done is pressed the owner may be a different pane showing a
+     different template. That is precisely the class of bug the panes round
+     was spent on - FindReplace._state and Reco._slicerState stamp for the
+     same reason - and here it would publish one reconciliation's columns
+     against another's id. */
+  _corrPick: null,
+
+  openCorrectionCols(paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const tpl = S.tpl, sess = S.sess;
+    if (!tpl || !sess) { U.toast('Load data first', 'error'); return; }
+    const fmtCols = (tpl.columns || []).filter(c => c.formats && c.formats.length);
+    const activeCol = AppState._correctionCol || ((fmtCols[0] || {}).name || '');
+    /* The active format column is OFFERED, disabled, and is NOT filtered out
+       of the stored list. The list is panel-wide, so filtering it would make
+       a chip the operator never removed vanish when they moved to another
+       format tab, and ticking the active column here would succeed while
+       nothing appeared - counted as "dropped" beside a genuinely stale name. */
+    /* THE KEY COLUMNS ARE OFFERED THE SAME WAY, AND FOR THE SAME REASON: the
+       row already prints them (decision C renders them from row[pk], ahead of
+       everything else), so choosing one bought a second, identical key cell
+       and made a 43-column recon read as if two different keys were on the
+       row. Offered-but-disabled rather than filtered out, exactly as above:
+       the stored list is panel-wide and a name that vanishes from the picker
+       is a name the operator cannot see they still have. */
+    const pkSet = new Set(tpl.primaryKeys || []);
+    const catalog = Reco.pickerCatalog(tpl, sess).map(c => (c.name === activeCol
+      ? Object.assign({}, c, { disabled: true, note: 'already shown as Current Value' })
+      : (pkSet.has(c.name)
+        ? Object.assign({}, c, { disabled: true, note: 'already shown as the key' }) : c)));
+    Reco._corrPick = { paneKey: S.paneKey, tplId: S.id };
+    ColPicker.openSet({
+      title: 'Columns to show beside the value',
+      catalog: catalog,
+      chosen: Reco.correctionCols(tpl, sess).cols,
+      cap: Reco.CORR_CTX_CAP,
+      help: 'Shown read-only beside each bad value, so you can decide what it should be. These are '
+          + 'yours, on this PC - no colleague sees them until you press "Save as the team default".',
+      doneLabel: 'Show these columns',
+      onDone: names => Reco._corrColsDone(names),
+      /* Cancel drops the stamp and NOTHING else. The panel behind the modal
+         was never touched, so re-rendering it would only throw away the
+         scroll position of a list the operator was reading. */
+      onCancel: () => { Reco._corrPick = null; }
+    });
+  },
+
+  /* Null means the pane has moved and nothing may be written. Said in full,
+     naming both templates, because the dialog is closed on the way out: a
+     refusal the user has to guess at reads as a bug. */
+  _corrTarget(what) {
+    const st = Reco._corrPick;
+    const S = Reco._paneSel(st && st.paneKey);
+    if (!S.tpl || !S.sess) { U.toast('Load data first', 'error'); return null; }
+    if (st && st.tplId && S.id !== st.tplId) {
+      const nameOf = id => (AppState.recoTemplates.find(x => x.id === id) || {}).name || id;
+      U.toast('These columns were chosen for ' + nameOf(st.tplId) + ' in a pane that is now showing '
+        + nameOf(S.id) + ' - ' + what + ' changed nothing. Open "Show columns" again in the pane you '
+        + 'want to change.', 'error');
+      return null;
+    }
+    return S;
+  },
+
+  _corrColsDone(names) {
+    const S = Reco._corrTarget('Done');
+    Reco._corrPick = null;
+    if (!S) return;
+    const cols = (names || []).slice();
+    Reco._corrSet(S, cols, cols.length ? ('Showing ' + cols.length + ' more column(s)') : 'Showing no extra columns');
+  },
+
+  /* The ONE write of the per-person list. userPref returns false when this PC
+     would not store it, so the toast says "for now" rather than reporting a
+     save that is gone at the next launch - which is the complaint this whole
+     feature answers. */
+  _corrSet(S, cols, msg) {
+    const ok = Reco.userPref(S.tpl.id, 'correctionCols', cols);
+    delete Reco._corrMore[S.paneKey || 'p0'];   // a different list is a different question
+    Reco._corrRepaint(S);
+    U.toast(msg + (ok === false ? ' - for this session only, this PC would not store it' : ''), 'success');
+  },
+
+  /* Clear and the chip x act on THIS PERSON'S store ONLY, and Clear writes []
+     rather than removing the key: "I want none" has to outrank a team default
+     of three columns, which is what the tri-state is for. Neither may touch
+     tpl.correctionContextCols - that is everyone's, and nothing destructive to
+     other people's work happens in this app without a confirm naming it. When
+     the list in force came from the team default, the x writes the team's list
+     minus that one into this person's store, which is the only reading of "do
+     not show me this column" that does not change what a colleague sees. */
+  clearCorrectionCols(paneKey) {
+    const S = Reco._paneSel(paneKey);
+    if (!S.tpl || !S.sess) return;
+    Reco._corrSet(S, [], 'Showing no extra columns');
+  },
+  removeCorrectionCol(name, paneKey) {
+    const S = Reco._paneSel(paneKey);
+    if (!S.tpl || !S.sess) return;
+    Reco._corrSet(S, Reco.correctionCols(S.tpl, S.sess).cols.filter(n => n !== name),
+      'No longer showing ' + name);
+  },
+
+  /* BACK TO THE TEAM'S LIST - the one state the tri-state can express and
+     nothing could reach. Clear writes [], "I want none", and [] is a choice,
+     so it outranks the team default for ever: once an operator had been in
+     the picker there was no button, chip, menu item or toast anywhere in the
+     app that wrote null, and the picker was no escape either - it opens on
+     correctionCols().cols, which is [], and never shows what the team
+     published, so they could not even read the list they would have to
+     retype. The controller then adds Narrative to the team default so
+     everyone can see the bank narrative beside a bad reference, and the
+     colleagues who most need it - the ones who tried a column and pressed
+     Clear - never get it, with nothing on screen to say why their tab differs
+     from the tab of the person sitting next to them.
+     userPref already handles null: it REMOVES the key and returns true. */
+  followTeamCorrectionCols(paneKey) {
+    const S = Reco._paneSel(paneKey);
+    if (!S.tpl || !S.sess) return;
+    Reco.userPref(S.tpl.id, 'correctionCols', null);
+    delete Reco._corrMore[S.paneKey || 'p0'];   // a different list is a different question
+    Reco._corrRepaint(S);
+    U.toast('Following the team default for ' + S.tpl.name + ' from now on', 'success');
+  },
+
+  /* THE ONLY WRITER OF tpl.correctionContextCols, and it confirms first.
+     recoTemplates.json is on the shared folder, so this changes what every
+     colleague who has not chosen for themselves sees on this tab, on every
+     PC. Stamped like the team column order, so the template can say who
+     published it instead of the list simply being different one morning. */
+  saveCorrectionColsAsTeam(paneKey) {
+    const S = Reco._paneSel(paneKey);
+    const tpl = S.tpl;
+    if (!tpl || !S.sess) return;
+    const cols = Reco.correctionCols(tpl, S.sess).cols;
+    const was = Array.isArray(tpl.correctionContextCols) ? tpl.correctionContextCols : [];
+    if (JSON.stringify(was) === JSON.stringify(cols)) {
+      U.toast('These are already the team default for ' + tpl.name, 'success');
+      return;
+    }
+    const head = cols.length
+      ? 'Make these the team default for ' + tpl.name + '?\n\n    ' + cols.join(', ')
+      : 'Clear the team default for ' + tpl.name + '?';
+    if (!confirm(head + (was.length ? '\n\nToday it is:\n\n    ' + was.join(', ') : '')
+      + '\n\nEvery colleague who has not chosen their own will see these on the Correction tab, on '
+      + 'every PC. Anyone who has already chosen keeps their own.')) return;
+    if (cols.length) tpl.correctionContextCols = cols;
+    else delete tpl.correctionContextCols;
+    tpl.correctionContextColsBy = AppState.currentUser || 'unknown';
+    tpl.correctionContextColsAt = new Date().toISOString();
+    AppState.saveKeys('recoTemplates');
+    Reco._corrRepaint(S);
+    U.toast('Saved as the team default for ' + tpl.name, 'success');
+  },
+
+  /* The chrome, rendered inside the pane shell and therefore TWICE when a
+     split is open. NOT ONE id ON ANY OF IT - not on the button, not on the
+     chip row, not on a chip's x. activeSection is a per-pane VIEW key, so
+     both panes can sit on this tab at once, and this family is as long as the
+     chip row, which PANE_IDS (a fixed list) cannot park. Every handler
+     carries the pane key instead, exactly as the Apply button below does and
+     for exactly the same reason. */
+  _corrChrome(tpl, sess, ctx, pkey) {
+    let h = '<div class="corr-ctx" style="margin:6px 0;">';
+    h += '<button class="small" onclick="Reco.openCorrectionCols(\'' + pkey + '\')" '
+       + 'title="Pick columns to show read-only beside each bad value">Show columns…</button> ';
+    ctx.cols.forEach(n => {
+      h += '<span class="tag">' + U.esc(n) + ' <span class="x" title="Stop showing this column"'
+         + ' onclick="Reco.removeCorrectionCol(\'' + U.jsq(n) + '\',\'' + pkey + '\')">×</span></span>';
+    });
+    if (ctx.cols.length) {
+      h += ' <button class="small" onclick="Reco.clearCorrectionCols(\'' + pkey + '\')"'
+         + ' title="Show none of them. Your own setting, not the team\'s">Clear</button>';
+    }
+    /* THE TEAM BUTTON IS NOT GATED ON THE LIST BEING NON-EMPTY, and that is
+       not a widening: saveCorrectionColsAsTeam's own else branch deletes
+       tpl.correctionContextCols, confirm text and all, and it was unreachable
+       from every screen in this app. Publish the wrong six columns - the
+       400-character Description, or a column later taken off Display Columns -
+       and the best anyone could do was publish ONE instead; "no team default"
+       could not be got back to. #25's twin can be un-published (saveTemplate's
+       `orderNow === null` branch, from the editor's order picker), so this is
+       the house precedent, not a new power. Clear stays gated: it writes this
+       person's [] and there is nothing to clear when nothing is in force. */
+    const published = Array.isArray(tpl.correctionContextCols);
+    if (ctx.cols.length || published) {
+      h += ' <button class="small" onclick="Reco.saveCorrectionColsAsTeam(\'' + pkey + '\')"'
+         + ' title="' + (ctx.cols.length
+           ? 'Make these the starting columns for everyone on this folder'
+           : 'Leave everyone who has not chosen their own with no extra columns')
+         + '">' + (ctx.cols.length ? 'Save as the team default' : 'Clear the team default') + '</button>';
+    }
+    /* SCOPE 'mine' IS SAID OUT LOUD, including when the list is empty - where
+       there is no chip row to hang it on and the chrome was otherwise
+       character for character the chrome of a template nobody had ever
+       configured. That is the whole of how someone is told why their screen
+       differs from their colleague's, and the button beside it is the way
+       back. */
+    if (ctx.scope === 'mine') {
+      h += ' <span class="text-muted" style="font-size:10px;">your own choice'
+         + (ctx.cols.length ? '' : ' - no extra columns') + '</span>';
+      if (published && tpl.correctionContextCols.length) {
+        h += ' <button class="small" onclick="Reco.followTeamCorrectionCols(\'' + pkey + '\')"'
+           + ' title="Go back to the columns the team publishes, and follow them from now on">'
+           + 'Follow the team default</button>';
+      }
+    }
+    if (ctx.scope === 'team') h += ' <span class="text-muted" style="font-size:10px;">the team default</span>';
+    if (ctx.scope === 'legacy') h += ' <span class="text-muted" style="font-size:10px;">from this session (legacy)</span>';
+    /* Counted, not announced: a column someone deleted from the template on
+       purpose is not an error, but a list that silently shrinks is how an
+       operator comes to believe the picker does not work. */
+    if (ctx.dropped) h += ' <span class="text-muted" style="font-size:10px;">' + ctx.dropped
+       + ' column(s) no longer in this template were left out</span>';
+    h += '</div>';
+    return h;
+  },
+
+  /* DECISION E. Every table in this file is table-layout:auto
+     (grep -c table-layout == 0), where a max-width on a CELL is undefined and
+     the browser sizes from content: a 400-character Description chosen as
+     context made the column about 3,000px wide and pushed Apply off screen -
+     destroying the one measure that put Apply next to the bad value. Auto
+     layout DOES honour a max-width on a block INSIDE the cell, so the
+     truncation goes there and white-space is deliberately left off the <td>.
+     The whole value stays readable on the title. */
+  _corrCell(attr, name, val) {
+    const s = (val == null) ? '' : String(val);
+    return '<td ' + attr + '="' + U.escAttr(name) + '"><div style="max-width:180px;overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap" title="' + U.escAttr(s) + '">' + U.esc(s) + '</div></td>';
+  },
+
   renderCorrection(tpl, sess) {
     Reco._fullPass();
     try { return Reco._renderCorrectionInner(tpl, sess); }
@@ -19138,6 +19588,75 @@ renderRecoTable(tpl, sess) {
     const col = formatCols.find(c => c.name === activeCol) || formatCols[0];
     h += '<div class="help">Format rules for <b>'+U.esc(col.label||col.name)+'</b>: '+col.formats.map(f=>'<code>'+U.esc(f)+'</code>').join(', ')+'</div>';
 
+    /* #27. One pane key for every handler this renderer emits, computed
+       once: the pane being rendered owns the screen for the duration of its
+       render (Panes.withOwner), so Panes.owner() is the right answer here -
+       the same pattern as _renderOneRow's own `pkey`. */
+    const okey = ((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0';
+    const pkey = U.jsq(okey);
+    const ctx = Reco.correctionCols(tpl, sess);
+    h += Reco._corrChrome(tpl, sess, ctx, pkey);
+
+    /* DECISION H. getRowPK returns null with no primaryKeys and
+       applyCorrection's write is guarded by `if (pk)`, so on a keyless
+       template a correction is saved NOWHERE - silently, today. Say so, and
+       show the first three template columns so the operator can at least tell
+       the rows apart: with no key column there is nothing else on the row to
+       identify it by.
+       tpl.primaryKeys is read through a guard from here on because
+       App.importBackup assigns AppState.recoTemplates WHOLESALE with no shape
+       normalisation of any kind, so a template restored from an old backup
+       arrives with the field undefined - and this renderer was the one place
+       in the file that read it bare and threw. */
+    const pks = (tpl.primaryKeys || []);
+    /* NEVER the column under correction. It is already the Current Value cell,
+       and the two prints DISAGREE - an id cell goes through displayCellValue
+       (01/01/24) and Current Value is deliberately raw (45292). Filtered BEFORE
+       the slice, so a keyless template still gets three columns to tell its rows
+       apart rather than two. */
+    const idCols = pks.length ? []
+      : (tpl.columns || []).map(c => c && c.name).filter(Boolean)
+          .filter(n => n !== col.name).slice(0, 3);
+    /* THE NAMES ACTUALLY EMITTED BESIDE THE BAD VALUE. The stored list stays
+       panel-wide and the chip row above still shows every one of it (decision
+       F) - nothing the operator never removed vanishes - but a name the row
+       ALREADY prints is not printed a second time. The primary key is
+       rendered from row[pk] by the loop below (decision C) and the active
+       format column is rendered as Current Value, so choosing either bought a
+       duplicate cell, and the format column's two prints DISAGREED: the
+       context cell runs through displayCellValue (01/01/24) and Current Value
+       is raw (45292), three columns apart in one row, which reads as the app
+       being confused about the cell the operator is being asked to fix.
+       Everything downstream - the cap, the wrapper, the early stop - is
+       computed from THIS list, because a chosen set that emits no cell costs
+       no more per row than no chosen set at all. */
+    /* ONE NAME, ONE CELL. `already` has to carry every name the row prints by
+       another route - the primary key cells, the keyless id cells, and the
+       Current Value cell - or the claim above is false, which is how the
+       active column came to print twice on a keyless template with nothing
+       chosen at all. It also accumulates as it goes, so a duplicate name
+       INSIDE the stored list (a hand-edited share, or an older build) emits
+       one cell and not two.
+       CORR_CTX_CAP is enforced here as well as in the picker, for the same
+       reason: the picker is not the only way a list arrives. The chip row
+       above still shows every stored name (decision F) - nothing the operator
+       never removed vanishes from the panel; this bounds what is RENDERED. */
+    const already = new Set(pks.concat(idCols).concat([col.name]));
+    const ctxShown = [];
+    for (const n of ctx.cols) {
+      if (already.has(n)) continue;
+      already.add(n);
+      if (ctxShown.length >= Reco.CORR_CTX_CAP) break;
+      ctxShown.push(n);
+    }
+    if (!pks.length) {
+      h += '<div class="help" style="color:var(--danger, #dc2626);">This template has no primary key, so '
+         + 'a correction here changes the rows in front of you but is saved nowhere - nothing reaches the '
+         + 'shared correction master and nothing is re-applied the next time this file is loaded. The '
+         + 'first ' + idCols.length + ' of its other columns are shown so you can tell the rows '
+         + 'apart.</div>';
+    }
+
     // Show rows with errors for this column
     const errorRows = [];
     sess.data.forEach((row, i) => {
@@ -19145,9 +19664,30 @@ renderRecoTable(tpl, sess) {
         errorRows.push({ row, idx: i });
       }
     });
-    if (errorRows.length) {
+    /* DECISION B: THE CAP IS CONDITIONAL. It is justified by the per-row cost
+       of a context column, and that cost does not exist when nobody has
+       ticked a box - an unconditional cap would turn today's scannable
+       4,812-row list into 24 clicks of "Show 200 more", each one a full
+       App.navigate('reco'). With nothing chosen `shown` IS `errorRows`, which
+       is what makes "identical with nothing chosen" true rather than a
+       promise.
+       IT BOUNDS THE RENDERED LIST AND NEVER RENUMBERS. `idx` is an index into
+       sess.data and the Apply button carries it, so a cap that sliced
+       sess.data instead would correct a row sixty places away - into the
+       SHARED correctionMaster, where it re-applies to that pk on every future
+       load for every colleague. */
+    const lim = ctxShown.length ? (Reco.CORR_ROW_CAP + Reco._corrExtra(okey, tpl, col.name, ctx.cols)) : 0;
+    const shown = (lim && errorRows.length > lim) ? errorRows.slice(0, lim) : errorRows;
+    /* The horizontal scroller, only once there is something wide enough to
+       need it: with no context column this table is the table it has always
+       been, down to the absence of a wrapper. */
+    const wide = !!(ctxShown.length || idCols.length);
+    if (shown.length) {
+      if (wide) h += '<div style="overflow-x:auto">';
       h += '<table><thead><tr>';
-      if (tpl.primaryKeys.length) tpl.primaryKeys.forEach(pk => { h += '<th>'+U.esc(pk)+'</th>'; });
+      if (pks.length) pks.forEach(pk => { h += '<th>'+U.esc(pk)+'</th>'; });
+      idCols.forEach(n => { h += '<th>'+U.esc(n)+'</th>'; });
+      ctxShown.forEach(n => { h += '<th>'+U.esc(n)+'</th>'; });
       h += '<th>Current Value</th><th>Corrected Value</th><th></th></tr></thead><tbody>';
       /* NO id ON THE ROW INPUT, and it is deliberately not on PANE_IDS
          either. activeSection is a VIEW key, so both panes can sit on this
@@ -19166,16 +19706,47 @@ renderRecoTable(tpl, sess) {
          family is as long as the error list. The value comes off the button's
          own <tr>, and the pane key and the row id travel with it so the write
          cannot miss its pane or its row either (MODULE 4b). */
-      const pkey = U.jsq(((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0');
-      errorRows.forEach(({ row, idx }) => {
+      /* The enriched row is built ONLY when an additional column was chosen,
+         and then only as far as the last chosen one (S1 + uptoName). `full` is
+         null otherwise and displayCellValue never consults it for a template
+         column, so a context column that is a file column costs nothing. */
+      const upto = ctxShown.length ? Reco._corrUpto(tpl, sess, ctxShown) : null;
+      shown.forEach(({ row, idx }) => {
         h += '<tr>';
-        if (tpl.primaryKeys.length) tpl.primaryKeys.forEach(pk => { h += '<td>'+U.esc(row[pk])+'</td>'; });
+        /* DECISION C: THE PK CELLS ARE UNTOUCHED. Reading full[pk] instead
+           would let an added column of the same name shadow the key and print
+           a different value from the Master List ten lines below - addExtra
+           guards against the collision, _rowWithExtras does not, and
+           addExtraCol accepts a free-text name with no uniqueness check. A
+           derived key cell is #24's job, through its own guarded helper. */
+        if (pks.length) pks.forEach(pk => { h += '<td>'+U.esc(row[pk])+'</td>'; });
+        /* DECISION G: READ-ONLY. No inputs. This view is for DECIDING; the
+           editing stays in the grid, which routes through applyEdits and
+           writes a Cn row. And through displayCellValue, not
+           XlSchema.currentValue: currentValue is the edit-COMPARISON reader
+           and returns row[name] raw, so a Posting Date holding Excel serials
+           read 01/01/24 in the grid and 45292 here - in the very column the
+           operator is using to decide what a wrong value should be. */
+        const full = upto ? Reco.rowFull(tpl, sess, row, upto.upto) : null;
+        idCols.forEach(n => { h += Reco._corrCell('data-idcol', n, Reco.displayCellValue(tpl, sess, row, n, full, Reco.CORR_DISP)); });
+        ctxShown.forEach(n => { h += Reco._corrCell('data-col', n, Reco.displayCellValue(tpl, sess, row, n, full, Reco.CORR_DISP)); });
         h += '<td class="cell-error">'+U.esc(row[col.name])+'</td>';
         h += '<td><input type="text" placeholder="Enter corrected value" /></td>';
         h += '<td><button class="small primary" onclick="Reco.applyCorrection('+idx+',\''+U.jsq(col.name)+'\',this.closest(\'tr\').querySelector(\'input\').value,\''+pkey+'\',\''+U.jsq(row._id)+'\')">Apply</button></td>';
         h += '</tr>';
       });
       h += '</tbody></table>';
+      if (wide) h += '</div>';
+      /* Say how many are being held back and let the operator ask for more.
+         Re-navigating is the only route this section has (see _corrRepaint),
+         and raising a module-level counter is what makes the next render show
+         them - nothing about how many rows one person is looking at belongs
+         on the session, where it would reach the share. */
+      if (shown.length < errorRows.length) {
+        h += '<div class="help">Showing ' + U.fmtInt(shown.length) + ' of ' + U.fmtInt(errorRows.length)
+           + ' rows with this error. <button class="small" onclick="Reco.showMoreCorrectionRows(\'' + pkey
+           + '\')">Show 200 more</button></div>';
+      }
     } else {
       h += '<div class="empty" style="color:var(--success, #059669);">All values match the required format.</div>';
     }

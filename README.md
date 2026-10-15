@@ -67,6 +67,32 @@ The column *order* is shared by both panes (it is stored per reconciliation per 
 per pane). The Correction tab now refuses an empty corrected value — blanking a field
 from that tab was how a cross-pane mix-up could reach the shared correction master.
 
+## Columns beside the value you are correcting
+
+On the Correction tab, **Show columns…** picks any columns of the template — file
+columns, added columns, formula columns and master lookups alike — and shows them
+read-only beside each bad value, so you can tell what the value should be without
+leaving the tab. They show exactly what the grid shows: a date held as an Excel serial
+reads `01/01/24`, not `45292`, a lookup reads the looked-up value, and a cell someone
+has formatted in the Excel view reads the way it reads there — a VAT rate formatted as
+a percentage is `5.00%` on both screens, not `5.00%` on one and `0.05` on the other.
+
+The choice is **yours, on this PC** — it never goes near the shared folder, so nobody
+else's list changes when you pick one. **Save as the team default** publishes it (behind
+a confirm that says so) as the starting list for every colleague who has not chosen
+their own; their own choices still win. **Clear** and a chip's `×` only ever touch your
+own list — they cannot delete the team's.
+
+Once you have chosen for yourself you are no longer following the team, and the tab says
+so (*your own choice*). **Follow the team default** gives your own choice up again and
+follows theirs from then on, including a column they publish later. Whoever published can
+also take it back: with your own list empty that same button reads **Clear the team
+default** and, behind the same confirm, removes it so nobody is started on anything.
+
+Once at least one column is chosen the list is shown 200 rows at a time, with **Show
+200 more**; with nothing chosen the whole error list is shown exactly as before.
+
+
 ## Tests
 
 ```bash
@@ -79,6 +105,7 @@ node tests/e2e/run_xlview_e2e.mjs       # the in-app Excel view (jspreadsheet CE
 node tests/e2e/run_reports_e2e.mjs      # custom reports: what a filter means per column kind, cards, totals, CSV, 200k rows
 node tests/e2e/run_grid_scale_e2e.mjs   # the grid on a 200k-row extract: slicers, surgical updates, progress, navigation, sort order
 node tests/e2e/run_colorder_e2e.mjs     # the display column order: a team order, your own order on this PC, and the export following the team's
+node tests/e2e/run_correction_e2e.mjs   # the correction tab's context columns: byte-identical with none chosen, the cap and the Apply index, scope, truncation, two panes
 node tests/e2e/run_panes_e2e.mjs        # two panes side by side: session ownership, id parking, per-pane scroll, ledger-write refusals, one Excel link per pane
 node tests/e2e/run_reverse_e2e.mjs      # reversing a generated entry: cancel it if it never posted, contra it if it did
 node tests/e2e/run_specialjv_e2e.mjs    # Special JV safety: balance at arrival/preview/commit, posted-JV tracking, ref validation
@@ -88,9 +115,9 @@ node tests/e2e/run_jv_wizard_e2e.mjs    # the Special JV creator wizard, end to 
 ```
 
 Run them one at a time — each binds a fixed port block (`run_jv_core_unit.mjs` needs
-neither a port nor a browser, and takes about a second). All fifteen must pass:
-75 pytest cases (1 skipped), and `1,856` end-to-end checks — 250 + 73 + 41 + 63 + 94
-+ 107 + 100 + 145 + 301 + 254 + 123 + 79 + 107 + 119, in the order above.
+neither a port nor a browser, and takes about a second). All sixteen must pass:
+75 pytest cases (1 skipped), and `1,979` end-to-end checks — 250 + 73 + 41 + 63 + 94
++ 107 + 100 + 145 + 123 + 301 + 254 + 123 + 79 + 107 + 119, in the order above.
 
 A count that has gone **down** is a regression, not a tidy-up: these suites only ever
 grow, and each one's header comment names the gates it exists to hold.

@@ -419,3 +419,159 @@ runs on every cell commit in the app) and it would land after the fourteen
 suites had already been run green against the file as it is. It is worth one
 deliberate change with its own assertion — "a dropped edit says so" — rather
 than a drive-by at the end of a round.
+
+---
+
+# From the #27 correction-context round
+
+
+## T-C27-1  The correction tab validates the RAW value; the grid validates the
+            DISPLAYED one — and the context columns now put the two side by side
+
+**Where** `apps/Reco.html` `_renderCorrectionInner` (`!FMT.validate(row[col.name],
+col.formats)`, and the `<td class="cell-error">` that prints `U.esc(row[col.name])`)
+against `_renderOneRow` (`let val = Reco.displayCellValue(...)` then
+`!FMT.validate(val, colDef.formats)`).
+
+**What** For a column whose name contains "date", `displayCellValue` runs
+`U.formatExcelDate` first, so the grid validates `01/01/24` while the correction tab
+validates `45292`. A format rule of `DD/DD/DD` passes in the grid and fails on this
+tab — the same cell, red in one place and fine in the other — and the Correction
+section tab's own count is computed the tab's way, so the number beside the tab name
+disagrees with the number of red cells in the grid.
+
+**Why it is only a ticket** It is pre-existing and it cuts both ways: whichever reader
+is changed, somebody's format rules start matching or stop matching overnight, and the
+rule that moves also moves `anyFormatErrors`, the section-tab counts and the red cells
+in the grid together. #27 makes it VISIBLE rather than worse — pick that same date
+column as a context column from another format tab and the row shows `45292` under
+Current Value and `01/01/24` two cells to the left — but #27 deliberately did not
+touch the Current Value cell or the counts (decisions C and D), so changing the reader
+here would have put a format-rule change inside a view-preference commit.
+
+**Fix** One reader. `FMT.validate(Reco.displayCellValue(tpl, sess, row, col.name),
+col.formats)` in all three places (the error collection, the five count passes and
+`anyFormatErrors`), and the Current Value cell printed through `displayCellValue` as
+well so what is validated is what is shown.
+
+**Test** A template with a `Posting Date` column holding serials and
+`formats: ['DD/DD/DD']`: assert the grid's red-cell count, the section tab's count
+and the correction tab's row count are the SAME number, and that the value in the
+Current Value cell is the value that was validated. It fails today on all three.
+
+
+## T-C27-2  A keyless template can show the bad value twice
+
+**Where** `apps/Reco.html` `_renderCorrectionInner`:
+`const idCols = pks.length ? [] : (tpl.columns || []).slice(0, 3)...`
+
+**What** Decision H's fallback shows the first three template columns as identifying
+columns, because with no primary key there is nothing else on the row to tell the rows
+apart. When the active format column is one of those three — and on a small template
+it usually is — its value appears both as an identifying cell and as Current Value, the
+second time in red. Harmless, and it looks like a bug.
+
+**Why it is only a ticket** The decision says "the first three template columns", in
+those words, and the alternative is a rule ("the first three that are not the active
+format column") that makes the identifying cells move as the operator switches format
+tabs — the exact instability decision F exists to avoid for the chip row.
+
+**Fix** Keep the trio stable and drop the DUPLICATE CELL instead: skip an identifying
+column that equals `col.name` when emitting the row, and emit the `<th>` for it as
+"Current Value" only. Four lines, one rule, nothing moves between tabs.
+
+**Test** A keyless template whose first column carries the format rule: assert the bad
+value appears in exactly one cell of the row, and that the identifying `<th>`s are the
+same list on every format tab.
+
+**Note, fix round** The KEYED half of this is now closed and the shape is there to copy:
+`_renderCorrectionInner` builds `ctxShown = ctx.cols.filter(n => !already.has(n))` where
+`already` is `pks` plus the active format column, and emits the `<th>` and the `<td>` from
+that while the chip row keeps the whole stored list (decision F). Only the keyless trio
+still duplicates, and it needs the same four lines against `idCols`.
+
+
+## T-C27-3  The "Show 200 more" cap is keyed on a GLOBAL format column
+
+**Where** `apps/Reco.html` `Reco._corrSig(tpl, colName, cols)`, called with
+`col.name` resolved from `AppState._correctionCol`.
+
+**What** The cap is per pane and resets when the format column changes, which is
+decision B. But the format column itself is `AppState._correctionCol`, a global — see
+**T-F1-4** — so switching the format tab in ONE pane changes it for both, and the
+other pane's expansion is reset although nothing the operator did concerned that pane.
+
+**Why it is only a ticket** It is entirely a consequence of T-F1-4, which already has
+the fix written: `correctionCol` is named in `Panes.VIEW_KEYS_PENDING` and already
+whitelisted by `_restoreView`, so moving it onto the session is a drop-in. Fixing it
+here would mean doing T-F1-4 inside this commit, and T-F1-4 changes what the section
+tabs do in both panes — which wants its own assertions, not a rider.
+
+**Fix** T-F1-4: move `_correctionCol` onto the session as a per-pane VIEW key. `_corrSig`
+then needs no change at all — it is handed `col.name`, and `col` is already resolved
+per pane inside the render.
+
+**Test** Two panes, two templates, both on the Correction tab, both over the cap:
+press "Show 200 more" in the right pane, switch the LEFT pane to its other format tab,
+and assert the right pane still shows 400 rows. (The per-pane half of this is already
+pinned in `run_correction_e2e` [13]; this is the half that needs T-F1-4.)
+
+## T-C27-4  A per-user context list keeps names of deleted columns for ever
+
+**Where** `apps/Reco.html` `Reco.correctionCols` (the `dropped` filter) and
+`Reco.userPref(tplId, 'correctionCols', …)` — the per-user store in `localStorage`.
+
+**What** `tpl.correctionContextCols` is pruned against `allNames` on every
+`saveTemplate` (decision I), so the team list cannot hold a dead name for long. Nothing
+prunes the per-user list: it is written whole by the picker, by `Clear` and by the chip
+`×`, and read through a filter that drops dead names at read time without ever writing
+the shorter list back. So an operator who chose `Narrative` keeps `Narrative` in their
+own store after the column is deleted from the template — and if a column of that name
+is ever added again, a choice they made months ago silently comes back.
+
+**Why it is only a ticket** The read deliberately does not write: a preference the
+operator has not set must stay unset, or the first person to open the tab becomes the
+author of whatever the team default happened to be that morning — the comment above
+`correctionCols` says so, and the fix round's F5 change rests on it (a list that lost
+every name now falls THROUGH to the team default, which it could not do if the read had
+rewritten it to `[]`). Pruning therefore has to happen on a WRITE, and the write that
+should do it is the picker's `Done` — which is a change to `_corrColsDone`, not to the
+reader, and wants its own assertions about what `dropped` then counts.
+
+**Fix** In `Reco._corrSet`, store `cols.filter(n => Reco._corrKnown(S.tpl, S.sess).has(n))`
+rather than `cols`, so every per-user write lands pruned. The read-time filter stays as
+the belt for lists written before this.
+
+**Test** Choose `Centre` and `Narrative`; delete `Narrative` from the template; reopen the
+picker and press Done; assert the stored array is `['Centre']` and not
+`['Centre','Narrative']`; then re-add a column called `Narrative` and assert it does NOT
+reappear beside the bad value.
+
+
+## T-C27-5  The Excel view is a third reader of the per-cell number format
+
+**Where** `apps/Reco.html` `Reco._xlRender` (the `else if (fmt && fmt.numFmt && !empty)`
+branch), against `Reco._ssFmtApply`, which the grid's read-only cell and the correction
+tab's context cells now both go through.
+
+**What** The fix round made the per-cell number format ONE rule for the two readers that
+disagreed. The Excel view still has its own: it applies `numFmt` in a branch of an
+if/else chain, so a cell with a `numFmt` never reaches the `XlSchema.dateLabel` branch
+below it, and it never runs `U.formatExcelDate` first the way `displayCellValue` does.
+For every format the probes exercised the three screens agree; the orderings differ, so
+there is no guarantee they go on agreeing — a date column with a `numFmt` of `percent`,
+or a `recoDisplay` date format plus a `date_short` cell format, are the shapes to check.
+
+**Why it is only a ticket** It is the Excel view's branch chain, not the correction tab's,
+and the branch order is load-bearing for the status column and the dropdown labels either
+side of it. Changing it belongs with the Excel-view-per-pane work, which already has to
+touch `_xlRender`.
+
+**Fix** Give `_xlRender` the same two steps in the same order as `displayCellValue` +
+`_ssFmtApply`: resolve the display value by role first, then apply `fmt` last, so one
+rule decides and the chain only decides what the value IS.
+
+**Test** The same row and column read off all three screens — grid `<td>`, Excel view
+`<td>`, correction context `<td>` — for a date column carrying a `numFmt`, asserted
+character for character. `run_correction_e2e` section `[F1]` is the two-screen half of
+exactly this comparison and is the pattern to extend.
