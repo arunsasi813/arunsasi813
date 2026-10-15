@@ -894,6 +894,33 @@ try {
     + 'operator never removed cannot vanish when they switch tabs',
     { onRef: t9.chipsOnRef, onSecond: t9.chipsOnSecond });
 
+
+  /* THE ROW ITSELF, which T9 never read. This is exactly the state the
+     reviewers' finding F8 names - the stored list holds the column under
+     correction, left there by decision F - and it is the class of defect that
+     got past review twice, because the names-only assertions above pass while
+     the bad value prints in two cells that disagree. The defect itself was
+     closed by the delivered F10 fix and then, for the keyless shape, by the
+     blocker fix; this is the assertion that was missing, and it reads VALUES. */
+  const t9row = await page.evaluate((arg) => {
+    const [tplId, ERRTBL] = arg;
+    const errTbl = new Function('return ' + ERRTBL)();
+    const panel = document.querySelector('#recoContentArea .panel');
+    const tbl = errTbl(panel);
+    const tr = tbl.querySelector('tbody tr');
+    const ths = [...tbl.querySelectorAll('thead th')].map(th => th.textContent).filter(Boolean);
+    const bad = ((tr.querySelector('td.cell-error') || {}).textContent || '').trim();
+    return { ths, dupTh: ths.filter((x, i) => ths.indexOf(x) !== i), bad: bad,
+      occurrences: [...tr.children].filter(td => td.textContent.trim() === bad).length,
+      ctxCols: [...tr.querySelectorAll('td[data-col]')].map(td => td.dataset.col),
+      stored: Reco.userPref(tplId, 'correctionCols') };
+  }, [TPL, ERRTBL]);
+  check((t9row.stored || []).includes('Ref') && t9row.bad === 'bad ref 0' && t9row.occurrences === 1,
+    'T9: THE ROW - the bad value is printed in exactly ONE cell although the stored list holds the column '
+    + 'under correction (decision F keeps the name; the render prints it once, as Current Value)', t9row);
+  check(!t9row.ctxCols.includes('Ref') && !t9row.dupTh.length,
+    'T9: and there is no context cell for the column under correction, and no <th> twice', t9row);
+
   } catch (e) { check(false, '[9] the picker decorations could not be exercised at all',
     String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
 
@@ -1420,6 +1447,758 @@ try {
     { chips: f5.chips, saysDropped: f5.saysDropped });
 
   } catch (e) { check(false, '[F5] the all-dead per-user list could not be exercised at all',
+    String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
+
+  /* ====================================================================
+     ROUND 2 — the eight findings the first fix round's brief was cut before
+     delivering. They are named by their id in the reviewers' own file
+     (F3-F8, F12, F13) and PREFIXED R2 because the sections above are
+     labelled F1-F5 for the five findings that round DID handle, which are
+     findings F9, F10, F11, F1 and F2 of that same file. R2-Fn here means
+     finding Fn there, and nothing else.
+     ==================================================================== */
+
+  /* ====================================================================
+     R2-F3 — a SESSION-ONLY column must not be publishable as the team
+     default. The picker legitimately offers sess.extraColumns, and the
+     PER-PERSON list legitimately holds one: it resolves and renders with
+     its value. But saveTemplate's prune is built from template names and
+     has no session to widen against, so a published session name was
+     deleted from the share by the next unrelated template save — with no
+     confirm, no toast, and ctx.dropped 0 (the name is REMOVED from the
+     array rather than left in it), so the chip row's "N column(s) no
+     longer in this template" line could not fire either.
+
+     THE ASSERTION THAT CATCHES IT READS CELL VALUES, before and after that
+     save, for a colleague who never chose: a names-only assertion on the
+     team array passes while the cell disappears, which is how the prune's
+     silence survived the first review.
+     ==================================================================== */
+  section('R2-F3', 'R2-F3: a session-only column cannot become the team default, and no unrelated save can un-publish one');
+  try {
+
+  const F3TPL = 'tpl_r2_f3';
+  const r2f3 = await page.evaluate(async (arg) => {
+    const [tplId, ERRTBL] = arg;
+    const errTbl = new Function('return ' + ERRTBL)();
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = tplId; t.name = 'SCRATCH RECON';
+    t.columns = ['Doc', 'Ref', 'Amount', 'Centre'].map(n => ({
+      name: n, label: n, formats: n === 'Ref' ? ['AA-DDDD'] : [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Ref', 'Amount', 'Centre'];
+    t.enableCorrections = true; t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(tplId); App.closeModal();
+    /* saveTemplate REPLACES the object in AppState.recoTemplates, so every
+       read of the template after a save has to be a fresh lookup. */
+    const live = () => AppState.recoTemplates.find(x => x.id === tplId);
+    const sess0 = AppState.recoSessions[tplId];
+    Reco.ensureSessionShape(sess0);
+    /* EXACTLY THE SHAPE ssCommitAddCol's session-only branch writes. */
+    sess0.extraColumns = [{ name: 'Scratch', type: 'custom', _ssAdded: true, _ssSingleUse: false }];
+    sess0.data = [0, 1].map(i => ({ _id: tplId + '_r' + i, _pk: 'SD' + i, _ver: 'upload',
+      Doc: 'SD' + i, Ref: 'bad ref ' + i, Amount: String((i + 1) * 10),
+      Centre: 'CTR' + i, Scratch: 'SCR' + i }));
+    sess0._autoLoadAttempted = true;
+    sess0.activeSection = 'correction';
+    AppState.activeRecoId = tplId;
+    AppState._correctionCol = 'Ref';
+    delete live().correctionContextCols;
+
+    const nav = async () => { App.navigate('reco'); await new Promise(r => setTimeout(r, 170)); };
+    const cells = () => {
+      const panel = document.querySelector('#recoContentArea .panel');
+      const tr = errTbl(panel).querySelector('tbody tr');
+      return tr ? [...tr.querySelectorAll('td[data-col]')].map(td => td.dataset.col + '=' + td.textContent.trim()) : null;
+    };
+    /* THE RENDERED BUTTON, not the function: the button is what carries the
+       pane key, and a programmatic call would not exercise it. */
+    const press = async (answer) => {
+      const realConfirm = window.confirm;
+      let saw = null;
+      window.confirm = m => { saw = String(m); return answer; };
+      window.__toasts = [];
+      try {
+        const b = [...document.querySelectorAll('#recoContentArea .panel .corr-ctx button')]
+          .find(x => /saveCorrectionColsAsTeam/.test(x.getAttribute('onclick') || ''));
+        if (!b) return { pressed: false, confirm: null, toasts: [] };
+        b.click();
+      } finally { window.confirm = realConfirm; }
+      await new Promise(r => setTimeout(r, 500));
+      return { pressed: true, confirm: saw, toasts: (window.__toasts || []).map(x => x.msg) };
+    };
+    const out = {};
+
+    Reco.userPref(tplId, 'correctionCols', ['Centre', 'Scratch']);
+    await nav();
+    out.mineCells = cells();
+    out.publish = await press(true);
+    out.teamAfterPublish = JSON.stringify(live().correctionContextCols);
+
+    /* THE COLLEAGUE WHO NEVER CHOSE reads the published list. */
+    Reco.userPref(tplId, 'correctionCols', null);
+    await nav();
+    out.scopeBefore = Reco.correctionCols(live(), AppState.recoSessions[tplId]).scope;
+    out.cellsBefore = cells();
+
+    /* ONE UNRELATED TEMPLATE SAVE — a typo in the description. */
+    window.__toasts = [];
+    RecoTemplate.edit(tplId);
+    RecoTemplate._editing.description = 'typo fix';
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    out.saveToasts = (window.__toasts || []).map(x => x.msg);
+    out.teamAfterUnrelatedSave = JSON.stringify(live().correctionContextCols);
+    await nav();
+    out.cellsAfter = cells();
+    out.sessStillHasScratch = (AppState.recoSessions[tplId].extraColumns || [])
+      .some(a => a && a.name === 'Scratch');
+
+    /* THE WORDING TRAP: with the session name filtered out the publish is a
+       no-op against what is already there, so the "already the team default"
+       branch is the one the operator lands on — and it has to say why
+       Scratch is not in it, or they are told their click did nothing and
+       never learn why. */
+    Reco.userPref(tplId, 'correctionCols', ['Centre', 'Scratch']);
+    await nav();
+    out.already = await press(true);
+    out.teamAfterAlready = JSON.stringify(live().correctionContextCols);
+
+    /* AND A CHOSEN LIST THAT IS NOTHING BUT A SESSION COLUMN IS REFUSED: an
+       unguarded filter turns it into cols=[], which is the "Clear the team
+       default" branch — one click from "publish this one column" to
+       deleting the list it cannot replace. */
+    Reco.userPref(tplId, 'correctionCols', ['Scratch']);
+    await nav();
+    out.onlySession = await press(true);
+    out.teamAfterOnlySession = JSON.stringify(live().correctionContextCols);
+
+    Reco.userPref(tplId, 'correctionCols', null);
+    return out;
+  }, [F3TPL, ERRTBL]);
+  note('R2-F3 confirm', (r2f3.publish.confirm || '').slice(0, 420));
+  note('R2-F3 cells', { mine: r2f3.mineCells, before: r2f3.cellsBefore, after: r2f3.cellsAfter });
+  check(same(r2f3.mineCells, ['Centre=CTR0', 'Scratch=SCR0']),
+    'the premise: the PER-PERSON list may hold a session-only column and it renders WITH ITS VALUE — so the '
+    + 'read must not be narrowed; the publish is what has to be', r2f3.mineCells);
+  check(r2f3.publish.pressed && /Scratch/.test(r2f3.publish.confirm || '')
+        && /cannot be a team default/i.test(r2f3.publish.confirm || ''),
+    'R2-F3: the confirm NAMES the session-only column and says it cannot be a team default',
+    (r2f3.publish.confirm || '').slice(0, 420));
+  check(r2f3.teamAfterPublish === '["Centre"]',
+    'R2-F3: and the publish wrote the TEMPLATE names only — the session name never reached the share',
+    r2f3.teamAfterPublish);
+  check(r2f3.teamAfterUnrelatedSave === r2f3.teamAfterPublish,
+    'R2-F3: so one unrelated template save afterwards changes NOTHING',
+    { afterPublish: r2f3.teamAfterPublish, afterSave: r2f3.teamAfterUnrelatedSave });
+  check(r2f3.cellsBefore && r2f3.cellsBefore.length > 0 && same(r2f3.cellsBefore, r2f3.cellsAfter),
+    'R2-F3: THE GATE — a colleague who never chose reads the same context CELLS, with the same VALUES, '
+    + 'before and after that save. The names-only version of this assertion passes while the cell vanishes',
+    { before: r2f3.cellsBefore, after: r2f3.cellsAfter });
+  check(r2f3.sessStillHasScratch,
+    'R2-F3: and the session column itself was never touched — the data was always fine, it was the '
+    + 'published list that was being silently edited', r2f3.sessStillHasScratch);
+  check(r2f3.already.toasts.some(m => /already the team default/i.test(m)) &&
+        r2f3.already.toasts.some(m => /Scratch/.test(m)) && r2f3.teamAfterAlready === '["Centre"]',
+    'R2-F3: the wording trap — on the "already the team default" branch the operator is told the click was '
+    + 'a no-op AND why Scratch is not in the published list', r2f3.already.toasts);
+  check(r2f3.onlySession.confirm === null && r2f3.teamAfterOnlySession === '["Centre"]'
+        && r2f3.onlySession.toasts.some(m => /Scratch/.test(m)),
+    'R2-F3: and a list that is NOTHING BUT a session column is REFUSED — it must not fall into the '
+    + '"Clear the team default" branch and delete a list it cannot replace',
+    { confirm: r2f3.onlySession.confirm, team: r2f3.teamAfterOnlySession, toasts: r2f3.onlySession.toasts });
+
+  } catch (e) { check(false, '[R2-F3] the session-only publish could not be exercised at all',
+    String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
+
+  /* ====================================================================
+     R2-F4 — overwriting a colleague's published list says WHOSE it is, and
+     the stamp that says so is deleted beside the field in both places that
+     delete the field. Before this the stamp was write-only in the whole
+     file AND was written on the branch that had just deleted the list it
+     describes, so a template on the share could claim a publisher for a
+     list that is not there.
+     ==================================================================== */
+  section('R2-F4', 'R2-F4: the team default says who published it and when, and the stamp dies with the field');
+  try {
+
+  const F4TPL = 'tpl_r2_f4';
+  const r2f4 = await page.evaluate(async (tplId) => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = tplId; t.name = 'STAMP RECON';
+    t.columns = ['Doc', 'Ref', 'Amount', 'Centre', 'Description', 'Note'].map(n => ({
+      name: n, label: n, formats: n === 'Ref' ? ['AA-DDDD'] : [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Ref', 'Amount', 'Centre', 'Description', 'Note'];
+    t.enableCorrections = true; t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(tplId); App.closeModal();
+    const live = () => AppState.recoTemplates.find(x => x.id === tplId);
+    const sess = AppState.recoSessions[tplId];
+    Reco.ensureSessionShape(sess);
+    sess.data = [{ _id: tplId + '_r0', _pk: 'PD0', _ver: 'upload', Doc: 'PD0', Ref: 'bad ref',
+                   Amount: '100', Centre: 'C1', Description: 'D1', Note: 'N1' }];
+    sess._autoLoadAttempted = true;
+    sess.activeSection = 'correction';
+    AppState.activeRecoId = tplId;
+    AppState._correctionCol = 'Ref';
+    const nav = async () => { App.navigate('reco'); await new Promise(r => setTimeout(r, 170)); };
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    /* KEY PRESENCE, not value: that is the difference between a delete and
+       an assignment of undefined, and the presence is what
+       recoTemplates.json records. */
+    const stampOf = () => { const x = live();
+      return { has: has(x, 'correctionContextCols'), hasBy: has(x, 'correctionContextColsBy'),
+               hasAt: has(x, 'correctionContextColsAt'), by: x.correctionContextColsBy,
+               at: x.correctionContextColsAt, cols: JSON.stringify(x.correctionContextCols) }; };
+    const press = async (answer) => {
+      const realConfirm = window.confirm;
+      let saw = null;
+      window.confirm = m => { saw = String(m); return answer; };
+      window.__toasts = [];
+      try {
+        const b = [...document.querySelectorAll('#recoContentArea .panel .corr-ctx button')]
+          .find(x => /saveCorrectionColsAsTeam/.test(x.getAttribute('onclick') || ''));
+        if (!b) return { pressed: false, confirm: null, toasts: [] };
+        b.click();
+      } finally { window.confirm = realConfirm; }
+      await new Promise(r => setTimeout(r, 500));
+      return { pressed: true, confirm: saw, toasts: (window.__toasts || []).map(x => x.msg) };
+    };
+    const PRIYA_AT = '2026-10-01T09:00:00.000Z';
+    const setPriya = cols => { const x = live();
+      x.correctionContextCols = cols; x.correctionContextColsBy = 'Priya'; x.correctionContextColsAt = PRIYA_AT; };
+    const out = {};
+
+    // (1) Arun is about to replace Priya's list, and DECLINES
+    setPriya(['Centre', 'Description']);
+    Reco.userPref(tplId, 'correctionCols', ['Note']);
+    await nav();
+    const t0 = Date.now();
+    out.declined = await press(false);
+    out.afterDecline = stampOf();
+
+    // (2) the same press, accepted
+    out.accepted = await press(true);
+    out.afterAccept = stampOf();
+    const at = Date.parse(out.afterAccept.at || 0);
+    out.acceptedWithinRun = !!(at && at >= t0 - 2000 && at <= Date.now() + 2000);
+
+    // (3) THE CLEAR BRANCH: this person wants none and un-publishes
+    setPriya(['Centre', 'Description']);
+    Reco.userPref(tplId, 'correctionCols', []);
+    await nav();
+    out.cleared = await press(true);
+    out.afterClear = stampOf();
+
+    // (4) THE PRUNE BRANCH: the team's only name is gone from the template
+    setPriya(['GhostCol']);
+    RecoTemplate.edit(tplId);
+    RecoTemplate._editing.description = 'another typo fix';
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    out.afterPrune = stampOf();
+
+    // (5) the chrome, with the team default in force
+    setPriya(['Centre']);
+    Reco.userPref(tplId, 'correctionCols', null);
+    await nav();
+    const panel = document.querySelector('#recoContentArea .panel');
+    const box = panel.querySelector('.corr-ctx');
+    out.scope = Reco.correctionCols(live(), AppState.recoSessions[tplId]).scope;
+    out.chrome = box.textContent.replace(/\s+/g, ' ').trim();
+    out.idsInPanel = [...panel.querySelectorAll('[id]')].map(e => e.id);
+    /* OFF THE RENDERED TEXT NODES. document.body.textContent includes inline
+       <script> source, where a code comment mentioning a name reads as a hit
+       — that is the triage's own recorded false positive. */
+    const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+    let txt = '', n2;
+    while ((n2 = walker.nextNode())) {
+      if (!/^(SCRIPT|STYLE)$/.test(n2.parentNode.nodeName)) txt += n2.nodeValue + ' ';
+    }
+    out.rendered = txt.replace(/\s+/g, ' ').trim();
+    Reco.userPref(tplId, 'correctionCols', null);
+    return out;
+  }, F4TPL);
+  note('R2-F4 confirm', (r2f4.declined.confirm || '').slice(0, 420));
+  note('R2-F4 chrome', r2f4.chrome);
+  check(r2f4.declined.pressed && /Priya/.test(r2f4.declined.confirm || '')
+        && /01-Oct-26/.test(r2f4.declined.confirm || ''),
+    'R2-F4: the confirm names WHOSE list is about to be overwritten and WHEN they set it, in the format '
+    + 'the display order already uses', (r2f4.declined.confirm || '').slice(0, 420));
+  check(r2f4.afterDecline.cols === '["Centre","Description"]' && r2f4.afterDecline.by === 'Priya',
+    'R2-F4: and declining still writes nothing — not the list, not the stamp', r2f4.afterDecline);
+  check(r2f4.afterAccept.by === 'Test User' && r2f4.acceptedWithinRun,
+    'R2-F4: accepting stamps this person and this moment', r2f4.afterAccept);
+  check(r2f4.afterClear.has === false && r2f4.afterClear.hasBy === false && r2f4.afterClear.hasAt === false,
+    'R2-F4: UN-PUBLISHING DELETES THE STAMP WITH THE FIELD — read as key presence, because a template '
+    + 'claiming a publisher for a list that is not there is the lie this makes impossible', r2f4.afterClear);
+  check(r2f4.afterPrune.has === false && r2f4.afterPrune.hasBy === false && r2f4.afterPrune.hasAt === false,
+    'R2-F4: and so does saveTemplate\'s prune, which is the other route that deletes the field',
+    r2f4.afterPrune);
+  check(r2f4.scope === 'team' && /set by Priya on 01-Oct-26/.test(r2f4.rendered),
+    'R2-F4: with the team default in force the chip row SAYS whose it is — the stamp is no longer write-only',
+    { scope: r2f4.scope, chrome: r2f4.chrome });
+  check(r2f4.idsInPanel.length === 0,
+    'R2-F4: and it carries NO id — both panes can sit on this tab, so nothing this screen renders may be '
+    + 'id-addressable (PANE_IDS is a fixed, bounded list)', r2f4.idsInPanel);
+
+  } catch (e) { check(false, '[R2-F4] the attribution could not be exercised at all',
+    String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
+
+  /* ====================================================================
+     R2-F5 — restoring a session backup must not write the legacy
+     sess.correctionExtraCols. restoreSession carries the STORED value
+     across for the twin field sess.columnOrder, three lines above, for
+     exactly this reason; #27 made the other field a display source, so the
+     pre-existing wholesale assignment became a route by which a
+     hand-edited backup publishes context columns nobody chose to the one
+     shared recoSessions.json — labelled only "(legacy)", with no publisher,
+     no date, and no route in the app that clears it.
+     ==================================================================== */
+  section('R2-F5', 'R2-F5: a restored backup cannot publish the legacy correctionExtraCols to the shared folder');
+  try {
+
+  const F5TPL = 'tpl_r2_f5';
+  const r2f5 = await page.evaluate(async (arg) => {
+    const [tplId, ERRTBL] = arg;
+    const errTbl = new Function('return ' + ERRTBL)();
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = tplId; t.name = 'LEGACY RECON';
+    t.columns = ['Doc', 'Ref', 'Amount', 'Description', 'Centre'].map(n => ({
+      name: n, label: n, formats: n === 'Ref' ? ['AA-DDDD'] : [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Ref', 'Amount', 'Description', 'Centre'];
+    t.enableCorrections = true; t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(tplId); App.closeModal();
+    const live = () => AppState.recoTemplates.find(x => x.id === tplId);
+    const sess0 = AppState.recoSessions[tplId];
+    Reco.ensureSessionShape(sess0);
+    sess0.data = [0, 1].map(i => ({ _id: tplId + '_r' + i, _pk: 'LD' + i, _ver: 'upload',
+      Doc: 'LD' + i, Ref: 'bad ref ' + i, Amount: String((i + 1) * 10),
+      Description: 'DESC' + i, Centre: 'CTR' + i }));
+    sess0._autoLoadAttempted = true;
+    sess0.activeSection = 'correction';
+    sess0.correctionExtraCols = [];
+    sess0.columnOrder = ['Doc', 'Ref'];
+    AppState.activeRecoId = tplId;
+    AppState._correctionCol = 'Ref';
+    delete live().correctionContextCols;
+    Reco.userPref(tplId, 'correctionCols', null);
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 170));
+    const out = { before: { legacy: JSON.stringify(sess0.correctionExtraCols),
+                            order: JSON.stringify(sess0.columnOrder),
+                            scope: Reco.correctionCols(live(), sess0).scope } };
+    /* THE BACKUP, in exactly the shape Reco.backupSession writes, with a
+       hand-edited session — which is the only way this field is ever
+       non-empty, since no build has ever written it. */
+    const backup = {
+      template: JSON.parse(JSON.stringify(live())),
+      session: JSON.parse(JSON.stringify(sess0)),
+      manualOffsetMaster: {},
+      correctionMaster: { LD0: { Description: 'FROM-BACKUP' } },
+      docNumberMaster: {}, entryHistory: [], exportedAt: new Date().toISOString()
+    };
+    backup.session.correctionExtraCols = ['Description', 'Amount'];
+    backup.session.columnOrder = ['Centre', 'Amount'];
+    /* A REAL File ON A REAL <input type=file>, which is the shape the file
+       input hands restoreSession. */
+    const input = document.createElement('input');
+    input.type = 'file';
+    const dt = new DataTransfer();
+    dt.items.add(new File([JSON.stringify(backup)], 'reco_session_test.json', { type: 'application/json' }));
+    input.files = dt.files;
+    const realConfirm = window.confirm;
+    window.confirm = () => true;
+    try {
+      Reco.restoreSession({ target: input });
+      await new Promise(r => setTimeout(r, 1500));
+    } finally { window.confirm = realConfirm; }
+    const sess = AppState.recoSessions[tplId];
+    out.after = { legacy: JSON.stringify(sess.correctionExtraCols),
+                  order: JSON.stringify(sess.columnOrder),
+                  scope: Reco.correctionCols(live(), sess).scope,
+                  rows: (sess.data || []).length,
+                  master: JSON.stringify(AppState.correctionMaster[tplId] || null) };
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 220));
+    const panel = document.querySelector('#recoContentArea .panel');
+    const tr = errTbl(panel).querySelector('tbody tr');
+    out.after.ctxCells = tr ? [...tr.querySelectorAll('td[data-col]')].map(td => td.dataset.col + '=' + td.textContent.trim()) : null;
+    out.after.chrome = panel.querySelector('.corr-ctx').textContent.replace(/\s+/g, ' ').trim();
+    /* THE SHARED FILE ITSELF, read back off the bridge: this value's whole
+       consequence is that recoSessions.json is ONE file on the folder. */
+    try {
+      await AppState.flush();
+      const onDisk = JSON.parse(await window.pywebview.api.read_file('reco/recoSessions.json'))[tplId] || {};
+      out.onDisk = onDisk.correctionExtraCols === undefined ? '(absent)' : JSON.stringify(onDisk.correctionExtraCols);
+    } catch (e) { out.onDisk = 'READ FAILED: ' + String((e && e.message) || e); }
+    return out;
+  }, [F5TPL, ERRTBL]);
+  note('R2-F5', r2f5);
+  check(r2f5.before.legacy === '[]' && r2f5.before.order === '["Doc","Ref"]' && r2f5.before.scope === 'none',
+    'the premise: the stored session has the legacy field EMPTY, a stored column order, and nothing in force',
+    r2f5.before);
+  check(r2f5.after.legacy === '[]',
+    'R2-F5: after restoring a backup whose session carried two legacy names the STORED session still has [] '
+    + '— a backup cannot publish context columns nobody chose', r2f5.after.legacy);
+  check(r2f5.after.order === '["Doc","Ref"]',
+    'R2-F5: and the TWIN field keepLegacy already protected is still protected — asserted side by side, so a '
+    + 'future edit cannot repair one and forget the other', r2f5.after.order);
+  check(r2f5.after.scope === 'none' && same(r2f5.after.ctxCells, []),
+    'R2-F5: and the RENDER agrees — no context cell, nothing labelled "(legacy)"',
+    { scope: r2f5.after.scope, cells: r2f5.after.ctxCells, chrome: r2f5.after.chrome });
+  check(r2f5.onDisk === '[]' || r2f5.onDisk === '(absent)',
+    'R2-F5: AND THE SHARED FILE SAYS SO — recoSessions.json read back off the bridge, not trusted in memory',
+    r2f5.onDisk);
+  check(r2f5.after.rows === 2 && /FROM-BACKUP/.test(r2f5.after.master),
+    'R2-F5: and the rest of the backup DID restore, so this is not passing by refusing the restore',
+    r2f5.after);
+
+  } catch (e) { check(false, '[R2-F5] the restore could not be exercised at all',
+    String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
+
+  /* ====================================================================
+     R2-F6R — the residue of F6. The 6-column cap and the de-duplication
+     are enforced on the RENDER (the orchestrator's blocker fix) and in the
+     picker, but the resolver still returned the unbounded, un-deduped
+     list, and the chip row, removeCorrectionCol and the team publish all
+     read THAT. So the panel said twelve and the table printed six, with
+     nothing on screen to say so, and an over-cap list was sticky: the next
+     publish put all of it back on the share.
+     ==================================================================== */
+  section('R2-F6R', 'R2-F6R: an over-cap, duplicated stored list is bounded and de-duplicated AT THE READ, and the panel says so');
+  try {
+
+  const F6TPL = 'tpl_r2_f6';
+  await page.evaluate(new Function('arg', 'return ' + SETUP + '(arg)'), [F6TPL, 20, 15, 13, true]);
+  const r2f6 = await page.evaluate(async (arg) => {
+    const [tplId, ERRTBL] = arg;
+    const errTbl = new Function('return ' + ERRTBL)();
+    const live = () => AppState.recoTemplates.find(x => x.id === tplId);
+    const nav = async () => { App.navigate('reco'); await new Promise(r => setTimeout(r, 200)); };
+    /* TWELVE NAMES, 'Centre' TWICE, and deliberately neither the primary key
+       'Doc' nor the column under correction 'Ref' — so the CAP is the only
+       thing that can bound it. The shape a hand edit of recoTemplates.json
+       (a plain JSON file on the folder) gives. */
+    const TWELVE = ['Centre', 'Description', 'Second Ref', 'Note', 'Acct', 'Calc',
+                    'E04', 'E05', 'E06', 'E07', 'Posting Date', 'Centre'];
+    AppState.activeRecoId = tplId;
+    AppState._correctionCol = 'Ref';
+    Reco.userPref(tplId, 'correctionCols', null);
+    live().correctionContextCols = TWELVE.slice();
+    await nav();
+    const out = { stored: TWELVE.length };
+    const r = Reco.correctionCols(live(), AppState.recoSessions[tplId]);
+    out.resolved = { cols: r.cols.slice(), scope: r.scope, dropped: r.dropped, capped: r.capped };
+    out.distinct = new Set(r.cols).size;
+    const panel = document.querySelector('#recoContentArea .panel');
+    out.chips = [...panel.querySelectorAll('.corr-ctx .tag')].map(s => s.textContent.replace(/\s*×\s*$/, '').trim());
+    out.chrome = panel.querySelector('.corr-ctx').textContent.replace(/\s+/g, ' ').trim();
+    const tbl = errTbl(panel);
+    const tr = tbl.querySelector('tbody tr');
+    out.cells = [...tr.querySelectorAll('td[data-col]')].map(td => td.dataset.col + '=' + td.textContent.trim());
+    out.ths = [...tbl.querySelectorAll('thead th')].map(th => th.textContent).filter(Boolean);
+    /* THE STICKINESS HALF: an over-cap list must CONVERGE on the cap, not be
+       re-published in full by the next person who presses the button. */
+    Reco.removeCorrectionCol('Description', 'p0');
+    await new Promise(r2 => setTimeout(r2, 350));
+    out.afterChipX = Reco.userPref(tplId, 'correctionCols');
+    const realConfirm = window.confirm;
+    window.confirm = () => true;
+    try { Reco.saveCorrectionColsAsTeam('p0'); await new Promise(r2 => setTimeout(r2, 500)); }
+    finally { window.confirm = realConfirm; }
+    out.teamAfterPublish = (live().correctionContextCols || []).slice();
+    return out;
+  }, [F6TPL, ERRTBL]);
+  note('R2-F6R', { resolved: r2f6.resolved, chips: r2f6.chips.length, cells: r2f6.cells });
+  check(r2f6.resolved.cols.length === 6 && r2f6.distinct === 6
+        && same(r2f6.resolved.cols, ['Centre', 'Description', 'Second Ref', 'Note', 'Acct', 'Calc']),
+    'R2-F6R: a twelve-name stored list with a repeat resolves to the SIX DISTINCT names the cap allows, in '
+    + 'stored order', r2f6.resolved);
+  check(r2f6.chips.length === 6,
+    'R2-F6R: and the chip row speaks for what is rendered — twelve chips, six of which produce no cell, is '
+    + 'the panel describing a list the table is not printing', r2f6.chips);
+  /* The wording changed when the cap moved off the resolver and onto the render
+     path: the panel now states HOW MANY are held back rather than where the list
+     was cut, because the two were not the same number. The assertion is stricter
+     than it was — it pins the COUNT (5 of the 11 live names, 6 rendered) as well
+     as the cap, so a panel that says "6 more" or omits the sentence both fail. */
+  check(/5 more not shown \(up to 6 columns\)/.test(r2f6.chrome),
+    'R2-F6R: and the panel says how many the cap held back, beside the line that counts dead names',
+    r2f6.chrome);
+  check(r2f6.cells.length === 6 && new Set(r2f6.cells).size === 6
+        && r2f6.ths.length === new Set(r2f6.ths).size,
+    'R2-F6R: six context cells and no entry repeated — read as name=VALUE, so a duplicate printing the same '
+    + 'number twice cannot pass as two distinct columns', { cells: r2f6.cells, ths: r2f6.ths });
+  check((r2f6.afterChipX || []).length === 5,
+    'R2-F6R: one chip × on that list writes FIVE names to this person\'s store, not eleven', r2f6.afterChipX);
+  check(r2f6.teamAfterPublish.length === 5,
+    'R2-F6R: and the next publish CONVERGES on the cap instead of putting the over-cap list back on the share',
+    r2f6.teamAfterPublish);
+
+  /* THE REGRESSION GUARD for the all-dead per-user list (finding F2 of the
+     five that were handled, section [F5] above): the tri-state fallthrough
+     must keep testing the FILTER result and not the slice. It is a guard,
+     not a discriminator — slicing a non-empty list cannot make it empty
+     while CORR_CTX_CAP is above zero — and it is here because this is the
+     edit that could have broken it. */
+  const r2f6c = await page.evaluate(async (tplId) => {
+    const live = () => AppState.recoTemplates.find(x => x.id === tplId);
+    live().correctionContextCols = ['Centre', 'Note', 'Calc'];
+    Reco.userPref(tplId, 'correctionCols', ['Note', 'Calc']);
+    RecoTemplate.edit(tplId);
+    RecoTemplate._editing.additionalColumns = [];
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    AppState.activeRecoId = tplId;
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 200));
+    const r = Reco.correctionCols(live(), AppState.recoSessions[tplId]);
+    const out = { team: (live().correctionContextCols || []).slice(),
+                  cols: r.cols.slice(), scope: r.scope, dropped: r.dropped };
+    Reco.userPref(tplId, 'correctionCols', null);
+    return out;
+  }, F6TPL);
+  check(r2f6c.scope === 'team' && same(r2f6c.cols, ['Centre']),
+    'R2-F6R: a per-user list whose every name was removed from the template the real way STILL falls '
+    + 'through to the surviving team name — the slice did not break the tri-state fallthrough', r2f6c);
+
+  } catch (e) { check(false, '[R2-F6R] the over-cap stored list could not be exercised at all',
+    String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
+
+  /* ====================================================================
+     R2-F7 — the picker said "not shown" about a column this tab shows. The
+     note is pickerCatalog's and is true of the GRID (it means "not in
+     displayColumns"); the correction tab ignores displayColumns entirely.
+     Someone picking columns reads it as "ticking this does nothing" and
+     skips the column they wanted — and in the other direction, a column
+     deliberately taken off Display Columns can be published to every
+     colleague's correction screen while the publisher is being told it will
+     not appear.
+     ==================================================================== */
+  section('R2-F7', 'R2-F7: the picker does not call a column "not shown" when this tab shows it');
+  try {
+
+  const F7TPL = 'tpl_r2_f7';
+  await page.evaluate(async (tplId) => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = tplId; t.name = 'HIDDEN RECON';
+    t.columns = ['Doc', 'Ref', 'Hidden1', 'Amount'].map(n => ({
+      name: n, label: n, formats: n === 'Ref' ? ['AA-DDDD'] : [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    /* DELIBERATELY WITHOUT 'Hidden1': Display Columns is what the note is
+       about, and this tab does not consult it. */
+    t.displayColumns = ['Doc', 'Ref', 'Amount'];
+    t.enableCorrections = true; t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(tplId); App.closeModal();
+    const sess = AppState.recoSessions[tplId];
+    Reco.ensureSessionShape(sess);
+    sess.data = [{ _id: tplId + '_r0', _pk: 'HD0', _ver: 'upload', Doc: 'HD0', Ref: 'bad ref',
+                   Hidden1: 'H-0', Amount: '100' }];
+    sess._autoLoadAttempted = true;
+    sess.activeSection = 'correction';
+    AppState.activeRecoId = tplId;
+    AppState._correctionCol = 'Ref';
+    Reco.userPref(tplId, 'correctionCols', null);
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 200));
+  }, F7TPL);
+  await page.click('#recoContentArea .corr-ctx button');
+  await page.waitForSelector('#cpPanes label', { timeout: 5000 });
+  const r2f7 = await page.evaluate(() => {
+    /* By the name in the checkbox's OWN handler, not by a substring of the
+       label, exactly as T9 does. */
+    const rowFor = n => [...document.querySelectorAll('#appModal label.inline')]
+      .find(l => { const i = l.querySelector('input');
+                   return i && (i.getAttribute('onchange') || '').indexOf("toggle('" + n + "'") >= 0; });
+    const noteOf = n => { const l = rowFor(n); if (!l) return null;
+      const s = l.querySelector('span.text-muted');
+      return { note: s ? s.textContent.trim() : '', text: l.textContent.replace(/\s+/g, ' ').trim() }; };
+    const tpl = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+    const sess = AppState.recoSessions[AppState.activeRecoId];
+    return { hidden: noteOf('Hidden1'), active: noteOf('Ref'), amount: noteOf('Amount'),
+             gridVisible: Reco.visibleBase(tpl, sess, { includeHidden: true }),
+             catalogNote: (Reco.pickerCatalog(tpl, sess).find(c => c.name === 'Hidden1') || {}).note };
+  });
+  note('R2-F7 picker', r2f7);
+  check(r2f7.gridVisible.indexOf('Hidden1') === -1 && r2f7.catalogNote === 'not shown',
+    'the premise: the column really is off Display Columns, and pickerCatalog still says so — the two '
+    + 'other pickers that read that note are right to show it (run_colorder T12 pins the string)', r2f7);
+  check(!!r2f7.hidden && !/not shown/.test(r2f7.hidden.text),
+    'R2-F7: the CORRECTION picker does not say "not shown" about a column this tab shows', r2f7.hidden);
+  check(!!r2f7.hidden && /shown here/i.test(r2f7.hidden.note),
+    'R2-F7: it says what is true on this tab instead', r2f7.hidden);
+  check(!!r2f7.active && /already shown as Current Value/i.test(r2f7.active.text),
+    'R2-F7: and the two notes this picker already set are untouched', r2f7.active);
+  /* A REAL CLICK on the checkbox, then the real Done button. */
+  await page.evaluate(() => {
+    const l = [...document.querySelectorAll('#appModal label.inline')]
+      .find(x => { const i = x.querySelector('input');
+                   return i && (i.getAttribute('onchange') || '').indexOf("toggle('Hidden1'") >= 0; });
+    l.querySelector('input').click();
+  });
+  await page.click('#appModalFooter button.success');
+  await page.waitForTimeout(450);
+  const r2f7b = await page.evaluate((arg) => {
+    const [tplId, ERRTBL] = arg;
+    const errTbl = new Function('return ' + ERRTBL)();
+    const panel = document.querySelector('#recoContentArea .panel');
+    const tr = errTbl(panel).querySelector('tbody tr');
+    const cell = tr.querySelector('td[data-col="Hidden1"]');
+    const out = { stored: Reco.userPref(tplId, 'correctionCols'), cell: cell ? cell.textContent.trim() : null };
+    Reco.userPref(tplId, 'correctionCols', null);
+    return out;
+  }, [F7TPL, ERRTBL]);
+  check(same(r2f7b.stored, ['Hidden1']) && r2f7b.cell === 'H-0',
+    'R2-F7: and the column the operator ticked renders WITH ITS VALUE, which is what makes the old note '
+    + 'false on this tab', r2f7b);
+
+  } catch (e) { check(false, '[R2-F7] the picker note could not be exercised at all',
+    String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
+
+  /* ====================================================================
+     R2-F12 — the early stop was matched by NAME, so two added columns
+     sharing a name stopped the walk at the FIRST of them, before the chosen
+     column, and the context cell rendered BLANK while the grid showed the
+     value. An empty "Approved by" beside a bad reference is a different
+     decision from "this screen could not work it out", and nothing on
+     screen said which it was.
+
+     The fixture is built from the TWO ORDINARY GESTURES that reach the
+     shape — a session-only column, then a template column of the same name
+     — because saveTemplate has no session and cannot see the collision.
+     That is the reachability half, and it is asserted, not assumed.
+     ==================================================================== */
+  section('R2-F12', 'R2-F12: two added columns sharing a name do not stop the walk before the chosen one');
+  try {
+
+  const F12TPL = 'tpl_r2_f12';
+  const r2f12 = await page.evaluate(async (arg) => {
+    const [tplId, ERRTBL] = arg;
+    const errTbl = new Function('return ' + ERRTBL)();
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = tplId; t.name = 'DUPNAME RECON';
+    t.columns = ['Doc', 'Ref', 'Amount'].map(n => ({
+      name: n, label: n, formats: n === 'Ref' ? ['AA-DDDD'] : [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Ref', 'Amount'];
+    t.enableCorrections = true; t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(tplId); App.closeModal();
+    const live = () => AppState.recoTemplates.find(x => x.id === tplId);
+    const sess0 = AppState.recoSessions[tplId];
+    Reco.ensureSessionShape(sess0);
+    sess0.data = [{ _id: tplId + '_r0', _pk: 'FD0', _ver: 'upload', Doc: 'FD0', Ref: 'bad ref', Amount: '100' }];
+    sess0._autoLoadAttempted = true;
+    sess0.activeSection = 'correction';
+    AppState.activeRecoId = tplId;
+    AppState._correctionCol = 'Ref';
+    const out = {};
+
+    /* GESTURE 1 — "+ Col", session-only. */
+    window.__toasts = [];
+    Reco.ssOpenAddColModal();
+    await new Promise(r => setTimeout(r, 140));
+    document.getElementById('ssNewColName').value = 'Note';
+    const persist = document.getElementById('ssNewColPersist');
+    if (persist) persist.checked = false;
+    Reco.ssCommitAddCol();
+    await new Promise(r => setTimeout(r, 300));
+    out.addToasts = (window.__toasts || []).map(x => x.msg);
+    out.sessExtras = (AppState.recoSessions[tplId].extraColumns || []).map(a => a.name);
+
+    /* GESTURE 2 — the template editor adds a column of the same name, which
+       it cannot see, and one more AFTER it. */
+    window.__toasts = [];
+    RecoTemplate.edit(tplId);
+    RecoTemplate._editing.additionalColumns = [
+      { name: 'Note', type: 'custom' },
+      { name: 'Reviewer', type: 'formula', formula: 'CONCAT("rev-",{Doc})' }];
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 300));
+    out.saveToasts = (window.__toasts || []).map(x => x.msg);
+    out.extrasOrder = (live().additionalColumns || []).map(a => a.name)
+      .concat((AppState.recoSessions[tplId].extraColumns || []).map(a => a.name));
+    out.upto = Reco._corrUpto(live(), AppState.recoSessions[tplId], ['Reviewer']);
+
+    /* THE GRID, so the comparison is against a RENDERED cell. */
+    const sess = AppState.recoSessions[tplId];
+    AppState.activeRecoId = tplId;
+    sess.activeSection = 'action';
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 350));
+    const gtr = document.querySelector('.reco-table-wrap tbody tr');
+    const grid = {};
+    [...(gtr ? gtr.querySelectorAll('td[data-col]') : [])].forEach(td => { grid[td.dataset.col] = td.textContent.trim(); });
+    out.grid = grid;
+
+    /* THEN the correction tab with 'Reviewer' chosen. */
+    Reco.userPref(tplId, 'correctionCols', ['Reviewer']);
+    sess.activeSection = 'correction';
+    window.__evals = {};
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 350));
+    const panel = document.querySelector('#recoContentArea .panel');
+    const rows = [...errTbl(panel).querySelectorAll('tbody tr')];
+    out.rendered = rows.length;
+    const cell = rows[0].querySelector('td[data-col="Reviewer"]');
+    out.corr = cell ? cell.textContent.trim() : null;
+    out.evals = JSON.parse(JSON.stringify(window.__evals || {}));
+
+    /* AND THE TYPED VALUE: the same column as the free-text tag "+ Col"
+       actually creates, with a value the operator typed. */
+    RecoTemplate.edit(tplId);
+    RecoTemplate._editing.additionalColumns = [
+      { name: 'Note', type: 'custom' }, { name: 'Reviewer', type: 'custom' }];
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 300));
+    const sess2 = AppState.recoSessions[tplId];
+    sess2.manualTags = sess2.manualTags || {};
+    sess2.manualTags[Reco._tagKey(sess2.data[0], 'Reviewer')] = 'Approved by AR';
+    sess2.activeSection = 'correction';
+    AppState.activeRecoId = tplId;
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 350));
+    const tr2 = errTbl(document.querySelector('#recoContentArea .panel')).querySelector('tbody tr');
+    const c2 = tr2.querySelector('td[data-col="Reviewer"]');
+    out.typed = c2 ? c2.textContent.trim() : null;
+    Reco.userPref(tplId, 'correctionCols', null);
+    return out;
+  }, [F12TPL, ERRTBL]);
+  note('R2-F12', { extras: r2f12.extrasOrder, upto: r2f12.upto, grid: r2f12.grid,
+                   corr: r2f12.corr, typed: r2f12.typed, evals: r2f12.evals });
+  check(same(r2f12.extrasOrder, ['Note', 'Reviewer', 'Note'])
+        && r2f12.addToasts.some(m => /session-only/.test(m))
+        && r2f12.saveToasts.some(m => /Template saved/.test(m)),
+    'R2-F12 REACHABILITY: two ordinary gestures and no file import produce two added columns sharing a '
+    + 'name — "+ Col" session-only, then the template editor, which has no session to check against',
+    { extras: r2f12.extrasOrder, add: r2f12.addToasts, save: r2f12.saveToasts });
+  check(r2f12.grid.Reviewer === 'rev-FD0',
+    'the premise: the GRID renders the chosen column\'s value, so a blank context cell is a divergence and '
+    + 'not an empty column', r2f12.grid);
+  check(r2f12.corr === 'rev-FD0' && r2f12.corr === r2f12.grid.Reviewer,
+    'R2-F12: the context cell is CHARACTER FOR CHARACTER the grid\'s cell — the walk is no longer stopped '
+    + 'at the first extra that happens to share a name with the one after the chosen column',
+    { corr: r2f12.corr, grid: r2f12.grid.Reviewer, upto: r2f12.upto });
+  check(r2f12.evals.Reviewer === r2f12.rendered && r2f12.rendered > 0,
+    'R2-F12: and it was EVALUATED once per rendered row — counting, because _extraOwnValue catches its own '
+    + 'throw and an empty cell from any other cause would otherwise look the same',
+    { evals: r2f12.evals, rendered: r2f12.rendered });
+  check(r2f12.typed === 'Approved by AR',
+    'R2-F12: and a value the operator TYPED into that column reads back in the context cell — an empty '
+    + '"Approved by" beside a bad reference says nobody signed it off', r2f12.typed);
+
+  } catch (e) { check(false, '[R2-F12] the duplicate added-column name could not be exercised at all',
     String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
 
   const toasts = await readToasts(page);

@@ -72,16 +72,28 @@ from that tab was how a cross-pane mix-up could reach the shared correction mast
 On the Correction tab, **Show columns…** picks any columns of the template — file
 columns, added columns, formula columns and master lookups alike — and shows them
 read-only beside each bad value, so you can tell what the value should be without
-leaving the tab. They show exactly what the grid shows: a date held as an Excel serial
-reads `01/01/24`, not `45292`, a lookup reads the looked-up value, and a cell someone
-has formatted in the Excel view reads the way it reads there — a VAT rate formatted as
-a percentage is `5.00%` on both screens, not `5.00%` on one and `0.05` on the other.
+leaving the tab. They read the way the grid's own read-only cells read: a date held as
+an Excel serial reads `01/01/24`, not `45292`; a lookup reads the looked-up value; and a
+VAT rate formatted as a percentage is `5.00%` on both screens, not `5.00%` on one and
+`0.05` on the other. (An *editable* column carrying a number format is the one
+exception — the grid shows it in an input box, unformatted, so `10` there can read
+`10.00` here.)
+
+Up to six columns are shown at once. Anything beyond that, and anything already on the
+row as its key or as the value you are correcting, stays in the chip row and the tab
+says how many and why — so a list of nine never quietly renders as four.
 
 The choice is **yours, on this PC** — it never goes near the shared folder, so nobody
 else's list changes when you pick one. **Save as the team default** publishes it (behind
 a confirm that says so) as the starting list for every colleague who has not chosen
 their own; their own choices still win. **Clear** and a chip's `×` only ever touch your
 own list — they cannot delete the team's.
+
+When the list in force is the team's, the tab says whose it is and when they set it
+(*the team default - set by Priya on 01-Oct-26*), and the confirm says the same before
+you replace theirs. A column that exists only in this session's loaded data cannot be a
+team default: the app names it — in the confirm, or in a message if that leaves
+nothing to publish — and it stays on your own list.
 
 Once you have chosen for yourself you are no longer following the team, and the tab says
 so (*your own choice*). **Follow the team default** gives your own choice up again and
@@ -116,8 +128,8 @@ node tests/e2e/run_jv_wizard_e2e.mjs    # the Special JV creator wizard, end to 
 
 Run them one at a time — each binds a fixed port block (`run_jv_core_unit.mjs` needs
 neither a port nor a browser, and takes about a second). All sixteen must pass:
-75 pytest cases (1 skipped), and `1,979` end-to-end checks — 250 + 73 + 41 + 63 + 94
-+ 107 + 100 + 145 + 123 + 301 + 254 + 123 + 79 + 107 + 119, in the order above.
+75 pytest cases (1 skipped), and `2,019` end-to-end checks — 250 + 73 + 41 + 63 + 94
++ 107 + 100 + 145 + 163 + 301 + 254 + 123 + 79 + 107 + 119, in the order above.
 
 A count that has gone **down** is a regression, not a tidy-up: these suites only ever
 grow, and each one's header comment names the gates it exists to hold.

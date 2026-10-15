@@ -11571,7 +11571,14 @@ defaultTemplate() {
        removed on purpose. */
     if (Array.isArray(t.correctionContextCols)) {
       t.correctionContextCols = t.correctionContextCols.filter(n => allNames.has(n));
-      if (!t.correctionContextCols.length) delete t.correctionContextCols;
+      /* The publisher stamp goes with the field here too, or the template
+         keeps claiming a publisher for a list this save has just removed -
+         and the chip row now reads that stamp out loud. */
+      if (!t.correctionContextCols.length) {
+        delete t.correctionContextCols;
+        delete t.correctionContextColsBy;
+        delete t.correctionContextColsAt;
+      }
     }
 
     /* Publishing a team order is not a screen preference: it is the column
@@ -15819,12 +15826,20 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
   },
 
   /* Copy of a row with every additional column (template + session) filled
-     in, in declaration order. Stops before `uptoName` when given. */
+     in, in declaration order. Stops BEFORE `uptoName` when given a name, and
+     AFTER that index when given a number. */
   _rowWithExtras(tpl, sess, row, uptoName, ctx) {
     const out = Object.assign({}, row);
     const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
-    for (const ac of extras) {
-      if (uptoName != null && ac.name === uptoName) break;
+    /* THE NUMBER EXISTS BECAUSE A NAME IS AMBIGUOUS: two added columns may
+       share one, and the first of them then stopped a walk that was meant to
+       stop at the second. The name form is kept because _extraValueForRow
+       asks "everything declared before THIS column", which is a name
+       question - its own caller holds the definition, not an index. */
+    const byIdx = (typeof uptoName === 'number');
+    for (let i = 0; i < extras.length; i++) {
+      const ac = extras[i];
+      if (uptoName != null && (byIdx ? i > uptoName : ac.name === uptoName)) break;
       out[ac.name] = Reco._extraOwnValue(tpl, sess, out, row, ac, ctx);
     }
     return out;
@@ -19228,8 +19243,20 @@ renderRecoTable(tpl, sess) {
     else if (team)   { raw = team;   scope = 'team'; }
     else if (legacy) { raw = legacy; scope = 'legacy'; }
     const known = Reco._corrKnown(tpl, sess);
-    let cols = raw.filter(n => known.has(n));
-    let dropped = raw.length - cols.length;
+    /* BOUNDED AND DE-DUPLICATED HERE, where the tri-state is already decided.
+       The cap was enforced in the picker and - since the keyless duplicate -
+       on the render, but the resolver still answered with the raw list, and
+       the chip row, removeCorrectionCol and the team publish all read THAT.
+       So the panel said twelve while the table printed six, with nothing on
+       screen to say so, and an over-cap list was sticky: the next publish put
+       the whole of it back on the share instead of converging on the cap.
+       `dropped` counts names NO LONGER IN THE TEMPLATE and nothing else - a
+       repeat is not a dead name and must not be reported as one, or the chip
+       row says a column was removed from a template that still has it. */
+    const liveNames = a => [...new Set(a.filter(n => known.has(n)))];
+    const deadCount = a => a.filter(n => !known.has(n)).length;
+    let seen = liveNames(raw);
+    let dropped = deadCount(raw);
     /* A PER-USER LIST THAT LOST EVERY NAME IS NOT AN EMPTY CHOICE. [] is the
        tri-state's "I want none" and still outranks everything below it - that
        is what Clear writes and T7 pins. A list that HAD names and lost all of
@@ -19242,16 +19269,31 @@ renderRecoTable(tpl, sess) {
        allNames by saveTemplate (decision I) so an all-dead team list is a
        transient, and what sits below it is the legacy session field, which is
        [] in every real session. */
-    if (scope === 'mine' && raw.length && !cols.length) {
+    /* TESTED ON THE FILTER RESULT, NEVER ON THE SLICE. A twelve-name list
+       that slices to six has not "lost every name", and the slice is taken
+       below precisely so this decision cannot see it. */
+    if (scope === 'mine' && raw.length && !seen.length) {
       const next = team || legacy;
-      const nc = next ? next.filter(n => known.has(n)) : [];
-      if (nc.length) {
-        cols = nc;
-        dropped += next.length - nc.length;
+      const ns = next ? liveNames(next) : [];
+      if (ns.length) {
+        seen = ns;
+        dropped += deadCount(next);
         scope = team ? 'team' : 'legacy';
       }
     }
-    return { cols: cols, dropped: dropped, scope: scope };
+    /* `capped` is a different sentence from `dropped`: these columns exist
+       and are chosen, and the cap is what is holding them back. The RENDER
+       path keeps its own cap (see the ctxShown loop) - it is the one that
+       must hold, because a future caller rendering from a list it built
+       itself would bypass this one. */
+    const cols = seen.slice(0, Reco.CORR_CTX_CAP);
+    /* `all` is the uncapped live list, and the renderer needs it because the
+       cap must be spent on the names that will ACTUALLY render. `cols` stays
+       exactly what it was: the chip row speaks for it (decision F) and
+       saveCorrectionColsAsTeam publishes from it, so filtering it here would
+       quietly drop the key column out of a team default. */
+    return { cols: cols, all: seen, dropped: dropped,
+             capped: seen.length - cols.length, scope: scope };
   },
 
   /* THE EARLY STOP (S1's uptoName). _rowWithExtras breaks BEFORE the extra it
@@ -19262,17 +19304,25 @@ renderRecoTable(tpl, sess) {
      measured 4,009 ms, PER RENDER, and applyCorrection ends in
      App.navigate('reco') so every Apply click paid it again.
      null when no chosen column is an additional column at all, which is the
-     common case and costs nothing: no enriched row is built. `upto`
-     undefined means "walk them all" - the last chosen extra IS the last
-     declared one. */
+     common case and costs nothing: no enriched row is built. What is returned
+     is the INDEX of the last chosen extra, and _rowWithExtras breaks AFTER
+     it, so a chosen extra that is the last declared one walks them all. */
   _corrUpto(tpl, sess, cols) {
     const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
     const want = new Set(cols);
     let last = -1;
     extras.forEach((ac, i) => { if (ac && ac.name && want.has(ac.name)) last = i; });
     if (last < 0) return null;
-    const next = extras[last + 1];
-    return { upto: (next && next.name) ? next.name : undefined };
+    /* A POSITION, NOT A NAME. Two added columns may legitimately share a
+       name - a session-only column and a template column of that name
+       collide, because ssCommitAddCol and saveTemplate each refuse only the
+       duplicates they can SEE and saveTemplate has no session - and the name
+       of the extra after the chosen one then matched an EARLIER extra, so the
+       walk stopped before the chosen column and its context cell rendered
+       BLANK while the grid showed the value. An empty "Approved by" beside a
+       bad reference is a different decision from "this screen could not work
+       it out", and nothing on screen said which it was. */
+    return { upto: last };
   },
 
   /* "Show 200 more" raises this. MODULE-LEVEL on purpose: it is not a
@@ -19357,10 +19407,22 @@ renderRecoTable(tpl, sess) {
        the stored list is panel-wide and a name that vanishes from the picker
        is a name the operator cannot see they still have. */
     const pkSet = new Set(tpl.primaryKeys || []);
+    /* AND THE THIRD ARM IS RE-MAPPED TOO. pickerCatalog's "not shown" means
+       "not in displayColumns": true of the GRID, false here, because this tab
+       renders every chosen name and never consults displayColumns. Someone
+       picking columns read it as "ticking this does nothing" and skipped the
+       column they wanted; in the other direction a column deliberately taken
+       off Display Columns could be published onto every colleague's
+       correction screen while the publisher was told it would not appear.
+       Fixed HERE and not in pickerCatalog: the template editor's Display
+       Order picker and "Column order - my view" both show that note
+       correctly, and run_colorder_e2e's T12 pins the exact string. */
     const catalog = Reco.pickerCatalog(tpl, sess).map(c => (c.name === activeCol
       ? Object.assign({}, c, { disabled: true, note: 'already shown as Current Value' })
       : (pkSet.has(c.name)
-        ? Object.assign({}, c, { disabled: true, note: 'already shown as the key' }) : c)));
+        ? Object.assign({}, c, { disabled: true, note: 'already shown as the key' })
+        : (c.note === 'not shown'
+          ? Object.assign({}, c, { note: 'not in the grid - shown here' }) : c))));
     Reco._corrPick = { paneKey: S.paneKey, tplId: S.id };
     ColPicker.openSet({
       title: 'Columns to show beside the value',
@@ -19456,6 +19518,19 @@ renderRecoTable(tpl, sess) {
     U.toast('Following the team default for ' + S.tpl.name + ' from now on', 'success');
   },
 
+  /* WHO PUBLISHED THE TEAM DEFAULT AND WHEN, in the one format
+     _displayOrderSection already uses for the team column order, so the two
+     screens agree. '' when there is no stamp - and the stamp is deleted
+     beside the field in both places that delete the field, so this can never
+     name a publisher for a list that is not there. One spelling, two readers
+     (the confirm and the chip row). */
+  _corrTeamBy(tpl) {
+    if (!tpl || !(tpl.correctionContextColsBy || tpl.correctionContextColsAt)) return '';
+    const at = tpl.correctionContextColsAt ? new Date(tpl.correctionContextColsAt) : null;
+    const when = (at && !isNaN(at.getTime())) ? U.fmtDate(at, 'DD-MMM-YY') : '';
+    return 'set by ' + (tpl.correctionContextColsBy || 'unknown') + (when ? ' on ' + when : '');
+  },
+
   /* THE ONLY WRITER OF tpl.correctionContextCols, and it confirms first.
      recoTemplates.json is on the shared folder, so this changes what every
      colleague who has not chosen for themselves sees on this tab, on every
@@ -19465,22 +19540,74 @@ renderRecoTable(tpl, sess) {
     const S = Reco._paneSel(paneKey);
     const tpl = S.tpl;
     if (!tpl || !S.sess) return;
-    const cols = Reco.correctionCols(tpl, S.sess).cols;
+    /* NARROWED TO TEMPLATE NAMES, because saveTemplate's prune cannot be
+       widened: it runs off allNames (file + added) and has no session in
+       scope, so it cannot tell a session-only column from a deleted one. A
+       session name that reached the share was therefore deleted from it by
+       the next unrelated template save - quietly, and with the prune's own
+       stated mitigation dead, because the name is REMOVED from the array
+       rather than left in it, so the read-time count is 0 and the chip row's
+       "N column(s) no longer in this template" line cannot fire.
+       THE READ KEEPS sess.extraColumns (_corrKnown): the per-person list
+       legitimately holds a session column and renders it with its value, so
+       narrowing the read would break that and silently zero that count. It
+       is the PUBLISH that has to be narrowed. */
+    const picked = Reco.correctionCols(tpl, S.sess).cols;
+    const tplNames = new Set((tpl.columns || []).map(c => c && c.name)
+      .concat((tpl.additionalColumns || []).map(a => a && a.name)).filter(Boolean));
+    const cols = picked.filter(n => tplNames.has(n));
+    const sessionOnly = picked.filter(n => !tplNames.has(n));
+    const sessMsg = sessionOnly.length
+      ? sessionOnly.join(', ') + (sessionOnly.length === 1 ? ' is' : ' are')
+        + " only in this session's data, so " + (sessionOnly.length === 1 ? 'it cannot' : 'they cannot')
+        + ' be a team default - ' + (sessionOnly.length === 1 ? 'it stays' : 'they stay') + ' on your own list.'
+      : '';
+    /* A CHOSEN LIST THAT IS NOTHING BUT SESSION COLUMNS IS REFUSED. With the
+       filter in place it resolves to [], which is the "Clear the team
+       default" branch - one click from "publish this column" to deleting a
+       colleague's published list. Two readings are possible, so this does
+       neither and says which. */
+    if (!cols.length && sessionOnly.length) {
+      U.toast(sessMsg + ' There is nothing else chosen to publish, so the team default was not changed.', 'error');
+      return;
+    }
     const was = Array.isArray(tpl.correctionContextCols) ? tpl.correctionContextCols : [];
+    /* SAID ON THIS BRANCH TOO: the filtered list can equal what is already
+       published, and then the operator is told their click was a no-op -
+       true of the published list, and silent about the name that is not in
+       it, which is the one thing they pressed the button to find out. */
     if (JSON.stringify(was) === JSON.stringify(cols)) {
-      U.toast('These are already the team default for ' + tpl.name, 'success');
+      U.toast('These are already the team default for ' + tpl.name
+        + (sessMsg ? ' - ' + sessMsg : ''), 'success');
       return;
     }
     const head = cols.length
       ? 'Make these the team default for ' + tpl.name + '?\n\n    ' + cols.join(', ')
       : 'Clear the team default for ' + tpl.name + '?';
-    if (!confirm(head + (was.length ? '\n\nToday it is:\n\n    ' + was.join(', ') : '')
+    /* WHOSE LIST IS ABOUT TO BE OVERWRITTEN, AND WHEN THEY SET IT. The
+       button sits two pixels from Clear and the confirm showed a colleague's
+       columns without saying they were hers, although the template holds
+       both facts. */
+    const byAt = Reco._corrTeamBy(tpl);
+    if (!confirm(head + (was.length ? '\n\nToday it is' + (byAt ? ' (' + byAt + ')' : '')
+        + ':\n\n    ' + was.join(', ') : '')
+      + (sessMsg ? '\n\n' + sessMsg : '')
       + '\n\nEvery colleague who has not chosen their own will see these on the Correction tab, on '
       + 'every PC. Anyone who has already chosen keeps their own.')) return;
-    if (cols.length) tpl.correctionContextCols = cols;
-    else delete tpl.correctionContextCols;
-    tpl.correctionContextColsBy = AppState.currentUser || 'unknown';
-    tpl.correctionContextColsAt = new Date().toISOString();
+    /* THE STAMP GOES WITH THE FIELD, BOTH WAYS. It used to be written after
+       the else branch that had just DELETED the list it describes, so an
+       un-published template claimed a publisher for a list that is not
+       there: latent while nothing read the stamp, a visible lie the moment
+       the chip row does. */
+    if (cols.length) {
+      tpl.correctionContextCols = cols;
+      tpl.correctionContextColsBy = AppState.currentUser || 'unknown';
+      tpl.correctionContextColsAt = new Date().toISOString();
+    } else {
+      delete tpl.correctionContextCols;
+      delete tpl.correctionContextColsBy;
+      delete tpl.correctionContextColsAt;
+    }
     AppState.saveKeys('recoTemplates');
     Reco._corrRepaint(S);
     U.toast('Saved as the team default for ' + tpl.name, 'success');
@@ -19493,7 +19620,7 @@ renderRecoTable(tpl, sess) {
      chip row, which PANE_IDS (a fixed list) cannot park. Every handler
      carries the pane key instead, exactly as the Apply button below does and
      for exactly the same reason. */
-  _corrChrome(tpl, sess, ctx, pkey) {
+  _corrChrome(tpl, sess, ctx, pkey, n) {
     let h = '<div class="corr-ctx" style="margin:6px 0;">';
     h += '<button class="small" onclick="Reco.openCorrectionCols(\'' + pkey + '\')" '
        + 'title="Pick columns to show read-only beside each bad value">Show columns…</button> ';
@@ -19538,13 +19665,36 @@ renderRecoTable(tpl, sess) {
            + 'Follow the team default</button>';
       }
     }
-    if (ctx.scope === 'team') h += ' <span class="text-muted" style="font-size:10px;">the team default</span>';
+    /* AND IT SAYS WHOSE IT IS. The stamp was write-only in the whole file,
+       so the correction tab's columns were "simply different one morning" -
+       the failure the stamp exists to prevent. Class only, NO id: this
+       renders once per pane, both panes can sit on this tab, and PANE_IDS is
+       a fixed, bounded list that cannot park a per-template name. */
+    if (ctx.scope === 'team') {
+      const teamBy = Reco._corrTeamBy(tpl);
+      h += ' <span class="text-muted" style="font-size:10px;">the team default'
+         + (teamBy ? ' - ' + U.esc(teamBy) : '') + '</span>';
+    }
     if (ctx.scope === 'legacy') h += ' <span class="text-muted" style="font-size:10px;">from this session (legacy)</span>';
     /* Counted, not announced: a column someone deleted from the template on
        purpose is not an error, but a list that silently shrinks is how an
        operator comes to believe the picker does not work. */
     if (ctx.dropped) h += ' <span class="text-muted" style="font-size:10px;">' + ctx.dropped
        + ' column(s) no longer in this template were left out</span>';
+    /* The chip row speaks for the resolved list, so when the cap has cut that
+       list the panel has to say so: twelve chips and six cells, silently, is
+       how an operator comes to believe the picker does not work.
+       TWO SEPARATE FACTS, and conflating them is what made the old sentence
+       false. A name held back by the cap is not shown at all; a name the row
+       already prints as its key or as the value being corrected IS on screen,
+       just not as a second column. Counted by the renderer (`n`), never from
+       where correctionCols happened to cut the list - that number did not know
+       which names this row prints by another route. */
+    const nCap = (n && n.heldBack) || 0, nElse = (n && n.elsewhere) || 0;
+    if (nCap) h += ' <span class="text-muted" style="font-size:10px;">' + nCap
+       + ' more not shown (up to ' + Reco.CORR_CTX_CAP + ' columns)</span>';
+    if (nElse) h += ' <span class="text-muted" style="font-size:10px;">' + nElse
+       + ' already on the row as the key or the value being corrected</span>';
     h += '</div>';
     return h;
   },
@@ -19595,7 +19745,6 @@ renderRecoTable(tpl, sess) {
     const okey = ((typeof Panes !== 'undefined' && Panes.owner()) || {}).key || 'p0';
     const pkey = U.jsq(okey);
     const ctx = Reco.correctionCols(tpl, sess);
-    h += Reco._corrChrome(tpl, sess, ctx, pkey);
 
     /* DECISION H. getRowPK returns null with no primaryKeys and
        applyCorrection's write is guarded by `if (pk)`, so on a keyless
@@ -19641,14 +19790,29 @@ renderRecoTable(tpl, sess) {
        reason: the picker is not the only way a list arrives. The chip row
        above still shows every stored name (decision F) - nothing the operator
        never removed vanishes from the panel; this bounds what is RENDERED. */
+    /* THE CAP IS SPENT ON WHAT RENDERS. It used to be applied by
+       correctionCols, which does not know which names this row already prints,
+       so two of the six slots went to the key and the column under correction:
+       an operator who chose nine saw FOUR cells and was told "only the first 6
+       are shown". Partitioning here fixes both halves - the six slots now go to
+       six columns the operator can actually read, and the sentence below is
+       computed from what was really held back rather than from where the list
+       happened to be cut. */
     const already = new Set(pks.concat(idCols).concat([col.name]));
     const ctxShown = [];
-    for (const n of ctx.cols) {
-      if (already.has(n)) continue;
-      already.add(n);
-      if (ctxShown.length >= Reco.CORR_CTX_CAP) break;
+    let elsewhere = 0;
+    for (const n of (ctx.all || ctx.cols)) {
+      if (already.has(n)) { elsewhere++; continue; }
+      already.add(n);                       // ...and never the same name twice
+      if (ctxShown.length >= Reco.CORR_CTX_CAP) continue;
       ctxShown.push(n);
     }
+    /* Counted off the loop, not off the list, so it cannot drift from it:
+       every live chosen name is either rendered, printed elsewhere on the row,
+       a repeat, or held back by the cap. */
+    const heldBack = (ctx.all || ctx.cols).length - ctxShown.length - elsewhere;
+    h += Reco._corrChrome(tpl, sess, ctx, pkey, { heldBack: heldBack, elsewhere: elsewhere });
+
     if (!pks.length) {
       h += '<div class="help" style="color:var(--danger, #dc2626);">This template has no primary key, so '
          + 'a correction here changes the rows in front of you but is saved nowhere - nothing reaches the '
@@ -23262,15 +23426,27 @@ renderCustomReport(tpl, sess, rpt, idx) {
         if (d.template && d.template.id && d.template.id !== id) {
           if (!confirm('This backup was taken from template "' + (d.template.name || d.template.id) + '", not "' + (cur ? cur.name : id) + '". Restore it into the current template anyway?' + revWarn)) return;
         } else if (!confirm('Replace the loaded data, manual offsets, corrections, document numbers and entries of this template with the backup?' + revWarn)) return;
-        /* The legacy shared column order is READ-ONLY (Reco._legacyTeamOrder),
-           and a restore is the second route that used to write it: the backup
+        /* THE TWO LEGACY SHARED FIELDS ARE READ-ONLY - the column order
+           (Reco._legacyTeamOrder) and #27's sess.correctionExtraCols - and a
+           restore is the second route that used to write them: the backup
            carries whatever array was on the session when it was taken, and
            assigning it republished that to the whole folder - either
            resurrecting an order the team had moved on from or wiping the one
-           they are using. Carry the stored value across untouched instead. */
+           they are using. Carry the stored values across untouched instead.
+           BOTH ARE NAMED HERE ON PURPOSE: the correction list was forgotten
+           when the order was patched, and the next legacy field would be
+           forgotten in exactly the same way. */
         if (d.session) {
-          const keepLegacy = (AppState.recoSessions[id] || {}).columnOrder || null;
-          d.session.columnOrder = keepLegacy;
+          const keptLegacy = AppState.recoSessions[id] || {};
+          d.session.columnOrder = keptLegacy.columnOrder || null;
+          /* #27 reads this as the BOTTOM fallback of Reco.correctionCols and
+             no build has ever written it, so a hand-edited backup was the one
+             route by which context columns nobody chose reached the single
+             shared recoSessions.json - labelled only "(legacy)", with no
+             publisher, no date, and no route in the app that clears it. The
+             `|| []` is ensureSessionShape's own default for a session that
+             never had the key. */
+          d.session.correctionExtraCols = keptLegacy.correctionExtraCols || [];
           /* Replaces the OWNED session and re-points every view at it. A
              direct write to AppState.recoSessions[id] would not be persisted,
              so the restored session would vanish on the next load and the

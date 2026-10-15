@@ -575,3 +575,182 @@ rule decides and the chain only decides what the value IS.
 `<td>`, correction context `<td>` — for a date column carrying a `numFmt`, asserted
 character for character. `run_correction_e2e` section `[F1]` is the two-screen half of
 exactly this comparison and is the pattern to extend.
+
+
+## T-C27-6  `App.importBackup` replaces the sessions wholesale and writes BOTH legacy view fields
+
+**Where** `apps/Reco.html` `App.importBackup` (`AppState.recoSessionsOwned = d.recoSessions`),
+against `Reco.restoreSession`, which now carries the STORED `columnOrder` **and**
+`correctionExtraCols` across untouched.
+
+**What** `restoreSession` is one of the two routes that used to write the read-only legacy
+view fields; `importBackup` is the other, and it has no guard for either. A backup taken
+while somebody had hand-edited `correctionExtraCols` — or taken from a build with a
+different `columnOrder` — republishes both to the one shared `recoSessions.json`, for
+every template in the file at once. Measured by the triage round: it writes
+`correctionExtraCols` AND the `columnOrder` twin that `keepLegacy` exists to protect, so
+it bypasses #25's patch as well as the one #27 needed.
+
+**Why it is only a ticket** `importBackup` is wholesale BY DESIGN and its confirm says so
+in those words — "It REPLACES the templates, sessions, masters and entry history shared by
+everyone using this folder". It is pre-existing house behaviour, identical for #25's
+field, and narrowing it is a decision about what a whole-folder restore MEANS, not a #27
+defect. Folding it into `restoreSession`'s one-line fix would make a wholesale restore
+quietly partial, which is worse than either honest answer.
+
+**Fix** Decide, then do one of two things. If view fields are never restored: after the
+assignment, walk `AppState.recoSessionsOwned` and re-apply the stored value of every
+`Panes.VIEW_KEYS` field from the sessions that were there before — one loop over the
+whitelist, so the next legacy field is not forgotten the way this one was. If they are
+restored: leave the code and extend the confirm to enumerate the team settings a
+whole-folder restore replaces.
+
+**Test** Export a backup; hand-edit `recoSessions[id].correctionExtraCols` to two names and
+`columnOrder` to two others; import it with the confirm accepted; assert whichever decision
+was taken — either both fields hold the STORED values and the Correction tab shows no
+context column, or the confirm names them. Read the shared file back off the bridge, as
+`run_correction_e2e` `[R2-F5]` does, rather than trusting memory.
+
+
+## T-C27-7  `Reco._extraValueForRow` stops the extras walk by NAME, so a duplicate added-column name gives a wrong value to Find/Replace, exports, filters and the slicer
+
+**Where** `apps/Reco.html` `Reco._extraValueForRow` (`Reco.rowFull(tpl, sess, row, ac.name)`)
+and `_rowWithExtras`'s name branch.
+
+**What** The mechanism of the correction tab's R2-F12, in the caller that was NOT changed.
+With `additionalColumns` = [`Dup` = `"A"`, `Mid` = `"M"`, `Dup` = `CONCAT("x",{Mid})`],
+`Reco._extraValueForRow(…, extras[2])` returns `x` where the whole-row walk the grid uses
+returns `xM` — measured on this build and on `d9957fc`, so it is pre-existing. That helper
+feeds Find/Replace, the export type sniff, the grid filters and the slicer, so the
+consequence is a filter that hides a row it should show and a wrong value in an exported
+file, not just a blank cell.
+
+**Why it is only a ticket** Pre-existing and outside this tab, and the honest fix changes
+the CONTRACT of a helper with nine callers: `_rowWithExtras` would have to compare the
+extras ENTRY rather than its name. #27's path needed only an unambiguous stop and got one
+(an index); widening the contract wants its own commit and its own assertions across all
+nine callers.
+
+**Fix** Accept the entry itself, which is the real chokepoint — it closes the name
+ambiguity for every caller at once, this tab included:
+`if (upto != null && (typeof upto === 'number' ? i > upto : (typeof upto === 'object' ? ac === upto : ac.name === upto))) break;`
+with `_extraValueForRow` passing `ac`.
+
+**Test** That three-extra fixture: assert `Reco._extraValueForRow(tpl, sess, row, extras[2])`
+=== `'xM'` and equal to `Reco.rowFull(tpl, sess, row)['Dup']` character for character; then
+a grid filter on that column, asserting the row it should match is matched. Keep
+`run_correction_e2e` `[R2-F12]`'s assertions as the guard that the correction path stays
+right whichever form the stop takes.
+
+
+## T-C27-10  An OVER-CAP chosen list can show chips and cells that are different sets
+
+**Where** `apps/Reco.html` `Reco.correctionCols` (`const cols = seen.slice(0, Reco.CORR_CTX_CAP)`)
+feeds the chip row, while `_renderCorrectionInner`'s `ctxShown` loop builds the rendered set
+from `ctx.all` minus the names the row already prints.
+
+**What** Two lists, by necessity, and when the chosen list is BOTH over the cap AND contains a
+name the row prints elsewhere they can name different columns. Measured with a nine-name list
+whose first two are the key and the column under correction: the chip row shows
+[Doc, Ref, Centre, Description, Second Ref, Note] and the table renders
+[Centre, Description, Second Ref, Note, Acct, Calc] — so Acct and Calc render with no chip, and
+Doc and Ref have a chip but no column of their own. The panel's two counts still account for
+every name ("1 more not shown (up to 6 columns)" and "2 already on the row as the key or the
+value being corrected"), so nothing is unexplained; it is the chip MEMBERSHIP that is odd.
+
+**Why it is only a ticket** The state is not reachable through the app: the picker enforces
+`CORR_CTX_CAP`, so a list longer than six can only arrive from a hand-edited recoTemplates.json,
+`App.importBackup`, or a build with a different cap. At six or fewer — every state a user can
+create — the chip row is exactly the chosen list and the cells are that list minus what the row
+already prints, which is coherent and is what the two counts describe. And the two constraints
+that force two lists are both load-bearing: decision F requires the chip row to be panel-wide
+and STABLE ACROSS FORMAT TABS (the column under correction changes per tab, so a skip-filtered
+chip row makes a chip the operator never removed vanish when they switch — this is exactly what
+T9 and F2 caught when it was tried), and R2-F6R requires the chip row to be capped.
+
+**Fix** A third list: chips from the live chosen names capped at `CORR_CTX_CAP` but with the
+RENDERED names preferred — i.e. cap the renderable ones first, then fill the remaining slots
+with the skipped ones, so chips ⊇ cells always. About six lines in `correctionCols`, returning
+`{ cols, chips, all, dropped, capped, elsewhere }`.
+
+**Test** Section R2-F6R's own fixture, extended: assert every rendered `td[data-col]` name has a
+chip, and that the chip row is byte-identical on both format tabs (the T9 assertion) in the same
+run — the two halves must pass together or the fix has traded one for the other.
+
+## T-C27-8  The `rowFull` comments and the handover doc both describe a memo that has never existed
+
+**Where** `apps/Reco.html` `_fullPass()` (its whole body is `Reco._fullCache = { ctx: {} }`),
+the comment above `_fullCache` ("holds two things: the memo, keyed by row._id, and the
+Masters.indexFor context"), the comment above `rowFull` ("memoised for this pass"), and
+`docs/RECO_ARCHITECTURE_HANDOVER.md:166` ("there is deliberately **no** whole-row memo:
+uptoName is set on every real call").
+
+**And now stale in a second way.** The #27 correction round made `uptoName` polymorphic:
+`Reco._corrUpto` returns `{ upto: <index> }`, so the correction path passes a NUMBER while
+`_extraValueForRow`'s path passes a NAME, and two callers still pass neither
+(`apps/Reco.html:17355` and the suite's own whole-row read). Whoever fixes this ticket must
+correct that too — the handover line describes a single-shaped argument that no longer
+exists, which is worse than describing a memo that does not exist, because a reader will
+write `uptoName === someName` against it.
+
+**What** There is no row memo and there never was: two `rowFull(tpl, sess, row)` calls on
+the same row inside one pass pay two walks and two sets of per-extra evaluations. The two
+comments say there is one; the handover doc documents the absence with a reason that is
+itself false, because `apps/Reco.html:17340` and the correction panel's own no-`upto`
+branch both call `rowFull` with no `uptoName`. So the next person reads a contradiction in
+which both sides are partly wrong. Byte-identical on `d9957fc` — pre-existing, and #27
+added none of this text.
+
+**Why it is only a ticket** It is a documentation defect with no behaviour attached (the
+triage verdict on it is OUT_OF_SCOPE for this round), and the other way of resolving it —
+adding the memo — buys about 1 ms per render: 200 rows with one master_lookup over a
+50,000-row master and one formula measured 18 ms for one whole-row reader, 19 ms for two
+and 23 ms for three, against this suite's own T11 threshold of 1,500 ms for that shape.
+The pass already shares the expensive thing, which is the 50,000-entry index. A memo on
+the `uptoName` path would also hand a PARTIAL row to a caller that asked for a whole one,
+which is the one property the present comment gets right.
+
+**Fix** Cut the claims down to the code, in three places and with no behaviour change:
+`_fullCache`'s comment to "holds one thing: the Masters.indexFor context"; `rowFull`'s
+"memoised for this pass" to "threading this pass's Masters context; there is no whole-row
+memo"; and the handover line to keep "no whole-row memo" while dropping the `uptoName`
+justification, naming instead the two callers that pass none. Leave the
+`_fullPass()`/`_fullEnd()` pairing exactly as it is — a master index that outlives its
+render is a stale chart of accounts.
+
+**Test** Not a timing assertion. If anyone ever adds the memo, assert it by COUNT: two
+`rowFull(tpl, sess, row)` calls in one pass with `window.__evals` unchanged after the
+second, plus a negative assertion that `rowFull(tpl, sess, row, upto)` is never served
+from it — compare the returned object's key set against the full walk's.
+
+
+## T-C27-9  `saveTemplate` cannot see the session, so a template save can create two added columns with one name
+
+**Where** `apps/Reco.html` `RecoTemplate.saveTemplate`'s duplicate checks (over `t.columns`
++ `t.additionalColumns`) against `Reco.ssCommitAddCol`'s check (over those PLUS
+`sess.extraColumns`).
+
+**What** Two ordinary gestures reach a state that neither check refuses: **+ Col** adds a
+session-only column called `Note` (accepted — the template has no such name), and then the
+template editor adds an added column called `Note` (accepted — `saveTemplate` has no
+session in scope to look at). `_rowWithExtras` then evaluates both entries in turn,
+`visibleBase` de-duplicates so the grid draws one column, `_extraDef` resolves the first,
+and #27's early stop had to be re-based on a POSITION so that it stops at the right one
+(`run_correction_e2e` `[R2-F12]`, which builds the state from those two gestures).
+
+**Why it is only a ticket** The correction tab is correct in that state now, and the
+duplicate itself is pre-existing: the grid, the Excel view and every export have always
+collapsed it to one column. Refusing it means either making `saveTemplate` session-aware —
+which it is not, by design, and is the same reason F3's prune could not be widened — or
+refusing at a third place. Both are decisions about the template write path, which carries
+its own "KNOWN AND UNMITIGATED" staleness note and wants its own commit.
+
+**Fix** Refuse it where a session IS in scope. `Reco.ensureSessionShape` runs on every open
+of a reco: when a session extra's name is now held by a template column or an added column,
+say so with a toast naming the column and either drop the session entry or rename it to
+`<name> (session)`. That is one place, it is the only place that can see both lists, and it
+repairs an existing share on the next open rather than only refusing new ones.
+
+**Test** The two gestures of `[R2-F12]`: assert whichever refusal is chosen, with the toast
+naming the column, and keep `[R2-F12]`'s own assertions (the chosen context cell equals the
+grid's cell, character for character) as the guard for the state if it is allowed to stand.
