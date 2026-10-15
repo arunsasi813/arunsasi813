@@ -30,6 +30,29 @@ The first start asks for the base folder. Later changes go through **📁 Base f
 
 In a template's Reco view, **📗 Edit in Excel** writes the rows to a real Excel workbook (dropdowns for list columns, real dates and amounts, read-only columns greyed) and opens it in Microsoft Excel. Edit, press **Ctrl+S**, and Reco notices the save: click **Load back**, review the changes (and any conflicts with edits made in Reco meanwhile), and apply. Every applied change is recorded in the version history (`_src = excel:<id>`). **📗 Links** lists open workbooks; **Load from file…** loads a copy saved elsewhere. Without the new launcher (or without openpyxl) the workbook is downloaded instead and loaded back with *Load from file…* (no dropdowns). Details: handover §11.
 
+## A row key built from an added column
+
+A template's **Primary Key** can now include a column you added, as long as its value is worked
+out from the file's own columns — a **formula** (say `CONCAT({Doc},"-",{Line})`) or a **lookup
+into the accounts master**. Columns people type into cannot be key components, and the picker says
+why beside each box.
+
+The value is computed **once, when the data is loaded**, and frozen into the row. So if a
+colleague edits the accounts master next week, your rows keep the identity they were loaded with —
+and the cell shows **⚠ recalculated** if the two ever disagree, rather than quietly showing one
+value while the history, the offsets and the journal use another.
+
+Before an upload is written, Reco asks once if anything is wrong with the keys it worked out: a
+part that came out empty or `#ERR`, parts that are all blank, or a value containing the `||`
+separator. Each of those still *looks* like a key, so nothing later would refuse those rows and
+they would match no history. You can say no and nothing is written. Duplicate keys are only
+questioned when the key contains an added column — on a key made of file columns, several lines
+per document is just the shape of an AP extract, and that loads as it always did.
+
+Nothing is retroactive: data already loaded keeps its keys, and the **next** upload mints the new
+way. The confirm says so, and it now also fires when you change a key column's formula — which
+used to say nothing while the next upload detached the history. Details: handover §14.
+
 ## Reviewing side by side
 
 **⪿ Split** in the Reco toolbar opens a second pane beside the first. Use it to
@@ -117,6 +140,7 @@ node tests/e2e/run_xlview_e2e.mjs       # the in-app Excel view (jspreadsheet CE
 node tests/e2e/run_reports_e2e.mjs      # custom reports: what a filter means per column kind, cards, totals, CSV, 200k rows
 node tests/e2e/run_grid_scale_e2e.mjs   # the grid on a 200k-row extract: slicers, surgical updates, progress, navigation, sort order
 node tests/e2e/run_colorder_e2e.mjs     # the display column order: a team order, your own order on this PC, and the export following the team's
+node tests/e2e/run_pk_extras_e2e.mjs    # added columns in the row key: eligibility, the frozen value, the mint, and the question asked before the write
 node tests/e2e/run_correction_e2e.mjs   # the correction tab's context columns: byte-identical with none chosen, the cap and the Apply index, scope, truncation, two panes
 node tests/e2e/run_panes_e2e.mjs        # two panes side by side: session ownership, id parking, per-pane scroll, ledger-write refusals, one Excel link per pane
 node tests/e2e/run_reverse_e2e.mjs      # reversing a generated entry: cancel it if it never posted, contra it if it did
@@ -127,9 +151,9 @@ node tests/e2e/run_jv_wizard_e2e.mjs    # the Special JV creator wizard, end to 
 ```
 
 Run them one at a time — each binds a fixed port block (`run_jv_core_unit.mjs` needs
-neither a port nor a browser, and takes about a second). All sixteen must pass:
-75 pytest cases (1 skipped), and `2,019` end-to-end checks — 250 + 73 + 41 + 63 + 94
-+ 107 + 100 + 145 + 163 + 301 + 254 + 123 + 79 + 107 + 119, in the order above.
+neither a port nor a browser, and takes about a second). All seventeen must pass:
+75 pytest cases (1 skipped), and `2,187` end-to-end checks — 250 + 73 + 41 + 63 + 94
++ 107 + 100 + 145 + 168 + 163 + 301 + 254 + 123 + 79 + 107 + 119, in the order above.
 
 A count that has gone **down** is a regression, not a tidy-up: these suites only ever
 grow, and each one's header comment names the gates it exists to hold.

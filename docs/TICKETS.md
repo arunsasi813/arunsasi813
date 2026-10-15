@@ -754,3 +754,208 @@ repairs an existing share on the next open rather than only refusing new ones.
 **Test** The two gestures of `[R2-F12]`: assert whichever refusal is chosen, with the toast
 naming the column, and keep `[R2-F12]`'s own assertions (the chosen context cell equals the
 grid's cell, character for character) as the guard for the state if it is allowed to stand.
+
+
+## T-24R2-1  `saveTemplate`'s read-modify-write race now splits ROW IDENTITY, not just a column's values
+
+**Where** `apps/Reco.html` `RecoTemplate.saveTemplate`, the `KNOWN AND UNMITIGATED`
+comment above `if (!t.dataFolder) t.dataFolder = Versioning.folderFor(orig || t);`, against
+`RecoTemplate._openedWith`, which is captured at the end of the same function specifically so
+such a check could exist and is never consulted.
+
+**What** `AppState.recoTemplates` is read once at boot, `RecoTemplate.edit()` deep-clones, and
+this function replaces the whole stored object — so a field a colleague saved at 10:00 is
+reverted when a save goes out from a 09:00 clone. Pre-existing, and it affects every template
+field. #24 changes what it costs: `additionalColumns` is now part of what IDENTIFIES a row, so
+page A can edit a key formula and save (its confirm fires correctly), page B can then save a
+name change from its earlier clone and silently revert that formula, and the two of them start
+minting different `_pk` for the same invoice. One day file then holds two incompatible key
+schemes for the same business rows, reopening it from history gives one row per key, and the
+open-item total doubles with each half carrying only its own offsets and corrections. Nothing
+notices: B's clone and the stored template agree, so `defsMoved` is false, no confirm fires and
+`tplSignature` moves for neither of them.
+
+**Why it is only a ticket** Closing even the identity half means re-reading the stored template
+from the shared folder before writing, and every read of the share is a `fetch` through the
+bridge — so this is an `await` inside `saveTemplate`, i.e. the async template write path the
+existing comment already defers to its own commit. Every e2e fixture in the repo calls
+`RecoTemplate.saveTemplate()` synchronously and reads `AppState.recoTemplates` on the next line;
+making it async is a change to that contract and wants its own round with its own regression
+run. #24's own fix for the same hazard class — the definition-change confirm and the signature —
+is in and works for one page.
+
+**Fix** Bounded, not the whole race: before writing, re-read the stored template's
+`primaryKeys` plus the definitions of the columns in `Reco._keyDepNames(stored)`, and if they
+differ from `RecoTemplate._openedWith`'s, refuse the save with "someone else changed how this
+reconciliation identifies its rows while this editor was open — close it and open it again"
+rather than overwriting. Two fields, one read, no merge.
+
+**Test** Two pages on one share with the same template open in the editor; A edits a key
+formula and saves; B saves a NAME change from its earlier clone. Assert B is refused by that
+sentence, that `reco/recoTemplates.json` still holds A's formula, and then that one upload from
+each page writes ONE key scheme into `reco_data/<folder>/<MMM-YY>/<DD>.csv` — the measurement to
+beat is the 12 history rows for 4 business rows under two schemes that this race produces today.
+
+
+## T-24R2-2  A row added in the grid has no frozen key: on a DERIVED key it has no key at all, and on a typed key the key moves when the cell is edited
+
+**Where** `apps/Reco.html` `Reco.rowKey`'s `_ssAdded` branch
+(`if (row && row._ssAdded) return Reco.getRowPK(tpl, row) || null;`) against
+`Reco._ssBlankRow`, which deliberately writes no `_pk`.
+
+**What** Round 2 made a row typed in with **+ Row** answerable: `rowKey` works its key out
+from the key cells, which is the same key `Reco.applyEdits` already writes that row's history
+under, so its manual offset and its correction reach the shared masters and are applied when the
+extract next contains that key. Two things are still true of such a row and of no other row:
+
+1. **Its key is not frozen.** `getRowPK` reads the cells every time, so editing a key cell after
+   filing a correction leaves that correction under the old key, unreachable from the grid. This
+   is also what the build before #24 did, so it is not a regression — but #24 is the ticket that
+   made every other row's key immovable, and this is the one row shape where it still moves.
+2. **On a DERIVED key it has no key at all.** `getRowPK` reads `row[k]`, and a formula or lookup
+   column's value is not on the row — so on exactly the templates this ticket was about, a
+   hand-added row answers null and its offset, correction, group and comment are refused (the
+   row menu says "Row has no primary key", which is at least honest).
+
+**Why it is only a ticket** Both need a mint on the EDIT path: `_pk` written once, when the
+row's key cells are first complete, which for (2) also means running the dependency closure
+(`Reco._keyScratch`) for one row inside `Reco.applyEdits` / `Reco.ssSetCell`. That is new
+behaviour on the one path #24 was told not to widen, and decision F is explicit that `rowKey`
+itself must never mint. It also needs a decision the UI does not currently ask for: a hand-added
+row with a derived key is a row the operator is inventing, so the app has to say whether the
+derived columns are computed for it at all.
+
+**Fix** In the edit path, when a row carries `_ssAdded` and no `_pk`, and the edited column is in
+`tpl.primaryKeys` (or in the closure of a key extra), and every component is then non-blank:
+mint `_pk` once from `Reco._keyScratch`, move any `manualOffsetMaster` / `correctionMaster` /
+`groupMaster` / `commentMaster` entry already filed under the previous answer, and from then on
+treat the row like any other — frozen. Do NOT write `_pk` before that point: four version
+writers are guarded by nothing but `if (row._pk)` and a session-only row must not append change
+rows to the shared day file.
+
+**Test** (1) Keyed template, `Reco.ssAddRow(false)`, type the key cell, `Reco.applyCorrection`,
+then edit the key cell again: assert the correction is still reachable from the row (today it is
+not). (2) A template keyed on a formula extra: add a row, fill the columns the formula reads,
+and assert `Reco.rowKey` answers with the formula's value and that the offset reaches
+`manualOffsetMaster.json` — today it answers null. Keep G19's assertion that nothing is appended
+to `reco_data/<folder>/` for a session-only row.
+
+
+## T-24R2-3  Renaming a key component drops it from the key instead of carrying it over
+
+**Where** `apps/Reco.html` the name input in `RecoTemplate._renderAdditionalColumnsEditor`
+(`oninput="RecoTemplate._editing.additionalColumns[i].name=this.value"`) against the prune in
+`saveTemplate`.
+
+**What** Rename a key extra from `Ref` to `Ref2` and save: `primaryKeys` goes from
+`['Doc','Ref','Look']` to `['Doc','Look']`. Since round 2 the confirm NAMES what it dropped and
+why ("there is no column with this name"), so the operator is told — but they are told about a
+deletion they did not ask for, and the obvious intent (the same key, under the new name) is not
+offered. PLAN2's S18 lists rename detection as part of `saveTemplate`'s one validation gate; it
+is not built.
+
+**Why it is only a ticket** Detecting a rename means pairing `RecoTemplate._openedWith.additionalColumns`
+POSITIONALLY against `t.additionalColumns`, and a positional pairing is wrong whenever the editor
+also added, removed or reordered a column in the same session — which the Eval arrows make easy.
+Getting that wrong carries the key over to the wrong column, which is worse than dropping it.
+It also wants the same treatment for `displayOrder`, `correctionContextCols`, `aggregateBy` and
+`editableColumns`, i.e. it is S18's job and not a key-specific patch.
+
+**Fix** In `saveTemplate`, pair old and new `additionalColumns` by position ONLY when the two
+lists have the same length and the same types in the same order; for each pair whose name
+changed and whose old name is in `primaryKeys` (or in any of the four lists above), ask once —
+"`Ref` is now called `Ref2`. Keep it as part of the row key?" — and rewrite the reference on yes.
+On no, keep the drop and the reason the confirm already carries.
+
+**Test** The rename fixture above: assert the question is asked, that yes gives
+`primaryKeys ['Doc','Ref2','Look']` with `tplSignature` unmoved, and that no gives
+`['Doc','Look']` with the dropped-component sentence. Plus a negative: the same rename in a save
+that also deletes a column asks nothing and drops as it does today.
+
+
+## T-24R2-4  Custom masters are identified by their position in the list, so they cannot be key sources
+
+**Where** `apps/Reco.html` `Masters.catalog` (`out.push({ id: 'custom:' + idx, … })`) against
+`AppState.customMasters.splice(idx, 1)` in `deleteCustomMaster`, and
+`RecoTemplate._pkEligible`'s refusal of `custom:*`.
+
+**What** A `master_lookup` into a custom list stores `source: 'custom:1'`, a POSITION. Delete a
+different custom master and every `custom:1` config silently re-points at another table, with
+`additionalColumns` byte-identical — so #24's definition-change confirm cannot fire and
+`tplSignature` cannot move. #24 therefore refuses a custom-master lookup as a key component
+outright, with that as the stated reason (decision B), which is the right call and also a
+feature the user asked for that they cannot have.
+
+**Why it is only a ticket** Giving custom masters stable ids is a migration of stored template
+JSON (`custom:<idx>` → `custom:<uid>`) plus a legacy resolver for configs already on the share,
+plus a re-validation pass in `deleteCustomMaster`. That is its own commit with its own
+migration test, and #24 stands without it.
+
+**Fix** Mint `cm.uid` on creation and on first read of an existing master; emit
+`'custom:' + cm.uid` from `Masters.catalog`; resolve a legacy `custom:<digits>` by index once
+and rewrite it; in `deleteCustomMaster`, re-run `RecoTemplate._pkEligible` for every template
+whose key names a lookup into the deleted master and refuse (or warn and prune, naming it, the
+way the save-time prune now does). Then drop the `custom:*` arm from `_pkEligible`.
+
+**Test** Two custom masters, a template keyed on a lookup into the second, delete the first:
+assert the key still resolves to the same table (the stored config now names a uid), that the
+minted `_pk` is unchanged across the delete, and that deleting the master the key DOES read is
+refused by name.
+
+
+## T-24R2-5  A key component whose value contains `'||'` cannot be split back out of `_pk`
+
+**Where** `apps/Reco.html` `Reco.getRowPK` (`primaryKeys.map(...).join('||')`, which escapes
+nothing) against `Reco._keyFrozenPart`'s split guard and `Reco._pkLabel`'s.
+
+**What** `_pk` is the components joined with `'||'`. When a component's own value contains that
+separator, `_pk.split('||')` does not give the components back, so the frozen value of that
+component cannot be recovered from storage. Round 2 made this honest rather than silent: the
+mint counts such rows, `_keyIngestCheck` asks before the day file is written, and `keyDrift`
+marks the cell ⚠ recalculated so the screen says the value it is printing is a recalculation
+and not the stored key. What it does not do is make the frozen value recoverable.
+
+**Why it is only a ticket** Every fix is a storage-format change: escaping the separator at mint
+(`'||'` → `'\\|\\|'`), or a separator that cannot occur in data, or storing the parts. All three
+change the bytes of `_pk`, which round-trips the CSV control column, the manual-offset master,
+the correction master, the group and comment masters, the Special JV claims and the posted-JV
+index — a migration across every file on the share, for a shape the operator is now warned
+about before it reaches the share at all.
+
+**Fix** Escape at mint and unescape at split, in `getRowPK` and the two split sites only, with a
+one-off migration that rewrites `_pk` in the version files and re-keys the five masters — or
+decide the warning is the answer and say so in the handover doc. Do not do half: an escaped mint
+with an unescaped reader is worse than today.
+
+**Test** A key component holding `'A||B'`: assert the minted `_pk` splits back into exactly
+`primaryKeys.length` parts, that `keyCellValue` returns `'A||B'` and that the drift marker is
+NOT painted when nothing has drifted (today it is, correctly, because the value cannot be
+recovered).
+
+
+## T-24R2-6  The AEG editor's input-column RENAME is the one arm of S11 still ungated
+
+**Where** `apps/Reco.html` `AEG.updateInputCol` and `AEG.selectInputCol` (which writes
+`AEG.editingTemplate.<key>=this.value` inline) against `AEG._roleClash`, which round 2 added and
+wired into `AEG.setEditingPath` and `AEG.toggleAggregateBy`.
+
+**What** `RecoTemplate._exclusiveRoleConflict` is now asked in both editors, in both directions,
+for the roles that matter today: the To Account input column, the From Account input column and
+the club-by set. Renaming an AEG input column into the name of a column a linked reconciliation
+holds a role on is not asked about, and neither are the two fields `selectInputCol` still writes
+inline (`currencyColumn`, `valueColumn`).
+
+**Why it is only a ticket** With override and carry-forward not built, the matrix refuses
+NOTHING on those paths today — `_exclusiveRoleConflict` returns null for every rename, so the
+gate would be a call that cannot fire. `updateInputCol` is also called per keystroke, so a
+refusal there needs debouncing or a move to `onchange` before it can toast anything. #26 and
+#30 are the tickets that make those roles exist, and the function they are told to write into is
+now whole.
+
+**Fix** When #26 or #30 lands, add the `aeg.inputColumns` call to `updateInputCol` (on change,
+not on input) and convert `selectInputCol`'s two inline writes to `AEG.setEditingPath` so they
+pass through the gate that already exists.
+
+**Test** With an override-enabled column in a linked reconciliation, rename an AEG input column
+onto it and assert the refusal sentence and that the name is unchanged; and the control, that an
+ordinary rename is silent.

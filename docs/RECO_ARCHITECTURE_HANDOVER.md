@@ -201,7 +201,9 @@ Control columns: `_pk` (PK columns joined with `||`, or `_auto_<uid>`), `_ver` (
 - `collapseToActive()` — highest `Cn` per PK, else `upload`; ties go to the row written later.
 - Opening a file (`Reco.loadVersionedFile` → `Versioning.loadActive`) applies the latest `Cn` from **newer** files, because edits always go to the day's file. Auto-load picks the newest file that contains `upload` rows.
 - **Compaction** (Manage → Version History): keeps every upload row and the latest `Cn` per PK; optionally archives the full file to `_archive/` first.
-- Ingesting data warns when rows share a primary key (they collapse to one when reopened from history).
+- Ingesting data warns when rows share a primary key (they collapse to one when reopened from
+  history). On a key that contains an **added column**, that warning moved **before** the write and
+  became a blocking confirm the operator can refuse — see §14.4 for why it is scoped that way.
 
 ### 5a. Opening a reco: what loads, when, and what the screen says
 
@@ -1355,3 +1357,148 @@ way to work. It is the same whole-file shared JSON every other feature writes.
   through it, so it is a shared latent single point of failure (ticket T-F1-1).
 - `Reco.applyCorrection` still writes **no `Cn` row** to the day file (pre-existing): the share's
   only record of a correction is the `correctionMaster` entry.
+
+---
+
+## 14. Added columns in the primary key
+
+> *"added columns can also be used for primary key section"*
+
+A key component may now be a template column **or an added column whose value is a
+deterministic function of template columns**. The value is computed once, when the data is
+loaded, and frozen into `row._pk`; nothing recomputes it.
+
+### 14.1 The rule, and why it is this narrow
+
+| allowed | refused, with its own reason |
+|---|---|
+| a template column | `custom` / `dropdown` — the user types into them, so the key would change under the row |
+| a `formula` over template columns and **earlier** eligible extras | a formula calling `TODAY` / `AGE` / `AGEING` / `AGEING_BUCKET` — the key would move with the clock |
+| a `master_lookup` with `source === 'accounts'` and a complete config | `docNumbers` (grows on every commit) and `corrections` (keyed *by* the key) |
+| | `custom:*` masters — their ids are **positional** (`'custom:' + idx` against `splice(idx, 1)`), so deleting one silently re-points every `custom:1` config at a different table with `additionalColumns` byte-identical, so no definition-change confirm fires |
+| | the legacy `type: 'master'` — its `evalLookup` branch scans `AppState.aegMaster` inline per row and never calls `Masters.lookup` |
+
+The formula check **whitelists the grammar** rather than blacklisting names, because
+`Formula._compile` builds `new Function('__t', ...names, 'return (' + code + ');')` — everything
+outside `{…}` is raw JavaScript. So `CONCAT({Doc},"-",Date.now())` would pass a name blacklist and
+give every row a unique throwaway key. `{…}` tokens and string literals are stripped, clock
+helpers are matched on **call position** with word boundaries, and any remaining identifier that
+is not a key of `Formula._helpers` is rejected. (A substring test for `AGE` would also refuse a
+legitimate `ROUND(AVERAGE({A},{B}),2)` with a visibly nonsense reason, which is how people learn
+to distrust a validator.)
+
+### 14.2 Two readers, and the difference matters
+
+- **`Reco.rowKey(tpl, row)`** — the BUSINESS key. Tests `primaryKeys.length` **first**, then
+  returns `row._pk`, and **never mints**: a pure reader, null on miss. Twenty behavioural readers
+  were converted to it.
+- **`row._pk`** — STORAGE identity. Every row has a truthy one (`_auto_`+uid or `_added_`+id).
+  Read directly only by `applyEdits`, `appendUpload`, `_ssFmtRowKey` and the version store.
+
+Conflating them is not a style question. Both the manual-offset and correction writes are guarded
+only by a bare `if (pk)` on the line after the key is taken, so returning `_pk` ahead of the
+`primaryKeys` test would start filing records under throwaway uids — unbounded garbage in two
+shared files every colleague loads at boot.
+
+`Reco.storeKey` adds a fourth clause: null when every key component is empty. With two key
+columns both blank, `getRowPK` returns the string `'||'`, which is **truthy**, so `ingestData`'s
+`_auto_` fallback never fires and every blank-key row in every file of that template collapses
+onto one key. Blank key cells are routine on a bank or GL extract.
+
+### 14.3 The frozen value, in one place
+
+The grid recomputes a derived extra on every render, so after a colleague edits the shared
+accounts master the key column would *print* `VEND-44` while `_pk` stayed `VEND-33` — and every
+other surface is on `VEND-33`. `Reco._rowWithExtras` now returns the **frozen** component for a
+key extra instead of recomputing it. That one edit is why the grid, the CSV export, every report,
+the Excel view, `XlSchema.currentValue` and `Reco.displayCellValue` agree without a branch each.
+
+`Reco.keyCellValue` does the guarded split out of `_pk`, refusing to split a storage-only key and
+falling back when the part count does not match `primaryKeys.length` — because `getRowPK` joins
+with `'||'` and escapes nothing. `Reco.keyDrift` paints **⚠ recalculated** on a cell whose
+recomputed value disagrees with the frozen one, so the screen says when it is not showing the key.
+
+### 14.4 The mint, and the question asked before anything is written
+
+A key extra may depend on an **earlier, eligible, non-key** extra. `Formula.substituteTokens`
+turns a missing reference into `''` *silently*, so `CONCAT({Base},"-",{Line})` with `Base`
+unmaterialised mints `'-1'`, `'-2'`… — thousands of rows sharing one `_pk`, `collapseToActive`
+then keeps one row per key, and **a 200,000-row day file reopens as a few dozen rows**. So the
+mint materialises the transitive closure in declaration order, reusing one scratch object, chunked
+with the busy overlay above `BUSY_ROWS`.
+
+Then, **before `appendUpload` writes anything**, the operator is asked once about whatever is
+wrong with the minted keys — and the question is assembled worst-first:
+
+| arm | when it is asked | why |
+|---|---|---|
+| a master a key component depends on is unreadable or empty | **hard refusal**, any key | identity must not depend on a file that failed to load |
+| an empty or `#ERR` component | any key | a key with one empty part still *looks* like a key, so nothing later refuses those rows and they match no history. `'#ERR'` is not empty either — every row that errors shares one key |
+| all parts blank | any key | they collapse onto the truthy `'||'` |
+| a component containing `'||'` | any key | the stored key cannot be split back |
+| **duplicates** | **a derived key only** | see below |
+
+**The duplicate arm is deliberately scoped to a derived key.** On a key made of template columns
+duplicates are a pre-existing tolerated state: ingest has always loaded them and shown the
+*Duplicate primary keys* panel afterwards, and `ExcelLink` carries a whole `dupPk` badge machinery
+for them. An AP or GL extract keyed on a document number with several lines per document **is**
+that shape, so asking before the write would question such a reconciliation on every upload, with
+Cancel loading nothing — a template nobody has touched behaving differently on Monday. On a
+derived key a duplicate is new information: the formula or lookup collapsed rows that arrived
+distinct. Gate: `run_pk_extras_e2e.mjs` G29, mutation-proved both ways.
+
+### 14.5 Migration — a no-op, and the three visible changes
+
+`primaryKeys` holds only template-column names today and the new keyable set is a superset, so
+the save filter keeps exactly what it kept. Every row already carries `_pk`, `rowKey` returns it,
+the mint path is not re-entered. No control column, no widened header, no CSV rewrite. Verified
+byte-identical on a template-column key: the grid markup, the CSV an edit writes, the Excel
+export's descriptors and per-cell values, a report's numbers, `recoSessions.json` byte order, and
+`correctionMaster.json` / `manualOffsetMaster.json` on the share.
+
+Three things **do** change on data nobody has touched, and the team should know:
+
+1. **A key with an empty, `#ERR` or all-blank component is now questioned before the upload is
+   written**, where it used to load silently and quietly match no history. Cancel loads nothing.
+   This is the fix, not a regression — but it is a new question on an old template.
+2. **A keyless template's corrections and manual offsets are visibly saved nowhere.** They always
+   were (the write is guarded by `if (pk)` and `getRowPK` returns null), but it was silent. The
+   Correction tab now says so. *(Pre-existing and unchanged: the toast still says "Correction
+   applied" on a blank-key row of a keyed template while nothing is written.)*
+3. **A reader that previously recomputed a different key than `_pk` now returns `_pk`.** Only
+   reachable with an editable key column, `excelView.allowPkEdit` on, and an actual edit to a key
+   cell. This is convergence on the key that history, the offset master, the Special JV claims and
+   the posted-JV index were already using. A group or comment filed under the diverged key becomes
+   unreachable from the grid; `Groups.resolvePk`'s version-file fallback resolves such an orphan
+   from history.
+
+**First template to adopt a derived key: nothing is retroactive.** The loaded session keeps its
+keys; the **next upload** mints the new way and those rows do not match older history. The
+existing confirm says this, and it now also fires when a key extra's **formula or config** changes
+— which previously left `primaryKeys` byte-identical and said nothing while the next upload
+detached history. `tplSignature` hashes the key extras' definitions (`kx`) for the same reason,
+but only when the key actually names one, so an existing template keeps the signature it has.
+
+**Downgrade** is safe-ish: the stored JSON stays readable, the old `saveTemplate` filter strips the
+key the next time anyone saves that template, and the next upload mints `_auto_` keys — which is
+why the empty-component warning matters, as a diagnosis.
+
+### 14.6 Cost
+
+The mint at **500,000 rows** is **1,246 ms** (best of three), against a 60,000 ms budget, with the
+window answering throughout (25 busy paints, worst frame gap 76 ms). A template-column key with
+the same three added columns is **394 ms** — unchanged — so existing templates pay nothing.
+
+### 14.7 Known limitations
+
+- **`custom:*` masters as key sources** are refused until custom masters have stable uids
+  (ticket).
+- **`saveTemplate`'s read-modify-write race now splits ROW IDENTITY, not just a column's
+  values.** Two colleagues editing one template's key concurrently can produce version rows under
+  two incompatible key schemes in one day file, with no confirm and no signature move, because the
+  loser's clone and the stored template agree. Measured: 12 version rows for 4 business rows.
+  Properly fixing it needs an `await` to re-read the share — the in-memory copy is stale too — so
+  it is out of this change (ticket T-24R2-1). **Tell the team before a derived key goes live on a
+  template two people edit.**
+- A row typed into the grid (`+ Row`) keys on `_added_`+id, so it has no business key until the
+  extract next contains it.

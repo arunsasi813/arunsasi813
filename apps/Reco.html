@@ -4815,7 +4815,7 @@ const Groups = {
   countMembershipsInSession(tpl, sess) {
     let n = 0;
     (sess.data||[]).forEach(r => {
-      const pk = Reco.getRowPK(tpl, r);
+      const pk = Reco.rowKey(tpl, r);
       if (pk && Groups.groupsForPk(tpl.id, pk).length) n++;
     });
     return n;
@@ -4828,7 +4828,7 @@ const Groups = {
     if (!pk) return null;
     const sess = AppState.recoSessions[tpl.id];
     if (sess) {
-      const found = (sess.data||[]).find(r => Reco.getRowPK(tpl, r) === pk);
+      const found = (sess.data||[]).find(r => Reco.rowKey(tpl, r) === pk);
       if (found) return { row: found, source: 'session' };
     }
     // Scan versioned files newest first (each file read once per resolveGroup)
@@ -6335,8 +6335,35 @@ const XlSchema = {
   tplSignature(tpl) {
     const cfg = {};
     (tpl.editableColumns || []).forEach(c => { cfg[c] = ((tpl.editableColumnConfig || {})[c] || {}).editType || 'free'; });
-    return XlSchema.fnv1a(JSON.stringify({ cols: (tpl.columns || []).map(c => [c.name, !!c.isDate, !!c.isValue]),
-      pk: tpl.primaryKeys || [], ed: tpl.editableColumns || [], cfg }));
+    const sig = { cols: (tpl.columns || []).map(c => [c.name, !!c.isDate, !!c.isValue]),
+      pk: tpl.primaryKeys || [], ed: tpl.editableColumns || [], cfg };
+    /* DECISION I. A key component may now be an ADDED column, whose value is
+       worked out from a formula or a lookup - and additionalColumns was
+       nowhere in this hash. Edit a key formula, re-upload, and Monday's
+       workbook loaded back with a MATCHING signature, no staleness flag, and
+       up to 2,000 rowNotInCurrentData problems reading "row is not in the data
+       open in Reco".
+       Only the definitions of the columns the key actually NAMES, and only
+       when at least one of them is an added column: a signature is a promise
+       about what the workbook was exported against, and adding a field
+       unconditionally would mark every workbook exported by an older build as
+       stale on the day this ships, for every template in the folder. An
+       unrelated added column still does not invalidate a workbook either. */
+    /* ROUND 2: the DEPENDENCY CLOSURE (Reco._keyDepNames), not only the
+       columns the key NAMES. Editing the helper formula a key extra is built
+       from left this hash byte-identical, so the workbook came back with a
+       matching signature, no staleness flag, and up to 2,000
+       rowNotInCurrentData problems reading "row is not in the data open in
+       Reco" - the exact failure decision I was written to prevent.
+       Still nothing at all when the key names no added column, which is every
+       template that existed before #24: no workbook anyone holds today is
+       marked stale by this change. */
+    const dep = Reco._keyDepNames(tpl);
+    if (dep && dep.size) {
+      const kx = (tpl.additionalColumns || []).filter(a => a && dep.has(a.name));
+      if (kx.length) sig.kx = kx;
+    }
+    return XlSchema.fnv1a(JSON.stringify(sig));
   },
 
   REASONS: {
@@ -6840,7 +6867,14 @@ const ExcelLink = {
     await ExcelLink.exportNow(tpl, sess, o);
   },
 
-  /* Identity columns whose values must not change for a row to be trusted:
+  /* DECISION L: THIS NEEDS NO CHANGE FOR #24, AND HERE IS WHY, so nobody
+     "fixes" it later. A key component that is an ADDED column is role
+     'computed' (XlSchema.build's addExtra), and the first line below keeps
+     only role 'tpl', so an extra can never enter `fp` however the key is
+     configured. The fingerprint is about cells the sheet CARRIES; an extra's
+     value is not on the row at all.
+
+     Identity columns whose values must not change for a row to be trusted:
      tpl.excelLink.fpCols, else keys + value + doc number, else the first
      three read-only template columns. */
   _fpCols(tpl, cols) {
@@ -6861,7 +6895,13 @@ const ExcelLink = {
   },
   _howNote(d) {
     if (d.role === 'status') return 'Reco status — read-only';
-    if (d.role === 'computed') return 'Computed in Reco — values only';
+    /* The computed branch used to return BEFORE the isPk branch below, so a
+       key column that Reco works out was described in the workbook's "How to
+       use" sheet as an ordinary computed column. It is read-only for a
+       stronger reason than the others: its value was frozen into the row key
+       when the data was loaded. */
+    if (d.role === 'computed')
+      return d.isPk ? 'Computed in Reco — part of the row key, read-only' : 'Computed in Reco — values only';
     if (!d.editable) return d.isPk ? 'Key column — read-only, changes are ignored' : 'Read-only — changes here are ignored';
     if (d.editor === 'list') return d.options && d.options.length ? 'Editable · dropdown (strict)' + (d.role === 'toAccount' ? ' · To Account codes' : '') : 'Editable · No options configured';
     if (d.editor === 'combo') return 'Editable · suggestions';
@@ -7837,6 +7877,14 @@ const ExcelLink = {
     if (ridPos < 0 && keyPos >= 0) mode = 'key';
     else if (ridPos < 0) {
       const pkd = (tpl.primaryKeys || []).map(k => ({ k, d: S.byName.get(k) || fpDesc(k) }));
+      /* DECISION L. Refused BY NAME when any key component is an added column.
+         The fallback below compares r[x.k], which is UNDEFINED for an extra -
+         its value is never on the row - so every row hashes to the same
+         string, cnt.get(k) is never 1, nothing matches, and the operator is
+         told "this row is not in the data open in Reco" for 2,000 rows when
+         the truth is "Reco cannot match by visible key for this template". */
+      const vkRefusal = ExcelLink._visibleKeyRefusal(tpl);
+      if (vkRefusal) { plan.refused = vkRefusal; return plan; }
       if (pkd.length && pkd.every(x => mapRes.map[x.k] != null)) {
         mode = 'visible';
         plan.needsConfirm = 'The hidden row-id columns were deleted from the sheet. Match rows by their visible key (' + tpl.primaryKeys.join(' + ') + ') instead?';
@@ -8066,9 +8114,30 @@ const ExcelLink = {
   },
   _keyOf(tpl, it) {
     const row = it.row || it.live;
-    if (row && (tpl.primaryKeys || []).length) return tpl.primaryKeys.map(k => row[k] == null ? '' : String(row[k])).join(' · ');
+    /* Through keyCellValue, so the review table names the row by the same
+       FROZEN key as history and the offset master. `row` here may also be a
+       row read out of the workbook, which carries no _pk; keyCellValue then
+       falls back to the value on the row, which is what this line always
+       did. */
+    if (row && (tpl.primaryKeys || []).length) return tpl.primaryKeys.map(k => {
+      const v = Reco.keyCellValue(tpl, null, row, k);
+      return v == null ? '' : String(v);
+    }).join(' · ');
     if (row && tpl.docNumberColumn) return String(row[tpl.docNumberColumn] || '');
     return 'R' + it.r;
+  },
+  /* Null when matching rows by their visible key is safe; otherwise the
+     sentence to refuse with. See the call site in the load-back planner. */
+  _visibleKeyRefusal(tpl) {
+    const pks = (tpl && tpl.primaryKeys) || [];
+    if (!pks.length) return null;
+    const names = new Set((tpl.columns || []).map(c => c && c.name));
+    const extras = pks.filter(k => !names.has(k));
+    if (!extras.length) return null;
+    return 'The hidden row-id columns were deleted from the sheet, and this template\'s key '
+      + 'includes ' + (extras.length === 1 ? 'a column Reco works out' : 'columns Reco works out')
+      + ' (' + extras.join(', ') + '), whose values are not in the sheet at all. Rows cannot be '
+      + 'matched by their visible key here. Export again.';
   },
   _shown(c) { const s = XlSchema.display(c); return s === '' ? '<i class="text-muted">(empty)</i>' : U.esc(s); },
   renderReview(plan) {
@@ -10887,6 +10956,27 @@ defaultTemplate() {
       const checked = (t.primaryKeys||[]).includes(c.name);
       h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.togglePK(\''+U.jsq(c.name)+'\',this.checked)"> '+U.esc(c.label||c.name)+'</label>';
     });
+    /* #24. The uploaded extract often has NO unique column, so the user
+       manufactures one - {Doc} & "-" & {Line}, or a lookup that turns a
+       cryptic ERP code into a canonical reference - and until now had to go
+       back to the ERP to get a key. An added column may be a key component
+       when its value is worked out from the file: a formula, or a lookup into
+       the Accounts Master.
+
+       ALWAYS-ENABLED BOXES, validated in togglePK, exactly like the
+       aggregation block further down. This block is emitted BEFORE
+       _renderAdditionalColumnsEditor and no config input in that editor
+       redraws this one, so a disabled box could never become enabled: you
+       would type the formula and the box would stay grey. The reason prints
+       beside the box instead, and ticking an ineligible one toasts it. */
+    (t.additionalColumns||[]).forEach(ac => {
+      if (!ac || !ac.name) return;
+      if ((t.columns||[]).some(c => c && c.name === ac.name)) return;   // saveTemplate refuses this clash anyway
+      const checked = (t.primaryKeys||[]).includes(ac.name);
+      const el = RecoTemplate._pkEligible(t, ac.name);
+      h += '<label class="inline"><input type="checkbox" '+(checked?'checked':'')+' onchange="RecoTemplate.togglePK(\''+U.jsq(ac.name)+'\',this.checked)"><span class="badge specific">extra</span> '+U.esc(ac.name)
+         + (el.ok ? '' : ' <span class="text-muted">— ' + U.esc(el.reason) + '</span>') + '</label>';
+    });
     h += '</div></div>';
 
     h += RecoTemplate._renderAdditionalColumnsEditor(t);
@@ -11075,13 +11165,13 @@ defaultTemplate() {
       }
 
       h += '<label class="field"><span class="label-text">Keyword Column <span class="text-muted">(rows that trigger AEG)</span></span>';
-      h += '<select onchange="RecoTemplate._editing.aegIntegration.keywordColumn=this.value"><option value="">— none —</option>';
+      h += '<select onchange="RecoTemplate.setAegRole(\'keywordColumn\',this.value)"><option value="">— none —</option>';
       allColsWithExtras.forEach(c => { h += '<option value="'+U.escAttr(c)+'"'+(t.aegIntegration.keywordColumn===c?' selected':'')+'>'+U.esc(c)+'</option>'; });
       h += '</select></label>';
       h += '<label class="field"><span class="label-text">Keyword Values <span class="text-muted">(comma-separated)</span></span>';
       h += '<input type="text" value="'+U.escAttr(t.aegIntegration.keywordValues||'')+'" oninput="RecoTemplate._editing.aegIntegration.keywordValues=this.value" placeholder="e.g. PostEntry, Generate" /></label>';
       h += '<label class="field"><span class="label-text">Post-entry Classification Column</span>';
-      h += '<select onchange="RecoTemplate._editing.aegIntegration.postEntryColumn=this.value"><option value="">— none —</option>';
+      h += '<select onchange="RecoTemplate.setAegRole(\'postEntryColumn\',this.value)"><option value="">— none —</option>';
       allColsWithExtras.forEach(c => { h += '<option value="'+U.escAttr(c)+'"'+(t.aegIntegration.postEntryColumn===c?' selected':'')+'>'+U.esc(c)+'</option>'; });
       h += '</select></label>';
       h += '<label class="field"><span class="label-text">Post-entry Value <span class="text-muted">(written after generating)</span></span>';
@@ -11293,11 +11383,317 @@ defaultTemplate() {
     h += '</select>';
     return h;
   },
+  /* ---- #24: WHICH COLUMNS MAY BE PART OF THE ROW KEY --------------------
+     THE RULE: a key component may be a template column, or an added column
+     whose value is a DETERMINISTIC FUNCTION of template columns - a formula
+     (over template columns and earlier eligible extras, using no clock helper
+     and no identifier outside Formula._helpers), or a master_lookup into the
+     ACCOUNTS MASTER with a complete config. Its value is computed once, when
+     the data is loaded, and frozen into row._pk; nothing recomputes it.
+     Added columns the user TYPES INTO may not be key components.
+
+     Returns { ok, reason }. `reason` is rendered beside the checkbox and
+     toasted by togglePK, so it has to be something an operator can act on -
+     "not eligible" teaches nobody anything, and a validator whose reasons do
+     not make sense is a validator people learn to ignore. */
+  _pkEligible(t, name, memo) {
+    /* ROUND 2: MEMOISED PER CALL TREE. _pkFormulaOk asks this about every
+       {…} reference, so a chain of added columns each reading the previous
+       one three times cost 3^N: 2,325 ms at eleven extras in the chain, 21
+       seconds at sixteen, and the template editor - the one screen in the app
+       with no busy overlay - simply locked, losing whatever was typed into
+       it. The memo is created by the top-level call and threaded down, so it
+       cannot go stale against an edit the way a cache on the template would:
+       it lives for one question about one template.
+       `busy` is insurance, not a known case: a reference can only resolve to
+       an EARLIER extra, so the graph is acyclic unless a stored template has
+       two added columns with one name. */
+    memo = memo || { done: new Map(), busy: new Set() };
+    const mk = String(name == null ? '' : name).trim();
+    if (memo.done.has(mk)) return memo.done.get(mk);
+    if (memo.busy.has(mk)) return { ok: false, reason: 'this column is worked out from itself' };
+    memo.busy.add(mk);
+    let res;
+    try { res = RecoTemplate._pkEligible1(t, name, memo); }
+    finally { memo.busy.delete(mk); }
+    memo.done.set(mk, res);
+    return res;
+  },
+  _pkEligible1(t, name, memo) {
+    const n = String(name == null ? '' : name).trim();
+    if (!n) return { ok: false, reason: 'this column has no name' };
+    if ((t.columns || []).some(c => c && String(c.name).trim() === n)) return { ok: true, reason: '' };
+    const extras = (t.additionalColumns || []);
+    const ac = extras.find(a => a && String(a.name).trim() === n);
+    if (!ac) return { ok: false, reason: 'there is no column with this name' };
+    const type = ac.type || 'custom';
+    if (type === 'custom' || type === 'dropdown')
+      return { ok: false, reason: 'you type this column in by hand, so its value is not worked out '
+             + 'from the data — a key has to come out the same every time the file is loaded' };
+    /* The legacy shape. Its evalLookup branch does its own inline
+       (AppState.aegMaster || []).find(...) per row and never calls
+       Masters.lookup, so it is the one lookup kind with no index behind it -
+       and the mint would pay that scan once per row over the whole master. */
+    if (type === 'master')
+      return { ok: false, reason: 'this is an older-style Accounts Master column — set it up '
+             + 'again as a Master Lookup on the Accounts Master to use it in the key' };
+    if (type === 'master_lookup') {
+      const cfg = ac.masterCfg || {};
+      const src = String(cfg.source || '');
+      /* DECISION B: THE SOURCE IS WHITELISTED, NOT JUST THE TYPE. Two of the
+         four master kinds are state this reconciliation itself writes. */
+      if (src === 'docNumbers')
+        return { ok: false, reason: 'the Document Number Master grows every time an entry is '
+               + 'posted, so this value moves as the team works' };
+      if (src === 'corrections')
+        return { ok: false, reason: 'the Correction Master is itself keyed BY the row key, so a '
+               + 'key built from it would define itself' };
+      if (src.indexOf('custom:') === 0)
+        return { ok: false, reason: 'a custom master is identified by its position in the list, so '
+               + 'deleting a different one would silently re-point this lookup at another table' };
+      if (src !== 'accounts')
+        return { ok: false, reason: 'only a lookup into the Accounts Master can be part of the key' };
+      if (!Masters._lookupCfg(t, ac))
+        return { ok: false, reason: 'this lookup is not finished — choose the column to match '
+               + 'on, the master column to match it against and the column to bring back' };
+      /* ROUND 2. WHAT IT MATCHES ON MATTERS AS MUCH AS WHAT IT READS. This
+         arm checked the source and the completeness and never looked at
+         matchColumn, so a key could match on a DROPDOWN - whose value lives
+         in sess.manualTags under row._id, re-minted on every load, so it is
+         '' at mint time and the lookup always misses. Every row then fell to
+         '_auto_' + uid while the picker said nothing, and once the operator
+         typed values in, the grid PRINTED a populated key column with no
+         marker: the screen said "these rows are keyed by their account" while
+         the store said "these rows have no key at all". The same test
+         _pkFormulaOk already applies to every {…} reference, which also
+         closes the "matchColumn declared below me" shape that stored JSON can
+         hold even though the editor cannot produce it. */
+      const mc = String(cfg.matchColumn || '').trim();
+      if (!(t.columns || []).some(c => c && String(c.name).trim() === mc)) {
+        const j = extras.findIndex(a => a && String(a.name).trim() === mc);
+        if (j === -1)
+          return { ok: false, reason: 'it matches on "' + mc + '", and there is no column with that name' };
+        if (j >= extras.indexOf(ac))
+          return { ok: false, reason: 'it matches on "' + mc + '", which is declared after this column, '
+                 + 'so it is still blank when this one is worked out \u2014 move it above' };
+        const em = RecoTemplate._pkEligible(t, extras[j].name, memo);
+        if (!em.ok)
+          return { ok: false, reason: 'it matches on "' + mc + '", which cannot be part of a key ('
+                 + em.reason + '), so neither can a lookup that reads it' };
+      }
+      return { ok: true, reason: '' };
+    }
+    if (type === 'formula') return RecoTemplate._pkFormulaOk(t, ac, extras, n, memo);
+    return { ok: false, reason: 'this kind of added column cannot be part of the key' };
+  },
+
+  /* DECISION C: WHITELIST THE GRAMMAR, DO NOT BLACKLIST NAMES.
+     Formula._compile builds `new Function('__t', ...names, 'return (' + code + ');')`,
+     so everything outside {…} is RAW JAVASCRIPT. THIS IS A JS EVALUATOR,
+     NOT A FORMULA INTERPRETER, and two things follow:
+       - a name blacklist lets CONCAT({Doc},"-",Date.now()) through, and every
+         row then gets a unique throwaway key that matches nothing tomorrow;
+       - a substring test for AGE matches AVERAGE, so a perfectly good
+         ROUND(AVERAGE({A},{B}),2) is refused with a visibly nonsense reason.
+     So: strip the {…} tokens and the string literals, match the clock
+     helpers on CALL POSITION with word boundaries, and then reject any
+     remaining identifier that is not a key of Formula._helpers. */
+  _pkFormulaOk(t, ac, extras, n, memo) {
+    const f = String(ac.formula == null ? '' : ac.formula);
+    if (!f.trim()) return { ok: false, reason: 'this formula is empty' };
+    const bare = f.replace(/\{[^}]*\}/g, ' ')
+                  .replace(/"(?:[^"\\]|\\.)*"/g, ' ')
+                  .replace(/'(?:[^'\\]|\\.)*'/g, ' ');
+    const clock = bare.match(/\b(TODAY|AGEING_BUCKET|AGEING|AGE)\s*\(/);
+    if (clock) return { ok: false, reason: clock[1] + '() reads the clock, so this column answers '
+                      + 'differently tomorrow — a row key must not move' };
+    const ids = bare.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) || [];
+    const bad = ids.find(id => !Object.prototype.hasOwnProperty.call(Formula._helpers, id));
+    if (bad) return { ok: false, reason: bad + ' is not one of the formula functions, and anything '
+                    + 'else in a formula is plain JavaScript — ' + bad + ' could give a '
+                    + 'different answer on every row' };
+    /* Every {…} reference must be a template column or an EARLIER
+       eligible extra. Formula.substituteTokens turns a reference it cannot
+       resolve into '' SILENTLY, so a key that reads a column declared BELOW it
+       mints the same string for thousands of rows and collapseToActive then
+       keeps one row per key. */
+    const refs = (f.match(/\{([^}]*)\}/g) || []).map(s => s.slice(1, -1).trim());
+    const myIdx = extras.indexOf(ac);
+    for (let i = 0; i < refs.length; i++) {
+      const r = refs[i];
+      if ((t.columns || []).some(c => c && String(c.name).trim() === r)) continue;
+      const j = extras.findIndex(a => a && String(a.name).trim() === r);
+      if (j === -1) return { ok: false, reason: '{' + r + '} is not a column on this template' };
+      if (j >= myIdx) return { ok: false, reason: '{' + r + '} is declared after this column, so it '
+                             + 'is still blank when this one is worked out — move it above' };
+      const e = RecoTemplate._pkEligible(t, extras[j].name, memo);
+      if (!e.ok) return { ok: false, reason: '{' + r + '} cannot be part of a key (' + e.reason
+                        + '), so neither can a formula that reads it' };
+    }
+    return { ok: true, reason: '' };
+  },
+
+  /* DECISION H. A STABLE CANONICAL ORDER: template columns in t.columns order,
+     then added columns in declaration order, then any name that is neither
+     (a stale reference the prune is about to drop) in the order it came in.
+     Without it, ticking a box pushes to the END, so untick-and-retick turns
+     ["Doc","Seq"] into ["Seq","Doc"], saveTemplate's JSON.stringify
+     comparison sees a change, and the full "rows will no longer match their
+     version history" confirm fires on something the user did not do. */
+  _canonicalPrimaryKeys(t, keys) {
+    const want = [];
+    (keys || []).forEach(k => { if (want.indexOf(k) === -1) want.push(k); });
+    const out = [];
+    const take = nm => { const i = want.indexOf(nm); if (i !== -1) { out.push(nm); want.splice(i, 1); } };
+    (t.columns || []).forEach(c => { if (c && c.name) take(c.name); });
+    (t.additionalColumns || []).forEach(a => { if (a && a.name) take(a.name); });
+    return out.concat(want);
+  },
+
+  /* ---- S11: THE ROLE MATRIX, in ONE place -------------------------------
+     Built whole now so #26 (formula override) and #30 (carry forward) write
+     INTO it rather than adding a second gate beside it. #24 only exercises
+     the primary-key row.
+
+     A column holds at most ONE of { primary-key component, allowOverride,
+     carryForward }: they are three different answers to "who owns this
+     column's value", and two of them cannot both be true of one column.
+     A key component may also not be a column THE APP WRITES - the AEG
+     post-entry column is stamped by commitEntryFromPreview and the To Account
+     column is picked in the grid - because the key would then move after the
+     row was posted, which is the drift decision G exists to make impossible.
+     An override- or carry-enabled column may be NONE of the AEG roles
+     (keywordColumn, postEntryColumn, the To Account column, or the linked AEG
+     template's inputColumns / fromAccount.inputColumn / toAccount.inputColumn
+     / aggregateBy), because the grid and the journal would then read one
+     value through two different ladders.
+
+     Returns null for "go ahead", or the sentence to show.
+
+     ASKED BY THE TOGGLES IN BOTH EDITORS, IN BOTH DIRECTIONS, AND
+     DELIBERATELY NOT BY saveTemplate: t.additionalColumns has never been
+     validated, so a live template may already hold a clash, and refusing at
+     save would make such a template unsavable FOR ANY CHANGE AT ALL - the
+     same trap the padded-name check above is careful to avoid. */
+  _exclusiveRoleConflict(t, name, role) {
+    const n = String(name == null ? '' : name).trim();
+    if (!n || !t) return null;
+    const aeg = t.aegIntegration || {};
+    const ac = (t.additionalColumns || []).find(a => a && String(a.name).trim() === n) || {};
+    const isPk = (t.primaryKeys || []).some(k => String(k).trim() === n);
+    const over = !!ac.allowOverride, carry = !!ac.carryForward;
+    const held = [];
+    if (isPk) held.push({ role: 'pk', what: 'part of the row key' });
+    if (over) held.push({ role: 'allowOverride', what: 'a column people can override by hand' });
+    if (carry) held.push({ role: 'carryForward', what: 'a column carried forward to the next file' });
+    /* ONLY for the three roles that are alternatives to each other. Asked
+       about an AEG role, this used to answer with the triple's sentence, which
+       is true and beside the point: the precise reason is in the AEG arm
+       below, and a refusal that does not name what it protected reads as a
+       bug. */
+    const clash = ['pk', 'allowOverride', 'carryForward'].indexOf(role) === -1
+      ? null : held.find(h => h.role !== role);
+    if (clash) return '"' + n + '" is already ' + clash.what
+      + '. A column can only be one of: part of the row key, overridable by hand, or carried '
+      + 'forward — they are three different answers to who owns its value.';
+
+    const aegRoles = [];
+    if (aeg.keywordColumn && String(aeg.keywordColumn).trim() === n) aegRoles.push('the AEG keyword column');
+    if (aeg.postEntryColumn && String(aeg.postEntryColumn).trim() === n) aegRoles.push('the AEG post-entry column');
+    const toAcc = XlSchema.toAccountCol(t);
+    if (toAcc && String(toAcc).trim() === n) aegRoles.push('the To Account column');
+    const linked = XlSchema.aegTemplateFor(t);
+    if (linked) {
+      if ((linked.inputColumns || []).some(c => c && String(c.name).trim() === n))
+        aegRoles.push('an input column of the linked AEG template');
+      if (linked.fromAccount && String(linked.fromAccount.inputColumn || '').trim() === n)
+        aegRoles.push('the linked AEG template\'s From Account column');
+      if (linked.toAccount && String(linked.toAccount.inputColumn || '').trim() === n)
+        aegRoles.push('the linked AEG template\'s To Account column');
+      if ((linked.aggregateBy || []).some(k => String(k).trim() === n))
+        aegRoles.push('a club-by column of the linked AEG template');
+    }
+
+    if (role === 'pk') {
+      /* Only the two the APP WRITES block a key component. A keyword column
+         and an AEG input column are READ, so a key may legitimately be one. */
+      const written = aegRoles.filter(r => r === 'the AEG post-entry column' || r === 'the To Account column');
+      if (written.length) return '"' + n + '" is ' + written[0]
+        + ', which Reco writes into after an entry is posted. A row key must not move after the '
+        + 'row is posted, so it cannot be part of the key.';
+      return null;
+    }
+    if (role === 'aeg.postEntryColumn' || role === 'aeg.keywordColumn') {
+      if (role === 'aeg.postEntryColumn' && isPk) return '"' + n
+        + '" is part of the row key, and Reco writes into the post-entry column after an entry is '
+        + 'posted. That would move the row key of a posted row, so it cannot be both.';
+      if (over || carry) return '"' + n + '" is ' + held[0].what
+        + ', so it cannot also be an AEG column: the grid and the journal would read one value two '
+        + 'different ways.';
+      return null;
+    }
+    /* ROUND 2: the AEG editor's own direction. 'aeg.toAccount.inputColumn' is
+       a column the APP WRITES, so a key component may not become one; the
+       From Account column and a club-by column are READ, so a key component
+       may be one and only an override- or carry-enabled column is refused
+       (which is #26's and #30's half of the matrix, written here so they add
+       a call and not a gate). */
+    if (role === 'aeg.toAccount.inputColumn' && isPk) return '"' + n
+      + '" is part of the row key of a reconciliation linked to this template, and Reco writes into '
+      + 'the To Account column after an entry is posted. That would move the row key of a posted '
+      + 'row, so it cannot be both.';
+    if (role === 'aeg.toAccount.inputColumn' || role === 'aeg.fromAccount.inputColumn'
+        || role === 'aeg.aggregateBy') {
+      if (over || carry) return '"' + n + '" is ' + held[0].what
+        + ' in a reconciliation linked to this template, so it cannot also be an AEG column: the '
+        + 'grid and the journal would read one value two different ways.';
+      return null;
+    }
+    if ((role === 'allowOverride' || role === 'carryForward') && aegRoles.length)
+      return '"' + n + '" is ' + aegRoles[0]
+        + ', so its value belongs to the journal, not to a person. It cannot also be '
+        + (role === 'allowOverride' ? 'overridable by hand' : 'carried forward') + '.';
+    return null;
+  },
+
+  /* DECISION H. THE BOXES ARE ALWAYS ENABLED AND THIS IS WHERE A COMPONENT IS
+     REFUSED. The disabled-checkbox design cannot work on this screen: the
+     Primary Key block is emitted BEFORE _renderAdditionalColumnsEditor and no
+     config input redraws the editor, so after typing a formula the box would
+     stay grey and the feature would look broken on arrival. The eligibility
+     reason renders beside the box; the toast is what you get if you tick it
+     anyway. renderEditor() is called so the box goes back to where it was -
+     a box that stays ticked after a refusal reads as a saved setting. */
   togglePK(name, checked) {
     const t = RecoTemplate._editing;
     t.primaryKeys = t.primaryKeys || [];
-    if (checked) { if (!t.primaryKeys.includes(name)) t.primaryKeys.push(name); }
+    if (checked) {
+      const el = RecoTemplate._pkEligible(t, name);
+      if (!el.ok) { U.toast('"' + name + '" cannot be part of the key: ' + el.reason, 'error');
+                    RecoTemplate.renderEditor(); return; }
+      const clash = RecoTemplate._exclusiveRoleConflict(t, name, 'pk');
+      if (clash) { U.toast(clash, 'error'); RecoTemplate.renderEditor(); return; }
+      if (!t.primaryKeys.includes(name)) t.primaryKeys.push(name);
+    }
     else t.primaryKeys = t.primaryKeys.filter(x=>x!==name);
+    t.primaryKeys = RecoTemplate._canonicalPrimaryKeys(t, t.primaryKeys);
+  },
+
+  /* The AEG role selects used to assign straight into the editing template
+     (`onchange="RecoTemplate._editing.aegIntegration.postEntryColumn=this.value"`),
+     which is the OTHER direction of S11 and had no gate at all: you could
+     make the row key's own column the post-entry column and nothing would
+     say a word until the first posted row re-identified itself. */
+  setAegRole(field, value) {
+    const t = RecoTemplate._editing;
+    t.aegIntegration = t.aegIntegration || {};
+    const v = String(value == null ? '' : value);
+    if (v) {
+      const clash = RecoTemplate._exclusiveRoleConflict(t, v, 'aeg.' + field);
+      if (clash) { U.toast(clash, 'error'); RecoTemplate.renderEditor(); return false; }
+    }
+    t.aegIntegration[field] = v;
+    return true;
   },
   toggleAggBy(name, checked) {
     const t = RecoTemplate._editing;
@@ -11514,7 +11910,15 @@ defaultTemplate() {
        edit, and renaming it HERE would silently orphan everything already
        stored against the padded name - tags, filters, slicers, hidden columns,
        column order, per-cell formats. So refuse, and name the column. Same for
-       two added columns that collide, which nothing else in the app rejects. */
+       two added columns that collide, which nothing else in the app rejects.
+       #24 DEPENDS ON THIS RUNNING FIRST: it is what stops a key component
+       named "Key " reaching the keyable filter below under a name no column
+       answers to, and being dropped by the very filter meant to widen the set.
+       PLAN.md asked for auto-trim-and-warn here instead, on the grounds that
+       additionalColumns is unvalidated and a hard refusal makes a padded
+       template unsavable for any change; that premise stopped being true when
+       this check landed, and trimming is the option that loses data. Left as
+       it is, deliberately. */
     const extraRaw = (t.additionalColumns || []).map(ac => String((ac && ac.name) == null ? '' : ac.name));
     const padded = extraRaw.find(n => n !== n.trim());
     if (padded != null) {
@@ -11538,13 +11942,35 @@ defaultTemplate() {
     const extraNames = new Set((t.additionalColumns || []).map(ac => ac && ac.name).filter(Boolean));
     const allNames   = new Set([...fileNames, ...extraNames]);
 
-    // Drop references to columns that no longer exist
-    // fileNames, deliberately, not allNames: an added column's value is never
-    // on the row, so a primary key naming one makes getRowPK produce a blank
-    // component for it for ever. #24 widens this in the same commit that
-    // teaches getRowPK to resolve an added column; widening it any earlier
-    // just keeps a broken key alive instead of repairing it.
-    t.primaryKeys = (t.primaryKeys || []).filter(k => fileNames.has(k));
+    /* Drop references to columns that no longer exist.
+       #24 WIDENED THIS, as the note that used to stand here said it would:
+       the keyable set is file columns PLUS every added column whose value is a
+       deterministic function of them (RecoTemplate._pkEligible). It is still
+       not allNames - an added column the user types into cannot be a key
+       component, because its value is not in the file and would not come back
+       the same way tomorrow.
+       The padded-name refusal above runs BEFORE this, which is what stops a
+       key extra named "Key " being unkeyable here and then dropped by the very
+       filter meant to widen the set.
+       Canonicalised in the same breath (decision H), so an untick-and-retick
+       is a genuine no-op rather than a reordering the confirm below reads as a
+       changed key. */
+    /* ROUND 2: AND IT SAYS WHAT IT DROPPED. The prune was silent: one press
+       of the Eval ↑ arrow in the Additional Columns editor moves a key
+       extra above the helper it reads, _pkEligible stops saying yes, and a
+       keyed reconciliation became a KEYLESS one under a confirm that talked
+       about history and named neither the column nor the reason - so OK was
+       the natural answer and every later upload minted '_auto_' uids. The
+       reason is already computed on this line; it is now carried to the
+       confirm below. */
+    const pkDropped = [];
+    t.primaryKeys = RecoTemplate._canonicalPrimaryKeys(t,
+      (t.primaryKeys || []).filter(k => {
+        if (fileNames.has(k)) return true;
+        const e = RecoTemplate._pkEligible(t, k);
+        if (!e.ok) pkDropped.push({ name: k, reason: e.reason });
+        return e.ok;
+      }));
 
     /* The team display order, pruned against allNames - it positions FILE
        columns and ADDED columns alike, so pruning it against t.columns would
@@ -11639,8 +12065,49 @@ defaultTemplate() {
          to tell "the user changed this field" from "someone else did". */
       // Keep the history folder the template already uses, even when it is renamed.
       if (!t.dataFolder) t.dataFolder = Versioning.folderFor(orig || t);
-      if (orig && (orig.primaryKeys || []).length && JSON.stringify(orig.primaryKeys) !== JSON.stringify(t.primaryKeys || [])) {
-        if (!confirm('You changed the primary key columns.\n\nRows saved before this change will no longer match their version history, manual offsets, corrections, groups and comments (they are keyed by the old primary key). Continue?')) return;
+      /* DECISION I. ALSO FIRE ON A KEY EXTRA'S DEFINITION. Editing a key
+         formula, or the master a key lookup reads, leaves primaryKeys
+         BYTE-IDENTICAL - so nothing used to fire, and yet the next upload
+         mints different keys and detaches every row from its history. The
+         definitions are compared with the names for exactly that reason. */
+      /* ROUND 2, TWICE OVER. The definitions compared are the key's whole
+         DEPENDENCY CLOSURE (Reco._keyDepNames): mapping primaryKeys onto
+         their own definitions is one hop too shallow, so editing the helper
+         formula a key extra is built from left this byte-identical, nothing
+         was asked, and the next upload gave every row a new identity. And the
+         sentence named kxDef(t)[0] - always the FIRST key extra, never the
+         one that changed; someone who deliberately edited `Look`, read "how
+         Ref is worked out" and knew they had not touched Ref, would
+         reasonably decide the dialog was noise. It now names what moved. */
+      const kxDef = tt => {
+        const dep = tt ? Reco._keyDepNames(tt) : null;
+        const out = {};
+        if (dep) (tt.additionalColumns || []).forEach(a => { if (a && dep.has(a.name)) out[a.name] = a; });
+        return out;
+      };
+      const defsWas = kxDef(orig), defsNow = kxDef(t);
+      const moved = Object.keys(defsNow).concat(Object.keys(defsWas))
+        .filter((nm, i, arr) => arr.indexOf(nm) === i)
+        .filter(nm => JSON.stringify(defsWas[nm] || null) !== JSON.stringify(defsNow[nm] || null));
+      const keysMoved = JSON.stringify(orig && orig.primaryKeys) !== JSON.stringify(t.primaryKeys || []);
+      const defsMoved = !!(orig && moved.length);
+      if (orig && (orig.primaryKeys || []).length && (keysMoved || defsMoved)) {
+        const drop = pkDropped.length
+          ? '\n\n' + pkDropped.map(d => '"' + d.name + '" can no longer be part of the key: '
+              + d.reason + '.').join('\n')
+            + '\n\nThe key will be ' + ((t.primaryKeys || []).length
+                ? t.primaryKeys.join(' + ')
+                : 'EMPTY \u2014 every row uploaded from now on gets a one-off key that matches nothing')
+            + '.'
+          : '';
+        const how = moved.length
+          ? 'how ' + moved.join(' and ') + (moved.length > 1 ? ' are' : ' is') + ' worked out'
+          : '';
+        const head = keysMoved
+          ? 'You changed the primary key columns' + (how ? ', and ' + how : '')
+          : 'You changed the primary key \u2014 ' + how;
+        if (!confirm(head + '.' + drop
+            + '\n\nRows saved before this change will no longer match their version history, manual offsets, corrections, groups and comments (they are keyed by the old primary key). Continue?')) return;
       }
       if (i!==-1) AppState.recoTemplates[i] = t;
     }
@@ -12514,7 +12981,7 @@ _xlStatusHtml(row, sess, tpl) {
   if (row._ssAdded) h += ' <span class="badge ss-added" title="Added row">✚</span>';
   if (row._ssPersistent) h += ' <span class="badge ss-persist" title="Persistent (in versioned CSV)">💾</span>';
   if (row._ssSingleUse) h += ' <span class="badge ss-single" title="Single-use — removed after next entry">⏱</span>';
-  const pk = Reco.getRowPK(tpl, row);
+  const pk = Reco.rowKey(tpl, row);
   if (pk) {
     const ix = Reco._xlBadgeIndex(tpl);
     const g = ix.groupsOf(pk);
@@ -13111,7 +13578,7 @@ _xlOffsetSelectedRows(rowIds) {
     sess.offsets[rowId] = true;
     row._recoId = rid;
     row._manualOffset = true;
-    const pk = Reco.getRowPK(tpl, row);
+    const pk = Reco.rowKey(tpl, row);
     if (pk) mm[pk] = { recoId: rid, byUser: true };
     n++;
   });
@@ -13148,7 +13615,7 @@ _xlContextMenu(ws, x, y, e, items, role) {
   }
   if (!isNaN(xi)) m.push({ title: 'Freeze up to here', onclick: () => Reco._xlSetPref('freezeColumns', Math.min(6, xi + 1)) });
   if (row) {
-    const pk = Reco.getRowPK(C.tpl, row);
+    const pk = Reco.rowKey(C.tpl, row);
     m.push({ type: 'line' });
     if (typeof Comments !== 'undefined' && Comments.openAddDialog) {
       m.push({ title: '💬 Comment', disabled: !pk, onclick: () => { if (pk) Comments.openAddDialog(C.tpl.id, pk); } });
@@ -13537,6 +14004,14 @@ _xlDestroy() {
 _ssBlankRow(tpl) {
   const row = { _id: U.uid(), _ssAdded: true };
   (tpl.columns || []).forEach(c => { row[c.name] = ''; });
+  /* NO _pk HERE, deliberately, and round 2 tried the other way and took it
+     back out. A session-only row has no storage identity because the operator
+     chose + Row over + Persistent Row, and FOUR version writers are guarded
+     by nothing but `if (row._pk)` (_ssFillColumn's two, _ssCommitCell and
+     _ssClearCell), so giving it one starts appending change rows for it to the
+     SHARED day file and quietly erases the difference between the two
+     buttons. What such a row needs is a BUSINESS key, and Reco.rowKey works
+     one out from its key cells - see the note there. */
   return row;
 },
 
@@ -14910,7 +15385,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     if (!tpl || !sess) return null;
     const row = Reco._rowById(sess, rowId);
     if (!row) return null;
-    const pk = Reco.getRowPK(tpl, row);
+    const pk = Reco.rowKey(tpl, row);
     return { tpl, sess, row, pk };
   },
 
@@ -15203,7 +15678,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
         sess.offsets[rowId] = true;
         row._manualOffset = true;
         row._recoId = rid;
-        const pk = Reco.getRowPK(tpl, row);
+        const pk = Reco.rowKey(tpl, row);
         if (pk) mm[pk] = { recoId: rid, byUser: true };
       });
     } else {
@@ -15263,7 +15738,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
         const newRid = 'M' + Date.now().toString(36) + '_' + Math.floor(Math.random()*1000);
         remaining.forEach(r => {
           r._recoId = newRid;
-          const pk = Reco.getRowPK(tpl, r);
+          const pk = Reco.rowKey(tpl, r);
           if (pk) mm[pk] = { recoId: newRid, byUser: true };
         });
         if (rid !== '__nogroup__') Reco._removeRidFromMaster(mm, rid);
@@ -15300,7 +15775,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       delete sess.offsets[r._id];
       delete r._manualOffset;
       delete r._recoId;
-      const pk = Reco.getRowPK(tpl, r);
+      const pk = Reco.rowKey(tpl, r);
       if (pk && mm[pk]) delete mm[pk];
     });
   },
@@ -15692,16 +16167,61 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     Reco._runState(id).loadGen++;
     const definedCols = tpl.columns.map(c => c.name);
 
-    // Map raw fields to defined columns AND assign PK + _ver upload
+    /* Map raw fields to defined columns and stamp _ver. THE KEY IS NOT MINTED
+       HERE ANY MORE: it may depend on added columns that have to be worked out
+       first (decision D), the per-component audit has to be able to refuse the
+       whole load before anything is written (decision E), and the correction
+       master is keyed BY the key, so it cannot be applied until the key is
+       frozen. */
     const mapped = rawData.map(raw => {
       const row = { _id: U.uid() };
       definedCols.forEach(col => {
         const key = rawFields.find(f => f === col) || rawFields.find(f => String(f).toLowerCase() === col.toLowerCase());
         row[col] = key ? (raw[key] == null ? '' : raw[key]) : '';
       });
-      row._pk = Reco.getRowPK(tpl, row) || ('_auto_' + U.uid());
+      /* RESERVED HERE, FILLED BY THE MINT. The value is worked out in its own
+         pass below, but the PROPERTY has to be created in the order it always
+         was: JSON.stringify walks a row in insertion order, sess.data is
+         written to recoSessions.json on the shared folder, and
+         run_panes_e2e.mjs diffs that file byte for byte against the previous
+         build. Same object, same meaning, different bytes is still a diff
+         nobody asked for. */
+      row._pk = '';
       row._ver = 'upload';
-      // Apply correction master
+      return row;
+    });
+    /* Synchronous below BUSY_ROWS, which is every caller that exists today:
+       Reco.loadData's parser callback and parsePasteData both treat this
+       function as synchronous, and so do nine e2e fixtures. Above it the mint
+       is chunked with the busy overlay and this returns a promise, which those
+       callers ignore and the big-file paths await. */
+    if (mapped.length > Reco.BUSY_ROWS)
+      return Reco._mintKeys(tpl, sess, mapped).then(a => Reco._ingestAfterMint(tpl, sess, mapped, a));
+    return Reco._ingestAfterMint(tpl, sess, mapped, Reco._mintKeysSync(tpl, sess, mapped));
+  },
+
+  /* The rest of the ingest, once the keys are frozen. Split out of ingestData
+     ONLY so the mint can be chunked above BUSY_ROWS without making the whole
+     function async for everybody. */
+  _ingestAfterMint(tpl, sess, mapped, audit) {
+    /* THE REFUSAL, AND IT IS BEFORE THE WRITE AND BEFORE THE CONCAT. A
+       `Versioning.appendUpload(tpl, mapped).then(...)` thirty lines below has
+       already fired by the time any modal could appear, and the day file is on
+       the share by then. */
+    const refusal = Reco._keyIngestCheck(tpl, mapped, audit);
+    if (refusal) {
+      if (refusal.hard) {
+        App.openModal('These rows cannot be given a row key',
+          '<div class="help" style="white-space:pre-wrap;">' + U.esc(refusal.msg) + '</div>',
+          '<button class="primary" onclick="App.closeModal()">OK</button>');
+        U.toast('Nothing was loaded', 'error');
+        return;
+      }
+      if (!confirm(refusal.msg)) { U.toast('Nothing was loaded', 'error'); return; }
+    }
+    /* The correction master, applied per row now that the key is frozen.
+       Byte for byte what used to run inside the map above. */
+    mapped.forEach(row => {
       const pk = row._pk;
       const tplCorr = (AppState.correctionMaster[tpl.id] || {});
       if (pk && tplCorr[pk]) {
@@ -15722,7 +16242,6 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
           }
         });
       }
-      return row;
     });
     sess.data = sess.data.concat(mapped);
     /* loadedAt means "when the rows I HOLD came from the share" - it is the
@@ -15763,9 +16282,15 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     App.navigate('reco');
     U.toast('Loaded '+mapped.length+' rows','success');
 
-    // Rows that share a primary key collapse into one when the data is
-    // reopened from history — tell the user now rather than after a reload.
-    if ((tpl.primaryKeys || []).length) {
+    /* Rows that share a primary key collapse into one when the data is
+       reopened from history. ROUND 2: this is no longer the only warning and
+       is no longer the FIRST one - the mint counts duplicates inside the
+       batch and _keyIngestCheck asks about them BEFORE appendUpload, which is
+       the only side of the write where a refusal means anything. What is left
+       here covers what that pass cannot see: a row that duplicates the key of
+       a row already in the session from an earlier load. Skipped when the
+       question already named duplicates, so the operator is not told twice. */
+    if ((tpl.primaryKeys || []).length && !(audit && audit.dupRows)) {
       const counts = new Map();
       sess.data.forEach(r => counts.set(r._pk, (counts.get(r._pk) || 0) + 1));
       const dupKeys = Array.from(counts).filter(([, n]) => n > 1);
@@ -15785,6 +16310,30 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
   // For non-extra columns, callers should just use row[col] directly.
   _extraValueForRow(tpl, sess, row, ac) {
     if (!ac) return '';
+    /* ROUND 2. DECISION G BELONGS HERE TOO, and this is the choke point four
+       more surfaces share: the column filters, the slicers, the sort and
+       find-and-replace all come through here, and all four read the
+       RECOMPUTED value. So once a colleague saved the shared accounts master,
+       the operator looked at the key column, saw VEND-33, filtered on
+       VEND-33 and got an EMPTY grid, while the slicer offered VEND-99, which
+       no row on screen showed. The row was still there.
+       _rowWithExtras has the same two lines for the grid, the exports, the
+       reports and the Excel view; between them every reader of a key extra's
+       value now answers with the frozen one. */
+    const kx = Reco._keyExtraSet(tpl);
+    if (kx && kx.has(ac.name)) {
+      const frozen = Reco.keyCellValue(tpl, sess, row, ac.name);
+      if (frozen != null) return frozen;
+    }
+    return Reco._extraComputedValue(tpl, sess, row, ac);
+  },
+
+  /* The same thing WITHOUT the freeze: what the column would say if it were
+     worked out right now. Split out of _extraValueForRow because
+     keyCellValue's fallback and keyDrift must not re-enter the frozen branch
+     - the first would recurse into itself and the second would compare the
+     recomputed value against itself and never report drift at all. */
+  _extraComputedValue(tpl, sess, row, ac) {
     // Formulas / lookups may reference additional columns declared above this one.
     const accum = Reco.rowFull(tpl, sess, row, ac.name);
     return Reco._extraOwnValue(tpl, sess, accum, row, ac, Reco._fullCtx());
@@ -15837,9 +16386,24 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
        asks "everything declared before THIS column", which is a name
        question - its own caller holds the definition, not an index. */
     const byIdx = (typeof uptoName === 'number');
+    const kx = Reco._keyExtraSet(tpl);
     for (let i = 0; i < extras.length; i++) {
       const ac = extras[i];
       if (uptoName != null && (byIdx ? i > uptoName : ac.name === uptoName)) break;
+      /* DECISION G, IN THE ONE PLACE. A key extra's value was frozen into
+         row._pk when the data was loaded and nothing may recompute it: the
+         grid, every export, every report, the Excel view and
+         XlSchema.currentValue all read the enriched row, so freezing it here
+         is what makes them agree instead of each carrying its own branch.
+         `kx` is null for every template that has no key extras - which is
+         every template that existed before #24 - so this costs one WeakMap
+         read per call and the walk below is byte for byte what it was.
+         The MINT itself reaches this with no _pk on the row yet, so it
+         computes; keyCellValue's split guard is what decides. */
+      if (kx && kx.has(ac.name)) {
+        const frozen = Reco.keyCellValue(tpl, sess, row, ac.name);
+        if (frozen != null) { out[ac.name] = frozen; continue; }
+      }
       out[ac.name] = Reco._extraOwnValue(tpl, sess, out, row, ac, ctx);
     }
     return out;
@@ -15893,9 +16457,602 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     return (tpl.additionalColumns || []).find(ac => ac.name === col) || null;
   },
 
+  /* A stored key as a column headed "Primary Key" should SHOW it. getRowPK
+     joins with '||' and escapes nothing, so a two-component key prints
+     'INV-7||3' and nobody reads that as two values. Split and joined with
+     ' · ', but ONLY when it splits into exactly primaryKeys.length parts -
+     the same guard keyCellValue needs and for the same reason: a component
+     whose own value contains '||' makes the split ambiguous. A single-column
+     key, which is every template that existed before #24, prints exactly the
+     characters it printed before. */
+  _pkLabel(tpl, pk) {
+    const pks = (tpl && tpl.primaryKeys) || [];
+    const s = pk == null ? '' : String(pk);
+    if (pks.length < 2) return s;
+    if (s.indexOf('_auto_') === 0 || s.indexOf('_added_') === 0) return s;
+    const parts = s.split('||');
+    return parts.length === pks.length ? parts.join(' · ') : s;
+  },
+
+  /* THE KEY COMPUTATION, not a key reader. This is what the MINT runs once
+     per row, over a row enriched with its added columns (see _mintKeysSync);
+     everything that later asks "which row is this?" goes through Reco.rowKey
+     below and gets the FROZEN answer. Callers that still spell
+     `row._pk || Reco.getRowPK(tpl, row)` are reading STORAGE identity and the
+     second arm is dead: every row has a truthy _pk. */
   getRowPK(tpl, row) {
     if (!tpl.primaryKeys || !tpl.primaryKeys.length) return null;
     return tpl.primaryKeys.map(k => String(row[k]||'')).join('||');
+  },
+
+  /* ---- S4: THE KEY READERS -----------------------------------------------
+     TWO kinds of identity live on a row, and #24 is the ticket that stopped
+     them being treated as one thing:
+
+       row._pk       STORAGE identity. Every row has a truthy one ('_auto_'+uid
+                     for a keyless template, '_added_'+_id for a row typed into
+                     the grid). It round-trips through the CSV control column
+                     and NOTHING can move it. Read directly only by applyEdits,
+                     Versioning.appendUpload, _ssFmtRowKey and the version
+                     store.
+       Reco.rowKey   the BUSINESS key - "which real-world row is this?". null
+                     when the template has no primary key, because the key is
+                     documented as Optional and most templates have none.
+
+     rowKey TESTS primaryKeys.length FIRST and only then returns row._pk, and
+     it NEVER MINTS. Both other orders were tried and both are worse.
+     Returning _pk first starts writing AppState.manualOffsetMaster[id][pk]
+     and AppState.correctionMaster[id][pk][col] under throwaway uids on every
+     keyless template - eleven sites in this file guard those two writes with
+     a bare `if (pk)` and nothing else - which is unbounded garbage in two
+     SHARED files that every colleague loads at boot. Minting on a miss
+     reintroduced the per-row recomputation this design exists to remove.
+
+     It returns the FROZEN key, not a recomputed one. That is the one visible
+     change on existing data: where a reader previously recomputed a DIFFERENT
+     key than _pk (only reachable with an editable key column,
+     excelView.allowPkEdit on, and an actual edit to a key cell) it now
+     returns _pk - which is what version history, the offset master, the
+     Special JV claims and the posted-JV index were already using. Convergence
+     on the authoritative key, not a re-key. A group or comment filed under
+     the diverged key becomes unreachable from the grid; Groups.resolvePk's
+     version-file fallback still resolves it from history. */
+  rowKey(tpl, row) {
+    if (!tpl || !tpl.primaryKeys || !tpl.primaryKeys.length) return null;
+    const pk = (row && row._pk) || null;
+    if (!pk) {
+      /* ROUND 2, AND THE ONE PLACE THIS FUNCTION ANSWERS WITH SOMETHING THAT
+         IS NOT row._pk. A row typed into the grid with + Row has no storage
+         identity at all - see _ssBlankRow - so this used to answer null for it
+         however carefully the operator filled in the key cells: "Correction
+         applied" was a lie (nothing reached the correction master or the
+         Master List of Corrections), the manual offset was not recorded, and
+         Create Group from Selection answered "Select rows first" about a row
+         the operator could see was selected.
+         It is worked out from the key CELLS, and that is not the minting this
+         function is forbidden to do: the hazard decision F names is writing
+         manualOffsetMaster[id][pk] under a THROWAWAY UID, and this is the
+         opposite - it is the same key Reco.applyEdits already writes the row's
+         history under (`e.row._pk || Reco.getRowPK(tpl, e.row)`), so the day
+         file, the offset master and the correction master agree on one key,
+         and the correction the operator files on a hand-added invoice is
+         applied when the extract next contains it. It is also what all twenty
+         readers converted in this commit returned for such a row before the
+         conversion, which is what decision N's no-op promise requires.
+         Guarded by _ssAdded, so this is a handful of rows the operator typed
+         and not the per-row recomputation the design exists to remove.
+         A row whose key cells are blank answers null for a SINGLE-component
+         key, where getRowPK gives ''. For a MULTI-component key it answers the
+         truthy '||' that getRowPK joins the blanks into — which is HEAD
+         behaviour and what the no-op promise requires here, so it is left
+         alone. Reco.storeKey is the reader that refuses it; do not add that
+         refusal to this one without re-reading decision N. */
+      if (row && row._ssAdded) return Reco.getRowPK(tpl, row) || null;
+      return null;
+    }
+    /* ROUND 2. '_auto_' IS NOT A BUSINESS KEY, IT IS THE ABSENCE OF ONE, and
+       the version above returned it. The mint writes '_auto_' + a fresh uid
+       for a row whose key components are all blank - routine on a bank or GL
+       extract - and that uid is minted again on every load. Handing it to the
+       twenty readers converted in this commit wrote a DIFFERENT unreachable
+       uid into manualOffsetMaster.json, correctionMaster.json,
+       groupMaster.json and commentMaster.json - four files on the shared
+       folder that every colleague parses at boot - on every single load,
+       while the operator's own offset was not restored and their correction
+       stopped being applied. getRowPK returned '' for exactly these rows and
+       the bare `if (pk)` guards no-op'd on it; this is that behaviour, kept,
+       which is also what decision N's no-op promise requires.
+       '_added_' DOES return: it is the identity of a row typed into the grid,
+       it round-trips the CSV control column for a persistent one, and it is
+       stable for the life of the session for the rest. */
+    if (String(pk).indexOf('_auto_') === 0) return null;
+    return pk;
+  },
+
+  /* S4's stricter sibling, for a store KEYED by the business key.
+     getRowPK joins with '||' and escapes nothing, so two blank key columns
+     mint the string '||', which is TRUTHY: ingestData's _auto_ fallback never
+     fires and every blank-key row in every file of that template collapses
+     onto one key. On a bank or GL extract, blank key cells are routine.
+     storeKey returns null for those rows so a caller sends them down its
+     session-scoped branch instead.
+
+     ROUND 2: the MINT still writes '||' - the bytes of _pk are not something
+     this ticket may change - but it is no longer silent. _mintKeysSync counts
+     those rows (badBlank) and _keyIngestCheck asks about them BEFORE
+     appendUpload, so the operator can refuse the load. See T-24R2-5 for the
+     storage-format fix, which is a migration across every file on the share.
+
+     It is deliberately NOT what the twenty readers converted in this commit
+     use. Swapping them onto it would change behaviour on existing data - a
+     row whose _pk really is '||' would stop reaching manualOffsetMaster['||']
+     - and this ticket's acceptance bar is that the migration is a no-op. The
+     pk-keyed stores #26 and #30 add are its first callers. */
+  storeKey(tpl, row) {
+    const pk = Reco.rowKey(tpl, row);
+    if (!pk) return null;
+    const parts = String(pk).split('||');
+    if (parts.length === tpl.primaryKeys.length && parts.every(p => p === '')) return null;
+    return pk;
+  },
+
+  /* The key components that are ADDED columns, as a Set, or null when there
+     are none - which is every template that existed before #24, so every
+     reader below is one or two property reads away from the path it has
+     always taken.
+
+     Cached against the template object AND against the two arrays it reads,
+     by IDENTITY. saveTemplate replaces both (the prune builds a new
+     primaryKeys array and the editor deep-clones additionalColumns), so a
+     stale set cannot outlive an edit. An in-place push to a LIVE template's
+     primaryKeys would not be seen - nothing does that: togglePK mutates
+     RecoTemplate._editing, which is a clone. */
+  _keyExtraCache: new WeakMap(),
+  _keyExtraSet(tpl) {
+    if (!tpl) return null;
+    const pks = tpl.primaryKeys;
+    if (!pks || !pks.length) return null;
+    const ac = tpl.additionalColumns;
+    if (!ac || !ac.length) return null;
+    let e = null;
+    try { e = Reco._keyExtraCache.get(tpl); } catch (x) { e = null; }
+    if (e && e.pks === pks && e.ac === ac) return e.set;
+    const tplCols = new Set((tpl.columns || []).map(c => c && c.name));
+    const names = new Set();
+    ac.forEach(a => {
+      if (a && a.name && !tplCols.has(a.name) && pks.indexOf(a.name) !== -1) names.add(a.name);
+    });
+    const set = names.size ? names : null;
+    try { Reco._keyExtraCache.set(tpl, { pks: pks, ac: ac, set: set }); } catch (x) {}
+    return set;
+  },
+
+  /* DECISION G. The grid recomputes a derived extra on EVERY render, so once
+     a colleague edits the shared accounts master this column would PRINT
+     VEND-44 while _pk is still VEND-33 and every other surface - history, the
+     offset master, the Special JV claims, the posted-JV index - is on
+     VEND-33. One column in the app whose printed value is
+     guaranteed-wrong-on-purpose is not something to document; this returns
+     the FROZEN component instead.
+
+     THE SPLIT GUARD IS REQUIRED, NOT DEFENSIVE: getRowPK joins with '||' and
+     escapes nothing, so a component whose own value contains '||' makes the
+     split ambiguous. When _pk does not split into exactly
+     primaryKeys.length parts, or is a storage-only key, the current computed
+     value is returned and the caller shows what it can. */
+  keyCellValue(tpl, sess, row, k) {
+    const frozen = Reco._keyFrozenPart(tpl, row, k);
+    if (frozen != null) return frozen;
+    const pks = (tpl && tpl.primaryKeys) || [];
+    if (pks.indexOf(k) < 0) return null;
+    /* The fallback calls the UNFROZEN computation, so it cannot re-enter this
+       function through _extraValueForRow's own frozen branch. Only the
+       fallback path pays it - a key whose _pk splits cleanly, which is every
+       key the mint wrote for a well-formed value, returns on the line above -
+       and keyDrift marks the cell ⚠ recalculated so the screen says that
+       this is not the stored key. */
+    const ac = Reco._extraDef(tpl, k);
+    if (ac) { try { return Reco._extraComputedValue(tpl, sess, row, ac); } catch (e) { return ''; } }
+    return row && row[k] != null ? row[k] : '';
+  },
+
+  /* The frozen component as _pk holds it, or NULL when it cannot be
+     recovered: a storage-only key ('_auto_' never reaches here, '_added_'
+     does), or a _pk that does not split into exactly primaryKeys.length parts
+     because a component's own value contains the '||' separator - getRowPK
+     joins with it and escapes nothing.
+
+     SEPARATE FROM keyCellValue because the two callers want opposite things
+     from "cannot be recovered": the CELL has to print something, so it falls
+     back to the recomputed value, while the DRIFT CHECK has to know that what
+     the cell prints is a recalculation. Comparing keyCellValue against the
+     recomputed value made those two sides equal BY CONSTRUCTION for exactly
+     the rows where the printed value is guaranteed not to be the key, so the
+     ⚠ recalculated badge was structurally unable to appear on them. */
+  _keyFrozenPart(tpl, row, k) {
+    const pks = (tpl && tpl.primaryKeys) || [];
+    const i = pks.indexOf(k);
+    if (i < 0) return null;
+    const pk = Reco.rowKey(tpl, row);
+    if (!pk || String(pk).indexOf('_auto_') === 0 || String(pk).indexOf('_added_') === 0) return null;
+    const parts = String(pk).split('||');
+    return parts.length === pks.length ? parts[i] : null;
+  },
+
+  /* Which key components no longer compute to the value frozen into _pk.
+     Only an EXTRA can drift - a template column's value is on the row, not
+     derived - so a template with no key extras pays one property read. */
+  keyDrift(tpl, sess, row) {
+    const kx = Reco._keyExtraSet(tpl);
+    if (!kx) return { drifted: false, cols: [] };
+    const cols = [];
+    kx.forEach(name => {
+      const frozen = Reco._keyFrozenPart(tpl, row, name);
+      let now = '';
+      try { now = Reco._extraComputedValue(tpl, sess, row, Reco._extraDef(tpl, name)); } catch (e) { now = ''; }
+      if (frozen == null) {
+        /* The frozen component cannot be shown at all, so the cell is
+           printing a recalculation - which is what the badge says. Only for a
+           row the MINT keyed: a row typed into the grid carries '_added_'+id
+           and never had a frozen component to disagree with. */
+        const pk = Reco.rowKey(tpl, row);
+        if (pk && String(pk).indexOf('_added_') !== 0) cols.push(name);
+        return;
+      }
+      if (String(frozen) !== String(now == null ? '' : now)) cols.push(name);
+    });
+    if (cols.length) Reco._noteKeyDrift(tpl, row);
+    return { drifted: cols.length > 0, cols: cols };
+  },
+
+  /* Counted per ROW and not per cell, because the grid asks once per rendered
+     key cell and a virtual scroll re-renders the same rows many times over -
+     a counter would otherwise read in the millions and mean nothing. Kept on
+     Reco and not on the session: sessions are JSON-serialised to the shared
+     folder, and how many rows one person's screen noticed as recalculated is
+     not a fact about the data. */
+  _keyDriftSeen: {},
+  _noteKeyDrift(tpl, row) {
+    const id = tpl && tpl.id;
+    if (!id) return;
+    const seen = Reco._keyDriftSeen[id] || (Reco._keyDriftSeen[id] = new Set());
+    /* CAPPED. The grid asks per rendered key cell, so scrolling a drifted
+       200,000-row file would otherwise put every row's key in here - megabytes
+       of strings held for a number whose only job is to say "a lot". Past the
+       cap the count stops rising and the marker on each cell still tells the
+       truth about that cell. */
+    if (seen.size < 100000) seen.add((row && row._pk) || '');
+  },
+  keyDriftCount(tplId) {
+    const s = Reco._keyDriftSeen[tplId];
+    return s ? s.size : 0;
+  },
+
+  /* ---- DECISION D: THE CLOSURE, IN DECLARATION ORDER ---------------------
+     A key extra may reference an EARLIER, eligible, NON-key extra, and
+     Formula.substituteTokens turns a missing reference into '' SILENTLY. So
+     CONCAT({Base},"-",{Line}) with Base unmaterialised mints '-' for every
+     row, collapseToActive then keeps one row per key, and a 200,000-row day
+     file REOPENS AS ONE ROW with nothing said. The mint therefore
+     materialises the TRANSITIVE CLOSURE in declaration order.
+
+     This returns the INDEX of the last key extra, which is the `uptoName`
+     number form _rowWithExtras already takes ("stop AFTER this index"). The
+     index form and not the name: two added columns may share a name, and the
+     first of them would otherwise stop a walk meant to stop at the second. */
+  _keyClosureUpto(tpl) {
+    const kx = Reco._keyExtraSet(tpl);
+    if (!kx) return -1;
+    const extras = (tpl.additionalColumns || []);
+    let last = -1;
+    for (let i = 0; i < extras.length; i++) if (extras[i] && kx.has(extras[i].name)) last = i;
+    return last;
+  },
+
+  /* ROUND 2. THE NAMES THE KEY'S VALUE ACTUALLY DEPENDS ON, transitively:
+     every key extra, plus every earlier extra one of them READS - a {…}
+     reference in a formula, or the matchColumn of a lookup. Three things
+     needed this answer and all three had their own, shallower one:
+
+       _keyMasterProblem looked only at the extras IN the key, so a key
+         FORMULA reading a non-key lookup was minted from an accounts master
+         that had failed to load, with no question asked - 'D1-', 'D2-' onto
+         the share, re-minted 'D1-VEND-33' the next day;
+       tplSignature hashed only the definitions of the columns the key NAMES,
+         so editing the helper formula a key is BUILT FROM left the signature
+         byte-identical and Monday's workbook loaded back claiming to be
+         current while every row had been re-keyed;
+       the definition-change confirm compared that same shallow list, so it
+         never fired on a dependency edit at all.
+
+     It is the DEPENDENCY set and deliberately not "every extra declared above
+     the last key extra": that over-approximation would HARD-REFUSE an ingest
+     because an unrelated document-number lookup declared above the key had an
+     empty master - and it is empty at the start of every month - and would
+     mark every exported workbook stale when an unrelated added column was
+     edited, which the comment in tplSignature promises it will not do.
+     Null when the template has no key extras, which is every template that
+     existed before #24. */
+  _keyDepNames(tpl) {
+    const kx = Reco._keyExtraSet(tpl);
+    if (!kx) return null;
+    const extras = (tpl.additionalColumns || []);
+    const byName = new Map();
+    extras.forEach(a => { if (a && a.name && !byName.has(a.name)) byName.set(a.name, a); });
+    const want = new Set();
+    const queue = [];
+    kx.forEach(n => { want.add(n); queue.push(n); });
+    while (queue.length) {
+      const ac = byName.get(queue.pop());
+      if (!ac) continue;
+      const refs = [];
+      if (ac.type === 'formula')
+        (String(ac.formula == null ? '' : ac.formula).match(/\{([^}]*)\}/g) || [])
+          .forEach(s => refs.push(s.slice(1, -1).trim()));
+      let cfg = null;
+      try { cfg = Masters._lookupCfg(tpl, ac); } catch (e) { cfg = null; }
+      if (cfg && cfg.matchColumn) refs.push(String(cfg.matchColumn).trim());
+      refs.forEach(r => { if (byName.has(r) && !want.has(r)) { want.add(r); queue.push(r); } });
+    }
+    return want;
+  },
+
+  /* The closure, into a scratch object the caller OWNS and reuses across
+     rows. _extraOwnValue only ever READS from the accum object, so one object
+     per pass is enough - and 500,000 copies of a 60-field row are not
+     something to allocate for a value that is thrown away immediately.
+     Session extras are deliberately not walked: sess.extraColumns is
+     per-person, so a key may never depend on one. */
+  _keyScratch(tpl, sess, row, upto, ctx, scratch) {
+    for (const k in scratch) delete scratch[k];
+    Object.assign(scratch, row);
+    const extras = (tpl.additionalColumns || []);
+    const end = Math.min(upto, extras.length - 1);
+    for (let i = 0; i <= end; i++) {
+      const ac = extras[i];
+      if (!ac || !ac.name) continue;
+      scratch[ac.name] = Reco._extraOwnValue(tpl, sess, scratch, row, ac, ctx);
+    }
+    return scratch;
+  },
+
+  _mintAcc(tpl) {
+    const pks = (tpl.primaryKeys || []);
+    const kx = Reco._keyExtraSet(tpl);
+    const a = { minted: 0, rows: 0, empty: {}, errs: {}, pipes: {}, partial: 0, errRows: 0,
+                allBlank: 0, badBlank: 0, ambig: 0, keyed: 0, dupRows: 0,
+                keys: new Set(), dupKeys: new Set(), keysCapped: false,
+                multi: pks.length > 1, pkIsExtra: pks.map(k => !!(kx && kx.has(k))),
+                ctx: {}, scratch: {}, upto: Reco._keyClosureUpto(tpl) };
+    pks.forEach(k => { a.empty[k] = 0; a.errs[k] = 0; a.pipes[k] = 0; });
+    return a;
+  },
+
+  /* THE MINT. Freezes row._pk for every row in [from, to), and counts, per
+     key component, the rows whose component is EMPTY and the rows whose
+     component is '#ERR'. '#ERR' is counted separately and NOT as empty,
+     because it is not empty: _extraOwnValue returns it for a throwing formula
+     and Formula._result maps NaN/Infinity to it, so twelve thousand rows can
+     share _pk='#ERR' while the duplicate-key modal fires only after the file
+     is already on the share.
+
+     `partial` is one of FOUR counts, and round 2 added three of them,
+     because the first build counted only this one and each of the others
+     loses a day's rows on the share:
+
+       partial   at least one component empty AND at least one not. 'INV-7||'
+                 is TRUTHY, so the _auto_ fallback never runs and Doc is
+                 unique so no two rows share a key - history detaches in
+                 silence.
+       badBlank  EVERY component blank, where that is not harmless. The
+                 comment that used to stand here said such a row "still falls
+                 to '_auto_'+uid exactly as it always has", and that is FALSE
+                 for a key with more than one component: `key` is already
+                 parts.join('||') = '||', which is TRUTHY, so the _auto_ arm
+                 below is never reached and every blank-key row in the file
+                 collapses onto that one key (30 rows reopened as 6, only the
+                 last blank row surviving). It is also not harmless when a
+                 blank component is an ADDED column: a lookup or a formula
+                 that produced nothing is a misconfiguration, which is the
+                 ticket's own headline key shape. It IS harmless for a single
+                 FILE column - the bank-extract case the floor was narrowed
+                 to protect - because each such row keeps its own uid.
+       dupRows   rows sharing a key with an earlier row in the same file.
+                 collapseToActive keeps ONE ROW PER KEY, so these are the rows
+                 that are gone from the grid tomorrow. An accounts lookup is
+                 many-to-one by construction (many invoices, one nominal), so
+                 the ticket's own motivating example mints this; the
+                 duplicate-key modal that used to be the only warning fires 35
+                 lines AFTER appendUpload has put the file on the share.
+       ambig     a component whose own value contains '||'. getRowPK joins
+                 with it and escapes nothing, so _pk cannot be split back into
+                 its parts and decision G's frozen value cannot be shown. */
+  _mintKeysSync(tpl, sess, rows, from, to, acc) {
+    const a = acc || Reco._mintAcc(tpl);
+    const pks = (tpl.primaryKeys || []);
+    const i0 = from == null ? 0 : from;
+    const i1 = to == null ? rows.length : to;
+    for (let i = i0; i < i1; i++) {
+      const row = rows[i];
+      if (!row) continue;
+      let key = '';
+      if (pks.length) {
+        const src = a.upto >= 0 ? Reco._keyScratch(tpl, sess, row, a.upto, a.ctx, a.scratch) : row;
+        let blanks = 0, errs = 0, pipes = 0, blankExtra = false;
+        const parts = new Array(pks.length);
+        for (let c = 0; c < pks.length; c++) {
+          const v = src[pks[c]];
+          const s = v == null ? '' : String(v);
+          parts[c] = s;
+          if (s === '') { blanks++; a.empty[pks[c]]++; if (a.pkIsExtra[c]) blankExtra = true; }
+          else if (s === '#ERR') { errs++; a.errs[pks[c]]++; }
+          else if (a.pkIsExtra[c] && s.indexOf('||') !== -1) { pipes++; a.pipes[pks[c]]++; }
+        }
+        if (errs) a.errRows++;
+        if (pipes) a.ambig++;
+        if (blanks && blanks < pks.length) a.partial++;
+        else if (blanks) { a.allBlank++; if (a.multi || blankExtra) a.badBlank++; }
+        key = parts.join('||');
+        if (key !== '') {
+          a.keyed++;
+          /* CAPPED, and the cap is the right way round: it stops growing once
+             300,000 DISTINCT keys have been seen, and a file with that many
+             distinct keys is a healthy one. The pathological case this counts
+             - a many-to-one lookup - has a handful of distinct keys, so the
+             cap never comes near it. Eight example keys are kept for the
+             question, and no more: the point is to name one, not to list
+             200,000. */
+          if (a.keys.has(key)) { a.dupRows++; if (a.dupKeys.size < 8) a.dupKeys.add(key); }
+          else if (!a.keysCapped) {
+            a.keys.add(key);
+            if (a.keys.size >= 300000) a.keysCapped = true;
+          }
+        }
+      }
+      row._pk = key || ('_auto_' + U.uid());
+      a.minted++;
+    }
+    a.rows = rows.length;
+    return a;
+  },
+
+  /* The same pass, CHUNKED, with the busy overlay the grid work established -
+     at 500,000 rows a single loop is a dead window for seconds, and a silent
+     pause reads as a crash. Always a promise. ingestData deliberately calls
+     _mintKeysSync below BUSY_ROWS instead, because every existing caller (a
+     file-picker callback and a paste box) treats ingestData as synchronous
+     and reads sess.data on the next line. */
+  async _mintKeys(tpl, sess, rows) {
+    const n = rows.length;
+    if (n <= Reco.BUSY_ROWS) return Reco._mintKeysSync(tpl, sess, rows);
+    const CHUNK = 20000;
+    const acc = Reco._mintAcc(tpl);
+    for (let i = 0; i < n; i += CHUNK) {
+      const end = Math.min(n, i + CHUNK);
+      Reco._mintKeysSync(tpl, sess, rows, i, end, acc);
+      Reco._busy('Working out row keys\u2026 ' + U.fmtInt(end) + ' / ' + U.fmtInt(n), 100 * end / n);
+      await Reco._yield();
+    }
+    Reco._busyDone();
+    return acc;
+  },
+
+  /* A master a key component depends on that is not usable RIGHT NOW.
+     Store.readOnlyKeys is set by Store.loadAll for a file it could not read,
+     and it already means "never overwrite this". Identity must not depend on
+     such a file: rows keyed from an empty accounts master would not match
+     their own history tomorrow, when the master loads properly. */
+  _keyMasterProblem(tpl) {
+    /* ROUND 2: the DEPENDENCY CLOSURE, not the key set. A key formula reading
+       a non-key lookup depends on that lookup's master as surely as a key
+       lookup depends on its own. */
+    const dep = Reco._keyDepNames(tpl);
+    if (!dep) return null;
+    const STORE = { accounts: 'aegMaster', docNumbers: 'docNumberMaster',
+                    corrections: 'correctionMaster' };
+    const bad = [];
+    (tpl.additionalColumns || []).forEach(ac => {
+      if (!ac || !dep.has(ac.name)) return;
+      const cfg = Masters._lookupCfg(tpl, ac);
+      if (!cfg) return;
+      const key = STORE[cfg.source];
+      if (key && Store.readOnlyKeys[key]) {
+        bad.push(ac.name + ' \u2014 its master could not be read from the shared folder');
+        return;
+      }
+      if (!(Masters.rows(cfg.source, tpl.id) || []).length) {
+        bad.push(ac.name + ' \u2014 its master is empty');
+      }
+    });
+    return bad.length ? bad : null;
+  },
+
+  /* THE FLOOR IS ONE ROW, deliberately. A single row whose key is half
+     missing detaches from its own history silently and for ever, the confirm
+     costs one click, and the case cannot arise at all on a single-column key
+     (one component cannot be both blank and not blank), which is every
+     template that existed before this feature. */
+  KEY_BAD_FLOOR: 1,
+
+  /* DECISION E: THE QUESTION IS ASKED BEFORE THE FILE IS WRITTEN.
+     `Versioning.appendUpload(tpl, mapped).then(path => {` has ALREADY FIRED
+     by the time the duplicate-key modal at the end of the ingest appears, so
+     that modal cannot refuse anything - and it never fires for this case
+     anyway, because a two-component key with ONE empty component yields
+     'INV-7||', which is truthy and unique. */
+  _keyIngestCheck(tpl, rows, audit) {
+    const pks = (tpl.primaryKeys || []);
+    if (!pks.length || !audit) return null;
+    const bad = Reco._keyMasterProblem(tpl);
+    if (bad) return { hard: true, msg:
+        'The row key of this reconciliation depends on a master that is not usable right now:\n\n  '
+      + bad.join('\n  ')
+      + '\n\nNothing was loaded. Rows keyed from a master that failed to load would not match '
+      + 'their own history once it loads properly.' };
+    const F = Reco.KEY_BAD_FLOOR;
+    /* THE DUPLICATE ARM IS FOR A DERIVED KEY ONLY, and this is a migration
+       promise, not a preference. On a key made of template columns, duplicates
+       are a PRE-EXISTING tolerated state: ingestData has always loaded them and
+       shown the 'Duplicate primary keys' panel afterwards, ExcelLink carries a
+       whole dupPk badge machinery for them, and an AP or GL extract keyed on a
+       document number with several lines per document IS THAT SHAPE. Asking
+       before the write would question such a reconciliation on every single
+       upload, with Cancel loading nothing - a template nobody has touched
+       behaving differently on Monday, which is exactly what this ticket's
+       acceptance bar forbids.
+       The other arms stay on for every key, because each reports something
+       that is silently WRONG on today's templates too: an empty or '#ERR'
+       component still looks like a key, so nothing later refuses those rows and
+       they quietly match no history; all-blank parts collapse onto the truthy
+       '||'; and a component containing '||' cannot be split back at all.
+       On a DERIVED key a duplicate is new information - the formula or lookup
+       collapsed rows that arrived distinct - so there it is asked. */
+    const dupAsk = audit.dupRows >= F && !!Reco._keyExtraSet(tpl);
+    if (audit.partial < F && audit.errRows < F && audit.badBlank < F
+        && !dupAsk && audit.ambig < F) return null;
+    /* ROUND 2: FOUR THINGS CAN BE WRONG WITH A MINTED KEY and the first build
+       asked about one of them. The question is assembled worst-first and is
+       asked ONCE, before anything is written, so the operator can say no to
+       the whole load. */
+    const say = [];
+    if (dupAsk) {
+      const ex = Array.from(audit.dupKeys).slice(0, 5).map(k => '"' + k + '"').join(', ');
+      say.push(U.fmtInt(audit.dupRows) + ' of ' + U.fmtInt(rows.length)
+        + ' row(s) share a row key (' + pks.join(' + ') + ') with another row in this file.\n\n'
+        + 'Reopening this data from history keeps ONE ROW PER KEY, so ' + U.fmtInt(audit.dupRows)
+        + ' of these rows would be gone from the grid the next time anyone opens the day'
+        + (ex ? '. Example key(s): ' + ex : '') + '.');
+    }
+    if (audit.partial >= F || audit.errRows >= F || audit.badBlank >= F) {
+      const lines = [];
+      pks.forEach(k => {
+        if (audit.empty[k]) lines.push('  ' + k + ': ' + U.fmtInt(audit.empty[k]) + ' row(s) EMPTY');
+        if (audit.errs[k]) lines.push('  ' + k + ": " + U.fmtInt(audit.errs[k]) + " row(s) '#ERR'");
+      });
+      say.push('Part of the row key (' + pks.join(' + ') + ') is missing on some of these rows:\n\n'
+        + lines.join('\n') + '\n\nout of ' + U.fmtInt(rows.length) + ' row(s).\n\n'
+        + (audit.badBlank >= F
+            ? U.fmtInt(audit.badBlank) + ' row(s) have NO usable key at all'
+              + (audit.multi
+                  ? " \u2014 and a key of " + pks.length + " parts that are all blank is the string '"
+                    + new Array(pks.length).join('||') + "', which still looks like a key, so every one of "
+                    + 'those rows collapses onto it when the day is reopened.\n\n'
+                  : ' \u2014 the lookup or formula it is worked out from produced nothing.\n\n')
+            : '')
+        + 'A key with one empty part still looks like a key, so nothing later will refuse these rows, '
+        + 'and they will not match their own version history, manual offsets, corrections, groups or '
+        + "comments. '#ERR' is not empty either \u2014 every row that errors shares one key.");
+    }
+    if (audit.ambig >= F) {
+      const lines = [];
+      pks.forEach(k => { if (audit.pipes[k]) lines.push('  ' + k + ': ' + U.fmtInt(audit.pipes[k]) + ' row(s)'); });
+      say.push("The value of a key column holds '||', which is the separator Reco puts between the "
+        + 'parts of a key:\n\n' + lines.join('\n') + '\n\n'
+        + 'The stored key of those rows cannot be split back into its parts, so that column shows a '
+        + 'freshly worked-out value rather than the one in the key, marked \u26a0 recalculated.');
+    }
+    return { hard: false, dupTold: dupAsk,
+             msg: say.join('\n\n\u2014\u2014\u2014\n\n') + '\n\nLoad them anyway?' };
   },
 
   /* Auto-offset preserves user-marked manual offsets stored in manualOffsetMaster */
@@ -15904,7 +17061,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     // First, restore manual offsets for any rows whose PK appears in the manual-offset master
     const mm = AppState.manualOffsetMaster[tpl.id] || {};
     sess.data.forEach(row => {
-      const pk = Reco.getRowPK(tpl, row);
+      const pk = Reco.rowKey(tpl, row);
       if (pk && mm[pk]) {
         sess.offsets[row._id] = true;
         row._recoId = mm[pk].recoId;
@@ -15912,11 +17069,30 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       }
     });
     if (!tpl.aggregate || !tpl.aggregateBy?.length) return;
+    /* The aggregation key may name an added column, whose value is not on the
+       row. Materialised only as far as the last added column the key mentions,
+       with ONE scratch object and ONE Masters index for the whole pass; when
+       the key names no added column, aggSrc is the identity and this is the
+       original code path. */
+    const aggExtras = (tpl.additionalColumns || []);
+    let aggUpto = -1;
+    for (let i = 0; i < aggExtras.length; i++)
+      if (aggExtras[i] && tpl.aggregateBy.indexOf(aggExtras[i].name) !== -1) aggUpto = i;
+    const aggCtx = {}, aggScratch = {};
+    const aggSrc = aggUpto < 0 ? (r => r)
+      : (r => Reco._keyScratch(tpl, sess, r, aggUpto, aggCtx, aggScratch));
     // Auto-offset by aggregation: only for rows NOT already manually offset
     const groups = new Map();
     sess.data.forEach(row => {
       if (row._manualOffset) return; // skip manual rows from auto-grouping
-      const key = tpl.aggregateBy.map(k => String(row[k]||'')).join('||');
+      /* DECISION M. The aggregation picker has always offered added columns,
+         but this read the RAW row, where an added column's value does not
+         exist - so ticking one collapsed EVERY row into one bucket and
+         auto-offset then matched the whole extract against itself. Routed
+         through the same closure helper as the mint, with one scratch object
+         and one Masters index for the whole pass. */
+      const aggRow = aggSrc(row);   // ONCE per row, not once per key column
+      const key = tpl.aggregateBy.map(k => String(aggRow[k]||'')).join('||');
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(row);
     });
@@ -16310,19 +17486,19 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     // Status-extra filters: attachment / comment / group presence
     if (sess.requireAttachment) {
       filtered = filtered.filter(r => {
-        const pk = Reco.getRowPK(tpl, r);
+        const pk = Reco.rowKey(tpl, r);
         return pk && typeof Attachments !== 'undefined' && Attachments.forPk(tpl.id, pk).length > 0;
       });
     }
     if (sess.requireComment) {
       filtered = filtered.filter(r => {
-        const pk = Reco.getRowPK(tpl, r);
+        const pk = Reco.rowKey(tpl, r);
         return pk && typeof Comments !== 'undefined' && Comments.forPk(tpl.id, pk).length > 0;
       });
     }
     if (sess.requireGroup) {
       filtered = filtered.filter(r => {
-        const pk = Reco.getRowPK(tpl, r);
+        const pk = Reco.rowKey(tpl, r);
         return pk && typeof Groups !== 'undefined' && Groups.groupsForPk(tpl.id, pk).length > 0;
       });
     }
@@ -17311,7 +18487,7 @@ _renderOneRow(tpl, sess, row, descs, idxMap, filteredIdx) {
   const isSelected = sess.selectedRows && sess.selectedRows[row._id];
   const rowClass = isOffset ? 'row-offset' : 'row-open';
   const selClass = isSelected ? ' selected' : '';
-  const rowPkAttr = U.escAttr(Reco.getRowPK(tpl, row) || '');
+  const rowPkAttr = U.escAttr(Reco.rowKey(tpl, row) || '');
      const addedCls = row._ssAdded ? ' row-ss-added' : '';
 
 
@@ -17332,7 +18508,7 @@ _renderOneRow(tpl, sess, row, descs, idxMap, filteredIdx) {
     if (row._ssAdded)      statusHtml += ' <span class="badge ss-added" title="Added row">✚</span>';
     if (row._ssPersistent) statusHtml += ' <span class="badge ss-persist" title="Persistent (in versioned CSV)">💾</span>';
     if (row._ssSingleUse)  statusHtml += ' <span class="badge ss-single" title="Single-use — removed after next entry">⏱</span>';
-  const rowPkForBadges = Reco.getRowPK(tpl, row);
+  const rowPkForBadges = Reco.rowKey(tpl, row);
   if (tpl.groupsEnabled) {
     const memberships = rowPkForBadges ? Groups.groupsForPk(tpl.id, rowPkForBadges) : [];
     if (memberships.length) {
@@ -17448,6 +18624,24 @@ _renderExtraCell(tpl, sess, row, desc, i, fullOf) {
 
   const own = fullOf()[ac.name];
   if (ac.type === 'master' || ac.type === 'master_lookup' || ac.type === 'formula') {
+    /* DECISION G. `own` is already the FROZEN value for a key component -
+       Reco._rowWithExtras freezes it, in the one place - so this cell prints
+       the same characters as history, the export, every report and the Excel
+       view. What it adds is the MARKER: recomputing the column now gives a
+       different answer, which means somebody changed the shared master or the
+       formula under a loaded session. Saying nothing would leave the operator
+       reading VEND-33 while the master says VEND-44 with no way to tell.
+       Only reached when the template HAS key extras, so no template that
+       existed before #24 renders a byte differently. */
+    const kx = Reco._keyExtraSet(tpl);
+    if (kx && kx.has(ac.name)) {
+      const d = Reco.keyDrift(tpl, sess, row);
+      h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(own)
+         + (d.cols.indexOf(ac.name) !== -1
+            ? ' <span class="badge fc" title="This column is part of the row key, so the value frozen when the data was loaded is what every other screen uses. Working it out again now gives a different answer — the master or the formula changed. Re-upload to re-key.">⚠ recalculated</span>'
+            : '') + '</td>';
+      return h;
+    }
     h += '<td' + dataAttr + ' class="text-muted" style="white-space:nowrap; padding: 6px;">'+U.esc(own)+'</td>';
     return h;
   }
@@ -18884,7 +20078,7 @@ renderRecoTable(tpl, sess) {
       sess.offsets[row._id] = true;
       row._recoId = rid;
       row._manualOffset = true;
-      const pk = Reco.getRowPK(tpl, row);
+      const pk = Reco.rowKey(tpl, row);
       if (pk) mm[pk] = { recoId: rid, byUser: true };
       n++;
     });
@@ -19092,7 +20286,7 @@ renderRecoTable(tpl, sess) {
     sess.offsets[row._id] = true;
     row._recoId = rid;
     row._manualOffset = true;
-    const pk = Reco.getRowPK(tpl, row);
+    const pk = Reco.rowKey(tpl, row);
     if (pk) {
       AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
       AppState.manualOffsetMaster[id][pk] = { recoId: rid, byUser: true };
@@ -19883,7 +21077,15 @@ renderRecoTable(tpl, sess) {
            guards against the collision, _rowWithExtras does not, and
            addExtraCol accepts a free-text name with no uniqueness check. A
            derived key cell is #24's job, through its own guarded helper. */
-        if (pks.length) pks.forEach(pk => { h += '<td>'+U.esc(row[pk])+'</td>'; });
+        /* #24, which the note above said would come. Through keyCellValue,
+           so a key component the user added prints the FROZEN component -
+           reading full[pk] instead would let an added column of the same name
+           shadow the key, and recomputing it would print a value that
+           disagrees with the Master List ten lines below. For a key of
+           template columns this is the same characters as row[pk] unless the
+           row's key was edited away from its own _pk, in which case the whole
+           app now agrees on _pk (see Reco.rowKey). */
+        if (pks.length) pks.forEach(pk => { h += '<td>'+U.esc(Reco.keyCellValue(tpl, sess, row, pk))+'</td>'; });
         /* DECISION G: READ-ONLY. No inputs. This view is for DECIDING; the
            editing stays in the grid, which routes through applyEdits and
            writes a Cn row. And through displayCellValue, not
@@ -19936,7 +21138,7 @@ renderRecoTable(tpl, sess) {
     if (allMasterRows.length) {
       h += '<table><thead><tr><th>Primary Key</th><th>Column</th><th>Old Value</th><th>New Value</th><th>Scope</th><th></th></tr></thead><tbody>';
       allMasterRows.forEach(r => {
-        h += '<tr><td><code>'+U.esc(r.pk)+'</code></td><td>'+U.esc(r.col)+'</td><td>'+U.esc(r.oldVal)+'</td><td>'+U.esc(r.newVal)+'</td>';
+        h += '<tr><td><code>'+U.esc(Reco._pkLabel(tpl, r.pk))+'</code></td><td>'+U.esc(r.col)+'</td><td>'+U.esc(r.oldVal)+'</td><td>'+U.esc(r.newVal)+'</td>';
         h += '<td>'+(r.sessionOnly?'<span class="badge fc">session</span>':'<span class="badge aed">master</span>')+'</td>';
         h += '<td><button class="small danger" onclick="Reco.removeCorrection(\''+U.jsq(r.pk)+'\',\''+U.jsq(r.col)+'\','+(r.sessionOnly?'true':'false')+')">Remove</button></td></tr>';
       });
@@ -20001,7 +21203,7 @@ renderRecoTable(tpl, sess) {
     const oldVal = row[colName];
     row[colName] = newVal;
     row['_corrected_'+colName] = true;
-    const pk = Reco.getRowPK(tpl, row);
+    const pk = Reco.rowKey(tpl, row);
     if (pk) {
       // Save to both session corrections and the cross-session correction master
       sess.corrections = sess.corrections || {};
@@ -22674,7 +23876,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       if (!sess.selectedRows[rid]) return;
       const row = Reco._rowById(sess, rid);
       if (!row) return;
-      const pk = Reco.getRowPK(tpl, row);
+      const pk = Reco.rowKey(tpl, row);
       if (pk && !pks.includes(pk)) pks.push(pk);
     });
     return pks;
@@ -23016,7 +24218,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
     // Find the row and unmark it
     if (sess && tpl) {
       sess.data.forEach(row => {
-        if (Reco.getRowPK(tpl, row) === pk) {
+        if (Reco.rowKey(tpl, row) === pk) {
           delete row._manualOffset;
           delete row._recoId;
           delete sess.offsets[row._id];
@@ -23032,6 +24234,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
   viewCorrectionMaster() {
     const id = AppState.activeRecoId;
     const cm = AppState.correctionMaster[id] || {};
+    const cmTpl = AppState.recoTemplates.find(x => x.id === id) || {};
     let h = '<div class="help">Saved corrections that are automatically applied on every data load for this template.</div>';
     const rows = [];
     Object.keys(cm).forEach(pk => {
@@ -23043,7 +24246,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
     else {
       h += '<table><thead><tr><th>Primary Key</th><th>Column</th><th>Old Value</th><th>New Value</th><th></th></tr></thead><tbody>';
       rows.forEach(r => {
-        h += '<tr><td><code>'+U.esc(r.pk)+'</code></td><td>'+U.esc(r.col)+'</td><td>'+U.esc(r.oldVal)+'</td><td>'+U.esc(r.newVal)+'</td>';
+        h += '<tr><td><code>'+U.esc(Reco._pkLabel(cmTpl, r.pk))+'</code></td><td>'+U.esc(r.col)+'</td><td>'+U.esc(r.oldVal)+'</td><td>'+U.esc(r.newVal)+'</td>';
         h += '<td><button class="small danger" onclick="Reco.removeCorrection(\''+U.jsq(r.pk)+'\',\''+U.jsq(r.col)+'\',false); App.closeModal();">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
@@ -24390,11 +25593,50 @@ const AEG = {
       (t.inputColumns || []).map(c => '<option value="' + U.escAttr(c.name) + '"' +
         (current === c.name ? ' selected' : '') + '>' + U.esc(c.label) + '</option>').join('') + '</select>';
   },
+  /* ---- S11, THE OTHER EDITOR ---------------------------------------
+     Decision J says the role matrix is refused in BOTH editors and in BOTH
+     directions. The Reco side gates togglePK and setAegRole; this side had no
+     gate at all, so RecoTemplate.togglePK correctly refused to tick the key
+     box on the To Account column while this editor would happily make an
+     existing key component the To Account column - which Reco WRITES after an
+     entry is posted, so the key of a posted row would move, which is the
+     drift decision G exists to make impossible.
+     Asked against every Reco template linked to the template being edited,
+     and NOT at save time, for the same reason RecoTemplate.saveTemplate does
+     not ask: a template may already hold a clash from before this check
+     existed, and refusing at save would make it unsavable for any change. */
+  _PATH_ROLE: { 'toAccount.inputColumn': 'aeg.toAccount.inputColumn',
+                'fromAccount.inputColumn': 'aeg.fromAccount.inputColumn' },
+  _roleClash(name, role) {
+    const id = AEG.editingTemplate && AEG.editingTemplate.id;
+    const n = String(name == null ? '' : name).trim();
+    if (!id || !n) return null;
+    const linked = (AppState.recoTemplates || []).filter(rt => rt && rt.aegIntegration
+      && rt.aegIntegration.enabled && rt.aegIntegration.aegTemplateId === id);
+    for (let i = 0; i < linked.length; i++) {
+      let msg = null;
+      try { msg = RecoTemplate._exclusiveRoleConflict(linked[i], n, role); } catch (e) { msg = null; }
+      if (msg) return msg + '\n\n(the reconciliation "' + (linked[i].name || linked[i].id) + '")';
+    }
+    return null;
+  },
   setEditingPath(path, value) {
+    const role = AEG._PATH_ROLE[path];
+    if (role && value) {
+      const clash = AEG._roleClash(value, role);
+      /* Re-rendered because the <select> is still showing the refused column:
+         a control that keeps a value the model rejected reads as a saved
+         setting. Same reason RecoTemplate.togglePK calls renderEditor().
+         Guarded: the refusal has already done its job (the toast is out and
+         the field was NOT written), so a redraw that throws on a template
+         shape openEditor cannot render must not take the screen with it. */
+      if (clash) { U.toast(clash, 'error'); try { AEG.openEditor(); } catch (e) {} return false; }
+    }
     const parts = path.split('.');
     let o = AEG.editingTemplate;
     for (let i = 0; i < parts.length - 1; i++) o = o[parts[i]];
     o[parts[parts.length - 1]] = value;
+    return true;
   },
   outputMappingControl(t, col, i) {
     const m = col.mapping;
@@ -24443,7 +25685,13 @@ const AEG = {
   toggleAggregateBy(name, checked) {
     const t = AEG.editingTemplate;
     t.aggregateBy = t.aggregateBy || [];
-    if (checked) { if (t.aggregateBy.indexOf(name) === -1) t.aggregateBy.push(name); }
+    if (checked) {
+      // S11, the other editor: a club-by column of this template may not be a
+      // column a linked reconciliation lets people override or carry forward.
+      const clash = AEG._roleClash(name, 'aeg.aggregateBy');
+      if (clash) { U.toast(clash, 'error'); try { AEG.openEditor(); } catch (e) {} return; }
+      if (t.aggregateBy.indexOf(name) === -1) t.aggregateBy.push(name);
+    }
     else t.aggregateBy = t.aggregateBy.filter(x => x !== name);
   },
   addOutputCol() {
