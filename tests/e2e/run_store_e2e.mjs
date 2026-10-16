@@ -85,8 +85,8 @@
  * one-time promotion, both halves; C8 decision S; C9 the Clear confirm;
  * C10 the Values panel.
  *
- * Ports 20800-20859 (phase 1: 20801-20805; #26: 20821-20823;
- * #30: 20842-20846).
+ * Ports 20800-20862 (phase 1: 20801-20805; #26: 20821-20823;
+ * #30: 20842-20846; the fixer rounds: 20847-20862).
  */
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -123,9 +123,24 @@ const PORT_FIX_SAY  = 20854;   // F10 the store says when it could not save
 const PORT_FIX_SPL  = 20855;   // F10 the damaged split file
 const PORT_FIX_DRAG = 20856;   // F11 the spreadsheet fill drag
 const PORT_FIX_SAFE = 20857;   // F12 the confirms that name the values
-/* The build every assertion here was shown to FAIL against. Override with
-   BASE_REV=<rev>. */
-const BASE_REV = process.env.BASE_REV || 'e9851b4';
+const PORT_FIX_CLR  = 20858;   // R6  F9's other half: a Clear, then a different extract
+/* ROUND 3 (fixer 2). The reviewer ids are F6/F11-F13/F15/F17-F20. Three of
+   the ports above were declared for exactly these sections and never used
+   (COL, SAY, SPL, DRAG); the last three are new, which moves the suite's
+   range to 20800-20861. */
+const PORT_FIX_KIND = 20859;   // F6  one orphan record vs the exported kind
+const PORT_FIX_STPL = 20860;   // F13 two colleagues saving one template
+const PORT_FIX_CONF = 20861;   // F20 the three settings that change what is read
+const PORT_FIX_BIGF = 20862;   // F15 a values file past the measured ceiling
+/* NOT A GATE, AND IT MUST NOT READ LIKE ONE. e9851b4 is the build these
+   assertions were shown to FAIL against, recorded for whoever wants to repeat
+   that; this suite's whole-build comparison is done with APP_REV / APP_FILE,
+   which are separate and are what the runner actually passes. Two readers of
+   this file counted the constant below as a fifth pinned byte-identity
+   baseline — there are FOUR (colorder 76dffed, pk_extras 3047f82, correction
+   d9957fc, panes 5f61d76) and this is not one of them. Kept as a comment
+   rather than a const so nothing can mistake it for a gate again.
+   FAIL-AGAINST BUILD: e9851b4 */
 
 let failures = 0, passes = 0;
 function check(cond, msg, extra) {
@@ -1388,19 +1403,34 @@ try {
     out.applied = res.applied;
     out.stored = Object.keys((AppState.extraValueMaster || {}).TPL_DUP || {});
     out.after = total();
-    /* THE MONEY, DEMONSTRATED. This is what a build without the refusal
-       writes - and what it then posts. Put in by hand, read through the real
-       preview, and taken back out again, so the assertion above is about
-       something. */
+    /* WHAT A RECORD ON A DUPLICATED KEY DOES WHEN IT IS ALREADY THERE.
+       This used to demonstrate the money bug: planted by hand, it was read by
+       all three rows and the entry posted 3000. RC-6 made that unreachable -
+       Reco._extraOverride stops serving a record whose key no longer names
+       ONE loaded row - so what this now pins is the STRONGER statement: even
+       with the record in place, every row reads its own formula and the entry
+       posts 1030. The write refusal (O2c) and the read suppression are two
+       independent guards and this is the second one. Put in by hand, read
+       through the real preview, and taken back out again. */
     AppState.extraValueMaster.TPL_DUP = { 'INV-7': { Net: { k: 'override', v: '1000', prev: '30',
       src: 'formula', ds: '', by: 'demo', at: new Date().toISOString() } } };
     out.broadcast = total();
+    out.broadcastStored = Object.keys((AppState.extraValueMaster || {}).TPL_DUP || {});
     delete AppState.extraValueMaster.TPL_DUP;
     out.restored = total();
     return out;
   });
   note('O2', { count: o2.count, before: o2.before, after: o2.after, broadcast: o2.broadcast, rejected: o2.rejected });
   check(o2.count === 3, 'O2a the premise: three loaded rows share the key INV-7', o2.count);
+  /* THIS FIXTURE IS DEGENERATE AND THE NUMBER CANNOT TELL TWO BEHAVIOURS
+     APART. Row 1's own formula value is 1000 and the override's value is also
+     1000, so 1030 is reached BOTH by applying the override to the row it was
+     typed on AND by suppressing it and letting the formula speak. That makes
+     1030 a fine premise and a poor gate. The assertions that DO distinguish
+     them are section 37's R3a/R3b, on a fixture whose row-1 formula is 2000:
+     there suppression posts 2030, and 2030 is the number the shipped
+     behaviour produces. Stated here so nobody reads 1030 as the general
+     arithmetic of a duplicated key — it is not, and the handover says so too. */
   check(o2.before.sum === 1030 && o2.before.dr === 1030 && o2.before.cr === 1030 && o2.before.lines === 2,
     'O2b the premise: the journal preview over the three rows posts 1000 + 30 + 0 = 1030 (one aggregated Dr/Cr pair)',
     o2.before);
@@ -1410,9 +1440,16 @@ try {
   check(o2.stored.length === 0, 'O2d and nothing at all was written to the store', o2.stored);
   check(o2.after.sum === 1030 && o2.after.dr === 1030,
     'O2e (THE GATE) so the entry still posts 1030', o2.after);
-  check(o2.broadcast.sum === 3000 && o2.broadcast.nets.join() === '1000,1000,1000',
-    'O2f AND THE MONEY BUG IS REAL: with the record in place all three rows read 1000 and the entry '
-    + 'posts 3000 - which is what the refusal exists to stop', o2.broadcast);
+  check(o2.broadcast.sum === 1030 && o2.broadcast.dr === 1030
+        && o2.broadcast.nets.join() === '1000,30,0' && o2.broadcastStored.join() === 'INV-7',
+    'O2f (RC-6, STRENGTHENED — this asserted the 3000 the bug posted) EVEN WITH THE RECORD IN THE '
+    + 'STORE the entry posts 1030 and each row reads its own formula value: a record whose key no '
+    + 'longer names one loaded row stops being served, at the one reader every surface shares. The '
+    + 'record is STILL THERE (INV-7) - it is suppressed, not deleted, because the key may be unique '
+    + 'again in next month\'s file. The write refusal O2c and this read suppression are two '
+    + 'independent guards: F1 proved the write guard alone is not enough, because a key that was '
+    + 'unique when the override was typed is shared a week later.',
+    { broadcast: o2.broadcast, stillStored: o2.broadcastStored });
   check(o2.restored.sum === 1030, 'O2g (control) removing the planted record puts the entry back to 1030', o2.restored);
   const o2err = dp.errors.filter(e => !/Could not save|injected fault/.test(e));
   check(o2err.length === 0, 'O2h no page error in the duplicate-key run', o2err.slice(0, 4));
@@ -3368,6 +3405,1598 @@ try {
   const f2err = dsp.errors.filter(e => !/Could not save|injected fault/.test(e));
   check(f2err.length === 0, 'F2h no page error in the two-upload run', f2err.slice(0, 4));
   await dsp.ctx.close();
+
+
+  /* =======================================================================
+     ROUND 2 OF THE FIX — the five BLOCKERS the first fix round did not reach,
+     plus the half of F9 its data-set edit left open. Reviewer ids are cited.
+
+     EVERY SECTION BELOW FAILED BEFORE ITS FIX and the failing run is recorded
+     in scratchpad/store/fix/f1/out/*.pre.txt (APP_FILE=.../f1/Reco.html.bak,
+     which is 29cb95d + the pinned gate, i.e. the tree these were written
+     against). Each assertion reads a VALUE - an amount, a cell, a stored
+     record - and not a column name: a blocker got through the first review
+     here because an assertion read a name where the bug was in the value.
+     ======================================================================= */
+
+  /* ---------------------------------------------------------------------
+     [35] R1 / finding F3 — AFTER A RELOAD, IS THE NUMBER IN THE LEDGER?
+     The post-entry column may be an ADDED column. commitEntryFromPreview
+     stamps it as a PLAIN ROW PROPERTY and queues a version row only for a
+     TEMPLATE column, so loadVersionedFile - what every colleague does the
+     next morning, and what a Clear forces - brings the row back with no
+     mark. Reco.isRowPosted then said "open" while Reco._postedRefFor named
+     the entry, about the same row; the badge was blank, the posted-JV audit
+     reported 0 posted / 0 missing, and the override refusal the user asked
+     for could not fire. The fix makes isRowPosted ask the LEDGER's own
+     record of the stamp (entry.postedPks + postedCol + postedValue) when the
+     column says nothing, so nothing new is written to the share and the
+     answer is key-scoped - which is what posted-ness is.
+     --------------------------------------------------------------------- */
+  section(35, 'R1 (F3) — after a reload the two readers agree, and the override is refused');
+  const RT1 = makeRoot('share-r1');
+  const brRT1 = await startBridge(RT1.root, PORT_FIX_POST); procs.push(brRT1.proc);
+  const pgRT1 = await openReco(browser, brRT1);
+  const xRT1 = await pgRT1.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_R1'; t.name = 'Posted on an added column';
+    t.columns = ['Invoice', 'Base', 'Reco', 'ToAccount']
+      .map(n => ({ name: n, label: n, formats: [], isValue: n === 'Base' }));
+    t.primaryKeys = ['Invoice'];
+    t.valueColumn = 'Base'; t.docNumberColumn = '';
+    t.displayColumns = t.columns.map(c => c.name);
+    /* Workflow is an ADDED custom column AND the post-entry column, which is
+       what the picker offers. Net is a separate overridable formula column
+       (S11 rightly forbids the post-entry column itself being overridable). */
+    t.additionalColumns = [
+      { name: 'Net', type: 'formula', formula: 'NUM({Base})*2', allowOverride: true },
+      { name: 'AED', type: 'formula', formula: 'NUM({Net})' },
+      { name: 'Workflow', type: 'custom' }
+    ];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id,
+      keywordColumn: '', keywordValues: '', postEntryColumn: 'Workflow', postEntryValue: 'Posted' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R1');
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Base: '100', Reco: 'R1', ToAccount: 'ACC1' }],
+      ['Invoice', 'Base', 'Reco', 'ToAccount']);
+    App.closeModal(); AppState.activeRecoId = tpl.id; AppState.activeSubSection = 'reco';
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+
+    const read = () => {
+      const sess = AppState.recoSessions.TPL_R1;
+      const row = sess.data.find(r => r._pk === 'INV-1');
+      Reco._fullPass();
+      let full; try { full = Reco.rowFull(tpl, sess, row); } finally { Reco._fullEnd(); }
+      const ref = Reco._postedRefFor(tpl, row);
+      const audit = Reco.postedJvAudit(tpl, sess);
+      const set = Reco._setOverride(tpl, sess, row, 'Net', '999999', 'value');
+      if (set.ok) Reco._clearOverride(tpl, sess, row, 'Net');
+      Reco._fullPass();
+      let net; try { net = String(Reco.rowFull(tpl, sess, row).Net); } finally { Reco._fullEnd(); }
+      return {
+        rowProp: Object.prototype.hasOwnProperty.call(row, 'Workflow') ? String(row.Workflow) : '(absent)',
+        isRowPosted: Reco.isRowPosted(tpl, sess, row),
+        excelLink: ExcelLink._isPosted(tpl, full, sess),
+        refId: ref ? ref.accountingId : null,
+        badge: (Reco._postedBadge(tpl, sess, row) || '').replace(/<[^>]*>/g, '').trim(),
+        auditPosted: audit.posted, auditLinked: audit.linked, auditMissing: audit.missing,
+        overrideOk: set.ok, overrideReason: set.ok ? '' : set.reason,
+        overrideMsg: set.ok ? '' : String(set.message || ''),
+        netAfter: net
+      };
+    };
+
+    /* POST IT through the real preview and the real commit. */
+    const sess = AppState.recoSessions.TPL_R1;
+    sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+    Reco.previewEntryFromSelection(false);
+    const hadPreview = !!Reco._pendingEntry;
+    const drPosted = ((Reco._pendingEntry || {}).lines || [])
+      .reduce((a, l) => a + U.num(l.Dr || l.dr || 0), 0);
+    Reco.commitEntryFromPreview();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const before = read();
+    const files = await Versioning.listFiles(tpl);
+    const file = (files[0] && (files[0].fullPath || files[0].path)) || null;
+
+    /* THE RELOAD. */
+    sess.data = [];
+    await Reco.loadVersionedFile(file, 'TPL_R1');
+    const after = read();
+    return { hadPreview, drPosted, histId: (AppState.entryHistory.TPL_R1 || []).map(e => e.accountingId)[0],
+             postedCol: (AppState.entryHistory.TPL_R1 || [])[0].postedCol,
+             postedPks: (AppState.entryHistory.TPL_R1 || [])[0].postedPks,
+             before, after, file };
+  });
+  note('R1 before the reload', xRT1.before);
+  note('R1 AFTER the reload', xRT1.after);
+  check(xRT1.hadPreview && xRT1.drPosted === 200 && xRT1.before.isRowPosted === true
+        && xRT1.before.refId === xRT1.histId,
+    'R1 premise: the row really was posted, for 200, and before any reload every reader agrees',
+    { dr: xRT1.drPosted, before: xRT1.before, hist: xRT1.histId });
+  check(xRT1.after.rowProp === '(absent)' && (xRT1.after.postedPks || xRT1.postedPks).length === 1,
+    'R1 premise: after the reload the stamp is NOT on the row - that is the state under test, and '
+    + 'the ledger still names the key', { rowProp: xRT1.after.rowProp, pks: xRT1.postedPks });
+  check(xRT1.after.isRowPosted === true,
+    'R1a (THE GATE) Reco.isRowPosted still says the row is in the general ledger after the reload - '
+    + 'it said false while Reco._postedRefFor named the entry about the same row (F3)', xRT1.after);
+  check(xRT1.after.refId === xRT1.histId && xRT1.after.excelLink === true,
+    'R1b and the three readers give ONE answer: isRowPosted, ExcelLink._isPosted and _postedRefFor '
+    + 'all resolve to ' + xRT1.histId, xRT1.after);
+  check(xRT1.after.badge.indexOf(xRT1.histId) !== -1,
+    'R1c the grid badge names the accounting reference instead of being blank', xRT1.after.badge);
+  check(xRT1.after.auditPosted === 1 && xRT1.after.auditLinked === 1 && xRT1.after.auditMissing === 0,
+    'R1d the Posted-JV Tracking card counts it 1 posted / 1 linked / 0 missing - it reported 0/0/0 '
+    + 'about a row that is in the ledger, so nobody could find it by looking',
+    { posted: xRT1.after.auditPosted, linked: xRT1.after.auditLinked, missing: xRT1.after.auditMissing });
+  check(xRT1.after.overrideOk === false && xRT1.after.overrideReason === 'posted'
+        && xRT1.after.overrideMsg.indexOf(xRT1.histId) !== -1,
+    'R1e the override on that row is REFUSED, naming the accounting reference - the user\'s own '
+    + 'decision, which was unenforceable in this state', xRT1.after);
+  check(xRT1.after.netAfter === '200',
+    'R1f AND THE VALUE: the cell still reads the 200 the entry was posted with, not the 999999 a '
+    + 'person typed over it', xRT1.after.netAfter);
+
+  /* ---------------------------------------------------------------------
+     [36] R2 / finding F10 — THE POSTED-ROW REFUSAL ON THE DELETE ROUTES.
+     The refusal lived only at the set site, so the number a journal was
+     posted with could not be CHANGED and could be DELETED: applyEdits
+     {clear:true}, the Manual Overrides panel's one-click Revert, the Values
+     panel's Remove and "Remove all for keys not in the current data" each put
+     the formula value back, with a green success toast. The bulk button is the
+     worst, because the keys not loaded right now are exactly the periods that
+     have already been posted.
+     NO CHOKEPOINT COVERS ALL FOUR: the panels have a pk and no row, so this is
+     ONE predicate (Reco._postedBlockFor, pk-keyed) asked at N=4 call sites.
+     --------------------------------------------------------------------- */
+  section(36, 'R2 (F10) — the four delete routes refuse on a row that is in the ledger');
+  const RT2 = makeRoot('share-r2');
+  const brRT2 = await startBridge(RT2.root, PORT_FIX_SAFE); procs.push(brRT2.proc);
+  const pgRT2 = await openReco(browser, brRT2);
+  const xRT2 = await pgRT2.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_R2'; t.name = 'Delete routes';
+    t.columns = ['Invoice', 'Base', 'Status', 'ToAccount']
+      .map(n => ({ name: n, label: n, formats: [], isValue: n === 'Base' }));
+    t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = '';
+    t.displayColumns = t.columns.map(c => c.name);
+    t.additionalColumns = [
+      { name: 'Net', type: 'formula', formula: 'NUM({Base})*2', allowOverride: true },
+      { name: 'AED', type: 'formula', formula: 'NUM({Net})' },
+      { name: 'Note', type: 'custom' }
+    ];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id,
+      keywordColumn: '', keywordValues: '', postEntryColumn: 'Status', postEntryValue: 'Posted' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R2');
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Base: '10', Status: '', ToAccount: 'ACC1' },
+                                { Invoice: 'INV-9', Base: '55', Status: '', ToAccount: 'ACC1' }],
+      ['Invoice', 'Base', 'Status', 'ToAccount']);
+    App.closeModal(); AppState.activeRecoId = tpl.id; AppState.activeSubSection = 'reco';
+    const sess = AppState.recoSessions.TPL_R2;
+    const rowP = sess.data.find(r => r._pk === 'INV-1');   // the posted one
+    const rowU = sess.data.find(r => r._pk === 'INV-9');   // never posted: the control
+    const out = {};
+    /* The preparer disagrees with the formula on INV-1 and types 1000; INV-9
+       gets an ordinary typed value and is NEVER posted - the control that
+       proves these refusals are about the ledger and not a blanket ban. */
+    await Reco.setOverride(rowP._id, 'Net', '1000');
+    await Reco.applyEdits(tpl, sess, [{ row: rowU, col: 'Note', value: 'chase' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    await new Promise(x => setTimeout(x, 80));
+    /* ONLY INV-1 IS POSTED, through the real preview and commit. */
+    sess.selectedRows = {}; sess.selectedRows[rowP._id] = true;
+    Reco.previewEntryFromSelection(false);
+    out.drPosted = ((Reco._pendingEntry || {}).lines || [])
+      .reduce((a, l) => a + U.num(l.Dr || l.dr || 0), 0);
+    Reco.commitEntryFromPreview();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    out.accId = (AppState.entryHistory.TPL_R2 || []).map(e => e.accountingId)[0];
+    const netOf = pk => {
+      const row = AppState.recoSessions.TPL_R2.data.find(r => r._pk === pk);
+      Reco._fullPass();
+      try { return String(Reco.rowFull(tpl, AppState.recoSessions.TPL_R2, row).Net); }
+      finally { Reco._fullEnd(); }
+    };
+    const recOf = (pk, col) => !!((((AppState.extraValueMaster || {}).TPL_R2 || {})[pk] || {})[col]);
+    out.posted = Reco.isRowPosted(tpl, sess, rowP);
+    out.netBefore = netOf('INV-1');
+
+    /* 1. applyEdits {clear:true} — the grid's own revert control. */
+    const c = await Reco.applyEdits(tpl, sess, [{ row: rowP, col: 'Net', clear: true }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    out.route1 = { applied: c.applied, rejected: c.rejected.map(x => ({ reason: x.reason, msg: String(x.message || '') })),
+                   net: netOf('INV-1'), rec: recOf('INV-1', 'Net') };
+
+    /* 2. the Manual Overrides panel's one-click Revert. */
+    window.__toasts = [];
+    Reco.revertOverrideKey('INV-1', 'Net');
+    await new Promise(x => setTimeout(x, 60));
+    out.route2 = { toasts: (window.__toasts || []).map(x => x.kind + ': ' + x.msg),
+                   net: netOf('INV-1'), rec: recOf('INV-1', 'Net') };
+    App.closeModal();
+
+    /* 3. the Values panel's per-record Remove, on the same posted key. */
+    window.__toasts = [];
+    Reco.removeValueRec('INV-1', 'Net');
+    await new Promise(x => setTimeout(x, 60));
+    out.route3 = { toasts: (window.__toasts || []).map(x => x.kind + ': ' + x.msg),
+                   net: netOf('INV-1'), rec: recOf('INV-1', 'Net') };
+    App.closeModal();
+
+    /* 4. "Remove all for keys not in the current data", with BOTH keys off
+          screen: INV-1 is in the ledger, INV-9 is not. */
+    const keep = sess.data.slice();
+    sess.data = [];
+    window.__toasts = [];
+    const asked = []; const realConfirm = window.confirm;
+    window.confirm = m => { asked.push(String(m)); return true; };
+    try { Reco.removeValuesNotLoaded(); } finally { window.confirm = realConfirm; }
+    await new Promise(x => setTimeout(x, 120));
+    if (typeof Store.idle === 'function') await Store.idle();
+    sess.data = keep;
+    out.route4 = { confirm: asked[0] || '', toasts: (window.__toasts || []).map(x => x.kind + ': ' + x.msg),
+                   postedRec: recOf('INV-1', 'Net'), unpostedRec: recOf('INV-9', 'Note'),
+                   net: netOf('INV-1') };
+    App.closeModal();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return out;
+  });
+  note('R2 route 1 — applyEdits {clear:true}', xRT2.route1);
+  note('R2 route 2 — the Overrides panel Revert', xRT2.route2);
+  note('R2 route 3 — the Values panel Remove', xRT2.route3);
+  note('R2 route 4 — remove all for keys not loaded', xRT2.route4);
+  check(xRT2.posted === true && xRT2.drPosted === 1000 && xRT2.netBefore === '1000',
+    'R2 premise: the entry really posted the override - 1000, not the formula\'s 20',
+    { posted: xRT2.posted, dr: xRT2.drPosted, net: xRT2.netBefore });
+  check(xRT2.route1.applied === 0 && (xRT2.route1.rejected[0] || {}).reason === 'posted'
+        && String((xRT2.route1.rejected[0] || {}).msg).indexOf(xRT2.accId) !== -1
+        && xRT2.route1.rec === true && xRT2.route1.net === '1000',
+    'R2a (THE GATE) applyEdits {clear:true} is refused naming ' + xRT2.accId
+    + ', the record survives, and the cell still reads the 1000 the ledger holds', xRT2.route1);
+  check(xRT2.route2.rec === true && xRT2.route2.net === '1000'
+        && xRT2.route2.toasts.some(s => /^error/.test(s) && s.indexOf(xRT2.accId) !== -1),
+    'R2b the Overrides panel\'s one-click Revert is refused the same way, with an error toast that '
+    + 'names the entry to reverse - it used to say "reverted" in green', xRT2.route2);
+  check(xRT2.route3.rec === true && xRT2.route3.net === '1000'
+        && xRT2.route3.toasts.some(s => /^error/.test(s) && s.indexOf(xRT2.accId) !== -1),
+    'R2c the Values panel\'s Remove is refused the same way', xRT2.route3);
+  check(xRT2.route4.postedRec === true && xRT2.route4.net === '1000',
+    'R2d the bulk "remove all for keys not in the current data" KEEPS the record on the posted key - '
+    + 'those keys are precisely the periods already posted', xRT2.route4);
+  check(xRT2.route4.unpostedRec === false,
+    'R2e ...and still does its job on the key that is NOT in the ledger, so this is a refusal about '
+    + 'the ledger and not a dead button', xRT2.route4);
+  check(/ledger|posted/i.test(xRT2.route4.confirm) && /\b1\b/.test(xRT2.route4.confirm),
+    'R2f and the confirm SAYS how many were kept because they are in the ledger - it never mentioned '
+    + 'the ledger at all', xRT2.route4.confirm);
+
+  /* ---------------------------------------------------------------------
+     [37] R3 / finding F1 — A DUPLICATE ARRIVING AFTER THE OVERRIDE.
+     The duplicate-key refusal is in _setOverride only, so a key that was
+     unique when the override was typed and is shared a week later broadcasts
+     the stored value to every row with that key: three AP lines under INV-7,
+     one overridden, and the entry posts 3000 where the three rows are worth
+     2030. The reader had no test at all.
+     THE FIX IS AT THE READER (Reco._extraOverride), which is the ONE
+     chokepoint every surface shares - the grid, the reports, the CSV, the
+     workbook, the Excel view and the AEG source-row loop - so the screen and
+     the journal cannot disagree about it.
+     WHAT I NARROWED, SAID PLAINLY: the reviewer called 1030 the correct
+     posting (the override on the row it was typed on, the formula on the two
+     new ones). The record is keyed on the KEY ALONE and cannot name a row, so
+     there is no way to apply it to one of three; the two honest answers are
+     to suppress it and say so, or to refuse the load. Suppressed: every
+     surface reads the formula, the record is KEPT (the key may be unique
+     again next month) and the duplicate-key panel now names it.
+     --------------------------------------------------------------------- */
+  section(37, 'R3 (F1) — a duplicate arriving by Add Data stops the stored override applying');
+  const RT3 = makeRoot('share-r3');
+  const brRT3 = await startBridge(RT3.root, PORT_FIX_DUP); procs.push(brRT3.proc);
+  const pgRT3 = await openReco(browser, brRT3);
+  const xRT3 = await pgRT3.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_R3'; t.name = 'Duplicate after the override';
+    t.columns = ['Invoice', 'Base', 'Reco', 'ToAccount']
+      .map(n => ({ name: n, label: n, formats: [], isValue: n === 'Base' }));
+    t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = '';
+    t.displayColumns = t.columns.map(c => c.name);
+    t.additionalColumns = [
+      { name: 'Net', type: 'formula', formula: 'NUM({Base})*2', allowOverride: true },
+      { name: 'AED', type: 'formula', formula: 'NUM({Net})' }
+    ];
+    t.enableReporting = true; t.reports = [{ name: 'R', columns: ['Invoice', 'Net'] }];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id,
+      keywordColumn: '', keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R3');
+    RecoTemplate.open(tpl.id);
+    const fields = ['Invoice', 'Base', 'Reco', 'ToAccount'];
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-7', Base: '1000', Reco: 'R1', ToAccount: 'ACC1' }], fields);
+    App.closeModal(); AppState.activeRecoId = tpl.id; AppState.activeSubSection = 'reco';
+    const sess = AppState.recoSessions.TPL_R3;
+    const out = {};
+    const journal = () => {
+      const s = AppState.recoSessions.TPL_R3;
+      s.selectedRows = {}; s.data.forEach(r => { s.selectedRows[r._id] = true; });
+      Reco.previewEntryFromSelection(false);
+      const ctx = Reco._pendingEntry;
+      const dr = ((ctx || {}).lines || []).reduce((a, l) => a + U.num(l.Dr || l.dr || 0), 0);
+      const inputs = ((ctx || {}).aegInputs || []).map(o => U.num(o.AED));
+      App.closeModal(); Reco._pendingEntry = null;
+      return { dr: dr, inputs: inputs };
+    };
+    const nets = () => {
+      const s = AppState.recoSessions.TPL_R3;
+      Reco._fullPass();
+      try { return s.data.map(r => String(Reco.rowFull(tpl, s, r).Net)); } finally { Reco._fullEnd(); }
+    };
+    /* The key is UNIQUE, so the override is accepted - 2000 becomes 1000. */
+    await Reco.setOverride(sess.data[0]._id, 'Net', '1000');
+    await new Promise(x => setTimeout(x, 80));
+    out.before = { nets: nets(), journal: journal(), dup: Reco._dupPkCountFor(tpl, sess, 'INV-7') };
+    /* NEXT WEEK'S FILE brings two more lines under the same invoice number -
+       the ordinary shape of an AP extract. */
+    window.__toasts = [];
+    const asked = []; const realConfirm = window.confirm;
+    window.confirm = m => { asked.push(String(m)); return true; };
+    const openModal = App.openModal; const modals = [];
+    App.openModal = function (title, body, footer) { modals.push({ title: String(title), body: String(body) }); };
+    try {
+      await Reco.ingestData(tpl, [{ Invoice: 'INV-7', Base: '15', Reco: 'R1', ToAccount: 'ACC1' },
+                                  { Invoice: 'INV-7', Base: '0', Reco: 'R1', ToAccount: 'ACC1' }], fields);
+    } finally { window.confirm = realConfirm; App.openModal = openModal; }
+    await new Promise(x => setTimeout(x, 80));
+    out.dupNow = Reco._dupPkCountFor(tpl, AppState.recoSessions.TPL_R3, 'INV-7');
+    out.nets = nets();
+    out.journal = journal();
+    out.rec = !!(((AppState.extraValueMaster.TPL_R3 || {})['INV-7'] || {}).Net);
+    /* WHATEVER THE OPERATOR WAS SHOWN: the pre-write question (a confirm) or
+       the panel after it. Both are captured because which one fires depends
+       on whether the key is derived, and the gap RC-6 closed was that for a
+       key of template columns NEITHER did. */
+    out.panel = ((modals.find(m => /Duplicate primary keys/.test(m.title)) || {}).body || '')
+      + ' ' + asked.join(' ');
+    /* Reco.runReport returns the enriched rows themselves (O3 reads it the
+       same way), so this is the report's own answer for the column. */
+    out.report = Reco.runReport(tpl, AppState.recoSessions.TPL_R3, tpl.reports[0])
+      .map(r => String(r.Net));
+    /* THE CONTROL: take the two new rows away again and the record applies. */
+    const s = AppState.recoSessions.TPL_R3;
+    s.data = s.data.slice(0, 1);
+    Reco._dupPkMemo = null;
+    out.afterFix = { nets: nets(), journal: journal() };
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return out;
+  });
+  note('R3 before the duplicate', xRT3.before);
+  note('R3 after the duplicate', { dup: xRT3.dupNow, nets: xRT3.nets, journal: xRT3.journal, rec: xRT3.rec });
+  note('R3 the duplicate-key panel the operator read', xRT3.panel.replace(/<[^>]*>/g, ' ').slice(0, 400));
+  note('R3 the control, with the duplicate rows gone', xRT3.afterFix);
+  check(xRT3.before.dup === 1 && xRT3.before.nets.join() === '1000' && xRT3.before.journal.dr === 1000,
+    'R3 premise: while the key is unique the override applies and the entry posts 1000',
+    xRT3.before);
+  check(xRT3.dupNow === 3,
+    'R3 premise: next week\'s file makes three rows share INV-7', xRT3.dupNow);
+  check(xRT3.nets.join() === '2000,30,0',
+    'R3a (THE GATE) every row reads its OWN formula value - the stored override was read by all '
+    + 'three rows and showed 1000 on each (F1)', xRT3.nets);
+  check(xRT3.journal.dr === 2030 && xRT3.journal.inputs.join() === '2000,30,0',
+    'R3b AND THE MONEY: the entry posts 2030 over the three rows, not the 3000 one override '
+    + 'multiplied into it', xRT3.journal);
+  check(xRT3.report.join() === '2000,30,0',
+    'R3c the report reads the same three values, so the screen and the ledger agree', xRT3.report);
+  check(xRT3.rec === true,
+    'R3d the record is NOT destroyed - the key may be unique again in next month\'s file, which is '
+    + 'the whole point of a key-scoped store', xRT3.rec);
+  check(/override|typed value/i.test(xRT3.panel) && /INV-7/.test(xRT3.panel),
+    'R3e the operator is TOLD: the duplicate-key panel names the values that have stopped applying - '
+    + 'it listed "Edits, offsets, corrections and comments" and omitted the two that reach a journal '
+    + 'entry', xRT3.panel.replace(/<[^>]*>/g, ' ').slice(0, 300));
+  check(xRT3.afterFix.nets.join() === '1000' && xRT3.afterFix.journal.dr === 1000,
+    'R3f the control: with the duplicate rows gone the same record applies again and posts 1000, so '
+    + 'this suppresses a value it cannot place and does not throw it away', xRT3.afterFix);
+
+  /* ---------------------------------------------------------------------
+     [38] R4 / finding F5 — THE ROLE MATRIX ASKS ABOUT RECORDS, NOT A BOX.
+     S11 decided from `ac.allowOverride`, and unticking that box is silent and
+     leaves every stored record applying (a deliberate decision: silently
+     recomputing a number a preparer signed off is worse). So two silent
+     template edits - untick, then assign the column as the AEG keyword
+     column - put a stale override in charge of whether a row posts at all,
+     and the entry posted 1007 where 7 was marked. The AEG loop's own comment
+     names that matrix as the only thing making it safe to read the store
+     there.
+     ONLY THE OVERRIDE ARM GAINS THE RECORD TEST. A k:'typed' record on an
+     unflagged column is FILE-SCOPED (it is honoured only on rows of the
+     upload it was typed against), so a plain dropdown may still be the
+     keyword column - which O14a asserts and which is a settled shape.
+     --------------------------------------------------------------------- */
+  section(38, 'R4 (F5) — a column that still holds overrides cannot become an AEG control column');
+  const RT4 = makeRoot('share-r4');
+  const brRT4 = await startBridge(RT4.root, PORT_FIX_ROLE); procs.push(brRT4.proc);
+  const pgRT4 = await openReco(browser, brRT4);
+  const xRT4 = await pgRT4.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_R4'; t.name = 'Role matrix vs records';
+    t.columns = ['Invoice', 'Base', 'Kind', 'ToAccount']
+      .map(n => ({ name: n, label: n, formats: [], isValue: n === 'Base' }));
+    t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = '';
+    t.displayColumns = t.columns.map(c => c.name);
+    t.additionalColumns = [
+      { name: 'Kw', type: 'formula', formula: '{Kind}', allowOverride: true },
+      { name: 'AED', type: 'formula', formula: 'NUM({Base})' }
+    ];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id,
+      keywordColumn: '', keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R4');
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Base: '1000', Kind: 'SKIP', ToAccount: 'ACC1' },
+                                { Invoice: 'INV-2', Base: '7', Kind: 'POST', ToAccount: 'ACC1' }],
+      ['Invoice', 'Base', 'Kind', 'ToAccount']);
+    App.closeModal(); AppState.activeRecoId = tpl.id; AppState.activeSubSection = 'reco';
+    const sess = AppState.recoSessions.TPL_R4;
+    const out = {};
+    /* 1. With the box ON the matrix already refuses the role. */
+    RecoTemplate.edit('TPL_R4');
+    out.withBoxOn = RecoTemplate._exclusiveRoleConflict(RecoTemplate._editing, 'Kw', 'aeg.keywordColumn');
+    App.closeModal();
+    /* 2. Somebody once typed over the formula: SKIP became POST. */
+    await Reco.setOverride(sess.data[0]._id, 'Kw', 'POST');
+    await new Promise(x => setTimeout(x, 80));
+    out.rec = JSON.parse(JSON.stringify((((AppState.extraValueMaster.TPL_R4 || {})['INV-1'] || {}).Kw) || null));
+    /* 3. The box is unticked, and then the column is made the keyword column. */
+    RecoTemplate.edit('TPL_R4');
+    window.__toasts = [];
+    RecoTemplate.toggleOverride(0, false);
+    out.untickToasts = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+    out.flagGone = !((RecoTemplate._editing.additionalColumns[0] || {}).allowOverride);
+    window.__toasts = [];
+    out.setRole = RecoTemplate.setAegRole('keywordColumn', 'Kw');
+    out.roleToasts = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+    out.kwAfter = String(RecoTemplate._editing.aegIntegration.keywordColumn || '');
+    /* SAVED, so the next step opens the editor on the state these two edits
+       really left behind - the box off and the record still on the share.
+       Without the save the draft is thrown away and step 4 would be asking
+       about a template that still has the box ticked. */
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    /* 4. THE WAY FORWARD: clear the records and the role is allowed. The money
+          is measured there, over the same two rows. */
+    Reco._dropExtraValueRec('TPL_R4', 'INV-1', 'Kw');
+    await new Promise(x => setTimeout(x, 80));
+    RecoTemplate.edit('TPL_R4');
+    out.setRole2 = RecoTemplate.setAegRole('keywordColumn', 'Kw');
+    RecoTemplate._editing.aegIntegration.keywordValues = 'POST';
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    const tpl2 = AppState.recoTemplates.find(x => x.id === 'TPL_R4');
+    const s2 = AppState.recoSessions.TPL_R4;
+    s2.selectedRows = {}; s2.data.forEach(r => { s2.selectedRows[r._id] = true; });
+    Reco.previewEntryFromSelection(false);
+    const ctx = Reco._pendingEntry || {};
+    out.picked = (ctx.sourceRows || []).map(r => String(r.Invoice) + ':' + String(r.Base));
+    out.dr = (ctx.lines || []).reduce((a, l) => a + U.num(l.Dr || l.dr || 0), 0);
+    App.closeModal(); Reco._pendingEntry = null;
+    out.savedKw = String((tpl2.aegIntegration || {}).keywordColumn || '');
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return out;
+  });
+  note('R4 the matrix with the box ON', xRT4.withBoxOn);
+  note('R4 the stored record', xRT4.rec);
+  note('R4 the untick', { toasts: xRT4.untickToasts, flagGone: xRT4.flagGone });
+  note('R4 the role assignment with the box OFF and the record still there',
+    { setRole: xRT4.setRole, toasts: xRT4.roleToasts, keywordColumn: xRT4.kwAfter });
+  note('R4 after clearing the record', { setRole2: xRT4.setRole2, picked: xRT4.picked, dr: xRT4.dr });
+  check(!!xRT4.withBoxOn && xRT4.rec && xRT4.rec.v === 'POST' && xRT4.rec.prev === 'SKIP' && xRT4.flagGone,
+    'R4 premise: the matrix refuses the role while the box is on, the override really did turn SKIP '
+    + 'into POST, and unticking really does clear the flag',
+    { matrix: xRT4.withBoxOn, rec: xRT4.rec, flagGone: xRT4.flagGone });
+  check(xRT4.untickToasts.some(s => /\b1\b/.test(s) && /override/i.test(s)),
+    'R4a unticking the box now SAYS that 1 stored override keeps applying - it was silent, and the '
+    + 'records outlive the box by design', xRT4.untickToasts);
+  check(xRT4.setRole === false && xRT4.kwAfter === '',
+    'R4b (THE GATE) the column cannot be made the AEG keyword column while it holds override '
+    + 'records - two silent edits used to be enough, and the matrix was the only thing making it '
+    + 'safe to read the store in the AEG loop (F5)', { setRole: xRT4.setRole, kw: xRT4.kwAfter });
+  check(xRT4.roleToasts.some(s => /^error/.test(s) && /\b1\b/.test(s) && /Kw/.test(s)),
+    'R4c and the refusal names the column and how many records are still live', xRT4.roleToasts);
+  check(xRT4.setRole2 === true && xRT4.savedKw === 'Kw',
+    'R4d the way forward works: with the records cleared the same assignment is allowed, so this is '
+    + 'a refusal about live records and not a permanent ban', { setRole2: xRT4.setRole2, saved: xRT4.savedKw });
+  check(xRT4.picked.join() === 'INV-2:7' && xRT4.dr === 7,
+    'R4e AND THE MONEY: the entry posts 7 over the one row the extract marked POST - with the stale '
+    + 'record in charge of the filter it posted 1007', { picked: xRT4.picked, dr: xRT4.dr });
+
+  /* ---------------------------------------------------------------------
+     [39] R5 / finding F4 — A NON-NUMERIC OVERRIDE AT THE JOURNAL.
+     #26 stores a value U.isNumeric rejects VERBATIM rather than refusing it,
+     and that is deliberate and stays: decision J.8 is precisely about an
+     override turning a numeric column non-numeric, a formula column's kind is
+     DERIVED from its values, and a refusal at the write site made J.8
+     untestable (the builders' couldNotBuild says so). The reviewer is also
+     right: the stated reason - "a dependent formula then says #ERR, which is
+     loud" - is false for this app's own NUM() idiom. NUM('1.234,50') is 1.23
+     and NUM("'500") is 0, so the ledger received 1.23 for a cell reading
+     1.234,50 and NOTHING for a cell reading '500, with no toast anywhere.
+     BOTH ARE RIGHT, so the store keeps the value and the REFUSAL GOES WHERE
+     IT WOULD REACH A JOURNAL ENTRY: Reco.previewEntryFromSelection refuses a
+     selection holding an override that turned a numeric cell non-numeric,
+     naming the key, the column and the characters. Nothing is posted and
+     nothing is stored differently.
+     --------------------------------------------------------------------- */
+  section(39, 'R5 (F4) — a non-numeric override is kept verbatim AND refused at the journal');
+  const RT5 = makeRoot('share-r5');
+  const brRT5 = await startBridge(RT5.root, PORT_FIX_NUM); procs.push(brRT5.proc);
+  const pgRT5 = await openReco(browser, brRT5);
+  const xRT5 = await pgRT5.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_R5'; t.name = 'Non-numeric override';
+    t.columns = ['Invoice', 'Base', 'Reco', 'ToAccount']
+      .map(n => ({ name: n, label: n, formats: [], isValue: n === 'Base' }));
+    t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = '';
+    t.displayColumns = t.columns.map(c => c.name);
+    t.additionalColumns = [
+      { name: 'Net', type: 'formula', formula: 'NUM({Base})*2', allowOverride: true },
+      { name: 'AED', type: 'formula', formula: 'NUM({Net})' }
+    ];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id,
+      keywordColumn: '', keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R5');
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Base: '10', Reco: 'R1', ToAccount: 'ACC1' },
+                                { Invoice: 'INV-2', Base: '20', Reco: 'R1', ToAccount: 'ACC1' },
+                                { Invoice: 'INV-3', Base: '30', Reco: 'R1', ToAccount: 'ACC1' }],
+      ['Invoice', 'Base', 'Reco', 'ToAccount']);
+    App.closeModal(); AppState.activeRecoId = tpl.id; AppState.activeSubSection = 'reco';
+    const sess = AppState.recoSessions.TPL_R5;
+    const row = sess.data[0];
+    const out = { cases: [] };
+    const tryPost = async (typed) => {
+      await Reco.setOverride(row._id, 'Net', typed);
+      await new Promise(x => setTimeout(x, 60));
+      const rec = JSON.parse(JSON.stringify((((AppState.extraValueMaster.TPL_R5 || {})['INV-1'] || {}).Net) || null));
+      let kind = null;
+      try { kind = (XlSchema.build(tpl, sess).byName.get('Net') || {}).kind; } catch (e) { kind = 'ERR'; }
+      sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+      window.__toasts = [];
+      Reco._pendingEntry = null;
+      Reco.previewEntryFromSelection(false);
+      const ctx = Reco._pendingEntry;
+      const dr = ((ctx || {}).lines || []).reduce((a, l) => a + U.num(l.Dr || l.dr || 0), 0);
+      App.closeModal(); Reco._pendingEntry = null;
+      const o = { typed: typed, storedV: rec ? rec.v : null, storedTyped: rec ? (rec.typed || null) : null,
+                  kind: kind, preview: !!ctx, dr: dr,
+                  toasts: (window.__toasts || []).map(x => x.kind + ': ' + x.msg) };
+      await Reco.applyEdits(tpl, sess, [{ row: row, col: 'Net', clear: true }],
+        { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+      await new Promise(x => setTimeout(x, 60));
+      return o;
+    };
+    /* The two cases the reviewer measured in a ledger, plus the control. */
+    out.cases.push(await tryPost('1.234,50'));   // U.num -> 1.2345: the ledger got 1.23
+    out.cases.push(await tryPost("'500"));       // U.num -> 0: the 500 contributed nothing
+    out.cases.push(await tryPost('abc'));
+    out.cases.push(await tryPost('1,234.50'));   // the CONTROL: canonicalises, must still post
+    /* And with nothing overridden at all, so the baseline is on the record. */
+    sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+    Reco._pendingEntry = null;
+    Reco.previewEntryFromSelection(false);
+    out.clean = ((Reco._pendingEntry || {}).lines || []).reduce((a, l) => a + U.num(l.Dr || l.dr || 0), 0);
+    App.closeModal(); Reco._pendingEntry = null;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return out;
+  });
+  xRT5.cases.forEach(c => note('R5 typed ' + JSON.stringify(c.typed), c));
+  note('R5 with no override at all', xRT5.clean);
+  const xEuro = xRT5.cases[0], xQuote = xRT5.cases[1], xAbc = xRT5.cases[2], xNumOk = xRT5.cases[3];
+  check(xRT5.clean === 120,
+    'R5 premise: the three rows are worth 20 + 40 + 60 = 120 with no override', xRT5.clean);
+  check(xEuro.storedV === '1.234,50' && xEuro.kind === 'text',
+    'R5a the store still keeps it VERBATIM and the column\'s export kind still goes to text - '
+    + 'decision J.8 is untouched, which is what the builders could not build any other way',
+    { v: xEuro.storedV, kind: xEuro.kind });
+  check(xEuro.preview === false && xEuro.dr === 0,
+    'R5b (THE GATE) the entry preview REFUSES: no entry is pending and nothing can be committed - '
+    + 'the ledger received 1.23 for a cell reading 1.234,50 (F4)', xEuro);
+  check(xEuro.toasts.some(s => /^error/.test(s) && /INV-1/.test(s) && /Net/.test(s)
+                                && s.indexOf('1.234,50') !== -1),
+    'R5c and the refusal names the row key, the column and the characters that were not understood',
+    xEuro.toasts);
+  check(xQuote.preview === false && xQuote.dr === 0,
+    'R5d the silent ZERO goes the same way: "\'500" posted 120 - the 500 contributed nothing at all '
+    + 'and no toast said so', xQuote);
+  check(xAbc.preview === false && xAbc.dr === 0,
+    'R5e ...and so does plain text in a numeric column', xAbc);
+  check(xNumOk.preview === true && xNumOk.dr === 1334.5 && xNumOk.storedV === '1234.5',
+    'R5f THE CONTROL: an override that IS a number still posts, and posts 1234.5 + 40 + 60 - this is '
+    + 'a refusal about values U.isNumeric rejects, not about overrides', xNumOk);
+
+  /* ---------------------------------------------------------------------
+     [40] R6 / finding F9, the half the first fix round left open.
+     Naming the data set by the upload fixed two uploads in one sitting, but
+     the stamp is a COUNT of this session's own dataSetIds and Reco.clearSession
+     installs a FRESH session - so after the sanctioned Clear the counter
+     restarts at 1 and the next upload is called '#u1' again, which is the name
+     the records already on the share were typed against. A DIFFERENT extract
+     uploaded after a Clear on the same day therefore came up carrying the
+     previous extract's values, with the carry flag off and no mark.
+     (Reviewer B's own p11_clearupload.mjs, which still failed after 29cb95d.)
+     THE STAMP NOW ALSO CLEARS THE HIGHEST STAMP ANY RECORD ALREADY USES for
+     that day file, so a name is never reused while a record names it.
+     --------------------------------------------------------------------- */
+  section(40, 'R6 (F9) — after a Clear, a DIFFERENT extract the same day comes up blank');
+  const RT6 = makeRoot('share-r6');
+  const brRT6 = await startBridge(RT6.root, PORT_FIX_CLR); procs.push(brRT6.proc);
+  const pgRT6 = await openReco(browser, brRT6);
+  const xRT6 = await pgRT6.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_R6'; t.name = 'Clear then another extract';
+    t.columns = ['Invoice', 'Amount'].map(n => ({ name: n, label: n, formats: [], isValue: n === 'Amount' }));
+    t.primaryKeys = ['Invoice']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Invoice', 'Amount'];
+    t.additionalColumns = [{ name: 'Vendor', type: 'custom' }];
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R6');
+    RecoTemplate.open(tpl.id);
+    const fields = ['Invoice', 'Amount'];
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Amount: '100' }, { Invoice: 'INV-2', Amount: '200' }], fields);
+    App.closeModal(); AppState.activeRecoId = tpl.id; AppState.activeSubSection = 'reco';
+    const out = {};
+    const vendors = () => {
+      const s = AppState.recoSessions.TPL_R6;
+      Reco._fullPass();
+      try {
+        return s.data.map(r => String(r.Invoice) + '=' + String(Reco.rowFull(tpl, s, r).Vendor));
+      } finally { Reco._fullEnd(); }
+    };
+    const marks = () => {
+      const s = AppState.recoSessions.TPL_R6;
+      return s.data.map(r => String(r.Invoice) + ':' + !!Reco._extraCarried(tpl, s, r, 'Vendor'));
+    };
+    let sess = AppState.recoSessions.TPL_R6;
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col: 'Vendor', value: 'SEPT ACME' },
+                                      { row: sess.data[1], col: 'Vendor', value: 'SEPT BORAX' }],
+      { source: 'grid', trusted: true });
+    await new Promise(x => setTimeout(x, 80));
+    out.typed = vendors();
+    out.ds1 = (sess.dataSetIds || []).slice();
+    /* THE SANCTIONED CLEAR, then a DIFFERENT extract on the same calendar day
+       (a catch-up, a second period, a corrected file). */
+    const realConfirm = window.confirm; window.confirm = () => true;
+    try { Reco.clearSession(); } finally { window.confirm = realConfirm; }
+    sess = AppState.recoSessions.TPL_R6;
+    out.dsCleared = (sess.dataSetIds || []).slice();
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Amount: '555' }, { Invoice: 'INV-2', Amount: '666' }], fields);
+    App.closeModal();
+    sess = AppState.recoSessions.TPL_R6;
+    await new Promise(x => setTimeout(x, 80));
+    out.ds2 = (sess.dataSetIds || []).slice();
+    out.after = vendors();
+    out.marks = marks();
+    out.recDs = (((AppState.extraValueMaster.TPL_R6 || {})['INV-1'] || {}).Vendor || {}).ds || null;
+    /* THE CONTROL: reopening the day file those values were typed into from
+       version history still shows them - the route the Clear's confirm is
+       about, and the one that must not break. */
+    const files = await Versioning.listFiles(tpl);
+    const file = (files[0] && (files[0].fullPath || files[0].path)) || null;
+    sess.data = [];
+    await Reco.loadVersionedFile(file, 'TPL_R6');
+    out.reopened = vendors();
+    out.reopenedDs = (AppState.recoSessions.TPL_R6.dataSetIds || []).slice();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return out;
+  });
+  note('R6 the values typed into the first extract', xRT6.typed);
+  note('R6 the data sets', { beforeClear: xRT6.ds1, afterClear: xRT6.dsCleared, afterSecondUpload: xRT6.ds2,
+                             recordWasTypedAgainst: xRT6.recDs });
+  note('R6 the second extract\'s cells', xRT6.after);
+  note('R6 reopening the day file from history', { cells: xRT6.reopened, ds: xRT6.reopenedDs });
+  check(xRT6.typed.join() === 'INV-1=SEPT ACME,INV-2=SEPT BORAX' && xRT6.dsCleared.length === 0,
+    'R6 premise: the values are on the first extract\'s rows, and the Clear really does empty the '
+    + 'data sets - which is why the stamp counter restarted', { typed: xRT6.typed, cleared: xRT6.dsCleared });
+  check(xRT6.after.join() === 'INV-1=,INV-2=',
+    'R6a (THE GATE) the DIFFERENT extract uploaded after the Clear comes up BLANK with the carry '
+    + 'flag off - it carried SEPT ACME and SEPT BORAX across two extracts (F9)', xRT6.after);
+  check(xRT6.ds2[0] !== xRT6.recDs,
+    'R6b and the reason is in the name: the new upload is NOT called what the records were typed '
+    + 'against', { newUpload: xRT6.ds2[0], record: xRT6.recDs });
+  check(xRT6.marks.every(m => /:false$/.test(m)),
+    'R6c nothing is marked carried either, because nothing was carried', xRT6.marks);
+  check(xRT6.reopened.join() === 'INV-1=SEPT ACME,INV-2=SEPT BORAX',
+    'R6d THE CONTROL: reopening the day file those values were typed into from version history still '
+    + 'shows them - the scope is the upload while two are on screen, and the file once it is one '
+    + 'file again', { cells: xRT6.reopened, ds: xRT6.reopenedDs });
+
+  /* =======================================================================
+     ROUND 3 OF THE FIX — fixer 2's findings: the HIGHs and MEDIUMs round 2
+     did not reach. Reviewer ids are cited. EVERY SECTION BELOW FAILED BEFORE
+     ITS FIX against the working tree as fixer 2 received it, recorded in
+     scratchpad/store/fix2/out/*.pre.txt (APP_FILE=.../fix2/Reco.html.bak).
+     Every assertion reads a VALUE - a record on the share, a file that does
+     or does not exist, the characters in a sentence the operator read - and
+     never a function or column name.
+     ======================================================================= */
+
+  /* ---------------------------------------------------------------------
+     [41] X1 / findings F11 + F19 — A SHARE THAT STOPS ANSWERING IS SAID OUT
+     LOUD, AND THE TYPING IS KEPT.
+
+     ONE CAUSE, TWO MOMENTS. `Store._readJsonFile` answers `_UNREADABLE` for
+     a read that threw and for a file that would not parse, and
+     `Store._mergeJob` turned that into `out.refused` and NOTHING ELSE: no
+     toast, no `Store.loadProblems` entry, no retry. The buffered intents sat
+     with no timer, and `Store._flushMergeTimers` only fires timers that
+     exist, so `AppState.flush()` resolved, the operator closed the app, and
+     four typed values were gone - with no second copy anywhere, because
+     applyEdits has already deleted the legacy `manualTags` entry for that
+     cell. That is F11.
+     F19 is the same silence one keystroke earlier: `Store.loadAll` quarantined
+     a damaged values file and said "starting it empty", which reads
+     recoverable, while the truth is that mergeWrite will refuse every write
+     for the session - and the sentence that says so could not fire on the
+     first burst, because the latch was set inside the job that burst started.
+
+     THE FIX IS ONE RULE IN THREE PLACES: a file we could not read is never
+     written to, the operator is told at the moment it is KNOWN, and what they
+     typed is kept and retried rather than dropped.
+     --------------------------------------------------------------------- */
+  section(41, 'X1 (F11/F19) — the share stops answering: the operator is told, and the typing is kept');
+  const SAY = makeRoot('share-say');
+  const brSAY = await startBridge(SAY.root, PORT_FIX_SAY); procs.push(brSAY.proc);
+  const pgSAY = await openReco(browser, brSAY);
+  await pgSAY.page.evaluate(SETUP + '([3])');
+  await pgSAY.page.evaluate(TYPE + `(['TPL_K','Vendor',[[2,'SAFELY SAVED']]])`);
+  const sayDisk0 = diskJson(SAY.root, 'reco/extraValueMaster.json');
+  check(((((sayDisk0 || {}).TPL_K || {})['INV-3'] || {}).Vendor || {}).v === 'SAFELY SAVED',
+    'X1 premise: while the folder answers, a typed value reaches the share', sayDisk0);
+
+  const xSAY = await pgSAY.page.evaluate(async () => {
+    /* THE SHARE STOPS ANSWERING READS, for this file only - the ordinary
+       weather of a network folder, injected at the api seam, which is where a
+       dropped share really fails. */
+    const realRead = window.pywebview.api.read_file;
+    window.__fault = true;
+    window.pywebview.api.read_file = function (rel) {
+      if (window.__fault && /extraValue/.test(String(rel)))
+        return Promise.reject(new Error('the shared folder did not answer'));
+      return realRead.apply(this, arguments);
+    };
+    window.__toasts = [];
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    const res = await Reco.applyEdits(tpl, sess, [
+      { row: sess.data[0], col: 'Vendor', value: 'TYPED WHILE THE SHARE WAS DOWN' },
+      { row: sess.data[1], col: 'Vendor', value: 'AND THIS ONE TOO' }],
+      { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const out = {
+      applied: res.applied,
+      toasts: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+      problems: Store.loadProblems.slice(),
+      lastErrorKey: Store.lastError ? Store.lastError.key : null,
+      pendingWhileDown: AppState.pendingCount()
+    };
+    /* THE FOLDER COMES BACK. Nothing is typed again: what the operator
+       already typed has to reach the share by itself. */
+    window.__fault = false;
+    if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 60));
+    if (typeof Store.idle === 'function') await Store.idle();
+    out.pendingAfter = AppState.pendingCount();
+    window.pywebview.api.read_file = realRead;
+    return out;
+  });
+  const sayDisk1 = diskJson(SAY.root, 'reco/extraValueMaster.json');
+  const sayVals = ['INV-1', 'INV-2', 'INV-3'].map(k =>
+    k + '=' + String(((((sayDisk1 || {}).TPL_K || {})[k] || {}).Vendor || {}).v || ''));
+  note('X1 what the operator was told while the share was down', xSAY.toasts);
+  note('X1 Store.loadProblems', xSAY.problems);
+  note('X1 the share file after the folder answered again', sayVals);
+  note('X1 pendingCount', { whileDown: xSAY.pendingWhileDown, after: xSAY.pendingAfter });
+  check(xSAY.toasts.some(t => /^error: /.test(t) && /shared folder/.test(t)),
+    'X1a the operator is TOLD that nothing is reaching the shared folder - it was two typed values, '
+    + 'applyEdits saying {applied:2}, and not one word (F11)', xSAY.toasts);
+  check(xSAY.problems.some(p => /extraValueMaster\.json/.test(String(p))),
+    'X1b and it is in Store.loadProblems too, so the state is still readable after the toast has '
+    + 'gone', xSAY.problems);
+  check(xSAY.pendingWhileDown > 0,
+    'X1c THE FACT THE RETRY STANDS ON, and it held before this fix too: the intents are still '
+    + 'buffered, so the typing has not been thrown away - it had simply stopped being owned by '
+    + 'anything that would try again', xSAY.pendingWhileDown);
+  check(sayVals.join() === 'INV-1=TYPED WHILE THE SHARE WAS DOWN,INV-2=AND THIS ONE TOO,INV-3=SAFELY SAVED',
+    'X1d (THE MONEY) BOTH typed values reach the share once the folder answers again, WITHOUT the '
+    + 'operator typing them a second time, and the record that was already there is still there',
+    sayVals);
+  check(xSAY.pendingAfter === 0,
+    'X1e ...and then nothing is owed: the retry cleared the buffered intents rather than leaving '
+    + 'them to the next keystroke', xSAY.pendingAfter);
+  await pgSAY.ctx.close();
+
+  /* F19: the SAME file damaged at BOOT. The latch has to be known before the
+     first keystroke, because the first keystroke is the one that used to get
+     no answer at all. */
+  const sayCorrupt = '{"TPL_K":{"INV-1":{"Vend';
+  fs.writeFileSync(path.join(SAY.root, 'reco/extraValueMaster.json'), sayCorrupt);
+  const pgSAY2 = await openReco(browser, brSAY);
+  const xSAY2 = await pgSAY2.page.evaluate(async () => {
+    const atBoot = { readOnly: !!Store.readOnlyKeys.extraValueMaster, problems: Store.loadProblems.slice() };
+    window.__toasts = [];
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col: 'Vendor', value: 'THE FIRST KEYSTROKE' }],
+      { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const first = (window.__toasts || []).map(t => t.kind + ': ' + t.msg);
+    window.__toasts = [];
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[1], col: 'Vendor', value: 'THE SECOND' }],
+      { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return { atBoot, first, second: (window.__toasts || []).map(t => t.kind + ': ' + t.msg) };
+  });
+  const quarantined = fs.existsSync(path.join(SAY.root, 'reco/_corrupt'))
+    ? fs.readdirSync(path.join(SAY.root, 'reco/_corrupt')).filter(f => /^extraValueMaster_/.test(f)) : [];
+  note('X1 the boot state with a damaged values file', xSAY2.atBoot);
+  note('X1 the first keystroke', xSAY2.first);
+  note('X1 the quarantine copies', quarantined);
+  check(xSAY2.atBoot.readOnly === true,
+    'X1f with the values file damaged, the app knows at BOOT that nothing can be saved to it - the '
+    + 'latch used to be set inside the job the first keystroke started (F19)', xSAY2.atBoot);
+  check(xSAY2.atBoot.problems.some(p => /nothing is being saved/.test(String(p)))
+        && !xSAY2.atBoot.problems.some(p => /starting it empty/.test(String(p))),
+    'X1g and the boot message is the honest one: not "starting it empty", which reads recoverable, '
+    + 'but that nothing is being saved to it this session', xSAY2.atBoot.problems);
+  check(xSAY2.first.some(t => /^error: /.test(t) && /nothing is being saved/.test(t)),
+    'X1h THE FIRST KEYSTROKE is told, not just the second - that first value is as unsaved as the '
+    + 'rest (F19)', xSAY2.first);
+  check(quarantined.length === 1,
+    'X1i and the damaged file is quarantined ONCE, not again on the first write', quarantined);
+  check(fs.readFileSync(path.join(SAY.root, 'reco/extraValueMaster.json'), 'utf8') === sayCorrupt,
+    'X1j THE RULE THAT ALREADY HELD, re-asserted here: the damaged file itself is never overwritten',
+    fs.readFileSync(path.join(SAY.root, 'reco/extraValueMaster.json'), 'utf8').slice(0, 60));
+  await pgSAY2.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [42] X2 / finding F17 — A TEMPLATE WHOSE OWN VALUES FILE CANNOT BE READ
+     IS NOT GIVEN A SECOND HOME.
+
+     Decision G's escape hatch routes a template's records to
+     reco/extraValues/<tplId>.json, and `Store.loadAll` learns the routing
+     from the files it finds. On a file it could not read or parse it pushed a
+     loadProblems line and `continue`d - skipping the very line that records
+     the routing - so `Reco._extraValueFile` answered "the main file" and the
+     template acquired TWO homes. The split file then WINS per cell on the
+     next boot (which is deliberate: it is the newer home), so the value typed
+     while the share was broken was replaced on screen by the colleague's
+     older one.
+
+     NARROWED TO A REFUSAL, which is what this app does where two readings are
+     possible: the routing table learns the template is split from the
+     FILENAME, and that one FILE is latched read-only, so the write is refused
+     and said out loud instead of being accepted into the wrong file. The
+     reviewer's own probe (skB/p10_split.mjs P10b) asserts the typed value
+     survives, which needs a fix that writes it into a file it could not read;
+     X2d says what happens instead, and X2e is the control that proves the
+     refusal is scoped to the damaged FILE and not to the feature.
+     --------------------------------------------------------------------- */
+  section(42, 'X2 (F17) — a damaged reco/extraValues/*.json refuses the write instead of taking a second home');
+  const SPL = makeRoot('share-spl');
+  const brSPL = await startBridge(SPL.root, PORT_FIX_SPL); procs.push(brSPL.proc);
+  const pgSPL0 = await openReco(browser, brSPL);
+  await pgSPL0.page.evaluate(SETUP + '([3])');
+  await pgSPL0.ctx.close();
+  fs.mkdirSync(path.join(SPL.root, 'reco/extraValues'), { recursive: true });
+  const splHealthy = JSON.stringify({ TPL_K: { 'INV-1': { Vendor: {
+    k: 'typed', v: 'SPLIT ACME', ds: 'split-ds', by: 'Colleague', at: '2026-10-10T09:00:00.000Z' } } } });
+  fs.writeFileSync(path.join(SPL.root, 'reco/extraValues/TPL_K.json'), splHealthy);
+  const pgSPL1 = await openReco(browser, brSPL);
+  const splOk = await pgSPL1.page.evaluate(() => ({
+    routed: (Store.extraValueFiles || {}).TPL_K || null,
+    v: ((((AppState.extraValueMaster || {}).TPL_K || {})['INV-1'] || {}).Vendor || {}).v || null
+  }));
+  note('X2 the healthy boot', splOk);
+  check(splOk.routed === 'reco/extraValues/TPL_K.json' && splOk.v === 'SPLIT ACME',
+    'X2 premise: a healthy split file is read and the template is routed to it', splOk);
+  await pgSPL1.ctx.close();
+
+  /* The share half-writes that file - the case the loader already has a
+     message for. */
+  const splBroken = '{"TPL_K":{"INV-1":{"Vend';
+  fs.writeFileSync(path.join(SPL.root, 'reco/extraValues/TPL_K.json'), splBroken);
+  const pgSPL2 = await openReco(browser, brSPL);
+  const xSPL = await pgSPL2.page.evaluate(async () => {
+    const atBoot = {
+      routed: (Store.extraValueFiles || {}).TPL_K || null,
+      problems: Store.loadProblems.slice()
+    };
+    window.__toasts = [];
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    const res = await Reco.applyEdits(tpl, sess, [{ row: sess.data[1], col: 'Vendor', value: 'TYPED TODAY' }],
+      { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const told = (window.__toasts || []).map(t => t.kind + ': ' + t.msg);
+    /* THE CONTROL: a template that is NOT split still saves. One damaged file
+       must not stop the whole team typing. */
+    const t2 = AppState.recoTemplates.find(x => x.id === 'TPL_2');
+    const s2 = AppState.recoSessions.TPL_2;
+    await Reco.applyEdits(t2, s2, [{ row: s2.data[0], col: 'Vendor', value: 'ANOTHER TEMPLATE' }],
+      { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return { atBoot, applied: res.applied, told };
+  });
+  const splMain = diskJson(SPL.root, 'reco/extraValueMaster.json');
+  note('X2 the boot with the split file damaged', xSPL.atBoot);
+  note('X2 what the operator was told when they typed', xSPL.told);
+  note('X2 the main file afterwards', splMain);
+  check(xSPL.atBoot.routed === 'reco/extraValues/TPL_K.json',
+    'X2a the routing table still says where that template\'s records live, read from the FILENAME - '
+    + 'it used to forget, which is what sent the writes to the main file (F17)', xSPL.atBoot.routed);
+  check(!(((splMain || {}).TPL_K || {})['INV-2']),
+    'X2b (THE MONEY) nothing for that template is written into reco/extraValueMaster.json, so one '
+    + 'template never has two homes and the older copy cannot win later',
+    (splMain || {}).TPL_K);
+  check(xSPL.told.some(t => /^error: /.test(t) && /extraValues\/TPL_K\.json/.test(t)),
+    'X2c and the operator is told, naming the file that could not be read, instead of a green '
+    + 'nothing', xSPL.told);
+  check(fs.readFileSync(path.join(SPL.root, 'reco/extraValues/TPL_K.json'), 'utf8') === splBroken,
+    'X2d the damaged file is not overwritten either: the value typed while it was broken is '
+    + 'REFUSED, not stored somewhere else and not written over a file we could not read',
+    fs.readFileSync(path.join(SPL.root, 'reco/extraValues/TPL_K.json'), 'utf8').slice(0, 60));
+  check(((((splMain || {}).TPL_2 || {})['INV-1||L1'] || {}).Vendor || {}).v === 'ANOTHER TEMPLATE',
+    'X2e THE CONTROL: a template whose own file is fine still saves normally - the refusal is '
+    + 'scoped to the one FILE that could not be read, not to the feature', (splMain || {}).TPL_2);
+  await pgSPL2.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [43] X3 / finding F12 — THE COLUMN'S NAME IS THE ONLY THING THAT
+     CONNECTS A RECORD TO A COLUMN.
+
+     The records are keyed [tplId][pk][colName], so a rename in the editor
+     left 400 vendor names stranded under the old name and the operator was
+     told "Template saved to database" in green; a removal left them on the
+     shared folder for ever; and a column added months later that happened to
+     reuse the name arrived PRE-FILLED with values nobody on the team typed
+     into it - which, on an AEG keyword or post-entry column, is the same
+     mechanism that decides which rows post.
+
+     ONE CAUSE, ONE PLACE: saveTemplate already diffs prevExtras against
+     t.additionalColumns for #30's promotion, so the rename and the removal
+     are read off that same pair. A rename MIGRATES the records (nothing is
+     lost, and it says how many moved); a removal ASKS, naming the count and
+     saying it deletes them for everyone, and on yes drops them through S13.
+     Reco.ssDeleteCol is the second route and gets the same two sentences,
+     because its confirm already promises the values are removed.
+     --------------------------------------------------------------------- */
+  section(43, 'X3 (F12) — renaming an added column keeps its values; deleting it asks, and takes them');
+  const COL = makeRoot('share-col');
+  const brCOL = await startBridge(COL.root, PORT_FIX_COL); procs.push(brCOL.proc);
+  const pgCOL = await openReco(browser, brCOL);
+  await pgCOL.page.evaluate(SETUP + '([3])');
+  await pgCOL.page.evaluate(TYPE + `(['TPL_K','Vendor',[[0,'ACME'],[1,'BORAX'],[2,'CERNO']]])`);
+  const colStore0 = diskJson(COL.root, 'reco/extraValueMaster.json');
+  check(['INV-1', 'INV-2', 'INV-3'].map(k => (((colStore0 || {}).TPL_K || {})[k] || {}).Vendor.v).join()
+        === 'ACME,BORAX,CERNO',
+    'X3 premise: the three typed values are on the share, keyed by the column NAME', (colStore0 || {}).TPL_K);
+
+  const xREN = await pgCOL.page.evaluate(async () => {
+    window.__toasts = [];
+    const dialogs = []; const realConfirm = window.confirm;
+    window.confirm = m => { dialogs.push(String(m)); return true; };
+    RecoTemplate.edit('TPL_K');
+    RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor').name = 'Supplier';
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 250)); if (typeof Store.idle === 'function') await Store.idle();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    AppState.activeRecoId = 'TPL_K';
+    Reco._fullPass();
+    let cells; try { cells = sess.data.map(r => r.Invoice + '=' + String(Reco.rowFull(tpl, sess, r).Supplier)); }
+    finally { Reco._fullEnd(); }
+    return { cells, dialogs, toasts: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+             cols: (tpl.additionalColumns || []).map(a => a.name) };
+  });
+  const colStore1 = diskJson(COL.root, 'reco/extraValueMaster.json');
+  note('X3 the renamed column\'s cells', xREN.cells);
+  note('X3 what the operator was told', xREN.toasts);
+  note('X3 the share after the rename', (colStore1 || {}).TPL_K);
+  check(xREN.cells.join() === 'INV-1=ACME,INV-2=BORAX,INV-3=CERNO',
+    'X3a (THE MONEY) renaming the column KEEPS the three values the team typed into it - they used '
+    + 'to go blank behind a green "Template saved" (F12)', xREN.cells);
+  check(['INV-1', 'INV-2', 'INV-3'].every(k => {
+      const cell = ((colStore1 || {}).TPL_K || {})[k] || {};
+      return cell.Supplier && cell.Supplier.v && !cell.Vendor;
+    }),
+    'X3b and they MOVED on the shared folder, under the new name, rather than being copied or left '
+    + 'stranded under the old one', (colStore1 || {}).TPL_K);
+  check(xREN.toasts.some(t => /3 value/.test(t) && /Supplier/.test(t)),
+    'X3c and the operator is told how many values moved and where', xREN.toasts);
+
+  /* Rename it back, then DELETE it - first CANCELLING, which must keep both
+     the column and the values. */
+  const xDEL = await pgCOL.page.evaluate(async () => {
+    const realConfirm = window.confirm;
+    window.confirm = () => true;
+    RecoTemplate.edit('TPL_K');
+    RecoTemplate._editing.additionalColumns.find(a => a.name === 'Supplier').name = 'Vendor';
+    RecoTemplate.saveTemplate();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 250)); if (typeof Store.idle === 'function') await Store.idle();
+
+    /* CANCEL. */
+    const saidNo = [];
+    window.confirm = m => { saidNo.push(String(m)); return false; };
+    RecoTemplate.edit('TPL_K');
+    let i = RecoTemplate._editing.additionalColumns.findIndex(a => a.name === 'Vendor');
+    RecoTemplate._editing.additionalColumns.splice(i, 1);
+    RecoTemplate.saveTemplate();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const afterNo = {
+      cols: (AppState.recoTemplates.find(x => x.id === 'TPL_K').additionalColumns || []).map(a => a.name),
+      recs: Object.keys((AppState.extraValueMaster.TPL_K || {})).filter(
+        k => ((AppState.extraValueMaster.TPL_K || {})[k] || {}).Vendor).length
+    };
+
+    /* YES. */
+    window.__toasts = [];
+    const saidYes = [];
+    window.confirm = m => { saidYes.push(String(m)); return true; };
+    RecoTemplate.edit('TPL_K');
+    i = RecoTemplate._editing.additionalColumns.findIndex(a => a.name === 'Vendor');
+    RecoTemplate._editing.additionalColumns.splice(i, 1);
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 250)); if (typeof Store.idle === 'function') await Store.idle();
+
+    /* ...and a brand-new column that happens to reuse the name. */
+    window.confirm = () => true;
+    RecoTemplate.edit('TPL_K');
+    RecoTemplate._editing.additionalColumns.push({ name: 'Vendor', type: 'custom' });
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    Reco._fullPass();
+    let fresh; try { fresh = sess.data.map(r => r.Invoice + '=' + String(Reco.rowFull(tpl, sess, r).Vendor)); }
+    finally { Reco._fullEnd(); }
+    return { saidNo, afterNo, saidYes, fresh };
+  });
+  const colStore2 = diskJson(COL.root, 'reco/extraValueMaster.json');
+  note('X3 the confirm on removing the column', xDEL.saidYes);
+  note('X3 after cancelling', xDEL.afterNo);
+  note('X3 a brand-new column of the same name', xDEL.fresh);
+  note('X3 the share after the removal', (colStore2 || {}).TPL_K);
+  check(xDEL.saidYes.some(m => /3 /.test(m) && /everyone/i.test(m)),
+    'X3d removing a column ASKS first, naming how many stored values go with it and that they go '
+    + 'for everyone - it used to say nothing at all (F12)', xDEL.saidYes);
+  check(xDEL.afterNo.cols.indexOf('Vendor') !== -1 && xDEL.afterNo.recs === 3,
+    'X3e THE WAY BACK: cancelling that confirm keeps the column AND the three values',
+    xDEL.afterNo);
+  check(!Object.keys((colStore2 || {}).TPL_K || {}).some(
+      k => (((colStore2 || {}).TPL_K || {})[k] || {}).Vendor),
+    'X3f on yes the records leave the shared folder with the column, instead of sitting there under '
+    + 'a name nothing in the app can show', (colStore2 || {}).TPL_K);
+  check(xDEL.fresh.join() === 'INV-1=,INV-2=,INV-3=',
+    'X3g (THE MONEY) a brand-new column that reuses the name starts EMPTY - it used to arrive '
+    + 'pre-filled with ACME/BORAX/CERNO, values nobody typed into it (F12)', xDEL.fresh);
+
+  /* THE SECOND ROUTE: the spreadsheet header's own delete. */
+  const xSS = await pgCOL.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    tpl.additionalColumns.push({ name: 'Scratch', type: 'custom', _ssAdded: true, _ssSingleUse: false });
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col: 'Scratch', value: 'SCRATCH ACME' },
+                                      { row: sess.data[1], col: 'Scratch', value: 'SCRATCH BORAX' }],
+      { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const before = Object.keys(AppState.extraValueMaster.TPL_K || {}).filter(
+      k => ((AppState.extraValueMaster.TPL_K || {})[k] || {}).Scratch).length;
+    const asked = []; const realConfirm = window.confirm;
+    window.confirm = m => { asked.push(String(m)); return true; };
+    Reco.ssDeleteCol('Scratch');
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 250)); if (typeof Store.idle === 'function') await Store.idle();
+    return { before, asked };
+  });
+  const colStore3 = diskJson(COL.root, 'reco/extraValueMaster.json');
+  note('X3 the spreadsheet delete confirm', xSS.asked);
+  note('X3 the share after it', (colStore3 || {}).TPL_K);
+  check(xSS.before === 2 && xSS.asked.some(m => /2 /.test(m)),
+    'X3h the spreadsheet header\'s own delete names the count too - its confirm already promised '
+    + 'the values were removed', xSS);
+  check(!Object.keys((colStore3 || {}).TPL_K || {}).some(
+      k => (((colStore3 || {}).TPL_K || {})[k] || {}).Scratch),
+    'X3i ...and it really removes them from the shared folder, which it never did (F12)',
+    (colStore3 || {}).TPL_K);
+  await pgCOL.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [44] X4 / finding F20 — THE SETTINGS THAT DECIDE WHETHER A DURABLE
+     RECORD IS READ ARE CHANGED WITH NO WORD TO THE OPERATOR.
+
+     The one thing on that folder with no second copy - no mirror on the
+     session, no row in the CSV - is the one thing the key-change confirm did
+     not name, so an operator who read its five items carefully and decided
+     the trade-off was acceptable decided it without knowing the typed values
+     were in it. Unticking carry changed what every stored record MEANS and
+     said nothing. Flipping a column's type made its records unreachable and
+     said nothing.
+     Round 2 did two of F20's four sentences (the override untick and the
+     duplicate-key panel); these are the other two, plus the type change.
+     --------------------------------------------------------------------- */
+  section(44, 'X4 (F20) — the key change, the carry untick and a type change all say what they do');
+  const CONF = makeRoot('share-conf');
+  const brCONF = await startBridge(CONF.root, PORT_FIX_CONF); procs.push(brCONF.proc);
+  const pgCONF = await openReco(browser, brCONF);
+  await pgCONF.page.evaluate(SETUP + '([3])');
+  await pgCONF.page.evaluate(TYPE + `(['TPL_K','Vendor',[[0,'ACME'],[1,'BORAX'],[2,'CERNO']]])`);
+  await pgCONF.page.evaluate(TYPE + `(['TPL_2','Vendor',[[0,'TWO-KEY ACME']]])`);
+
+  const xCONF = await pgCONF.page.evaluate(async () => {
+    const out = {};
+    /* 1. THE CARRY UNTICK, with records already written under the flag. */
+    window.__toasts = [];
+    RecoTemplate.edit('TPL_K');
+    let i = RecoTemplate._editing.additionalColumns.findIndex(a => a.name === 'Vendor');
+    RecoTemplate.toggleCarry(i, true);
+    RecoTemplate.saveTemplate();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    window.__toasts = [];
+    RecoTemplate.edit('TPL_K');
+    i = RecoTemplate._editing.additionalColumns.findIndex(a => a.name === 'Vendor');
+    RecoTemplate.toggleCarry(i, false);
+    out.untick = (window.__toasts || []).map(t => t.kind + ': ' + t.msg);
+    RecoTemplate.saveTemplate();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    out.recsAfterUntick = Object.keys(AppState.extraValueMaster.TPL_K || {}).filter(
+      k => ((AppState.extraValueMaster.TPL_K || {})[k] || {}).Vendor).length;
+
+    /* 2. A TYPE CHANGE AWAY FROM custom, with records. Cancel, then accept. */
+    const realConfirm = window.confirm;
+    const askedNo = [];
+    window.confirm = m => { askedNo.push(String(m)); return false; };
+    RecoTemplate.edit('TPL_K');
+    let ac = RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor');
+    ac.type = 'formula'; ac.formula = 'NUM({Amount})*2';
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    out.askedNo = askedNo;
+    out.typeAfterNo = (AppState.recoTemplates.find(x => x.id === 'TPL_K').additionalColumns
+      .find(a => a.name === 'Vendor') || {}).type;
+    const askedYes = [];
+    window.confirm = m => { askedYes.push(String(m)); return true; };
+    RecoTemplate.edit('TPL_K');
+    ac = RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor');
+    ac.type = 'formula'; ac.formula = 'NUM({Amount})*2';
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    out.askedYes = askedYes;
+    out.typeAfterYes = (AppState.recoTemplates.find(x => x.id === 'TPL_K').additionalColumns
+      .find(a => a.name === 'Vendor') || {}).type;
+
+    /* 3. THE KEY CHANGE, on the two-key template that holds one record. */
+    const askedKey = [];
+    window.confirm = m => { askedKey.push(String(m)); return true; };
+    RecoTemplate.edit('TPL_2');
+    RecoTemplate._editing.primaryKeys = ['Line'];
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    out.askedKey = askedKey;
+
+    /* 4. THE CONTROL: the same type change on a column with NO records says
+          nothing at all. A save is not the place to interrupt someone about
+          something that is not at stake. */
+    const askedCtl = [];
+    window.confirm = m => { askedCtl.push(String(m)); return true; };
+    RecoTemplate.edit('TPL_K');
+    const st = RecoTemplate._editing.additionalColumns.find(a => a.name === 'Status');
+    st.type = 'formula'; st.formula = '"x"';
+    RecoTemplate.saveTemplate();
+    window.confirm = realConfirm;
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    out.askedCtl = askedCtl;
+    return out;
+  });
+  note('X4 the carry untick', xCONF.untick);
+  note('X4 the type-change confirm', xCONF.askedYes);
+  note('X4 the key-change confirm', xCONF.askedKey);
+  note('X4 the control (a column with no records)', xCONF.askedCtl);
+  check(xCONF.untick.some(t => /3 value/.test(t) && /file/.test(t)) && xCONF.recsAfterUntick === 3,
+    'X4a unticking carry says how many records are stored against row keys and that they go back to '
+    + 'being honoured only in the file they were typed in - and it clears nothing (F20)',
+    { untick: xCONF.untick, recs: xCONF.recsAfterUntick });
+  check(xCONF.askedYes.some(m => /3 /.test(m)) && xCONF.typeAfterYes === 'formula',
+    'X4b changing a column away from custom ASKS, naming how many typed records stop being shown '
+    + '(F20)', { asked: xCONF.askedYes, type: xCONF.typeAfterYes });
+  check(xCONF.askedNo.length > 0 && xCONF.typeAfterNo === 'custom',
+    'X4c THE WAY BACK: cancelling that confirm leaves the column as it was', xCONF);
+  check(xCONF.askedKey.some(m => /typed/.test(m) && /1 /.test(m)),
+    'X4d the key-change confirm NAMES the typed values of added columns, with the count, among what '
+    + 'stops matching - they are the one thing on that folder with no second copy (F20)',
+    xCONF.askedKey);
+  check(xCONF.askedCtl.length === 0,
+    'X4e THE CONTROL: the same type change on a column with no stored records asks nothing',
+    xCONF.askedCtl);
+  await pgCONF.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [45] X5 / finding F13 — A COLLEAGUE'S STALE TEMPLATE SAVE UNSET THE TWO
+     FLAGS THAT DECIDE WHETHER A DURABLE RECORD IS READ.
+
+     saveTemplate replaces the whole stored object, and AppState.load() runs
+     once at boot, so a flag a colleague set at 10:00 was wiped by a save
+     going out from a 09:00 clone. The function's own comment names the hazard
+     and calls it pre-existing - and it is, for every field - but
+     carryForward and allowOverride are the first template fields whose loss
+     changes whether a record ALREADY ON THE SHARED FOLDER is read at all:
+     Reco._extraTyped falls back to file scope the moment carryForward is not
+     true, and the promotion has already deleted the legacy manualTags copy
+     those values used to live in.
+
+     THE REVIEWER'S MINIMUM FIX CANNOT WORK, which is why this is not it:
+     "merge the two flags from the stored template" reads
+     AppState.recoTemplates, and that array is this session's own stale
+     object - the code comment says so, and a check against it was written
+     and removed for exactly that reason. So the SHARE is read, once per
+     save, and for these two flags a value THIS EDITOR DID NOT TOUCH takes
+     the folder's answer. Every other field stays last-writer-wins and is
+     ticketed.
+     --------------------------------------------------------------------- */
+  section(45, 'X5 (F13) — a stale save does not silently unset carry-forward or the override flag');
+  const STPL = makeRoot('share-stpl');
+  const brSTPL = await startBridge(STPL.root, PORT_FIX_STPL); procs.push(brSTPL.proc);
+  const pgA5 = await openReco(browser, brSTPL);
+  await pgA5.page.evaluate(SETUP + '([2])');
+  const pgB5 = await openReco(browser, brSTPL);   // boots with the template as it is NOW
+  const a5 = await pgA5.page.evaluate(async () => {
+    RecoTemplate.edit('TPL_K');
+    const i = RecoTemplate._editing.additionalColumns.findIndex(a => a.name === 'Vendor');
+    RecoTemplate.toggleCarry(i, true);
+    RecoTemplate.saveTemplate();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return (AppState.recoTemplates.find(x => x.id === 'TPL_K').additionalColumns
+      .find(a => a.name === 'Vendor') || {}).carryForward;
+  });
+  const onShareA = diskJson(STPL.root, 'reco/recoTemplates.json');
+  check(a5 === true && (((onShareA || []).find(t => t.id === 'TPL_K') || {}).additionalColumns || [])
+          .some(a => a.name === 'Vendor' && a.carryForward === true),
+    'X5 premise: colleague A\'s carry flag is on the shared folder', a5);
+
+  const b5 = await pgB5.page.evaluate(async () => {
+    window.__toasts = [];
+    RecoTemplate.edit('TPL_K');          // from THIS page's 09:00 clone
+    RecoTemplate._editing.description = 'B was here';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const vd = (AppState.recoTemplates.find(x => x.id === 'TPL_K').additionalColumns || [])
+      .find(a => a.name === 'Vendor') || {};
+    return { carry: vd.carryForward, desc: AppState.recoTemplates.find(x => x.id === 'TPL_K').description,
+             toasts: (window.__toasts || []).map(t => t.kind + ': ' + t.msg) };
+  });
+  const onShareB = diskJson(STPL.root, 'reco/recoTemplates.json');
+  const vdB = (((onShareB || []).find(t => t.id === 'TPL_K') || {}).additionalColumns || [])
+    .find(a => a.name === 'Vendor') || {};
+  note('X5 colleague B\'s save', b5);
+  note('X5 the column on the share afterwards', vdB);
+  check(vdB.carryForward === true,
+    'X5a (THE MONEY) B\'s unrelated save does NOT silently unset the flag A set: the records on the '
+    + 'folder go on being read by key, and next month\'s file is not blank (F13)', vdB);
+  check(b5.toasts.some(t => /someone else/i.test(t) && /Vendor/.test(t)),
+    'X5b and B is told that somebody else had changed this template, naming the column - a green '
+    + '"Template saved to database" was the only thing said before', b5.toasts);
+  check(b5.desc === 'B was here',
+    'X5c THE CONTROL: what B actually edited is still saved - this keeps the share\'s answer for the '
+    + 'two flags, it does not refuse B\'s work', b5.desc);
+  const b5b = await pgB5.page.evaluate(async () => {
+    /* AND THE OTHER DIRECTION, which the finding names too: B deliberately
+       unticks it, with the share saying ON. A field the editor DID touch is
+       the operator's decision and must go through. */
+    window.__toasts = [];
+    RecoTemplate.edit('TPL_K');
+    const i = RecoTemplate._editing.additionalColumns.findIndex(a => a.name === 'Vendor');
+    RecoTemplate.toggleCarry(i, false);
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return (AppState.recoTemplates.find(x => x.id === 'TPL_K').additionalColumns
+      .find(a => a.name === 'Vendor') || {}).carryForward;
+  });
+  const onShareC = diskJson(STPL.root, 'reco/recoTemplates.json');
+  const vdC = (((onShareC || []).find(t => t.id === 'TPL_K') || {}).additionalColumns || [])
+    .find(a => a.name === 'Vendor') || {};
+  check(b5b !== true && vdC.carryForward !== true,
+    'X5d THE OTHER CONTROL: a flag the operator DID untick here is still turned off - the share wins '
+    + 'only for a setting this editor never touched', { memory: b5b, share: vdC });
+  await pgA5.ctx.close(); await pgB5.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [46] X6 / finding F18 — THE SPREADSHEET FILL DRAG OVER AN ADDED COLUMN
+     DID NOTHING AND SAID "Filled 3 cells".
+
+     T-30-1 filed this as "the drag writes an added column's value straight
+     onto the row". It writes an EMPTY STRING onto the row: the source value
+     is read as `srcRow[fd.srcCol]`, and applyEdits' tag branch ends with
+     `delete s.row[s.col]` (ONE TRUTH PER CELL, pre-existing), so an added
+     column has no row property to copy. The operator dragged a vendor name
+     down fifty rows, read "Filled 50 cells", and nothing was filled - and the
+     shared day CSV, which is the team's audit trail, gained one C-version row
+     per key recording a change that never happened.
+
+     A control that reports success having done nothing is worse than one that
+     refuses, so: the source value is read through the LADDER (what the
+     operator can see), a store-served column's cells go through
+     Reco.applyEdits - which is what puts them in the store, obeys every
+     refusal typing obeys, and writes no version row for a tag - and a
+     COMPUTED column is refused by name instead of being claimed.
+     --------------------------------------------------------------------- */
+  section(46, 'X6 (F18) — the fill drag over an added column fills it, or says it did not');
+  const DRG = makeRoot('share-drag');
+  const brDRG = await startBridge(DRG.root, PORT_FIX_DRAG); procs.push(brDRG.proc);
+  const pgDRG = await openReco(browser, brDRG);
+  await pgDRG.page.evaluate(SETUP + '([4])');
+  await pgDRG.page.evaluate(TYPE + `(['TPL_K','Vendor',[[0,'ACME'],[1,'OLD-B'],[2,'OLD-C'],[3,'OLD-D']]])`);
+  const drgVer = verFile(DRG.root, 'Keyed');
+  const drgRowsBefore = csvRows(drgVer).length;
+  const xDRG = await pgDRG.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    AppState.activeRecoId = 'TPL_K';
+    sess.spreadsheetMode = true;
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 250));
+    window.__toasts = [];
+    Reco._ssCommitFill({ srcCol: 'Vendor', curCol: 'Vendor', srcFidx: 0, curFidx: 3 });
+    await new Promise(r => setTimeout(r, 600));
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await Versioning.idle(); await new Promise(r => setTimeout(r, 250));
+    Reco._fullPass();
+    let cells; try { cells = sess.data.map(r => r.Invoice + '=' + String(Reco.rowFull(tpl, sess, r).Vendor)); }
+    finally { Reco._fullEnd(); }
+    return { cells, toasts: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+             rowProps: sess.data.map(r => r.Invoice + '='
+               + (Object.prototype.hasOwnProperty.call(r, 'Vendor') ? JSON.stringify(r.Vendor) : '(absent)')) };
+  });
+  const drgStore = diskJson(DRG.root, 'reco/extraValueMaster.json');
+  const drgRowsAfter = csvRows(drgVer).length;
+  note('X6 what the screen reads after the drag', xDRG.cells);
+  note('X6 what the operator was told', xDRG.toasts);
+  note('X6 the share', (drgStore || {}).TPL_K);
+  note('X6 version rows appended by the drag', drgRowsAfter - drgRowsBefore);
+  check(xDRG.cells.join() === 'INV-1=ACME,INV-2=ACME,INV-3=ACME,INV-4=ACME',
+    'X6a (THE MONEY) the drag really fills the three cells it claimed - it used to leave OLD-B, '
+    + 'OLD-C and OLD-D exactly where they were and say "Filled 3 cells" (F18)', xDRG.cells);
+  check(['INV-1', 'INV-2', 'INV-3', 'INV-4'].map(
+      k => ((((drgStore || {}).TPL_K || {})[k] || {}).Vendor || {}).v).join() === 'ACME,ACME,ACME,ACME',
+    'X6b and they are on the SHARED FOLDER, so they are still there tomorrow: the drag goes through '
+    + 'the same write path as typing, not onto the row', (drgStore || {}).TPL_K);
+  check(xDRG.toasts.some(t => /Filled 3 cell/.test(t))
+        && xDRG.rowProps.every(p => /=\(absent\)$/.test(p)),
+    'X6c the count it reports is the number it actually wrote, and nothing is left ON THE ROW: the '
+    + 'store is the one truth for this cell, and the empty string the drag used to write there is '
+    + 'what made the whole thing invisible', { toasts: xDRG.toasts, rowProps: xDRG.rowProps });
+  check(drgRowsAfter === drgRowsBefore,
+    'X6d and NO version row is appended to the shared day CSV for a value that is not in the CSV - '
+    + 'the audit trail used to gain one C-row per key recording nothing (F18)',
+    { before: drgRowsBefore, after: drgRowsAfter });
+
+  /* A COMPUTED added column: there is nothing to copy, and that has to be
+     said rather than counted as a success. */
+  const xDRG2 = await pgDRG.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
+    const sess = AppState.recoSessions.TPL_K;
+    tpl.additionalColumns.push({ name: 'Net', type: 'formula', formula: 'NUM({Amount})*2' });
+    tpl.displayColumns = (tpl.displayColumns || []).concat(['Net']);
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 250));
+    window.__toasts = [];
+    Reco._ssCommitFill({ srcCol: 'Net', curCol: 'Net', srcFidx: 0, curFidx: 3 });
+    await new Promise(r => setTimeout(r, 600));
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    Reco._fullPass();
+    let cells; try { cells = sess.data.map(r => r.Invoice + '=' + String(Reco.rowFull(tpl, sess, r).Net)); }
+    finally { Reco._fullEnd(); }
+    return { cells, toasts: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+             recs: Object.keys(AppState.extraValueMaster.TPL_K || {}).filter(
+               k => ((AppState.extraValueMaster.TPL_K || {})[k] || {}).Net).length };
+  });
+  note('X6 dragging a COMPUTED column', xDRG2);
+  check(xDRG2.cells.join() === 'INV-1=200,INV-2=400,INV-3=600,INV-4=800' && xDRG2.recs === 0,
+    'X6e every row still reads its own formula after a drag over a computed column, and no override '
+    + 'was invented in bulk', xDRG2);
+  check(!xDRG2.toasts.some(t => /Filled/.test(t)) && xDRG2.toasts.some(t => /Net/.test(t)),
+    'X6f ...and the operator is told that column was not filled, naming it, instead of reading '
+    + '"Filled 3 cells" about cells nothing was written to', xDRG2.toasts);
+  await pgDRG.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [47] X7 / finding F6 — ONE ORPHAN RECORD EXPORTED 2,000 GOOD NUMBERS AS
+     TEXT.
+
+     Decision J.8 walks the sparse store so that the exported KIND of a
+     formula column does not depend on WHERE in the file an override is: the
+     row scan stops at 2,000 rows, so an override on row 50,000 would
+     otherwise leave the column kind:'value' and write that one cell as forced
+     TEXT inside a numeric column. The walk asked EVERY key the template holds
+     a record for, with no test against the data being exported - and the
+     orphans are kept on purpose (an override of INV-7 applies in November if
+     INV-7 comes back). So one stale record from a key nobody has loaded since
+     April turned a whole column into text, the colleague's SUM at the bottom
+     read 0, and nothing was wrong on screen or in the CSV.
+
+     Scoped to the rows being exported, which is what the kind is ABOUT, and
+     NOT by narrowing Reco._overrideValuesFor itself: the role matrix and the
+     untick count call it too and must keep counting the orphans, because a
+     record on a key that is not loaded is exactly the hazard they guard
+     (X7d is the assertion that pins that). The row set is built lazily, so a
+     template with no records still walks nothing.
+     --------------------------------------------------------------------- */
+  section(47, 'X7 (F6) — an orphan override does not export a whole numeric column as text');
+  const KND = makeRoot('share-kind');
+  const brKND = await startBridge(KND.root, PORT_FIX_KIND); procs.push(brKND.proc);
+  const pgKND = await openReco(browser, brKND);
+  const xKND = await pgKND.page.evaluate(`(async function () {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_KND'; t.name = 'Kind scan';
+    t.columns = ['Invoice', 'Base'].map(n => ({ name: n, label: n, formats: [], isValue: n === 'Base' }));
+    t.primaryKeys = ['Invoice'];
+    t.valueColumn = 'Base';
+    t.displayColumns = ['Invoice', 'Base'];
+    t.additionalColumns = [{ name: 'Net', type: 'formula', formula: 'NUM({Base})*2', allowOverride: true }];
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_KND');
+    RecoTemplate.open(tpl.id);
+    const sess = AppState.recoSessions.TPL_KND;
+    Reco.ensureSessionShape(sess);
+    /* 2,100 rows, assigned directly as section 18's fixture is: the question
+       is about the SCHEMA, and 2,100 is what it takes to have a loaded row
+       the 2,000-row scan never reaches. */
+    const n = 2100;
+    const data = new Array(n);
+    for (let i = 0; i < n; i++) data[i] = { _id: 'k' + i, _pk: 'INV-' + (i + 1), _ver: 'upload',
+                                            Invoice: 'INV-' + (i + 1), Base: String(i + 1) };
+    sess.data = data;
+    AppState.activeRecoId = 'TPL_KND';
+    App.closeModal();
+    const kindOf = () => (XlSchema.build(tpl, sess, {}).byName.get('Net') || {}).kind;
+    const out = { rows: n };
+    delete AppState.extraValueMaster.TPL_KND;
+    out.kindClean = kindOf();
+    /* ONE STALE RECORD, on a key that is NOT in the loaded data - which is
+       what six months of ordinary overrides leave behind. */
+    AppState.extraValueMaster.TPL_KND = { 'INV-LONG-GONE': { Net: { k: 'override', v: 'see email',
+      prev: '400', src: 'formula', ds: '', by: 'someone', at: '2026-04-01T00:00:00.000Z' } } };
+    out.kindOrphan = kindOf();
+    out.countOrphan = Reco._overrideCount(tpl, 'Net');
+    out.keyIsLoaded = sess.data.some(r => r._pk === 'INV-LONG-GONE');
+    const xo = { rows: 'all', columns: 'asShown', includeComputed: true, protect: 'soft',
+                 dateFormat: 'dd-mmm-yyyy' };
+    const built = await ExcelLink.buildExport(tpl, sess, xo, 'S');
+    const ci = built.head.columns.findIndex(c => c.key === 'Net');
+    const cell = (built.cells[0] || [])[ci];
+    out.exportedKind = (built.head.columns[ci] || {}).kind;
+    out.firstCell = (cell && typeof cell === 'object') ? cell.v : cell;
+    out.firstCellType = (cell && typeof cell === 'object') ? typeof cell.v : typeof cell;
+    /* THE CONTROL FOR J.8: the same non-numeric override on a LOADED key that
+       the 2,000-row scan never reaches. The column MUST still go out as text. */
+    AppState.extraValueMaster.TPL_KND['INV-2050'] = { Net: { k: 'override', v: 'see email',
+      prev: '4100', src: 'formula', ds: '', by: 'someone', at: '2026-04-01T00:00:00.000Z' } };
+    out.kindLoadedPastScan = kindOf();
+    out.countBoth = Reco._overrideCount(tpl, 'Net');
+    return out;
+  })()`);
+  note('X7 the kind scan', xKND);
+  check(xKND.kindClean === 'value' && xKND.keyIsLoaded === false,
+    'X7 premise: with no records the column exports as numbers, and the planted key is NOT in the '
+    + 'loaded data', xKND);
+  check(xKND.kindOrphan === 'value',
+    'X7a (THE MONEY) one orphan record on a key nobody has loaded since April no longer turns the '
+    + 'whole column into text (F6)', xKND.kindOrphan);
+  check(xKND.exportedKind === 'value' && xKND.firstCellType === 'number' && xKND.firstCell === 2,
+    'X7b and the workbook a colleague opens carries the loaded cell as the NUMBER 2, not the string '
+    + '"2" - which is why their SUM at the bottom of the column read 0',
+    { kind: xKND.exportedKind, cell: xKND.firstCell, type: xKND.firstCellType });
+  check(xKND.kindLoadedPastScan === 'text',
+    'X7c THE CONTROL, AND IT IS DECISION J.8 ITSELF: a non-numeric override on a LOADED key that the '
+    + '2,000-row scan never reaches STILL takes the column to text - the store walk is scoped to the '
+    + 'rows being exported, not removed', xKND.kindLoadedPastScan);
+  check(xKND.countOrphan === 1 && xKND.countBoth === 2,
+    'X7d and the honest count still counts the orphans: the role matrix and the override untick read '
+    + 'it to decide whether a column still holds records, and a record on a key that is not loaded is '
+    + 'exactly the hazard they guard', { orphan: xKND.countOrphan, both: xKND.countBoth });
+  await pgKND.ctx.close();
+
+
+  /* ---------------------------------------------------------------------
+     [48] X8 / finding F15 — THE CEILING IS A STATED LIMIT, NOT SOMETHING A
+     TEAM DISCOVERS.
+
+     MEASURED ON THIS BUILD, through the test bridge on local disk, best of 3
+     taking the minimum (scratchpad/store/fix2/out/p7_size.post.txt):
+       2,000 records    288 KB  (144 B/record)  boot 672 ms   read  12 ms   one merge write   67 ms
+       50,000 records   7.3 MB  (147 B/record)  boot 987 ms   read 213 ms   one merge write  600 ms
+       200,000 records  29.6 MB (148 B/record)  boot 1,825 ms read 741 ms   one merge write 2,730 ms
+     Store._mergeJob reads AND writes the whole file for every 150 ms typing
+     burst, so on a shared folder at 10 MB/s a 200,000-record file is about
+     6 s of transfer on top of ~3 s of work, per burst, and Store._enqueue
+     serialises per file, so bursts queue behind each other and two
+     colleagues each move 30 MB. The usable ceiling is about 50,000 records
+     per FILE.
+
+     WHAT IS NOT BUILT HERE, deliberately: the Values-panel button that MOVES
+     a template's records into their own file (T-S10-3). Moving records
+     between two shared files while colleagues may be typing into either is a
+     data-moving operation on the one thing on that folder with no second
+     copy, and it needs its own review - the reviewer's other suggestion,
+     sharding automatically past a threshold, decides where everybody's data
+     lives on its own and is worse. What IS built is the sentence, because
+     there is already a remedy that needs no new UI: decision G's split file
+     is READ at boot and written to from then on (S11a/S11d), so a person
+     with folder access can move one template's records into
+     reco/extraValues/<tplId>.json by hand today.
+     --------------------------------------------------------------------- */
+  section(48, 'X8 (F15) — a values file past the measured ceiling says so at boot, with the way out');
+  const BIGF = makeRoot('share-bigf');
+  const brBIGF = await startBridge(BIGF.root, PORT_FIX_BIGF); procs.push(brBIGF.proc);
+  const pgBIGF0 = await openReco(browser, brBIGF);
+  await pgBIGF0.page.evaluate(SETUP + '([3])');
+  const smallBoot = await pgBIGF0.page.evaluate(() => Store.loadProblems.slice());
+  await pgBIGF0.ctx.close();
+  /* 60,000 records on one share, which is what a year of two columns on a
+     20,000-row monthly file looks like. */
+  const bigVals = { TPL_K: {} };
+  for (let i = 0; i < 30000; i++) bigVals.TPL_K['INV-' + i] = {
+    Vendor: { k: 'typed', v: 'V' + i, ds: 'd', by: 'someone', at: '2026-01-01T00:00:00.000Z' },
+    Status: { k: 'typed', v: 'Open', ds: 'd', by: 'someone', at: '2026-01-01T00:00:00.000Z' } };
+  fs.writeFileSync(path.join(BIGF.root, 'reco/extraValueMaster.json'), JSON.stringify(bigVals));
+  const bigBytes = fs.statSync(path.join(BIGF.root, 'reco/extraValueMaster.json')).size;
+  const pgBIGF = await openReco(browser, brBIGF);
+  const xBIGF = await pgBIGF.page.evaluate(() => ({
+    problems: Store.loadProblems.slice(),
+    loaded: Object.keys((AppState.extraValueMaster || {}).TPL_K || {}).length
+  }));
+  note('X8 the file', { bytes: bigBytes, records: 60000 });
+  note('X8 what the boot said', xBIGF.problems);
+  note('X8 a small store\'s boot', smallBoot);
+  check(xBIGF.loaded === 30000,
+    'X8 premise: all 60,000 records on 30,000 keys are loaded at boot, as they always were - this '
+    + 'is about the cost, not about losing them', xBIGF.loaded);
+  check(xBIGF.problems.some(p => /60000 typed values/.test(String(p))),
+    'X8a the boot names the file and the number of values in it, measured not guessed (F15)',
+    xBIGF.problems);
+  check(xBIGF.problems.some(p => /reco\/extraValues\/TPL_K\.json/.test(String(p))),
+    'X8b and it names the way out that works TODAY with no new UI: the split file decision G reads '
+    + 'at boot and writes to from then on, and the biggest template in the file', xBIGF.problems);
+  check(!smallBoot.some(p => /typed values/.test(String(p))),
+    'X8c THE CONTROL: an ordinary share says nothing - the sentence is a limit being reached, not a '
+    + 'notice everyone reads every morning', smallBoot);
+  await pgBIGF.ctx.close();
+
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
   check(allErrors.length === 0, 'U5 no page error across the whole run', allErrors.slice(0, 6));

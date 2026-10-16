@@ -1203,3 +1203,259 @@ not in the current data" as a separate, explicitly confirmed action.
 **Test** A template with records in the main file is moved: assert the split file holds them, the
 main file no longer does, a reload reads the same values, and a `Store.mergeWrite` for a second
 template does not touch either.
+
+**MEASURED (reviewer finding F15, re-measured by fixer 2 on this build).** Through the test
+bridge on LOCAL disk, best of 3 taking the minimum
+(`scratchpad/store/fix2/out/p7_size.post.txt`, reviewer B's own `skB/p7_size.mjs`):
+
+| records | file | per record | boot (load→ready) | the read a merge write does | ONE merge write |
+|---|---|---|---|---|---|
+| 2,000 | 288 KB | 144 B | 672 ms | 12 ms | 67 ms |
+| 50,000 | 7.3 MB | 147 B | 987 ms | 213 ms | 600 ms |
+| 200,000 | 29.6 MB | 148 B | 1,825 ms | 741 ms | 2,730 ms |
+
+Those are parse, serialise and IPC costs only. `Store._mergeJob` reads AND writes the whole file
+for every 150 ms typing burst, so on a shared folder at 10 MB/s a 200,000-record file is about
+6 s of transfer on top of ~3 s of work PER BURST, and `Store._enqueue` serialises per file, so
+bursts queue behind each other and two colleagues each move 30 MB. **The usable ceiling is about
+50,000 records per file**, which is now `Store.VALUE_FILE_CEILING`: past it the boot names the
+file, the count, the MB and the biggest template in it, and says that moving that template into
+`reco/extraValues/<tplId>.json` by hand works today because the loader reads it and writes there
+from then on (`run_store_e2e` section 48, X8a-X8c). What is still missing is this ticket's
+BUTTON. Sharding automatically past a threshold was the reviewer's other suggestion and is worse:
+it decides where everybody's data lives, in the middle of a typing burst, with no one asked.
+
+## T-26-4  A row that is already posted can be posted a SECOND time
+
+**Where** `apps/Reco.html` `Reco.previewEntryFromSelection` — nothing in it asks
+`Reco.isRowPosted`, and `commitEntryFromPreview` does not either. The only control is the AEG
+keyword filter, which is a value the operator maintains.
+
+**What** Select a row that is already in the general ledger, press Preview Entry, Generate: a
+second entry is written for the same key and `entryHistory` ends up with two entries whose
+`postedPks` both name it. Reviewer finding F3's probe (`scratchpad/store/skA/p5_repost.mjs`) did
+exactly this.
+
+**Why it is only a ticket** It is PRE-EXISTING and has nothing to do with the value store: it
+behaves the same on `e9851b4`, before any of these three features. What F3 made expensive was the
+*number* the second entry posted — a person could type 999999 over an already-posted row because
+the posted mark had evaporated after a reload, and RC-5 closed that (the override is refused, and
+`run_store_e2e` R1e/R1f pin it). The remaining act — posting the same row twice with its real
+value — is a workflow question with a settled answer somewhere else (the Posted-JV Tracking card
+exists to find it), and adding a refusal to the preview would change what every existing template
+can post. That belongs in its own review.
+
+**Fix** In `previewEntryFromSelection`, after the keyword filter, split `sourceRows` into posted
+and open by `Reco.isRowPosted` and refuse — or warn and offer to drop them — naming the
+accounting reference of each, the way the override refusal does. `Reco._postedRefForPk` already
+answers from the posted index.
+
+**Test** Post one row, reload the day file from history, select it again and preview: assert the
+preview refuses (or that the posted row is not among `Reco._pendingEntry.sourceRows`), and assert
+`AppState.entryHistory` still holds ONE entry for that key. A control must assert that a row whose
+entry was REVERSED can be posted again, because that is the documented way back.
+
+## T-26-5  A non-numeric override still reads as a number in a report TOTAL
+
+**Where** `apps/Reco.html` `Reco.runReport`'s totals and every other `U.num` reader of an added
+column's value.
+
+**What** RC-8 refuses a non-numeric override at the one door into a journal entry, so it can no
+longer reach the ledger. It can still reach a SCREEN total: with `Net` overridden to `1.234,50`,
+the report cell shows `1.234,50` and the report total adds `1.2345` to it, so the column does not
+add up to what the column says. Measured by reviewer A's own probe
+(`scratchpad/store/skA/p3_canon.mjs`, re-run after the fix:
+`scratchpad/store/fix/f1/out/p3_canon.1.txt`, REPORT TOTAL 101.2345 for rows worth 100).
+
+**Why it is only a ticket** The number is on a screen and not in a journal entry, the cell beside
+the total shows the characters that were typed, and the operator cannot post the entry at all
+until they correct it — so the state is loud and short-lived rather than silent and durable.
+Changing what `U.num` does to a non-numeric value is a change to the amount parser every surface
+in this app shares, which is its own review.
+
+**Fix** Either exclude a cell `U.isNumeric` rejects from a total and footnote the count ("3
+cell(s) are not numbers and are not in this total"), or mark the total itself. The report
+footer already renders counts, so there is a place to say it.
+
+**Test** Three rows worth 100, one overridden to `1.234,50`: assert the total is NOT 101.2345,
+assert whatever it becomes is accompanied by the count, and keep a control where a canonicalised
+override (`1,234.50`) is fully in the total.
+
+## T-26-6  A POSTED row whose key later becomes duplicated shows its computed value while the ledger holds the override
+
+**Where** `apps/Reco.html` `Reco._extraOverride` — RC-6's duplicate test, which returns null for
+every row sharing the key.
+
+**What** RC-6 stops a stored override being served when more than one loaded row shares its key,
+because the record cannot say which row it is about (finding F1: the entry posted 3000 where the
+rows are worth 2030). If that key had already been POSTED with the override, the suppression also
+changes what the reports, the CSV and the workbook say about a row that is in the ledger: the
+ledger holds 1000 and the screen now reads 20.
+
+**Why it is only a ticket** It is the lesser of two harms and the louder of the two. The
+alternative — keep serving the record — multiplies a number into a NEW journal entry, which is
+the blocker. The suppression only misreports a row that is already posted, and the duplicate-key
+panel fires on the same load and names the suppressed records (RC-6's second half), so the
+operator is told the moment it happens. Resolving it properly needs a record that can name a ROW
+and not only a key, which is a data-shape change to `extraValueMaster`.
+
+**Fix** The honest shape is to name the posted keys in that same panel ("2 of these are posted to
+the general ledger under AEG-…; the ledger holds the override and the screen now shows the
+computed value") using `Reco._postedRefForPk`, which exists. The deeper fix — a per-row record —
+should not be attempted without the duplicate-key policy being reopened.
+
+**Test** Post a row with an override, bring a duplicate of its key in by Add Data, and assert the
+panel names that key as posted AND names the accounting reference; assert the stored record is
+still there.
+
+## T-30-4  The Clear's confirm promises typed values "come back when a file with those keys is loaded again", and only one route does that
+
+**Where** `apps/Reco.html` `Reco.confirmClearSession` (the sentence `run_store_e2e` C9 asserts) and
+`Reco._dsInScope`.
+
+**What** The Clear says the typed values "are stored against the row key in the shared values file
+and come back when a file with those keys is loaded again". With carry-forward OFF — the default,
+and a settled decision — that is true for exactly ONE route: reopening from version history the
+day file they were typed into. A fresh upload of a different extract does not bring them back
+(that is decision M, and RC-9 is what made it true after a Clear too), and neither does next
+month's file. So the sentence promises the cross-file carry the default exists to prevent.
+
+**Why it is only a ticket** It is a wording change on a string an existing gate asserts (C9), so
+the replacement assertion has to be written with it, and the right sentence depends on how the
+Values panel ends up describing scope. It is also not wrong in the direction that loses work:
+nothing is deleted by a Clear either way.
+
+**Fix** Say which route brings them back: "…and come back when this day file is reopened from
+version history. A new upload is a new file, so they are not applied to it unless the column's
+carry-forward box is ticked." Strengthen C9 to assert both halves rather than the one it asserts
+now.
+
+**Test** C9's own fixture plus `run_store_e2e` R6: the confirm names version history, and R6a/R6d
+already pin the two behaviours the sentence would then describe.
+
+## T-S10-4  The e2e suites never remove their temp share, and that has killed the container twice
+
+**Where** every `tests/e2e/run_*.mjs` — each calls `fs.mkdtempSync(path.join(os.tmpdir(),
+'reco-<suite>-'))` once per app root and nothing ever removes it.
+
+**What** A run of the full net leaves one directory per root under `/tmp`, each holding a copy of
+`apps/Reco.html` (1.7 MB) plus its vendor libs, and the big fixtures leave hundreds of MB. 5,177
+of them had accumulated by `29cb95d` — 23 GB, and the disk reached 90% with 4 GB free, which
+killed the container in the middle of a review round and again in the middle of a fix round. Both
+rounds were lost.
+
+**Why it is only a ticket** It is test infrastructure, not the app, and the change touches every
+suite — so it wants doing once, deliberately, rather than inside a fix round for something else.
+
+**Fix** A shared helper: register every root in a module-level list and remove it in the same
+`finally` that kills the bridges (`fs.rmSync(base, { recursive: true, force: true })`), with
+`KEEP_TMP=1` to keep them when a failure needs inspecting. The suites already have the `finally`
+block; the roots are already collected in `procs`-shaped arrays in most of them.
+
+**Test** Run one suite twice and assert the count of `/tmp/reco-*` directories is unchanged, and
+that `KEEP_TMP=1` leaves exactly the roots the run made.
+
+## T-S10-5  A column that is renamed AND moved is read as a removal, not a rename
+
+**Where** `apps/Reco.html` `RecoTemplate.saveTemplate`, the F12 diff — `renamedCols` pairs
+`prevExtras[idx]` with `t.additionalColumns[idx]`, i.e. the SAME SLOT in the editor's list.
+
+**What** Renaming "Vendor" to "Supplier" in place migrates its stored values (`run_store_e2e`
+X3a-X3c). Renaming it AND dragging it to a different position in the same save looks exactly like
+"Vendor was removed and Supplier was added", so the operator gets the removal confirm — which
+offers to DELETE the values rather than move them — and the records stay filed under "Vendor" if
+they cancel. The same is true of a rename that also changes the column's type.
+
+**Why it is only a ticket** The confirm is the safe side of the fork: it says how many values are
+at stake, says they go for everyone, and says in so many words "if you meant to RENAME the
+column, cancel and change its name in place instead — that keeps the values". So the worst case
+is an operator doing it in two saves. Guessing which added column became which across a reorder
+needs an identity that does not exist yet: `additionalColumns` entries have no id, and inventing
+one is a data-shape change to every stored template.
+
+**Fix** Give an added column a stable `_cid` when it is created, keep it through the editor, and
+pair `prevExtras` to `t.additionalColumns` by `_cid` before falling back to the slot. Columns
+written by older builds have no `_cid`, so the slot rule has to stay as the fallback.
+
+**Test** Rename and reorder in one save: assert the three values move with the column and that no
+confirm was shown; keep X3d-X3g as they are, because a genuine removal must still ask.
+
+## T-S10-6  Typing that could not be saved is kept in memory and nothing on screen says so
+
+**Where** `apps/Reco.html` `Store._retryLater` (4 attempts, 300/600/1,200/2,400 ms) and
+`AppState.pendingCount()`, which nothing in the UI reads.
+
+**What** When the shared folder stops answering, RC-10 now says so (one toast per 4 s plus a
+`Store.loadProblems` entry) and retries the buffered intents, so a share that drops for a few
+seconds loses nothing (`run_store_e2e` X1a-X1e). After the four attempts the intents stay in
+memory until the next keystroke re-arms the timer with a fresh budget — and if the operator
+closes the window in that state, the typing goes with it. The same is true of a write refused
+because its own file could not be read at boot (F17/X2): the value is refused rather than written
+into the wrong file, and refused is the right answer, but it is not kept anywhere either.
+
+**Why it is only a ticket** The operator is now TOLD, twice over and in two places, which is the
+difference between this and the finding it came from (F11: not one word). What is left is a
+smaller, slower harm: somebody who reads neither sentence and closes the app.
+
+**Fix** Something in the UI reads `AppState.pendingCount()` — the saving indicator already has a
+home — and the window asks before closing while it is non-zero (`beforeunload`). The honest
+stretch goal is a local journal of unwritten intents (`localStorage`, this session's own) that a
+later boot can offer to replay, which is a new durable store and its own review.
+
+**Test** With reads failing, type, exhaust the retry budget, and assert `pendingCount()` is
+non-zero and that whatever reads it says so; then let the folder answer and assert it returns to
+zero without anything being typed again (X1d/X1e already pin the second half).
+
+## T-S10-7  Every template field except the two flags is still last-writer-wins
+
+**Where** `apps/Reco.html` `RecoTemplate.saveTemplate` — `if (i!==-1) AppState.recoTemplates[i] = t;`
+replaces the whole stored object, and `AppState.load()` runs once at boot.
+
+**What** RC-12 asks the shared folder for `carryForward` and `allowOverride` and keeps the
+folder's answer for whichever of the two this editor did not touch, naming the column
+(`run_store_e2e` X5a-X5d). It does that for those two and nothing else, because they are the only
+template fields whose loss changes whether a record already on the folder is READ. A colleague's
+display order, correction context, AEG roles, formulas and column list are all still overwritten
+silently by a save from a stale clone — which is what the function's own comment has said since
+the feature landed. RC-12 is also SKIPPED while this session owes the share a write
+(`AppState.pendingCount() !== 0`), because the file may then hold this session's own past rather
+than a colleague's present — `run_store_e2e` C6h caught exactly that and the skip is what makes
+it safe.
+
+**Why it is only a ticket** The general case means re-reading the stored template inside
+`saveTemplate` and merging field by field, which makes the whole template write path async (every
+caller today assumes the swap has happened by the time it returns) and needs a conflict dialog
+that can describe any field. `RecoTemplate._openedWith` is already captured for it.
+
+**Fix** Re-read `reco/recoTemplates.json` before the swap, diff the stored template against
+`_openedWith`, keep the share's value for every field the editor did not touch, and name them in
+one confirm. Then RC-12's special case can be deleted and the pendingCount skip with it.
+
+**Test** Two pages, one share: A changes the display order, B (booted earlier) saves a
+description. Assert A's order is still on the share and that B was told; and keep a control where
+B deliberately changes the same field and B's value wins.
+
+## T-30-5  The fill drag refuses a computed column rather than offering to override it
+
+**Where** `apps/Reco.html` `Reco._ssCommitFill` — `isComputedCol(col)` cells are counted into
+`skipped` and named in the toast.
+
+**What** RC-14 makes the drag fill a store-served added column properly and refuses a computed
+one by name, because filling it would mean writing an override onto every row the drag covered.
+An operator who genuinely wants to put the same number on fifty overridable rows has to type it
+fifty times.
+
+**Why it is only a ticket** A bulk write of overridden numbers is a money action: `_setOverride`
+refuses a posted row, a duplicated key and a pk-less row one cell at a time, and a fill would
+have to report each refusal and still leave the rest applied. That is a confirm-with-a-count
+design, not a drag behaviour.
+
+**Fix** When every column in the dragged rectangle is overridable, ask once — "set N cells in
+"Net" to 1,234.50? This replaces the computed value on N rows for everyone" — and route the
+accepted cells through `Reco.applyEdits`, which already enforces every refusal per cell; then
+report applied and refused with their reasons.
+
+**Test** A drag over an overridable column with one posted row in the rectangle: assert the
+confirm names the count, that the posted row is refused by its accounting reference, that the
+others are applied, and that the toast says both numbers.
+
