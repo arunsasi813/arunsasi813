@@ -424,7 +424,14 @@ family should borrow; see T-F2-8.
 
 ---
 
-## T-F2-8  A dropped row-level edit is silent
+## T-F2-8  ~~A dropped row-level edit is silent~~  **FIXED**
+
+**CLOSED.** `Reco.editCell`, `Reco.manualOffset` and `Reco.unmarkOffset` now carry the sentence
+`applyCorrection` already used for the same case. Section [66] (F28a-F28d); F28d is the control
+that matters — a row that IS there still commits, the value is in the store and on the shared
+folder, and NOTHING is said, because `editCell` runs on every cell commit in the app. Handover
+§18.4.
+
 
 **Where** `Reco.editCell` — `const row = rowId ? Reco._rowById(sess, rowId) :
 sess.data[rowIdx]; if (!row) return;`
@@ -783,7 +790,19 @@ naming the column, and keep `[R2-F12]`'s own assertions (the chosen context cell
 grid's cell, character for character) as the guard for the state if it is allowed to stand.
 
 
-## T-24R2-1  `saveTemplate`'s read-modify-write race now splits ROW IDENTITY, not just a column's values
+## T-24R2-1  ~~`saveTemplate`'s read-modify-write race now splits ROW IDENTITY~~  **FIXED**
+
+**CLOSED, AND AS A REFUSAL RATHER THAN A MERGE.** T-S10-7's general merge would have kept the
+folder's key definition silently, and the share would even have ended with one scheme — but B's
+session is keyed under the OLD scheme and B's NEXT UPLOAD would mint under a rule B never chose,
+which is the trap the ticket names. So `RecoTemplate._keyDefOf` reads `primaryKeys` plus the
+definitions of the columns in `Reco._keyDepNames` (the whole closure, from both sides) and any
+difference between the share and `_openedWith` refuses the save with this ticket's sentence,
+whatever this editor did; nothing is stored, and `_abandonSave` refreshes the window from the
+folder so "close it and open it again" is a recovery and not a loop. MEASURED on this tree, one
+upload from each of two pages: **8 distinct `_pk` for 4 business rows before, 4 after**
+(`run_store_e2e` S241e). Section [64] (S241–S241g). Handover §18.2.
+
 
 **Where** `apps/Reco.html` `RecoTemplate.saveTemplate`, the `KNOWN AND UNMITIGATED`
 comment above `if (!t.dataFolder) t.dataFolder = Versioning.folderFor(orig || t);`, against
@@ -1380,7 +1399,23 @@ from then on (`run_store_e2e` section 48, X8a-X8c). What is still missing is thi
 BUTTON. Sharding automatically past a threshold was the reviewer's other suggestion and is worse:
 it decides where everybody's data lives, in the middle of a typing burst, with no one asked.
 
-## T-26-4  A row that is already posted can be posted a SECOND time
+## T-26-4  ~~A row that is already posted can be posted a SECOND time~~  **FIXED**
+
+**CLOSED AS WARN-AND-OFFER, which is the user decision taken — never a hard refusal.** Preview
+Entry still OPENS; `previewEntryFromSelection` splits the post-keyword-filter `sourceRows` by
+`Reco.isRowPosted` above both ledger-write refusals, names each posted row with the accounting
+reference it is already in (`Reco._postedRefForPk`), and offers "Leave them out" in the
+preview's own banner (`Reco.previewIncludePosted`, one press and not a mode). WHAT THE ENTRY POSTS
+IS UNCHANGED UNTIL SOMEBODY PRESSES IT: dropping them by default was built first and run_jv_gen,
+run_jv_engine and Z1h all caught it — every one of those is a workflow that deliberately re-posts,
+and Z1's own comment settles the principle ("an entry quietly smaller than the selection the
+operator ticked is the harm, not the remedy"). Z1h2 asserts both halves: the warning fires and the
+rows stay in. A reversed or cancelled entry needs no special case — `isRowPosted` already
+answers false for one, and T264j-T264k are the control. Generate on a selection where EVERY row is
+already posted now refuses with a sentence instead of closing the modal on an entry nobody wrote
+(T264l). Section [67] (T264–T264l); the pre-fix run read `entryHistory` as
+`["AE…S1:INV-1","AE…KS1:INV-1+INV-2"]`. Handover §18.6.
+
 
 **Where** `apps/Reco.html` `Reco.previewEntryFromSelection` — nothing in it asks
 `Reco.isRowPosted`, and `commitEntryFromPreview` does not either. The only control is the AEG
@@ -1551,7 +1586,17 @@ block; the roots are already collected in `procs`-shaped arrays in most of them.
 **Test** Run one suite twice and assert the count of `/tmp/reco-*` directories is unchanged, and
 that `KEEP_TMP=1` leaves exactly the roots the run made.
 
-## T-S10-5  A column that is renamed AND moved is read as a removal, not a rename
+## T-S10-5  ~~A column that is renamed AND moved is read as a removal, not a rename~~  **FIXED**
+
+**CLOSED.** An added column gets a stable `_cid` when it is CREATED (`RecoTemplate.addExtraCol`,
+`Reco.ssAddColumn`'s persist branch, `Reco.ssPromoteCol`) and F12's diff pairs on it before falling
+back to the slot. Never backfilled: minting one lazily on edit would make `kxDef`'s comparison
+differ from the stored template's and fire the primary-key confirm on a save that changed nothing.
+The SLOT RULE STAYS for columns written by older builds, and S105g-S105h pin it — such a column
+renamed-and-moved is still read as a removal and still asks. `typeAway` pairs the same way, so a
+rename that also changes the type still gets its type question. Section [65] (S105–S105h), and
+X3a-X3g are unchanged. Handover §18.3.
+
 
 **Where** `apps/Reco.html` `RecoTemplate.saveTemplate`, the F12 diff — `renamedCols` pairs
 `prevExtras[idx]` with `t.additionalColumns[idx]`, i.e. the SAME SLOT in the editor's list.
@@ -1610,7 +1655,21 @@ later boot can offer to replay, which is a new durable store and its own review.
 non-zero and that whatever reads it says so; then let the folder answer and assert it returns to
 zero without anything being typed again (X1d/X1e already pin the second half).
 
-## T-S10-7  Every template field except the two flags is still last-writer-wins
+## T-S10-7  ~~Every template field except the two flags is still last-writer-wins~~  **FIXED**
+
+**CLOSED.** `saveTemplate` re-reads the stored template off `reco/recoTemplates.json` before its
+write and merges it field by field against `RecoTemplate._openedWith`: a field this editor did not
+touch keeps the FOLDER's value, a field it did touch is the operator's decision, and everything
+kept is named in ONE confirm whose Cancel abandons the save (`_settleShared` / `_mergeShared` /
+`_askMerged` / `_abandonSave`). It runs inside `additionalColumns` as well, per column and per
+field. **BOTH DELETIONS WERE MADE:** RC-12's two-field special case is gone (`_flagsOf`,
+`_readSharedExtraFlags`, `_reconcileSharedFlags` deleted, the two flags now merged by the general
+rule, X5a-X5d still green), and so is the `AppState.pendingCount() === 0` skip — the condition for
+C6h's hazard is a write owed FOR THAT FILE, which `RecoTemplate._tplWriteOwed()` asks exactly, and
+an owed write is landed first. `run_store_e2e` section [63] (S107–S107m); S107j–S107m are the
+deleted skip's own gate. Reproduced first in `scratchpad/dataloss/build/p1_s107.mjs`. Handover
+§18.1. A key-definition change is the one field that REFUSES instead — T-24R2-1.
+
 
 **Where** `apps/Reco.html` `RecoTemplate.saveTemplate` — `if (i!==-1) AppState.recoTemplates[i] = t;`
 replaces the whole stored object, and `AppState.load()` runs once at boot.
@@ -1842,7 +1901,25 @@ one test that monkeypatches `LONG_PATH_LIMIT` down to prove the fallback.
 and once under a 180-character one: assert identical counts both times, and assert the startup
 check fires and names the root when the root is over the limit.
 
-## T-S10-9  The last typing of the day is still lost if the folder is down and the operator leaves anyway
+## T-S10-9  ~~The last typing of the day is still lost if the folder is down and the operator leaves anyway~~  **FIXED**
+
+**CLOSED, WITH THE PER-CELL TIMESTAMP GUARD THE TICKET SPECIFIES.** Each unwritten intent is
+journalled on THIS PC (`Store.journalIntent`, cleared by intent id when its write resolves) and the
+next boot offers the replay BY COUNT, naming the cells (`App._replayJournal`), through the same
+`Store.mergeWrite`. An intent is applied only where the share holds no record for that cell or
+holds one whose `at` is OLDER; every skipped cell is named with who holds the newer value, what it
+says and what this window had. The journal carries the base folder each entry was typed against.
+THE OWED SET LIVES IN MEMORY and `localStorage` is written when a write resolves not-written, on
+`pagehide`/`beforeunload`, and when the leave gate asks — journalling per keystroke made C3's
+50,000-cell fill-down quadratic and hung the suite for eleven minutes. The leave gate no longer
+says "lose them" about values it is keeping. THE CLEAR IS INSIDE THE WRITE PATH
+(`Store._mergeJob`, one journal id per intent): hung off the promise `_extraValueFlush` returns, a
+failed write resolves it while the value is still owed and the RETRY that lands resolves nothing —
+so a folder that recovered on its own left the journal full and the next boot re-offered values
+already on the share, naming the operator as the colleague holding the newer one. Section [68]
+(S109–S109p), which tests the LOSING case as hard as the winning one and pins both ends of the
+journal's life. Handover §18.5. **This closes T-S10-6's remaining half too.**
+
 
 **Where** `apps/Reco.html` `App._pendingLeaveOk` and `App._wireLeaveGuard` (both reading
 `AppState.pendingCount()`), `Store._retryLater` behind them (`_RETRY_MAX` 4, at
