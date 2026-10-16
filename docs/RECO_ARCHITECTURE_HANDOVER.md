@@ -2767,8 +2767,25 @@ In `tests/e2e/run_store_e2e.mjs`:
   that line moved below A's post, the section reads green against an append that skips on the
   reference alone. S111a and S111a2 are the two premises; S111b–S111h are the claims.
 
-Mutation-checked: removing the suffix fails S109b/c/f/g; restoring the reference-only append
-fails S111b/c/f.
+**Mutation-checked on the committed tree**, and the readings are the clearest record of the bug
+there is:
+
+| mutant | what the share held | which assertions died |
+|---|---|---|
+| the per-window suffix removed | both windows minted `AEMVB5ZQXC`; `reco/entryHistory.json` still held **two** entries (`AEMVB5ZQXC`, `AEMVB5ZR59`) with each entry's document numbers following it — `D1/D2 → ZR59`, `D3/D4 → ZQXC` | **S109b, S109c, S109f, S109g** (4) |
+| the reference-only append restored | both windows under `AEPINNED1`; the share held **ONE** entry, and `D3/D4` pointed at the *other operator's* entry | **S111b, S111c, S111f** (3) |
+
+The first row is the fix working without its first layer: a certain collision, and **nothing
+lost** — because the append re-minted the loser and the document numbers followed. The second row
+is the bug: one record, one operator's journal entry gone, and their document numbers resolving
+their rows to a colleague's GL entry.
+
+> One detail the first row also shows, and it is by design: S109b died because the fixture
+> captured window A's reference *before* A's re-mint landed (the re-mint happened later, in
+> `_confirmEntryOnShare`'s repair). The share and the master were both correct. That is exactly
+> why every reader in §17.4 re-reads `entry.accountingId` instead of trusting a string captured
+> at mint time — a captured reference can be stale, and `_noticeReMint` is what corrects the one
+> the operator is looking at.
 
 ### 17.7 Still open
 
