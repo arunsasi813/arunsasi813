@@ -4,7 +4,13 @@ Things found while building, deliberately not built, and picked up cold from her
 says WHERE, WHAT, WHY IT IS ONLY A TICKET, the FIX and the TEST, because a ticket without those
 is a rumour.
 
-Three are worth promoting above the rest:
+Four are worth promoting above the rest:
+
+- **T-S10-16** — A4's `_keyStale` latch guards three of the five doors that write under a row key,
+  and `applyCorrection` is measured going through: after the key refusal it says a green
+  *"Correction applied"* and puts the correction on the shared folder under a key the folder's rule
+  no longer computes. It is the smallest remaining instance of the thing this round exists to stop,
+  and the decision it needs is one the last round already took once.
 
 - **T-S10-10** — the ledger merge is atomic inside ONE page and not BETWEEN pages. Two people
   pressing Generate within one read-write cycle of each other can still lose a journal entry, and
@@ -424,7 +430,20 @@ family should borrow; see T-F2-8.
 
 ---
 
-## T-F2-8  ~~A dropped row-level edit is silent~~  **FIXED**
+## T-F2-8  ~~A dropped row-level edit is silent~~  **FIXED** (reopened by the review, closed again)
+
+**THE REVIEW OF THIS ROUND FOUND FIVE MORE DOORS, and one of them LOST the edit rather than
+dropping it.** Findings B4 (HIGH) and B6 (MEDIUM): the Fix paragraph named three functions and its
+last sentence said "the same in its siblings", so it was applied to a LIST OF FUNCTIONS rather
+than to a RULE. `Reco.setTag` at a vanished row wrote the typed value into the legacy
+`sess.manualTags` under the dead `_id` and `AppState.save()` put it on the shared folder — keyed on
+an id `U.uid()` mints fresh on every load, so the `manualTags` read fallback can never find it
+again, and it was not journalled either, so T-S10-9's replay cannot recover it. It is also the door
+most typing goes through: `editCell` serves FILE columns, `setTag` serves every ADDED one.
+`setOverride`, `revertOverride`, `confirmCarried` and `ssToggleRowSingleUse` were silent too, two of
+them about a DELETE that did not happen. The dead-id write is gone, the five sentences are in, and
+`run_store_e2e` **[76]** is the gate. The legacy `manualTags` READ fallback is untouched and
+`run_reports_e2e` still seeds and reads it unedited.
 
 **CLOSED.** `Reco.editCell`, `Reco.manualOffset` and `Reco.unmarkOffset` now carry the sentence
 `applyCorrection` already used for the same case. Section [66] (F28a-F28d); F28d is the control
@@ -790,7 +809,25 @@ naming the column, and keep `[R2-F12]`'s own assertions (the chosen context cell
 grid's cell, character for character) as the guard for the state if it is allowed to stand.
 
 
-## T-24R2-1  ~~`saveTemplate`'s read-modify-write race now splits ROW IDENTITY~~  **FIXED**
+## T-24R2-1  ~~`saveTemplate`'s read-modify-write race now splits ROW IDENTITY~~  **FIXED** (and the refusal's own blind spot closed after the review)
+
+**THE REFUSAL WAS RIGHT AND ITS RECOVERY SENTENCE WAS HALF TRUE.** The review's finding A4 (HIGH):
+`_abandonSave` refreshes `AppState.recoTemplates`, `_openedWith` and the posted index, and nothing
+re-keys the rows this window already has LOADED, whose `_pk` was minted under the rule that has just
+gone. So the operator was told, in so many words, that their window was now correct, and everything
+they typed afterwards reached the shared folder under a key the folder's rule no longer computes:
+they read it back fine, no colleague ever saw it, and it was gone from their own grid at the next
+reload. Measured: B did exactly what the sentence said, typed into `Vendor`, the record landed under
+`D1`, and A's upload of the same business row under the folder's rule read `D1-X` and showed blank —
+no toast anywhere. The round had traded a silent revert of a colleague's key rule for a silent loss
+of this operator's typing. Fixed with a per-window latch (`Reco._keyStale`, never on the session so
+it cannot be serialised to a colleague who has nothing wrong), the refusal's new sentence about the
+rows on screen, and typing doors that refuse with a sentence until the rows are read again; cleared
+by `Reco._mintKeysSync`, which every re-keying route goes through. `run_store_e2e` **[71]**, with a
+control that typing works normally after a reload — a latch, not a dead end. **The refusal itself
+stands, and T-S10-7's general merge must not be allowed to swallow it:** a key change is not a
+field, it decides what every other record is filed under. **See T-S10-16 for the doors the latch
+does not yet guard.**
 
 **CLOSED, AND AS A REFUSAL RATHER THAN A MERGE.** T-S10-7's general merge would have kept the
 folder's key definition silently, and the share would even have ended with one scheme — but B's
@@ -1399,7 +1436,11 @@ from then on (`run_store_e2e` section 48, X8a-X8c). What is still missing is thi
 BUTTON. Sharding automatically past a threshold was the reviewer's other suggestion and is worse:
 it decides where everybody's data lives, in the middle of a typing burst, with no one asked.
 
-## T-26-4  ~~A row that is already posted can be posted a SECOND time~~  **FIXED**
+## T-26-4  ~~A row that is already posted can be posted a SECOND time~~  **FIXED** (the banner's cap closed after the review)
+
+**THE BANNER STOPPED NAMING THEM PAST EIGHT.** The review's finding A8 (LOW): with more than eight
+already-posted rows the list was truncated with nothing saying there were more — 8 of 10 named.
+The render now discloses the remainder. `run_store_e2e` **[77]**.
 
 **CLOSED AS WARN-AND-OFFER, which is the user decision taken — never a hard refusal.** Preview
 Entry still OPENS; `previewEntryFromSelection` splits the post-keyword-filter `sourceRows` by
@@ -1655,7 +1696,39 @@ later boot can offer to replay, which is a new durable store and its own review.
 non-zero and that whatever reads it says so; then let the folder answer and assert it returns to
 zero without anything being typed again (X1d/X1e already pin the second half).
 
-## T-S10-7  ~~Every template field except the two flags is still last-writer-wins~~  **FIXED**
+## T-S10-7  ~~Every template field except the two flags is still last-writer-wins~~  **FIXED** (four more holes closed after the review)
+
+**THE MERGE WAS RIGHT AND THE SAVE AROUND IT WAS NOT.** Four of the review's fourteen findings are
+this ticket's fix, and all four are now closed:
+
+- **A1 (BLOCKER)** an abandoned save had ALREADY deleted the typed values for everyone, then said
+  "Nothing was saved" — share values before 3, after 0. **A2 (HIGH)** the rename arm ORPHANED the
+  records under a name the folder's template does not have, after a green *"3 value(s) … now belong
+  to Supplier"* one toast before *"Nothing was saved"*. The three store side-effects and the
+  sentences that announce them are now STAGED into a closure only the success path invokes;
+  the confirms stay above the swap, where Cancel means what it says. **[69]**.
+- **A3 (HIGH)** from the swap until the folder answers, `AppState.recoTemplates` holds the editor's
+  UN-MERGED clone and ANY write of that key publishes it — one ordinary `AppState.save()` from a
+  tag, an offset or a group, 250 ms later, was enough. Measured: a colleague's `displayOrder` on the
+  share, `null` after this window's own flush, under two green "Template saved to database" toasts.
+  Now the key is HELD out of every write until the settle resolves (`RecoTemplate._tplHold`,
+  `AppState._keyHeld`), and held rather than dropped: `_snap` is left alone so the key still reads
+  as owed. **[70]**.
+- **B5 (HIGH)** the editor closed and the screen went home before the write was decided and neither
+  leave guard knew — 120 ms after Save: page `home`, `pendingCount` 0, `leaveOk` true, no toast, and
+  the share's description `null` afterwards. `pendingCount()` counts a held key, so both gates ask;
+  `pagehide` force-releases. **[70]** R2d/R2e.
+- **A5 (MEDIUM) / A7 (LOW)** the merge had no mirror for a column the FOLDER removed (silently
+  resurrected, and blank, because the record delete had already run) and said nothing when BOTH
+  sides changed the same field. **[72]**.
+
+**AND THE HOLD OPENED TWO HOLES OF ITS OWN**, both caught by existing gates and both fixed: a held
+write that is merely SKIPPED is a DROPPED write (`saveTemplate(); await AppState.flush();` published
+nothing at all, so the next share read described the folder's past and the merge unticked the flag
+this editor had just set — C6h and X5's premise), and waiting for the settle inside `flush()` is
+CIRCULAR unless the settle's write comes off the 250 ms debounce (`run_store_e2e` hung dead at
+[28] C6h). The settle now writes its one key directly (`AppState._writeKeyNow`) and the share read
+waits for that write on every path. Handover §18.8. **See T-S10-17.**
 
 **CLOSED.** `saveTemplate` re-reads the stored template off `reco/recoTemplates.json` before its
 write and merges it field by field against `RecoTemplate._openedWith`: a field this editor did not
@@ -1901,7 +1974,37 @@ one test that monkeypatches `LONG_PATH_LIMIT` down to prove the fallback.
 and once under a 180-character one: assert identical counts both times, and assert the startup
 check fires and names the root when the root is over the limit.
 
-## T-S10-9  ~~The last typing of the day is still lost if the folder is down and the operator leaves anyway~~  **FIXED**
+## T-S10-9  ~~The last typing of the day is still lost if the folder is down and the operator leaves anyway~~  **FIXED** (three more holes closed after the review)
+
+**THE REPLAY WAS RIGHT AND THE JOURNAL'S OWN BOOKKEEPING WAS NOT.** Three of the review's findings
+are this ticket's fix:
+
+- **B1 (BLOCKER) two windows of Reco on one PC destroyed each other's journal.** `journalPersist()`
+  wrote one window's whole in-memory Map over the shared `localStorage` list with no re-read, and
+  `_jrnlMap()` reads the disk only while `_jrnlMem === null`, so a window with a live map never saw
+  the other's entries again. Measured, two pages in one origin: A typed INV-1 with the folder down
+  (journal `["INV-1/Vendor=A-typed-this"]`), B then typed a DIFFERENT cell and the journal read
+  `["INV-2/Vendor=B-typed-this"]` — INV-1 gone; the boot replayed one value under a green toast and
+  the share ended with `INV-1=undefined`. Nobody was ever told. **The handover said the opposite**
+  (§18.7 limitation 3: "the per-cell guard makes that safe rather than destructive") — the cells are
+  keyed per window IN MEMORY, the persist was a blind whole-list write, and the guard runs at
+  replay, long after the loss. `journalPersist()` is now a read-merge-write, newest `at` winning,
+  with `Store._jrnlGone` stopping a cell this window has settled coming back. **[73]**.
+- **B2 (HIGH) the replay DELETED the journal of the folder it refused to replay into.**
+  `journalClear()` took no argument and spared nothing, and the "nothing belongs here" `return` sat
+  ABOVE the `discarded` toast. Measured: four values typed against the folder the team had just
+  moved off — journal `[]` after the boot and NOT ONE TOAST; with one of four belonging elsewhere,
+  the toast said "Point Reco back at that folder to put them on it" about an entry the same function
+  had just deleted. The same wipe fired whenever `get_folder_info()` was transiently unavailable.
+  Now `journalClear(keep)` takes a predicate, the sentence is said from above the early return, and
+  an UNKNOWN base is no longer read as a different folder. **[74]**.
+- **B3 (HIGH) `journalDone()` was O(n²) inside the queued write job** — the whole Map walked with no
+  early exit, once per intent, synchronously, inside `Store._mergeJob`'s job for the SHARED
+  `reco/extraValueMaster.json`, so that file's queue was held by a loop doing no I/O. 10 / 171 /
+  3,585 / **19,305 ms** at 1k / 5k / 20k / 50k cells; a 50,000-cell fill-down went from ~0.95 s to
+  **21.9 s**. The quadratic §18.5 says the Map was introduced to kill had MOVED, not gone, and the
+  suite could not see it: C3b counts writes (still one) and C3e only reports a clock. Fixed with a
+  `_jrnlById` index; **[75]** counts the SCANS.
 
 **CLOSED, WITH THE PER-CELL TIMESTAMP GUARD THE TICKET SPECIFIES.** Each unwritten intent is
 journalled on THIS PC (`Store.journalIntent`, cleared by intent id when its write resolves) and the
@@ -2244,3 +2347,141 @@ that column: assert the change is refused (or warned) and names the column. Cont
 link on a template with no flagged column is silent. Then the end-to-end one, which already
 passes: `run_store_e2e` [54] MR1b, where the posting is refused even though the editor allowed
 the state.
+
+---
+
+# From the review of the data-loss round
+
+<!-- the fixer, after the two reviews of T-S10-7 / T-24R2-1 / T-S10-5 / T-F2-8 / T-S10-9 / T-26-4.
+     Fourteen findings, all reproduced and all confirmed; thirteen fixed in sections [69]-[77].
+     These three are what is left. Handover section 18.8. -->
+
+## T-S10-15  `run_panes_e2e` [4]'s byte-identity gate fails about one run in three, and its premise is already hollow
+
+**Where** `apps/Reco.html:22504` `Reco._measureVirtRow(sess);` inside
+`setTimeout(Panes.wrapFixups(() => { … }), 0)`, and `_measureVirtRow(sess, wrap)` itself
+(`if (sess._virtRowHeight) return; … if (sample && sample.offsetHeight) sess._virtRowHeight =
+sample.offsetHeight;`). Nothing synchronises that timer with the `await AppState.flush()` at the end
+of the fixture's SITTING (`tests/e2e/run_panes_e2e.mjs:336`).
+
+**What** The gate compares `reco/recoSessions.json` byte for byte against base `5f61d76`. It fails
+about one run in three on an **unchanged tree** — one failure in eight measured by the reviewer, the
+diff reported at line 249/250 as the presence of `"_virtRowHeight": 38` **and nothing else**, with
+five consecutive clean runs either side of it. `git diff c94264d d1e9509 -- apps/Reco.html | grep
+_virtRowHeight` is **empty** on both the reviewer's measurement and mine, so this is not a behaviour
+change any round made. The mechanism, measured eight times out of eight: `TPL_A=38
+TPL_B=undefined TPL_C=undefined TPL_D=38`. The session at the failing line is **TPL_D**, the Restore
+Session one — `RecoTemplate.open('TPL_D')` renders an EMPTY session so the first deferred measure
+finds no sample row; the data is then assigned by hand with **no re-render**; only
+`restoreSession`'s own re-render queues a second `setTimeout(0)`, and whether that fires before the
+final flush is the race.
+
+**AND THE PREMISE IS ALREADY HOLLOW**, which is the half worth knowing: `TPL_B` and `TPL_C` are
+never measured at all (8/8), so the gate compares two sessions that are **absent on both sides** and
+reads green by symmetry. A premise assertion added naively ("the field is present in both files")
+would fail today.
+
+**Why it is only a ticket** The fix belongs in the FIXTURE and the review round was not allowed to
+edit `tests/e2e/run_panes_e2e.mjs`. The alternative — making the measurement eager in the app —
+would change a field the byte-identity gate compares against its own base and break the gate for
+real. **Do not "fix" it by dropping or normalising the field** (that is how a genuine migration
+break gets waved through, and this repo has already shipped one bad baseline that read green for two
+commits).
+
+**Fix** In the fixture, before the final `await AppState.flush()`, poll until
+`AppState.recoSessionsOwned[id]._virtRowHeight` is set for **every session the gate compares**, on
+BOTH builds. Then either have the SITTING render each of the four sessions' grids with rows once, or
+scope the new premise assertion to the sessions it actually renders — and assert the field is
+PRESENT, so the gate stops reading green by symmetry.
+
+**Test** `N=8 node tests/e2e/run_panes_e2e.mjs` with no changes: 8 green, and the premise assertion
+green in all 8. The reviewer's `p1_virt.mjs` / `p1b_line249.mjs` are the mechanism probes.
+
+---
+
+## T-S10-16  A4's latch guards three typing doors; `applyCorrection` and `manualOffset` write under the same dead key and are not latched
+
+**Where** `apps/Reco.html` — `Reco._keyStaleBlock` is consulted by `Reco.setTag`,
+`Reco.setOverride` and `Reco.revertOverride`. It is **not** consulted by `Reco.applyCorrection`
+(`AppState.correctionMaster[id][pk][colName] = { oldVal, newVal }`), `Reco.manualOffset`
+(`AppState.manualOffsetMaster[id][pk] = { recoId, byUser: true }`), `Reco.unmarkOffset` or
+`Reco.editCell`. `pk` in all of them is `Reco.rowKey(tpl, row)`, which returns the row's **frozen**
+`_pk` first — i.e. exactly the key the refusal has just invalidated.
+
+**What** Measured, `scratchpad/dataloss/fix/probes/q7_latchdoors.mjs` (port 21316), straight after
+the T-24R2-1 key refusal with `Reco._keyStale.TPL_X === true`:
+
+| door | what it said | what reached the share |
+|---|---|---|
+| `setTag` | the latch's sentence, `error` | nothing |
+| `applyCorrection` | **`success: Correction applied`** | `reco/correctionMaster.json` → **`["D3"]`** |
+| `manualOffset` | refused for tolerance, so unmeasured here | — |
+
+The folder's rule now computes `D3-X`, so that correction is filed where **no colleague will ever
+read it** and where this operator's own next load will not find it either — A4's harm exactly, in a
+door the fix did not name. `manualOffset` is structurally identical and was only not measured
+because that fixture's single row is outside the offset tolerance.
+
+**Why it is only a ticket** It is the same mistake as B4/B6 one layer up — a rule applied to a list
+of functions — and the review round closed the two doors its own finding named and measured. It is
+narrower than A4 was: a correction and an offset are *reconciliation* facts rather than typed
+values, and both have a second copy in `sess.corrections` / `sess.offsets` for this window, so the
+operator's screen is not wrong; what is lost is the colleague's half. It needs the same decision A4
+needed — refuse, or re-key — and it is better taken once for all five doors than bolted on here.
+
+**Fix** Put `_keyStaleBlock` at the top of `applyCorrection`, `manualOffset`, `unmarkOffset` and
+`editCell`, with each one's own verb ("corrected", "offset", "changed", "saved"), the way
+`setOverride` and `revertOverride` carry it — and consider whether the rule belongs in
+`Reco.rowKey` instead, which is the one function all five go through for the key. If it goes in
+`rowKey`, the machine paths matter: the Excel load-back and `ingestData` must not be told to press
+Load, which is why `applyEdits` was not the chokepoint for B4/B6 either.
+
+**Test** The `run_store_e2e` [71] fixture, extended: after the refusal, assert
+`applyCorrection` and `manualOffset` are each REFUSED with a sentence naming the row key, and that
+`reco/correctionMaster.json` and `reco/manualOffsetMaster.json` hold **nothing** under the dead key.
+Control: after a reload both work normally and write under the folder's own key.
+
+---
+
+## T-S10-17  `AppState.flush()` can now wait on a template settle, so any future settle path that needs a flush deadlocks
+
+**Where** `apps/Reco.html` — `AppState.flush()` and `AppState.saveKeys()` both begin with
+`if (AppState._keyHeld('recoTemplates')) await Promise.resolve(RecoTemplate._flagGuard);`, and
+`RecoTemplate.saveTemplate`'s share read waits for `RecoTemplate._flagGuard` and then for
+`RecoTemplate._tplWritten`. `AppState._writeKeyNow(key)` exists so that `_tplWritten` is a promise
+for a WRITE rather than for a flush, and it deliberately **bypasses `_keyHeld`**.
+
+**What** This is a trap rather than a defect: the current code is correct and the suite pins it
+(`run_store_e2e` [70], and [28] C6h is what caught the deadlock), but the invariant that makes it
+safe is **not local**. The first shape of A3's fix had `RecoTemplate._tplWritten = AppState.save()`
+— a 250 ms debounce that only a flush resolves — so the second of two back-to-back saves waited for
+a flush that was waiting for the second save's guard. `run_store_e2e` stopped dead at section [28]
+and never returned; a checkpoint was committed in that state. Reproduced in 12 seconds by
+`scratchpad/dataloss/fix/probes/q6_deadlock.mjs`: `flushed:false`, `settleOwed:1`.
+
+Three things have to stay true, and nothing in the code enforces them:
+
+1. anything the settle waits for must **not** be a flush or an `AppState.save()`;
+2. the `_tplWriteOwed()` flush in the share read must stay **synchronous on its own line**, ahead of
+   every `.then` — the hold is taken at the swap, i.e. after that read is issued, so that one flush
+   never sees a hold. Deferring it by one microtask moves the serialisation past the swap and the
+   flush publishes the editor's own clone, with the whole fix reading green while doing nothing;
+3. `_writeKeyNow` must stay the settle's private door. A second caller using it to get around a
+   hold would publish the un-merged clone, which is the loss A3 is about.
+
+**Why it is only a ticket** Closing it properly means either a real dependency-ordered writer (one
+place that knows "this key is owed, and it is owed behind that promise") or making `saveTemplate`
+async, which §18.7 explains cannot happen while every caller saves a template and reads
+`AppState.recoTemplates` on the next line. Both are bigger than the round that found it, and the
+three rules above are written into the code at each site.
+
+**Fix** Give the hold a release promise of its own (resolved by `release()`, never by a write) and
+have `flush()` wait on **that** rather than on `_flagGuard`, so the wait can never reach a write at
+all; then `_writeKeyNow` can go back to being an ordinary targeted write. Alternatively, add a dev
+assertion: a flush that has been waiting on a hold for more than one `SAVE_DELAY` logs the hold's
+age and the owed keys, so the next version of this deadlock is a console line rather than a hang.
+
+**Test** `probes/q6_deadlock.mjs` as a suite section: two saves with no await between them and a
+slowed share read, then `await AppState.flush()` inside a `Promise.race` against a budget — assert
+it resolves and that `RecoTemplate._settleOwed` is back to 0. Mutation: put
+`_tplWritten = AppState.save()` back and assert it times out.

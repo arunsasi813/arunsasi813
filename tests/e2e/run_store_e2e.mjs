@@ -4402,9 +4402,18 @@ try {
     RecoTemplate.toggleCarry(0, true);              // Rep gains the flag
     window.__toasts = [];
     RecoTemplate.saveTemplate();
-    const toast1 = (window.__toasts || []).map(x => x.msg);
+    /* READ AFTER THE SETTLE, not on the line after the synchronous
+       saveTemplate(). ROUND 4, findings A1/A2: the promotion, the rename
+       migration and the removal's record drop - and the sentences that
+       announce them - are STAGED behind the shared folder's answer, because
+       they had been running fifty-five lines before the folder could refuse
+       the save and had already said so ("3 value(s) ... now belong to
+       Supplier" one toast before "Nothing was saved"). "The operator is told
+       it happened" can only be said once it has happened. The assertions
+       below are unchanged. */
     await AppState.flush();
     if (typeof Store.idle === 'function') await Store.idle();
+    const toast1 = (window.__toasts || []).map(x => x.msg);
     const after1 = JSON.parse(JSON.stringify((AppState.extraValueMaster || {}).TPL_Q || {}));
     const legacyAfter1 = Object.keys(sess.manualTags || {}).map(k => k.split('||')[1]).sort();
 
@@ -4413,9 +4422,11 @@ try {
     RecoTemplate.edit('TPL_Q');
     window.__toasts = [];
     RecoTemplate.saveTemplate();
-    const toast2 = (window.__toasts || []).map(x => x.msg);
+    /* THE SAME MOVE, and here it makes the gate STRICTER: C7e now also fails
+       if the second save says it promoted something a moment later. */
     await AppState.flush();
     if (typeof Store.idle === 'function') await Store.idle();
+    const toast2 = (window.__toasts || []).map(x => x.msg);
     const after2 = JSON.parse(JSON.stringify((AppState.extraValueMaster || {}).TPL_Q || {}));
     AppState.activeRecoId = 'TPL_CF';
     return { q3Before, toast1, toast2, after1, after2, legacyAfter1,

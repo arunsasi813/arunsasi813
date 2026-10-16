@@ -2826,11 +2826,18 @@ their rows to a colleague's GL entry.
 
 Six tickets with one thing in common: **every one of them lost somebody's work silently.** No
 toast, no confirm, no row in the CSV — the value or the setting was simply not there the next
-time anyone looked. That is why every assertion in `run_store_e2e` sections **[63]–[68]** reads a
+time anyone looked. That is why every assertion in `run_store_e2e` sections **[63]–[68]** — and,
+after the review of this round, **[69]–[77]** (§18.8) — reads a
 **file** or a **value** — what is on the share, what the next upload mints, what the entry
 posts — and never a toast on its own.
 
-Ports **21240–21259**. The suite goes from 441 checks to **502**.
+Ports **21240–21259** for the build, **21300–21319** for the review round. The suite goes from 441
+checks to **502**, and to **582** once the review's own sections are in.
+
+> **READ §18.8 BEFORE TRUSTING ANYTHING IN §18.1–§18.7.** Two reviewers put fourteen findings
+> against this round, **every one of them reproduced and confirmed** — two BLOCKERs, seven HIGHs —
+> and two of §18.7's "known limitations" were measured to say the **opposite** of what happens.
+> Those sentences have been rewritten in place; the paragraphs that were right are untouched.
 
 ### 18.1 T-S10-7 — every template field, not just the two flags
 
@@ -3100,9 +3107,32 @@ entry.
   happened** when a merge is cancelled or a key change refused. In the ordinary case (an edit to an
   ordinary field) nothing ran and Cancel is clean; in the rare one, the folder's template is put
   back and the editor closes, but a rename that was part of the same save has already moved its
-  records. **Not ticketed as a defect** because those records moved *with* a column that is still
-  on the folder under its old name — nothing is deleted — but anybody making `saveTemplate` async
-  should close this with it.
+  records.
+  **~~Not ticketed as a defect because those records moved *with* a column that is still on the
+  folder under its old name — nothing is deleted.~~ THAT WAS MEASURED FALSE, TWICE, AND IS NOW
+  FIXED.** It was the review's finding A1 (BLOCKER) and A2 (HIGH):
+  - the **removal** arm is a `_dropExtraValueCols`, i.e. a DELETE. The operator answered yes to
+    *"Removing "Vendor" (3) also deletes 3 value(s) people have typed into that column … They go
+    for EVERYONE using this folder and cannot be brought back"*, the save was then refused for a
+    colleague's key change, and the folder was left with the column **back on the template and zero
+    of the three records** — under a toast reading *"Nothing was saved"*. Share values before 3,
+    **after 0**. The confirm's own promise (*"If you meant to RENAME the column, cancel and change
+    its name in place instead — that keeps the values"*) was false, because cancelling the SAVE did
+    not cancel the delete. Reachable with **no key change at all**: any colleague field change plus
+    Cancel on the merge question.
+  - the **rename** arm ORPHANS: the records went to `Supplier` while the folder's template kept
+    `Vendor`, so the column read blank for everyone and the three values sat in the file
+    unreachable — after a green *"3 value(s) … now belong to Supplier"* **one toast before**
+    *"Nothing was saved"*.
+
+  **The fix keeps the swap synchronous and moves the WRITING.** The three store side-effects
+  (`_promoteCarryForward`, `_renameExtraValueCol`, `_dropExtraValueCols`) **and the toasts that
+  announce them** are staged into one closure that only the success path invokes (`stageStore` →
+  `saveAndSay`). The confirms stay where they were, above the swap, because what the operator
+  decided does not change; a sentence about records that have not moved yet is a sentence that may
+  never become true. `run_store_e2e` **[69]** is the gate, on both abandon arms and with a control
+  that a save which SUCCEEDS still migrates and still deletes. Anybody making `saveTemplate` async
+  can delete the staging; until then this is the chokepoint.
 - **An owed templates write is LANDED FIRST, and that publish is the narrowed form of the old
   hazard.** `_tplWriteOwed()` true means this window holds a template change it has not published,
   and publishing it is owed work — but if a colleague changed the same template in that window,
@@ -3114,6 +3144,12 @@ entry.
   then publishes this editor's own clone, and the whole fix reads green while doing nothing. It
   was written that way once and the suite passed on a lucky read/write ordering through the bridge
   queue.
+  **ONE WORD OF THAT IS NOW CONDITIONAL.** Since the review's finding A3, `AppState.flush()` has
+  one wait of its own at the top of its body: if `recoTemplates` is **held** (§18.8), it awaits the
+  settle before serialising anything. The invariant above still holds *for the flush issued on
+  that line*, because the hold is taken at the swap — i.e. after this read has been issued — so
+  that flush never sees one. It does not hold for flushes in general, and anybody moving this code
+  has to keep the two apart.
 - **`additionalColumns` is merged per column and per field, not structurally.** A colleague's
   **reorder** of the added-column list is not detected as such: if this editor did not touch the
   list, the folder's whole array is taken by the top-level rule; if it did, the per-column merge
@@ -3121,10 +3157,27 @@ entry.
   order a formula reads), so two people reordering it at once is still last-writer-wins on the
   order itself.
 - **The journal is this PC's, and it is not backed up.** A machine that is reimaged with an
-  unwritten journal loses it, and a second window of the same app on the same PC shares the
-  `localStorage` origin, so the two windows share one journal (correctly — the cells are keyed —
-  but the second window's boot may offer the first window's owed values while the first is still
-  trying to write them; the per-cell guard makes that safe rather than destructive).
+  unwritten journal loses it.
+  **~~A second window of the same app on the same PC shares the `localStorage` origin, so the two
+  windows share one journal (correctly — the cells are keyed — … the per-cell guard makes that safe
+  rather than destructive).~~ THAT SAID THE OPPOSITE OF WHAT HAPPENED. It was finding B1
+  (BLOCKER), and it is now fixed.** The cells were keyed **per window in memory**; the persist was
+  a whole-list **blind write** — `journalPersist()` did
+  `Store._jrnlWrite(Array.from(Store._jrnlMap().values()))`, and `_jrnlMap()` reads
+  `localStorage` only while `_jrnlMem === null`, so a window whose map is already live never saw
+  the other window's entries again. The per-cell guard runs at **replay**, long after the loss.
+  Measured, two pages in one browser context (one PC's origin): window A typed INV-1 with the
+  folder down, journal `["INV-1/Vendor=A-typed-this"]`; window B then typed a **different** cell
+  and the journal read `["INV-2/Vendor=B-typed-this"]` — **INV-1 gone**. Last writer won every
+  time, the boot replayed one value, the only toast was a green *"1 value(s) kept on this PC are
+  back on the shared folder"*, and the share ended with `INV-1=undefined`. The precondition is only
+  that the second window has touched the journal earlier in the day; any persist does it — a failed
+  write, `pagehide`, the `beforeunload` guard, or the hub's leave gate, which persists first.
+  **`journalPersist()` is now a read-merge-write**: the disk list is re-read, merged by cell with
+  the live map, newest `at` winning, and a cell this window has already SETTLED (`Store._jrnlGone`)
+  is not resurrected by the re-read. `run_store_e2e` **[73]** is the gate. Two windows is a
+  configuration this team is known to run — T-S10-11 exists because of it, and
+  `U.accountingId()` draws two base-36 characters per **window** for exactly that reason.
 - **A template a colleague DELETED from the folder is silently republished by a save from a
   window that still has it open.** `_readSharedTemplate` answers `null`, `_settleShared` has
   nothing to compare, and the save goes through as it always did. That is not a loss of anybody's
@@ -3139,4 +3192,188 @@ entry.
   row sharing that key, because the preview works on rows; the dedupe is by `_id`, so the count in
   the banner can exceed the number of distinct references. Cosmetic, and it errs towards saying
   more rather than less.
+
+### 18.8 The review of this round — fourteen findings, four causes, and two holes the first fix opened
+
+Two reviewers read §18.1–§18.7 against the build at `d1e9509` and put **fourteen findings**: two
+BLOCKERs, seven HIGHs, four MEDIUMs, one LOW pair. Both verdicts were **do not ship**. Every one
+was **reproduced before it was believed** — the reviewers' probes re-ported into one block on ports
+21300–21319, kept in `scratchpad/dataloss/fix/probes/` — and **every one was confirmed**. Thirteen
+are fixed; the fourteenth is ticketed as **T-S10-15** and argued below.
+
+`run_store_e2e` sections **[69]–[77]** are the gates. Each one FAILED on `d1e9509` and the pre-fix
+run is `scratchpad/dataloss/fix/pre_store.txt`.
+
+**There were N = 4 shared causes, not fourteen bugs**, and each was closed once at its chokepoint:
+
+| cause | findings | the chokepoint |
+|---|---|---|
+| `saveTemplate` did irreversible work before the folder had answered | A1, A2, A3, B5 | the store migrations **staged** into one closure the success path invokes, and the `recoTemplates` key **held** out of every write until the settle resolves |
+| the merge looked in one direction, and only at fields nobody had touched | A5, A7 | the mirror pass and the `both` list in `_mergeShared` |
+| the journal was treated as this window's private list | B1, B2, B3 | one read-merge-write, one `keep` predicate, one `id → tag` index, all inside `Store`'s journal block |
+| T-F2-8 had been applied to a list of functions rather than to a rule | B4, B6 | five call sites and one sentence — `applyEdits` is shared, but gating it would also gate the machine paths (the Excel load-back), which must not be told to "press Load" |
+
+A4 has no shared cause: it is the key refusal's own blind spot, fixed where the refusal is.
+
+**What each one was, in one line, with what was measured:**
+
+- **A1 / A2 (BLOCKER, HIGH)** — the abandoned save had already deleted or orphaned three people's
+  typed values, and had already said so. Rewritten into §18.7 above, where the false sentence was.
+- **A3 (HIGH) — the swap-to-answer gap published the un-merged clone.** From the swap until the
+  folder answers, `AppState.recoTemplates` holds the editor's clone, and **any** write of that key
+  publishes it — one ordinary `AppState.save()` from a tag, an offset or a group 250 ms later was
+  enough. Measured: a colleague's `displayOrder` present on the share, **`null`** after this
+  window's own flush, under two green *"Template saved to database"* toasts and zero confirms.
+  That order is the column order of every CSV and every workbook the template exports, for
+  everyone. **The fix is a per-key HOLD** — `RecoTemplate._settleOwed` / `_tplHold()`, honoured by
+  `AppState._keyHeld` in `flush()` and `saveKeys()`. Held, never dropped: `_snap` is left alone so
+  the key still reads as owed to `_tplWriteOwed()` and `pendingCount()`. **[70]** is the gate.
+- **A4 (HIGH) — the key refusal left this window typing under a dead key.** T-24R2-1's recovery
+  sentence (*"Close it and open it again: this window now carries their key"*) was only ever true
+  of the **template**. `_abandonSave` refreshes `AppState.recoTemplates`, `_openedWith` and the
+  posted index; nothing re-keys the rows already loaded, whose `_pk` was minted under the rule that
+  has just gone. Measured: after doing exactly what the sentence said, B typed into `Vendor`, the
+  record landed under `D1`, and A's upload under the folder's rule read `D1-X` and showed blank —
+  **no toast anywhere**. The round had traded a silent revert of a colleague's key rule for a
+  silent loss of this operator's typing. **The fix is a latch, not a guess**: `Reco._keyStale`
+  (per window, never on the session, so it cannot be serialised to a colleague who has nothing
+  wrong), the refusal's own new sentence about the rows on screen, and two typing doors that refuse
+  with a sentence until the rows are read again. Re-minting the keys here would change every loaded
+  row's identity behind the operator's back; the Load they are sent to do is the route that does it
+  properly, with the duplicate-key and blank-key questions attached. Cleared by
+  `Reco._mintKeysSync`, which every re-keying route goes through — an upload, Add Data, a restore,
+  a version load, an Excel load-back. **[71]** is the gate, with a control that typing works
+  normally again after a reload: a latch, not a dead end.
+  **THE LATCH GUARDS THREE DOORS, AND THERE ARE FIVE.** `setTag`, `setOverride` and
+  `revertOverride` consult it; `applyCorrection`, `manualOffset`, `unmarkOffset` and `editCell` do
+  not, and `manualOffsetMaster[id][pk]` / `correctionMaster[id][pk][col]` are keyed by the same
+  frozen `_pk`. Measured after the refusal (`probes/q7_latchdoors.mjs`): `applyCorrection` said a
+  green *"Correction applied"* and `reco/correctionMaster.json` gained the key **`D3`** while the
+  folder's rule computes `D3-X`. Narrower than A4 — a correction has a second copy in
+  `sess.corrections`, so this operator's screen is not wrong; what is lost is the colleague's half —
+  and filed as **T-S10-16** rather than bolted on, because it needs the same decision A4 needed
+  taken once for all five doors.
+- **A5 / A7 (MEDIUM, LOW)** — the merge APPENDED a column the folder had gained and had no mirror
+  for one the folder had **removed**, so an older clone silently resurrected it (blank, because the
+  record delete had already run — operators learn that removing an added column "does not take");
+  and when **both** sides changed the same field the editor won with nothing said, so the one
+  person who could go and ask a colleague about it was the one person who did not know there was
+  anything to ask. Both are the same pass: the mirror, and the `both` list that `_askMerged` names.
+  An **absent** `additionalColumns` is not a removal — a template written by a build with no added
+  columns has no such key, and reading that as "the folder removed every one of them" would empty
+  the editor's list. **[72]** is the gate.
+- **A8 (LOW)** — past eight already-posted rows the T-26-4 banner stopped naming them. 8 of 10
+  named, with nothing saying there were more. Now disclosed.
+- **B1 (BLOCKER)** — two windows on one PC destroyed each other's journal. Rewritten into §18.7
+  above, where the false sentence was.
+- **B2 (HIGH) — the replay DELETED the journal of the folder it refused to replay into.**
+  `journalClear()` took no argument and spared nothing, and the `return` on the "nothing belongs
+  here" path sat **above** the `discarded` toast. Measured: four values typed against the folder
+  the team had just moved off, `Store._jrnlRead()` after the boot `[]` — **gone** — and **not one
+  toast said anything**; with one of four belonging elsewhere, the toast said *"Point Reco back at
+  that folder to put them on it"* about an entry the same function had just deleted. The same wipe
+  fired whenever `get_folder_info()` was transiently unavailable, because `_jrnlBase` then read
+  `''` and every entry classified as another folder's. Now `journalClear(keep)` takes a predicate,
+  the `discarded` sentence is said from **above** the early return, and an **UNKNOWN** base is no
+  longer read as a different folder. **[74]** is the gate.
+- **B3 (HIGH) — `journalDone()` was O(n²) inside the queued write job.** It walked the whole Map
+  with no early exit, once per intent, synchronously, from inside `Store._mergeJob` — and because
+  the loop runs after the write but still inside the per-path job for
+  `reco/extraValueMaster.json`, the queue for that **shared** file was held for all of it by a loop
+  doing no I/O. Measured 10 / 171 / 3,585 / **19,305 ms** at 1,000 / 5,000 / 20,000 / 50,000 cells;
+  a 50,000-cell fill-down went from ~0.95 s to **21.9 s** with the window frozen. §18.5 says the
+  owed set was put in a Map precisely to stop the first build's quadratic hanging the suite for
+  eleven minutes — the quadratic had **moved, not gone**, and the suite could not see it because
+  C3b counts the writes (still exactly one) and C3e only reports a wall clock (§16.4a). Fixed with
+  a `_jrnlById` index, and **[75]** counts the SCANS rather than the clock.
+- **B4 (HIGH) — `setTag` at a vanished row wrote the legacy `manualTags` under the dead `_id`.**
+  Of the writers that were still not speaking this was the one where the edit was **lost** rather
+  than merely dropped: the legacy store is keyed on an id `U.uid()` mints fresh on every load, so
+  the `manualTags` READ fallback can never find it again, and it was not journalled either, so
+  T-S10-9's replay cannot recover it. It is also the door most typing goes through — `editCell`
+  serves FILE columns and `setTag` serves every ADDED one. The dead-id write is deleted and
+  T-F2-8's sentence put there. The legacy `manualTags` **read** fallback is untouched and
+  `run_reports_e2e` still seeds and reads it: that is about records written by older builds and
+  never needed this write path, which only fires when the row is already gone. **[76]**.
+- **B5 (HIGH) — the editor closed and the screen went home before the write was decided, and
+  neither leave guard knew.** Measured 120 ms after Save: page `home`, `pendingCount` 0,
+  `__hubPendingWrites()` 0, `leaveOk` **true**, no toast — and the share's description `null`
+  afterwards. The hold fixes this too, because `pendingCount()` counts a held key, so both leave
+  gates ask; `pagehide` force-releases (`_releaseHoldForExit`) so a closing window cannot be held
+  open by one. **[70]**'s R2d/R2e.
+- **B6 (MEDIUM)** — four more row-level writers said nothing when their row had gone:
+  `setOverride`, `revertOverride`, `confirmCarried`, `ssToggleRowSingleUse`. One sentence each, in
+  the words each already implies, two of them about a **delete** that did not happen. **[76]**.
+
+#### The hold opened two holes of its own, and they are the reason this round took a second pass
+
+Both were found by the gates, not by reading, and both are worth knowing because they are the
+general shape of "defer a write":
+
+1. **A held write that is merely SKIPPED is a dropped write.** `saveTemplate(); await
+   AppState.flush();` is how every caller in the app and every fixture in the suite lands a save.
+   A flush that skipped the held key published **nothing at all** and the next share read then
+   described the folder's **past** — so `_mergeShared` read the field this editor had just set as
+   a colleague's change, kept the folder's older value, and quietly unticked it. Measured as
+   **C6h**'s carried value (`carried:false`, `grid:""`) and as **X5**'s own premise failing. So
+   `flush()` and `saveKeys()` **wait** for the settle and then write the MERGED template.
+2. **Waiting inside `flush()` is circular unless the settle's write is taken off the debounce.**
+   With `RecoTemplate._tplWritten = AppState.save()`, the second save's share read waited for the
+   first save's guard and then for a **250 ms debounce that only a flush resolves** — and that
+   flush found the key held by the second save and waited for the second save's guard, which was
+   waiting for the flush. `run_store_e2e` stopped dead at **[28] C6h** and never returned. So the
+   settle writes its own key **directly**: `AppState._writeKeyNow('recoTemplates')` serialises,
+   updates `_snap` the way `flush()` does, and resolves on the WRITE. No hold can be up for the
+   save that is releasing one, which is why it may bypass `_keyHeld`.
+3. **And "settled" is not "landed".** `_writeKeyNow` queues the write and updates `_snap` on the
+   same line, so `_tplWriteOwed()` answers *nothing owed* while the bytes are still in `Store`'s
+   queue, and `_tplHold()` is already false because `release()` runs before `saveAndSay()`. A save
+   starting in that window read the folder's past and unticked the flag again — which is why C6h
+   **flipped run to run** rather than failing cleanly, and why it only showed under the suite's own
+   load (fifteen live bridges by section [28]) and not in a one-page probe. The share read now
+   waits for `RecoTemplate._tplWritten` on **every** path, and the guard resolves **after** the
+   write, so `await RecoTemplate._flagGuard` means what every caller already read it to mean. The
+   owed-write flush stays **synchronous on its own line**, ahead of every `.then`, for the reason
+   §18.7 gives. Reproduced deterministically by slowing the write of that one file and leaving
+   every read alone (`probes/q5_slowwrite.mjs`): with the wait removed, the second save is asked
+   *"Someone else changed this template on the shared folder while you had it open: "Vendor" —
+   carry this value forward to the next file is OFF on the shared folder"* about a colleague who
+   does not exist, and the flag is gone from memory and from the folder.
+
+#### A6 — WONT_FIX this round, ticketed as T-S10-15
+
+`run_panes_e2e` **[4]**'s byte-identity gate fails about one run in three (1 in 8 measured on one
+tree, 0 in 8 on five consecutive runs) because `sess._virtRowHeight` is written by an unawaited
+`setTimeout(0)` that nothing synchronises with the fixture's final `await AppState.flush()`.
+`git diff c94264d d1e9509 -- apps/Reco.html | grep _virtRowHeight` is **empty** on both the
+reviewer's measurement and mine, so it is not a behaviour change this round made. The fix belongs
+in the fixture, which this round may not edit; making the measurement eager in the app would change
+a field the byte-identity gate compares against base `5f61d76` and break it for real. The ticket
+carries the mechanism **and the premise hole the reviewer found**: `TPL_B` and `TPL_C` are never
+measured at all (8/8 runs), so the gate already compares two sessions absent on both sides and
+reads green by symmetry — a premise assertion added naively would fail today.
+
+#### Two fixture corrections, and the argument for each
+
+The rule for this round was: **make the code satisfy the gate, do not adjust the gate.** Two gates
+were adjusted anyway, and both are timing reads rather than claims:
+
+- **C7c** (`run_store_e2e` [29], byte-identical to `c94264d` before this) asserts
+  `check(c7.toast1.some(m => /now kept against the row key/.test(m)), 'C7c and the operator is told
+  it happened, rather than having to guess', c7.toast1)`. The **assertion, the regex and the
+  message are unchanged**; what moved is the line on which `toast1` is read, from immediately after
+  the synchronous `saveTemplate()` to after the `await AppState.flush()` the fixture already
+  performed two lines later. The promotion and its sentence are staged behind the folder's answer
+  **because of A1 and A2** — a sentence about records that have not moved yet is exactly what A2
+  measured — so "the operator is told it happened" cannot be said before it has happened. The same
+  move makes **C7e** stricter: it now also fails if the second save says it promoted something a
+  moment later.
+- **R2e** asserted `leaveOk === false` while its own fixture stubbed `window.confirm` to return
+  `true` for every question, so it could never pass: `_pendingLeaveOk()` **returns** `confirm(...)`.
+  It now asserts what the finding is about — `gap.leaveAsked === true`, the question was put at
+  all — and says so in its own message.
+
+Everything else in the nine that were red at the first checkpoint was **code**, or a fixture
+premise that never put the window into the state the finding is about (R3's page had no active
+reconciliation, so `setTag` was returning at `if (!tpl || !sess) return;` and exercising nothing).
 

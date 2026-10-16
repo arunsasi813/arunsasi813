@@ -9633,6 +9633,35 @@ const AppState = {
     catch (e) { return false; }
   },
 
+  /* ---- ROUND 4, FINDING 3's OTHER HALF. ONE KEY, WRITTEN NOW: around the
+     debounce, and around the hold.
+
+     The hold defers `recoTemplates` so the editor's un-merged clone cannot be
+     published; the write it defers has to GO OUT when the folder has answered,
+     and it cannot go out through save()/flush() for two reasons. It would be
+     a 250 ms debounce, so the next save's share read would still describe the
+     folder's past and merge the previous save back out of it (measured as
+     C6h's carried value and X5's premise). And it would be CIRCULAR: a flush
+     that finds the key held waits for the settle, and a settle whose write is
+     a flush waits for the flush - which hung run_store_e2e at [28] C6h, two
+     saves of one template with no await between them.
+
+     So the settle writes its own key directly and _tplWritten is a promise
+     for A WRITE. No hold can be up for the save that is releasing one, which
+     is why this may bypass _keyHeld: release() runs before saveAndSay().
+     _snap is updated the way flush() updates it, so the debounced save that
+     follows does not write the same bytes twice. */
+  _writeKeyNow(key) {
+    if (Store.readOnlyKeys[key]) return Promise.resolve();
+    const value = AppState._persistValue(key);
+    let text;
+    try { text = Store.serialize(key, value); }
+    catch (e) { console.error('serialize failed for ' + key, e); return Promise.resolve(); }
+    if (text === AppState._snap[key]) return Store.idle();
+    AppState._snap[key] = text;
+    return Promise.resolve(Store.save(key, value, text)).then(() => Store.idle());
+  },
+
   /* Debounced save. Many UI handlers call this on every change; bursts are
      coalesced and only keys whose content actually changed are written.
      Returns a promise that resolves once the data has reached the disk. */
@@ -13998,13 +14027,28 @@ defaultTemplate() {
        the colleague's field would be gone with the whole fix reading green.
        So the in-flight save is waited for instead, and its write with it;
        `opened` for THIS save was snapshotted above, before any of that. */
+    /* ---- ROUND 4, AND THE LAST WRITE OF THIS KEY IS WAITED FOR ON EVERY
+       PATH. A guard that has resolved does not mean the bytes are on the
+       folder: the settle QUEUES its write (AppState._writeKeyNow) and updates
+       AppState._snap on the same line, so _tplWriteOwed() answers "nothing
+       owed" while the write is still in Store's queue. Reading the folder
+       then describes its PAST, and _mergeShared reads a field THIS EDITOR
+       just set as a colleague's change - keeping the folder's older value and
+       unticking it. Measured as C6h, which flipped run to run on it.
+       THE OWED-WRITE FLUSH STAYS SYNCHRONOUS ON ITS OWN LINE, inside the
+       ternary and ahead of every `.then`: deferring it by one microtask moves
+       the serialisation past the swap, so the flush publishes this editor's
+       clone and the whole fix reads green while doing nothing.
+       _tplWritten is a promise for a WRITE and never for a flush, so this
+       wait cannot deadlock against AppState.flush()'s own wait on the hold. */
     const share = opened
       ? (RecoTemplate._tplHold()
           ? Promise.resolve(RecoTemplate._flagGuard).catch(() => null)
-              .then(() => RecoTemplate._tplWritten).catch(() => null)
           : (RecoTemplate._tplWriteOwed()
               ? Promise.resolve(AppState.flush()).catch(() => null)
-              : Promise.resolve())).then(() => RecoTemplate._readSharedTemplate(t.id))
+              : Promise.resolve()))
+          .then(() => RecoTemplate._tplWritten).catch(() => null)
+          .then(() => RecoTemplate._readSharedTemplate(t.id))
       : null;
     if (!t.name?.trim()) { U.toast('Name is required','error'); return; }
     if (!t.columns.length) { U.toast('Define at least one column','error'); return; }
@@ -14521,8 +14565,15 @@ defaultTemplate() {
       /* ROUND 4. KEPT, so a save that arrives while this one is still in
          flight can wait for the write instead of publishing its own clone to
          land it (see the share read above). */
-      RecoTemplate._tplWritten = AppState.save();
+      /* ROUND 4. THE TEMPLATE'S OWN WRITE GOES OUT HERE, not on the
+         debounce: see AppState._writeKeyNow. AppState.save() still runs
+         after it, for whatever else this save dirtied (the session, a
+         version row) and so that every existing caller of save() still gets
+         its waiter resolved. */
+      RecoTemplate._tplWritten = AppState._writeKeyNow('recoTemplates');
+      AppState.save();
       U.toast('Template saved to database','success');
+      return RecoTemplate._tplWritten;
     };
     if (share) {
       settle();
@@ -14538,7 +14589,13 @@ defaultTemplate() {
            it; and on the abandon path there is nothing of ours left to
            publish, because _abandonSave has already put the FOLDER'S template
            into AppState.recoTemplates. */
-        .then(ok => { release(); if (ok !== false) saveAndSay(); },
+        /* ROUND 4: AND THE GUARD RESOLVES AFTER THE WRITE. saveAndSay's
+           return value is the templates write itself, so `await
+           RecoTemplate._flagGuard` means "this save has reached the folder",
+           which is what every fixture and every caller already reads it to
+           mean. Released BEFORE the write on both outcomes, so the write the
+           hold defers is not deferred by it. */
+        .then(ok => { release(); return ok !== false ? saveAndSay() : null; },
               e => { release(); throw e; });
       return RecoTemplate._flagGuard;
     }
