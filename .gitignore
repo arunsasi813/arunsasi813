@@ -6,3 +6,8 @@ webview_storage/
 
 # Agent worktrees created inside the checkout by background workflows
 .claude/worktrees/
+
+# a test helper used to write this into the repo root when a workbook path
+# did not resolve; the helper now throws instead, and this is belt and braces
+null.ops.json
+*.ops.json

@@ -1706,6 +1706,11 @@ try {
      ==================================================================== */
   console.log('\n[19] two live Excel links on one template, one per pane');
   const xlEdit = (file, ops) => {
+    /* A null or undefined `file` used to make this write "null.ops.json" into
+       the PROCESS's working directory, which is the repo — one such file was
+       committed before anyone noticed. A test that cannot find its workbook
+       must say so, not leave a turd in the tree. */
+    if (!file || typeof file !== 'string') throw new Error('xlEdit: no workbook path (got ' + file + ')');
     const opsFile = file + '.ops.json';
     fs.writeFileSync(opsFile, JSON.stringify(ops));
     const r = spawnSync('python3', [path.join(HERE, 'xl_edit.py'), file, opsFile], { encoding: 'utf8' });
