@@ -4116,12 +4116,18 @@ const Store = {
     out.extraValueMaster    = await readJson('extraValueMaster', {}, true);
 
     /* DECISION G, THE ESCAPE HATCH, ON DAY ONE SO IT IS NEVER A MIGRATION.
-       The store is ~110-150 bytes a record compact: 2,000 records is 250 KB
-       and 200,000 rows x 2 columns is about 48 MB, which is a round trip on
-       every merge write. When a share gets there, the Values panel offers
-       "move this template's values into their own file" and mergeWrite writes
-       reco/extraValues/<tplId>.json from then on. Reading those files here, on
-       day one, means there is never anything to convert.
+       The store is 144-148 bytes a record compact, re-measured on the shipped
+       tree: 2,000 records is 287,797 bytes, 50,000 is 7.3 MB and 200,000 is
+       29.6 MB - and that is a round trip on every merge write, which is why
+       the ceiling below exists.
+       THERE IS NO PANEL, and this comment used to promise one. Moving a
+       template's records into reco/extraValues/<tplId>.json is a boot message
+       naming the file, the record count, the MB and the biggest template, plus
+       somebody with folder access moving the JSON; the button is still
+       T-S10-3, because moving records between two shared files while
+       colleagues may be typing into either is a data-moving operation on the
+       one thing on this folder with no second copy. Reading those files here,
+       on day one, means there is never anything to convert.
        THE SPLIT FILE WINS on a conflict: it is the newer home for that
        template, and the records left in the main file are the ones that were
        there before the split. */
@@ -18494,10 +18500,17 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       (byTpl[pk] || (byTpl[pk] = {}))[name] = rec;
     };
     AppState.extraValueMaster = AppState.extraValueMaster || {};
-    /* MEMORY FIRST, THEN THE SAME MUTATION AS THE INTENT. Not redundant: S13
-       merges the disk object UNDER memory and then re-applies the buffered
-       intents, which is what makes a delete survive a merge - and what makes
-       this write survive a colleague's. */
+    /* MEMORY FIRST, THEN THE SAME MUTATION AS THE INTENT. Not redundant, and
+       the reason is NOT the one this comment used to give. It said S13 "merges
+       the disk object UNDER memory and then re-applies the buffered intents" -
+       that rule is GONE, and reinstating it reopens two blockers (a revert
+       resurrected by another page's next write, and a delete losing to stale
+       memory). Store.mergeWrite now takes the FILE as the authority for the
+       ids it owns (Store._takeDisk) and replays the buffered intents on top.
+       So memory is updated here for the screen, and the same mutation is
+       buffered as an intent because the intent is what survives the merge -
+       including when the mutation is a DELETE, which is the case the old rule
+       could not express at all. See handover §5b. */
     apply(AppState.extraValueMaster);
     Reco._extraValueFlush(tpl.id, apply);
     return { ok: true, rec: rec };

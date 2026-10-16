@@ -1102,7 +1102,28 @@ carry column whose box was turned off. `Reco._dropExtraValueCols` is still the p
 **Test** Two overrides on one column, box turned off, clear-all run: both records gone, a record
 on ANOTHER column of the same key untouched, and the file written once.
 
-## T-30-1  A spreadsheet-mode fill drag over an added column bypasses the store
+## T-30-1  (CLOSED — fixed by RC-14) A spreadsheet-mode fill drag over an added column bypasses the store
+
+**FIXED in `a824485` (reviewer finding F18), and the WHAT below was wrong in the one way that
+mattered.** This ticket said the drag "writes the value **onto the row**" and that "the value
+does show". It did not show. The source value was read as `srcRow[fd.srcCol]`, and an added
+column's value is not on the row (`applyEdits`' tag branch ends in `delete s.row[s.col]` — one
+truth per cell), so the drag wrote an EMPTY STRING: the operator dragged a vendor name down
+fifty rows, read "Filled 50 cells", nothing was filled, and the shared day CSV — the team's
+audit trail — gained one C-version row per key recording a change that never happened. A
+control that reports success having done nothing is worse than one that refuses, which is why
+this was closed as a defect and not as the enhancement it was filed as.
+
+`Reco._ssCommitFill` now reads the source value through the ladder (`Reco.rowFull`), routes a
+`custom`/`dropdown` column through `Reco.applyEdits` — the one door that writes the store and
+obeys every refusal typing obeys — refuses a COMPUTED added column by name ("N cell(s) in
+"Calc" were not filled: that column is computed in Reco"), and says "Filled N cells" once,
+after the store write has answered, so the count is a count of cells that changed.
+Test: `run_store_e2e` section [46], X6a-X6e (the three cells on screen AND on the share, no row
+property written, no version row invented, and the computed-column refusal with every row still
+reading its own formula). Verified independently in the verification round (`verify/v_f18.mjs`).
+What is deliberately NOT done is in **T-30-5**: the drag refuses an overridable column rather
+than offering to override it. The text below is kept for the reasoning.
 
 **Where** `apps/Reco.html` `Reco._ssCommitFill`, which does `row[col] = srcVal;` for every column
 in the dragged rectangle, and `Reco._ssVisibleCols()`, which reads `thead th[data-col]` — and that
@@ -1185,8 +1206,9 @@ reported, and a template with no duplicate keys promotes silently as it does now
 
 **What** A record is kept for ever under its `_pk`, by design: that is what makes a value survive
 a reopen, and an orphan is deliberately NOT deleted because the key may come back in next
-month's extract. So the file only grows. At ~135 bytes a record (measured by
-`run_store_e2e` S10 at 2,000 records: 263 KB) a share that types two columns onto 200,000 rows a
+month's extract. So the file only grows. At **144-148 bytes a record** — re-measured on the shipped
+tree at 2,000 / 50,000 / 200,000 records (287,797 B / 7,327,799 B / 29,577,801 B), superseding
+the ~135 bytes this ticket was filed with — a share that types two columns onto 200,000 rows a
 month reaches tens of MB in a year, and the file is re-read on every merge write.
 
 **Why it is only a ticket** The escape hatch is already in the loader (decision G): `loadAll`
@@ -1380,7 +1402,15 @@ written by older builds have no `_cid`, so the slot rule has to stay as the fall
 **Test** Rename and reorder in one save: assert the three values move with the column and that no
 confirm was shown; keep X3d-X3g as they are, because a genuine removal must still ask.
 
-## T-S10-6  Typing that could not be saved is kept in memory and nothing on screen says so
+## T-S10-6  (HALF LANDED) Typing that could not be saved is kept in memory and nothing on screen says so
+
+**THE GATE LANDED in `a824485`; the replay did not.** `AppState.pendingCount()` is now read by
+`App._pendingLeaveOk` (the hub button asks: "N change(s) have not reached the shared folder
+yet … Leave anyway and lose them?") and by `App._wireLeaveGuard` (a best-effort `beforeunload`
+on the window), so the "nothing on screen says so" half of this ticket is closed and the
+**Where** line below is out of date on that one point. What is left — the local journal this
+ticket calls its honest stretch goal — is now **T-S10-9**, written out with the replay guard
+that makes it safe. The text below is kept for the reasoning.
 
 **Where** `apps/Reco.html` `Store._retryLater` (4 attempts, 300/600/1,200/2,400 ms) and
 `AppState.pendingCount()`, which nothing in the UI reads.
@@ -1458,4 +1488,173 @@ report applied and refused with their reasons.
 **Test** A drag over an overridable column with one posted row in the rectangle: assert the
 confirm names the count, that the posted row is refused by its accounting reference, that the
 others are applied, and that the toast says both numbers.
+
+---
+
+# From the adversarial review of the store round (findings F1-F20)
+
+Two reviewers, twenty findings, seven blockers; fixed, then re-verified against the reviewers' own
+reproductions. Eighteen findings are shut. These four are what the round found and deliberately
+did not build — three of them are not regressions of the three features at all, which is why they
+are tickets and not fixes. The findings as written are in `scratchpad/store/reports/FINDINGS.md`
+and the re-measurement in `scratchpad/store/docs/VERIFIER.md`.
+
+## T-26-7  `XlSchema.build` is 18x slower at 200,000 rows once a template holds ONE override record
+
+**Where** `apps/Reco.html` `XlSchema.build` — `const rows = opts.rows || (sess && sess.data) || [];`
+and the `livePkSet()` closure under it, which walks `rows` to collect `_pk` into a Set.
+
+**What** F6's fix scoped decision J.8's store walk to the keys of the rows being exported: one
+orphan record, from a key nobody had loaded since April, was downgrading a whole numeric column to
+text, so 2,000 good numbers reached a colleague's workbook as strings and their SUM read 0. The Set
+that answers "is this record about a row in front of me?" is lazy and built at most once per
+build — a template with NO records never builds it, which is every template that existed before
+#26 — but one record arms it, and from then on every build pays an O(rows) pass.
+
+**MEASURED on this tree** (the verification round's `verify/v_xlschema.mjs`, same fixture, runs back
+to back, best of three): at 200,000 rows with 30 override records, **60.8 ms against 3.4 ms** at
+`4b8fd90`. With no records, 3.7 ms against 3.0 ms — unchanged, so F6's "no walk at all for a
+template with no records" claim holds.
+
+Who pays is per caller, and that is the useful half:
+
+- **SAFE.** The grid: `Reco.setOverride`, `Reco.revertOverride` and `Reco.setTag` all pass the
+  memoised `Reco._ovSchema(tpl, sess)`, so a keystroke-blur does not rebuild. `Reco.columnCatalog`
+  passes `rows: []` deliberately (a catalog is a question about the template), so every column
+  picker and `pickerCatalog` through it pay nothing; `ExcelLink.canExport` passes `rows: []` too,
+  and it runs on every render.
+- **PAYS.** `ExcelLink.schemaFor` (the export schema), `ExcelLink.diff` (the load-back plan),
+  `Reco._xlInit` (the in-app Excel view's schema), `Reco._reversePlan` (the reversal plan) and
+  **every `Reco.applyEdits` caller that passes no `schema`** — `Reco._ssCommitFill` calls
+  `applyEdits(..., { source: 'grid', trusted: true })` with none, so the fill drag is one of them.
+
+**Why it is only a ticket** 60 ms on a one-off action — opening a workbook, loading back, reversing
+an entry — is tolerable, and a cache here is not a line: invalidating it needs the question
+`Reco._ovSchema`'s memo already answers for the grid (array identity is not enough, because
+`applyEdits` mutates rows in place), and that memo got its own review where it lives. What is NOT
+tolerable is leaving the handover's cost argument (§5c) standing on this function being ~2 ms.
+
+**Fix** Memoise the key Set the way the grid memoises the schema: a `WeakMap` keyed on the array
+`opts.rows || sess.data`, with `Reco._ovSchema`'s signature as the invalidation, so repeated builds
+over one unchanged data set pay the walk once. Cheaper where it applies: hand the cached schema
+down the paths that have one (`_ssCommitFill` is the clear case).
+
+**Test** 200,000 rows, one override record, three builds over the same unchanged `sess.data`:
+assert the Set is built once (count it), that builds two and three are within noise of the
+no-record cost, and that mutating `sess.data` rebuilds it. Keep F6's own control beside it: the
+orphan record must still not turn a numeric column into text.
+
+## T-26-8  An AEG left holding keyword VALUES with no keyword COLUMN posts EVERY row
+
+**Where** `apps/Reco.html` `Reco.previewEntryFromSelection` —
+`if (aeg.keywordColumn && aeg.keywordValues)` is the only thing that narrows `sourceRows` to the
+rows the operator meant — and `RecoTemplate.setAegRole`, which on a refusal returns `false` and
+leaves the field at `''`, against the keyword-values input, which is written straight into the
+editing template by `oninput` with no gate at all.
+
+**What** The AEG keyword filter is a PAIR. With both fields set, only rows whose keyword column
+reads one of the listed values are posted. With the values set and the column empty the `&&` is
+false, no filter runs, and **every selected row posts** — `dr 1007` on reviewer A's own
+`scratchpad/store/skA/p6b_role.mjs` fixture, which is the number F5 was filed about reached a
+different way. The AEG never validated the pair; it behaves the same on `e9851b4`.
+
+It matters now because the new role refusal walks an operator into exactly that state. S11's matrix
+refuses a column that holds override records as the AEG keyword column ("… is a column that still
+holds 1 manual override(s) typed against row keys …, so it cannot also be an AEG column"), and the
+untick says the stored overrides KEEP APPLYING. So: type the values, be refused the column, dismiss
+the toast, save — and the template now posts every row it is given, with nothing on the Generate
+screen saying the filter is not running. The operator's only protection is a toast they have
+already dismissed.
+
+**Why it is only a ticket** It is not a regression of these three features and the refusal is the
+right answer; what is missing is a validation the AEG never had, and it carries a user-facing
+decision (refuse the save, or post behind a confirm that names the count). That belongs with the
+AEG's own editor, which this round did not open.
+
+**Fix** Ask in both places. In `RecoTemplate.saveTemplate`, when `aegIntegration.keywordValues` is
+non-empty and `keywordColumn` is `''`, say so and do not save silently — the stale-template and
+primary-key confirms are already there to sit beside. And in `Reco.previewEntryFromSelection`,
+before the entry is built, refuse by name: the filter names values but no column, so every selected
+row would post.
+
+**Test** A template with `keywordValues: 'POST'` and `keywordColumn: ''` and five selected rows of
+which one carries POST: assert the preview is refused by name and nothing is posted; then set the
+column and assert the entry posts that one row only. Control: both fields empty must stay
+unfiltered, which is today's deliberate behaviour and not the bug.
+
+## T-S10-8  `pytest` and `run_panes_e2e` read the temp root's PATH SHAPE, so a long `TMPDIR` goes red
+
+**Where** `tests/test_excel_link.py` (every fixture built on pytest's `tmp_path`) and
+`tests/e2e/run_panes_e2e.mjs` (`fs.mkdtempSync(path.join(os.tmpdir(), 'reco-panes-'))`), against
+`excel_link.py` `_choose_target`: `if len(str(p)) > LONG_PATH_LIMIT` (`LONG_PATH_LIMIT = 200`),
+which returns `("local", None, …)` with a `pathTooLong` warning instead of `("shared", rel, …)`.
+
+**What** Both suites build their share under the system temp root, so the ABSOLUTE LENGTH of
+`TMPDIR` decides whether the engine calls that share "shared" or falls back to the local work area.
+Point `TMPDIR` at a long contained scratch directory — which is the sane way to make cleanup one
+`rm -rf`, i.e. the remedy T-S10-4 asks for — and `pytest` comes back **69 passed / 6 failed**, all
+in `tests/test_excel_link.py`: `TypeError: unsupported operand type(s) for /: 'PosixPath' and
+'NoneType'` where the test does `root / res["rel"]` and `rel` is now `None`, plus assertions where
+the engine answered `local` and the test wanted `shared`. `run_panes_e2e` comes back **163 passed /
+1 failed and then crashes** — "two workbooks on the share with different names" gets `[null, null]`
+and `xl_edit.py` dies on `FileNotFoundError: 'null'`. With the default temp root both are green:
+**75 passed / 1 skipped** and **304 / 0**. Measured both ways in the verification round.
+
+Nothing is wrong with the code under test either time. The harm is to the next person: the README
+says a count that has gone down is a regression, and a contained temp root produces a lower count
+on a machine where nothing has regressed — invisibly, because the failures name Excel paths and not
+the temp root.
+
+**Why it is only a ticket** It is test infrastructure, and the fix has a choice in it. Making the
+suites independent of the temp root is test-only; making the engine's local-vs-shared answer
+independent of path length is not — `LONG_PATH_LIMIT` exists because Windows refuses long paths,
+and the fallback is shipping behaviour a finance share depends on.
+
+**Fix** Give both suites a short root of their own instead of `os.tmpdir()` / `tmp_path` (a
+`RECO_TEST_ROOT` honoured by both harnesses, defaulting to something short), and assert it short at
+STARTUP with the reason named — so a long root fails one loud assertion at the top instead of six
+Excel assertions in the middle. Leave the `pathTooLong` behaviour exactly as it is, and keep the
+one test that monkeypatches `LONG_PATH_LIMIT` down to prove the fallback.
+
+**Test** Run `pytest tests/test_excel_link.py` and `run_panes_e2e` twice, once under a short root
+and once under a 180-character one: assert identical counts both times, and assert the startup
+check fires and names the root when the root is over the limit.
+
+## T-S10-9  The last typing of the day is still lost if the folder is down and the operator leaves anyway
+
+**Where** `apps/Reco.html` `App._pendingLeaveOk` and `App._wireLeaveGuard` (both reading
+`AppState.pendingCount()`), `Store._retryLater` behind them (`_RETRY_MAX` 4, at
+`MERGE_DELAY * 2**n` = 300 / 600 / 1,200 / 2,400 ms), and `Store.mergeWrite`, which REFUSES rather
+than writes when it cannot read the file it has to merge into.
+
+**What** T-S10-6's first half landed: the operator is told while typing, and both doors out now ask
+("N change(s) have not reached the shared folder yet … Leave anyway and lose them?" on the hub
+button, plus a best-effort `beforeunload`). What is left is the answer **yes**. The folder is down
+on the last write of the day, the four retries are spent, the operator reads the question, answers
+"leave anyway", and the typing is gone — the store keeps ONE truth per cell and deliberately no
+second copy, so there is nothing to recover from afterwards (`App._pendingLeaveOk`'s own comment
+says exactly that). Reviewer B's `skB/p3_share` P3f is the measurement: four typed values, cells
+`["INV-1=","INV-2=","INV-3=","INV-4="]`, store `{}`. The same holds for a value refused because its
+own file could not be read at boot (F17/X2) — refused is the right answer, and it is not kept
+anywhere either.
+
+**Why it is only a ticket** The operator is now told twice and asked twice, which is the difference
+between this and the finding it came from (F11: not one word). What is left needs a NEW DURABLE
+STORE, and the review question is not the writing but the REPLAY: a colleague may have typed the
+same cell while this window was offline, and a blind replay would overwrite a newer value with an
+older one and call it recovery. That is worse than the loss it fixes, which is why it is not a line
+inside somebody else's fix round.
+
+**Fix** Journal each unwritten intent to this PC's own storage as it is buffered (`localStorage`,
+scoped per base folder and template, carrying the cell's own `at`). On the next boot, if the
+journal is not empty, offer the replay by count and name the cells — never silently. Replay through
+`Store.mergeWrite` with a PER-CELL TIMESTAMP GUARD: apply only where the share holds no record for
+that cell or holds one whose `at` is OLDER than the journalled one; list every cell skipped and who
+holds the newer value; clear the journal entry either way.
+
+**Test** With writes failing, type four values, exhaust the retry budget, answer the leave gate
+with "leave anyway", and reload: assert the journal held four intents, that the boot offers them by
+count, and that accepting puts all four on the share. Then the guard: plant a NEWER record for one
+of those cells on the share first and assert that cell is skipped and named while the other three
+apply — and that a second boot replays nothing.
 
