@@ -214,6 +214,28 @@ Once at least one column is chosen the list is shown 200 rows at a time, with **
 200 more**; with nothing chosen the whole error list is shown exactly as before.
 
 
+## The accounting reference is two characters longer
+
+`AEMVAUQHDL` is now `AEMVAUQHDL7K`. **Tell the team**, because the reference is what people quote
+to each other, write on documents and type into the GL.
+
+The reason is worth knowing. The old reference was the clock and nothing else — one string per
+millisecond — so **two people pressing Generate in the same millisecond got the same reference**,
+and the record that keeps an entry was keyed on exactly that string. One of the two journal
+entries was **discarded**. Both operators were told *"Entry … generated"*, both sets of rows were
+stamped `POSTED` on the shared folder, and both saves **succeeded**, so nothing in either window
+ever said otherwise — and the two entries were indistinguishable afterwards, so a reversal found
+the first one, a document number named one of them, and a row resolved to whichever came first.
+
+The last two characters are now drawn once per window, so two windows differ about 1,295 times out
+of 1,296. For the remaining one, an entry whose reference a colleague has already taken is
+recorded under a **new** reference instead of being dropped, and a message names it: *"This entry
+is AEMW1Q3R8F, not AEMVAYN4CT"*, saying that nothing has been lost and that the old reference
+belongs to a colleague's entry, so correct it if it has already been written down.
+
+Nothing has to be done to existing references. The ones already on the shared folder keep their
+old shape and still work everywhere. Details: handover §17.
+
 ## Tests
 
 ```bash
@@ -239,9 +261,16 @@ node tests/e2e/run_jv_wizard_e2e.mjs    # the Special JV creator wizard, end to 
 
 Run them one at a time — each binds a fixed port block (`run_jv_core_unit.mjs` needs
 neither a port nor a browser, and takes about a second). All eighteen must pass:
-75 pytest cases (1 skipped), and `2,532` end-to-end checks — 250 + 73 + 41 + 65 + 94
-+ 107 + 100 + 147 + 170 + 336 + 163 + 304 + 254 + 123 + 79 + 107 + 119, in the order
+75 pytest cases (1 skipped), and `2,639` end-to-end checks — 250 + 73 + 41 + 65 + 94
++ 107 + 100 + 147 + 170 + 441 + 163 + 304 + 256 + 123 + 79 + 107 + 119, in the order
 above.
+
+Do **not** set `TMPDIR` for `pytest`. Six `tests/test_excel_link.py` cases decide
+*shared* versus *local* from where the root sits, and a root under a different
+temporary directory makes them read `local` and fail for a reason that has nothing to
+do with the code. The Node suites are the other way round and want a `TMPDIR` you can
+clean up: each run leaves a share root behind, and a few thousand of them fill the
+disk.
 
 A count that has gone **down** is a regression, not a tidy-up: these suites only ever
 grow, and each one's header comment names the gates it exists to hold.

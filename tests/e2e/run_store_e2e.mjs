@@ -326,6 +326,1104 @@ const TYPE = `(async function (arg) {
   return { applied: res.applied, rejected: res.rejected.length, noop: res.noop };
 })`;
 
+/* ===========================================================================
+   THE MONEY ROUND'S OWN FIXTURES (Z1, T-26-5, T-26-6, T-S10-1, T-30-3).
+   Kept together and apart from the fixtures above because every one of them
+   needs a LINKED AEG TEMPLATE and a posted entry, which none of the store
+   fixtures has: this family is about what reaches the general ledger.
+
+   Ports 21140-21159 are this round's.
+=========================================================================== */
+const PORT_Z1    = 21140;   // Z1       a formula that cannot be worked out
+const PORT_Z1KW  = 21141;   // Z1       the same, on the KEYWORD column
+const PORT_T265  = 21142;   // T-26-5   a non-numeric cell in a report total
+const PORT_T266  = 21143;   // T-26-6   a posted key that becomes duplicated
+const PORT_S101  = 21144;   // T-S10-1  two colleagues generating entries
+const PORT_T303  = 21145;   // T-30-3   the promotion on a duplicate key
+
+/* Z1's FIXTURE. An FX revaluation: Base is the foreign-currency amount, Rate
+   is the rate of the day, and the added `formula` column AED is the
+   conversion. 'AED' is already the name of the default AEG template's
+   valueColumn AND one of its input columns, so this template links with no
+   re-mapping at all - which is the point: nothing here is contrived.
+   INV-3's Rate cell is 0, which is a blank or zero rate on one line of an
+   extract, and NUM(500)/NUM(0) is Infinity, which Formula._result turns into
+   '#ERR'. INV-3 is the LARGEST of the three by Base. */
+const Z1_SETUP = `(async function (arg) {
+  const [agg] = arg;
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_Z'; t.name = 'FX reval';
+  t.columns = ['Invoice','Base','Rate','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.additionalColumns = [{ name:'AED', type:'formula', formula:'NUM({Base})/NUM({Rate})' }];
+  t.enableReporting = true;
+  t.reports = [{ name:'R', columns:['Invoice','Base','Rate','AED'], showTotalRow:true, totalColumns:['AED'] }];
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = !!agg;
+  aegTpl.aggregateBy = agg ? ['Reco','ToAccount'] : [];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id,
+    keywordColumn:'', keywordValues:'', postEntryColumn:'Reco', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_Z');
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Rate','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const spec = [
+    ['INV-1','100','2','R1','ACC1','AED','D1','one','01/01/26','ACC1'],
+    ['INV-2','300','3','R1','ACC1','AED','D2','two','01/01/26','ACC1'],
+    ['INV-3','500','0','R1','ACC1','AED','D3','three','01/01/26','ACC1']
+  ];
+  await Reco.ingestData(tpl, spec.map(x => { const o={}; F.forEach((f,i)=>o[f]=x[i]); return o; }), F);
+  App.closeModal(); AppState.activeRecoId = tpl.id;
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+/* The same cell off five surfaces, then the refusal - AND the figure the old
+   build posted, measured here by handing Reco._buildEntryLines the very
+   source rows the preview builds, so the 150 in this suite's header is a
+   measurement and not a quotation. */
+const Z1_SURFACES = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_Z');
+  const sess = AppState.recoSessions.TPL_Z;
+  const row = sess.data.find(r => r._pk === 'INV-3');
+  const ac = tpl.additionalColumns.find(a => a.name === 'AED');
+  const out = {};
+  App.navigate('reco');
+  const tr = document.querySelector('tbody tr[data-rid="' + CSS.escape(row._id) + '"]');
+  const td = tr && tr.querySelector('td[data-col="AED"]');
+  const inp = td && td.querySelector('input');
+  out.grid = inp ? inp.value : (td ? td.textContent.trim() : null);
+  Reco._fullPass();
+  try { out.ladder = String(Reco._extraValueForRow(tpl, sess, row, ac)); } finally { Reco._fullEnd(); }
+  out.reportCell = String((Reco.runReport(tpl, sess, tpl.reports[0]).find(r => r.Invoice === 'INV-3') || {}).AED);
+  window.__dl = [];
+  const rd = U.download;
+  U.download = function (n, txt) { window.__dl.push({ name:n, text:String(txt) }); };
+  try { Reco.exportData('csv'); } finally { U.download = rd; }
+  const csv = (window.__dl[0] || {}).text || '';
+  const head = csv.split(/\\r?\\n/)[0].split(',');
+  const line = csv.split(/\\r?\\n/).find(l => l.indexOf('INV-3') !== -1) || '';
+  out.csv = (line.split(',')[head.indexOf('AED')] || '');
+  const built = await ExcelLink.buildExport(tpl, sess,
+    { rows:'all', columns:'asShown', includeComputed:true, protect:'soft', dateFormat:'dd-mmm-yyyy' }, 'S');
+  const ci = built.head.columns.findIndex(c => c.key === 'AED');
+  const cell = (built.cells.find(l => l[1] === 'INV-3') || [])[ci];
+  out.workbook = (cell && typeof cell === 'object') ? cell.v : cell;
+  App.closeModal();
+
+  /* WHAT THE OLD BUILD POSTED. The enriched rows are exactly what the AEG
+     extras loop produces for a formula column, so this is _buildEntryLines
+     reading '#ERR' through U.num - the one line that turned a broken formula
+     into a zero. */
+  const aegTpl = AppState.aegTemplates.find(x => x.id === tpl.aegIntegration.aegTemplateId);
+  const enriched = sess.data.map(r => Reco._rowWithExtras(tpl, sess, r));
+  out.aegSourceRows = enriched.map(r => r._pk + '=' + String(r.AED));
+  const inputs = enriched.map(r => {
+    const o = {};
+    aegTpl.inputColumns.forEach(ic => { o[ic.name] = r[ic.name] != null ? r[ic.name] : (r[ic.label] != null ? r[ic.label] : ''); });
+    if (o[aegTpl.valueColumn] === '' || o[aegTpl.valueColumn] == null)
+      o[aegTpl.valueColumn] = r[tpl.valueColumn] != null && r[tpl.valueColumn] !== '' ? r[tpl.valueColumn] : 0;
+    return o;
+  });
+  const lc = Reco._jvLineCols(aegTpl);
+  const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+  out.wouldPost = Reco._buildEntryLines(aegTpl, inputs, '', '').reduce((s, l) => s + val(l, lc.dr), 0);
+
+  // ...and now the real door.
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(false);
+  const pend = Reco._pendingEntry;
+  out.pending = pend ? { rows: (pend.sourceRows || []).length, lines: (pend.lines || []).length } : null;
+  out.refused = !pend;
+  out.toasts = (window.__toasts || []).map(t => t.kind + ': ' + t.msg);
+  out.refusal = out.toasts.join(' | ');
+  /* AND THE COMMIT IS ATTEMPTED ANYWAY, so Z1e reads entryHistory after a
+     real attempt to post rather than inferring it from the refusal. A gate
+     that only checks _pendingEntry survives a mutant that removes the
+     refusal but changes nothing else. */
+  if (pend) Reco.commitEntryFromPreview();
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory || {}).TPL_Z || []).length;
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* The control: correct the rate and the same selection posts 250. */
+const Z1_FIXRATE = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_Z');
+  const sess = AppState.recoSessions.TPL_Z;
+  const row = sess.data.find(r => r._pk === 'INV-3');
+  await Reco.applyEdits(tpl, sess, [{ row: row, col: 'Rate', value: '5' }], { source:'grid', trusted:true });
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(false);
+  const ctx = Reco._pendingEntry;
+  const out = { refused: !ctx, toasts: (window.__toasts||[]).map(t => t.kind + ': ' + t.msg) };
+  if (ctx) {
+    const lc = Reco._jvLineCols(ctx.aegTpl);
+    const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+    Reco.commitEntryFromPreview();
+    const hist = (AppState.entryHistory || {}).TPL_Z || [];
+    const e = hist[hist.length - 1];
+    out.postedDr = e ? (e.lines || []).reduce((s, l) => s + val(l, lc.dr), 0) : null;
+    out.accountingId = e ? e.accountingId : null;
+  }
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory || {}).TPL_Z || []).length;
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* SCOPE. 'Memo' reads #ERR on every row and the linked AEG template never
+   reads it: not an input column, not the value column, not an aggregateBy,
+   not an account column, not the keyword column. Refusing on it would change
+   what an existing template can post, which is the objection T-26-4 was
+   deferred for. */
+const Z1_SCOPE = `(async function () {
+  RecoTemplate.edit('TPL_Z');
+  RecoTemplate._editing.additionalColumns.push(
+    { name:'Memo', type:'formula', formula:'NUM({Base})/NUM({NoSuchColumn})' });
+  RecoTemplate.saveTemplate();
+  App.closeModal();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_Z');
+  const sess = AppState.recoSessions.TPL_Z;
+  AppState.activeRecoId = 'TPL_Z';
+  const out = { memo: String(Reco._rowWithExtras(tpl, sess, sess.data[0]).Memo) };
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(false);
+  const ctx = Reco._pendingEntry;
+  out.refused = !ctx;
+  out.toasts = (window.__toasts||[]).map(t => t.kind + ': ' + t.msg);
+  if (ctx) {
+    const lc = Reco._jvLineCols(ctx.aegTpl);
+    const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+    Reco.commitEntryFromPreview();
+    const hist = (AppState.entryHistory || {}).TPL_Z || [];
+    const e = hist[hist.length - 1];
+    out.postedDr = e ? (e.lines || []).reduce((s, l) => s + val(l, lc.dr), 0) : null;
+  }
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory || {}).TPL_Z || []).length;
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* THE KEYWORD COLUMN. A computed keyword column - a band, a converted amount,
+   a rounded rate - is an ordinary shape, and whatever its values are the
+   point is the same: the cell that could NOT be worked out is the cell that
+   dropped the row from the filter. A check over the SURVIVING rows can never
+   see it. */
+const Z1_KEYWORD = `(async function () {
+  RecoTemplate.edit('TPL_Z');
+  const t = RecoTemplate._editing;
+  t.additionalColumns.push({ name:'Band', type:'formula', formula:'NUM({Base})/NUM({Rate})' });
+  t.aegIntegration.keywordColumn = 'Band';
+  t.aegIntegration.keywordValues = '50,100';
+  RecoTemplate.saveTemplate();
+  App.closeModal();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_Z');
+  const sess = AppState.recoSessions.TPL_Z;
+  AppState.activeRecoId = 'TPL_Z';
+  const allowed = ['50','100'];
+  const bands = sess.data.map(r => String(Reco._rowWithExtras(tpl, sess, r).Band));
+  const out = { bands: bands, kwCol: tpl.aegIntegration.keywordColumn,
+                droppedByFilter: bands.filter(b => allowed.indexOf(b) === -1).length };
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(false);
+  out.refused = !Reco._pendingEntry;
+  out.toasts = (window.__toasts||[]).map(t => t.kind + ': ' + t.msg);
+  out.refusal = out.toasts.join(' | ');
+  if (Reco._pendingEntry) Reco.commitEntryFromPreview();
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory || {}).TPL_Z || []).length;
+  return out;
+})`;
+
+/* T-26-5's FIXTURE. Two rows worth 40 and 60 - 100 between them - and a third
+   whose Net is typed over by hand. */
+const T265_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_R'; t.name = 'Totals';
+  t.columns = ['Invoice','Base'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base';
+  t.displayColumns = ['Invoice','Base'];
+  t.additionalColumns = [{ name:'Net', type:'formula', formula:'NUM({Base})*2', allowOverride:true }];
+  t.enableReporting = true;
+  t.reports = [{ name:'R', columns:['Invoice','Net'], showTotalRow:true, totalColumns:['Net'] }];
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [{ Invoice:'INV-1', Base:'20' }, { Invoice:'INV-2', Base:'30' },
+                              { Invoice:'INV-3', Base:'5' }], ['Invoice','Base']);
+  App.closeModal(); AppState.activeRecoId = 'TPL_R';
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const T265_TOTAL = `(async function (arg) {
+  const [value] = arg;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R');
+  const sess = AppState.recoSessions.TPL_R;
+  const row = sess.data.find(r => r._pk === 'INV-3');
+  await Reco.setOverride(row._id, 'Net', value);
+  const rpt = tpl.reports[0];
+  const rows = Reco.runReport(tpl, sess, rpt);
+  const out = { cells: rows.map(r => String(r.Net)),
+                naive: rows.reduce((s, r) => s + U.num(r.Net), 0) };
+  const d = document.createElement('div');
+  d.innerHTML = Reco.renderCustomReport(tpl, sess, rpt, 0);
+  const td = d.querySelector('td[data-total-col="Net"]');
+  const nt = d.querySelector('[data-total-note]');
+  out.totalText = td ? td.textContent.trim() : null;
+  out.totalSum  = td ? Number(td.getAttribute('data-total-sum')) : null;
+  out.excluded  = td ? Number(td.getAttribute('data-total-excluded')) : null;
+  out.note = nt ? nt.textContent.replace(/\\s+/g, ' ').trim() : '';
+  await Reco.revertOverride(row._id, 'Net');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})`;
+
+/* T-26-6's FIXTURE. INV-7 is overridden to 1000 where the formula says 20,
+   and the entry is POSTED with the 1000 in it. INV-8 is overridden too and
+   is NEVER posted - the control that keeps the new sentence from naming an
+   accounting reference that does not exist. */
+const T266_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_6'; t.name = 'Posted then duplicated';
+  t.columns = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.additionalColumns = [{ name:'AED', type:'formula', formula:'NUM({Base})*2', allowOverride:true }];
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = true; aegTpl.aggregateBy = ['Reco','ToAccount'];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id,
+    keywordColumn:'', keywordValues:'', postEntryColumn:'Desc', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_6');
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const spec = [['INV-7','10','R1','ACC1','AED','D7','seven','01/01/26','ACC1'],
+                ['INV-8','10','R2','ACC1','AED','D8','eight','01/01/26','ACC1']];
+  await Reco.ingestData(tpl, spec.map(x => { const o={}; F.forEach((f,i)=>o[f]=x[i]); return o; }), F);
+  App.closeModal(); AppState.activeRecoId = 'TPL_6';
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const T266_RUN = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_6');
+  const sess = AppState.recoSessions.TPL_6;
+  const ac = tpl.additionalColumns.find(a => a.name === 'AED');
+  const r7 = sess.data.find(r => r._pk === 'INV-7');
+  const r8 = sess.data.find(r => r._pk === 'INV-8');
+  await Reco.setOverride(r7._id, 'AED', '1000');
+  await Reco.setOverride(r8._id, 'AED', '2000');
+  const out = {};
+  // POST INV-7 ONLY, so INV-8's override is stored and unposted.
+  sess.selectedRows = {}; sess.selectedRows[r7._id] = true;
+  Reco._pendingEntry = null;
+  Reco.previewEntryFromSelection(false);
+  const ctx = Reco._pendingEntry;
+  if (!ctx) { out.refused = true; return out; }
+  const lc = Reco._jvLineCols(ctx.aegTpl);
+  const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+  Reco.commitEntryFromPreview();
+  App.closeModal();
+  const hist = (AppState.entryHistory || {}).TPL_6 || [];
+  const e = hist[hist.length - 1];
+  out.accountingId = e.accountingId;
+  out.postedDr = (e.lines || []).reduce((s, l) => s + val(l, lc.dr), 0);
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+
+  /* NEXT WEEK'S FILE brings a second line under each invoice number, which is
+     the ordinary shape of an AP extract. */
+  window.__toasts = [];
+  Versioning.dayFile = () => '02.csv';
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const more = [['INV-7','10','R1','ACC1','AED','D7b','seven again','02/01/26','ACC1'],
+                ['INV-8','10','R2','ACC1','AED','D8b','eight again','02/01/26','ACC1']];
+  await Reco.ingestData(tpl, more.map(x => { const o={}; F.forEach((f,i)=>o[f]=x[i]); return o; }), F);
+  const body = document.getElementById('appModalBody');
+  out.panel = body ? body.innerHTML : '';
+  const pb = body && body.querySelector('[data-dup-posted]');
+  out.postedBlock = pb ? pb.textContent.replace(/\\s+/g, ' ').trim() : '';
+  App.closeModal();
+  out.dupCount = Reco._dupPkCountFor(tpl, sess, 'INV-7');
+  Reco._fullPass();
+  try { out.screenAfter = String(Reco._extraValueForRow(tpl, sess, sess.data.find(r => r._pk === 'INV-7'), ac)); }
+  finally { Reco._fullEnd(); }
+  const rec = ((AppState.extraValueMaster || {}).TPL_6 || {})['INV-7'] || {};
+  out.recStill = rec.AED ? String(rec.AED.v) : null;
+  out.unpostedNamed = out.panel.indexOf('INV-8') !== -1;
+  out.unpostedRefd  = out.postedBlock.indexOf('INV-8') !== -1;
+  return out;
+})`;
+
+/* T-S10-1's FIXTURE. Six rows so two pages can post different ones; a
+   document number column, because docNumberMaster is the other half of the
+   ticket. No added columns at all, so nothing here depends on Z1. */
+const S101_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_E'; t.name = 'Two colleagues';
+  t.columns = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.additionalColumns = [];
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = true; aegTpl.aggregateBy = ['Reco','ToAccount'];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id,
+    keywordColumn:'', keywordValues:'', postEntryColumn:'Desc', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const spec = [];
+  for (let i = 1; i <= 6; i++) spec.push(['INV-'+i, String(i*10), 'R1', 'ACC1', 'AED', 'D'+i, 'r'+i, '01/01/26', 'ACC1']);
+  await Reco.ingestData(tpl, spec.map(x => { const o={}; F.forEach((f,i)=>o[f]=x[i]); return o; }), F);
+  App.closeModal(); AppState.activeRecoId = 'TPL_E';
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const S101_POST = `(async function (arg) {
+  const [pks] = arg;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  const sess = AppState.recoSessions.TPL_E;
+  AppState.activeRecoId = 'TPL_E';
+  sess.selectedRows = {};
+  sess.data.forEach(r => { if (pks.indexOf(r._pk) !== -1) sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(false);
+  const ctx = Reco._pendingEntry;
+  const out = { refused: !ctx, toasts: (window.__toasts||[]).map(t => t.kind + ': ' + t.msg) };
+  if (ctx) {
+    const lc = Reco._jvLineCols(ctx.aegTpl);
+    const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+    Reco.commitEntryFromPreview();
+    const hist = (AppState.entryHistory || {}).TPL_E || [];
+    const e = hist[hist.length - 1];
+    out.accountingId = e ? e.accountingId : null;
+    out.dr = e ? (e.lines||[]).reduce((s,l)=>s+val(l,lc.dr),0) : null;
+  }
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory || {}).TPL_E || []).length;
+  await AppState.flush();
+  if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* A document number allocated BY HAND. It mutates an entry INSIDE
+   entryHistory, so the merge intent has to re-find that entry on the file it
+   has just read rather than mutating a copy the read has already replaced. */
+const S101_ALLOC = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  AppState.activeRecoId = 'TPL_E';
+  const hist = (AppState.entryHistory || {}).TPL_E || [];
+  const e = hist[0];
+  Reco.openAllocateModal(e.accountingId);
+  const inp = document.getElementById('alloc_AED');
+  if (inp) inp.value = 'GL-9001';
+  Reco.saveAllocation();
+  App.closeModal();
+  await AppState.flush();
+  if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return { accountingId: e.accountingId, hadInput: !!inp,
+           docNumbers: JSON.parse(JSON.stringify(e.docNumbers || {})) };
+})`;
+
+/* T-30-3's FIXTURE. Three templates, because the three answers cannot share
+   one: TPL_C is answered YES, TPL_D is answered NO, and TPL_Q has no
+   duplicate keys at all and must be asked nothing.
+     INV-7  two rows, 'Alice' and 'Bob'   -> a conflict: the promotion cannot pick
+     INV-8  one row, 'Carol'              -> promoted, as before
+     INV-9  two rows, 'Dave' and 'Dave'   -> NOT a conflict: nothing to pick between */
+const T303_SETUP = `(async function () {
+  const mk = async (id, name, rows) => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = id; t.name = name;
+    t.columns = ['Invoice','Base'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+    t.primaryKeys = ['Invoice'];
+    t.valueColumn = 'Base';
+    t.displayColumns = ['Invoice','Base'];
+    t.additionalColumns = [{ name:'Vendor', type:'custom' }];
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, rows.map(r => ({ Invoice:r[0], Base:r[1] })), ['Invoice','Base']);
+    App.closeModal();
+    const sess = AppState.recoSessions[id];
+    /* THE LEGACY HOME, seeded directly - which is what every one of these
+       values is on a share today, because the promotion is the one-time move
+       OUT of it. */
+    rows.forEach((r, i) => { if (r[2]) sess.manualTags[Reco._tagKey(sess.data[i], 'Vendor')] = r[2]; });
+    return tpl;
+  };
+  const dup = [['INV-7','10','Alice'], ['INV-7','10','Bob'], ['INV-8','10','Carol'],
+               ['INV-9','10','Dave'], ['INV-9','10','Dave']];
+  await mk('TPL_C', 'Conflict yes', dup);
+  await mk('TPL_D', 'Conflict no', dup);
+  await mk('TPL_Q', 'No duplicates', [['INV-1','10','Zoe'], ['INV-2','10',''], ['INV-3','10','']]);
+  AppState.activeRecoId = 'TPL_C';
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const T303_RUN = `(async function (arg) {
+  const [tplId, answer] = arg;
+  RecoTemplate.edit(tplId);
+  RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor').carryForward = true;
+  const asks = [];
+  const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return !!answer; };
+  window.__toasts = [];
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  App.closeModal();
+  await new Promise(r => setTimeout(r, 60));
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  const tpl = AppState.recoTemplates.find(x => x.id === tplId);
+  const sess = AppState.recoSessions[tplId];
+  const conflictText = asks.filter(m => /hold two different|different value/i.test(m)).join(' | ');
+  return {
+    asked: asks.length > 0,
+    allAsks: asks,
+    conflictText: conflictText,
+    promoted: (window.__toasts || []).reduce((n, t) => {
+      const m = String(t.msg).match(/^(\\d+) value\\(s\\) already on screen/); return m ? Number(m[1]) : n; }, 0),
+    toasts: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+    rows: sess.data.map(r => {
+      const tag = sess.manualTags[Reco._tagKey(r, 'Vendor')];
+      const rec = Reco._extraRec(tpl, sess, r, 'Vendor');
+      return { pk: r._pk, tag: tag === undefined ? null : String(tag), rec: rec ? String(rec.v) : null };
+    })
+  };
+})`;
+
+
+/* ===========================================================================
+   THE FIX ROUND'S OWN FIXTURES (MR-1, MR-2, MR-4, MR-6, T-S10-10, and the
+   re-measurements of T-26-5 / T-26-6 / T-30-3). Ports 21146-21156.
+=========================================================================== */
+const PORT_MR1OV = 21146;   // MR-1   an override on an '#ERR' cell
+const PORT_MR1J8 = 21147;   // MR-1   decision J.8 is still honoured
+const PORT_MR1JV = 21148;   // MR-1   the Special JV door
+const PORT_MR2  = 21149;   // MR-2  a failed ledger write is retried
+const PORT_MR4  = 21150;   // MR-4  the boot latch on the two ledger keys
+const PORT_MR6  = 21151;   // MR-6  Generate refused on a latched ledger
+const PORT_S109  = 21152;   // T-S10-10 two colleagues, genuinely overlapped
+const PORT_DNU   = 21153;   // MR-7  one document number, two entries
+const PORT_T266S = 21154;   // T-26-6 the colleague who did not post it
+
+/* ---- MR-1, DOOR ONE. Z1's refusal sends the operator to "correct the data
+   the formula reads, or correct the formula" - and the override box is the
+   one tool this app gives them for correcting a computed cell by hand. The
+   AEG extras loop's override gate runs BEFORE the formula arm, so an
+   overridden cell never enters badFx; and RC-8 only fired when rec.prev was
+   NUMERIC, which for an '#ERR' cell it is not. Measured before the fix: an
+   override of "'500" posted Dr 150 for three rows worth 150 + INV-3, and
+   '1.234,50' posted Dr 151.23. */
+const MR1_OV = `(async function (arg) {
+  const [value] = arg;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_Z');
+  const sess = AppState.recoSessions.TPL_Z;
+  AppState.activeRecoId = 'TPL_Z';
+  const ac = tpl.additionalColumns.find(a => a.name === 'AED');
+  ac.allowOverride = true;
+  const row = sess.data.find(r => r._pk === 'INV-3');
+  window.__toasts = [];
+  await Reco.setOverride(row._id, 'AED', value);
+  const out = { override: (((AppState.extraValueMaster||{}).TPL_Z||{})['INV-3']||{}).AED || null };
+  Reco._fullPass();
+  try { out.cell = String(Reco._extraValueForRow(tpl, sess, row, ac)); } finally { Reco._fullEnd(); }
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(false);
+  out.refused = !Reco._pendingEntry;
+  out.toasts = window.__toasts.map(t => t.kind + ': ' + t.msg);
+  if (!out.refused) {
+    const lc = Reco._jvLineCols(Reco._pendingEntry.aegTpl);
+    const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+    Reco.commitEntryFromPreview();
+    const hist = (AppState.entryHistory||{}).TPL_Z || [];
+    const e = hist[hist.length - 1];
+    out.accountingId = e ? e.accountingId : null;
+    out.dr = e ? (e.lines||[]).reduce((s,l)=>s+val(l,lc.dr),0) : null;
+  }
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory||{}).TPL_Z || []).length;
+  out.stamped = sess.data.filter(r => String(r.Reco) === 'POSTED').map(r => r._pk);
+  await Reco.revertOverride(row._id, 'AED');
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* ---- MR-1, AND WHAT IT MUST NOT DO. Decision J.8: a column that was
+   TEXTUAL ALL ALONG is not an amount, and an override on it exports as text
+   and does NOT refuse a posting. The relaxation above is scoped to a column
+   THIS ENTRY READS, so this template - whose overridden column the linked AEG
+   template never reads - must post exactly as it did before. */
+const MR1_J8 = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_J8'; t.name = 'J.8';
+  t.columns = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  /* 'Memo' is not an input column, not the value column, not an aggregateBy,
+     not an account column and not the keyword column - the same scope Z1h
+     uses. It is a FORMULA column, because an override only exists on a
+     formula or a master-lookup column (on a custom column the same write is
+     a k:'typed' record), and it works out to something that is NOT a number -
+     which is decision J.8's own case: a column whose kind is DERIVED from its
+     values and which was textual all along. RC-8 already refuses a
+     non-numeric override whose prev WAS numeric, on any column at all, and
+     that half is deliberately untouched; MR-1 changed only the other half,
+     where prev is not a number either. */
+  t.additionalColumns = [{ name:'Memo', type:'formula', formula:'{Desc}', allowOverride: true }];
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = true; aegTpl.aggregateBy = ['Reco','ToAccount'];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id, keywordColumn:'', keywordValues:'',
+                       postEntryColumn:'Desc', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_J8');
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const mk = a => { const o={}; F.forEach((f,i)=>o[f]=a[i]); return o; };
+  await Reco.ingestData(tpl, [mk(['INV-1','100','R1','ACC1','AED','D1','one','01/01/26','ACC1']),
+                              mk(['INV-2','300','R1','ACC1','AED','D2','two','01/01/26','ACC1'])], F);
+  App.closeModal(); AppState.activeRecoId = 'TPL_J8';
+  const sess = AppState.recoSessions.TPL_J8;
+  // the cell is not a number; text over text is J.8's own case
+  await Reco.setOverride(sess.data[0]._id, 'Memo', 'see email');
+  const out = { rec: (((AppState.extraValueMaster||{}).TPL_J8||{})['INV-1']||{}).Memo || null };
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null; window.__toasts = [];
+  Reco.previewEntryFromSelection(true);
+  out.refused = !Reco._pendingEntry;
+  out.toasts = window.__toasts.map(t => t.kind + ': ' + t.msg);
+  if (!out.refused) {
+    const lc = Reco._jvLineCols(Reco._pendingEntry.aegTpl);
+    const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+    Reco.commitEntryFromPreview();
+    const hist = (AppState.entryHistory||{}).TPL_J8 || [];
+    const e = hist[hist.length - 1];
+    out.dr = e ? (e.lines||[]).reduce((s,l)=>s+val(l,lc.dr),0) : null;
+  }
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* ---- MR-1, DOOR TWO. A bucketed row's amount is read by its own Special
+   JV's inputColumns, never by the AEG template's, and the split that buckets
+   it used to happen BELOW both refusals. Measured before the fix: the preview
+   refused nothing, Reco handed the JV page "AED":"#ERR", and an aggregating
+   JV posted Dr 150 for three rows worth 650 with all three stamped POSTED.
+   `jvReads` says whether the JV's spec reads AED, which is the control. */
+const MR1_JV = `(async function (arg) {
+  const [jvReads] = arg;
+  SpecialJV.registry['TCHX'] = { ref:'TCHX', displayName:'TCH exchange',
+    htmlPath:'special_jv_templates/TCHX.html', retired:false,
+    inputColumns: jvReads ? [{ name:'AED', label:'AED' }, { name:'Invoice', label:'Invoice' }]
+                          : [{ name:'Base', label:'Base' }, { name:'Invoice', label:'Invoice' }] };
+  if (SpecialJV.resetOptions) SpecialJV.resetOptions();
+  const tid = jvReads ? 'TPL_JV1' : 'TPL_JV0';
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = tid; t.name = 'jv door ' + tid;
+  t.columns = ['Invoice','Base','Rate','Reco','ToAccount','Cur','Doc'].map(n =>
+    ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.additionalColumns = [{ name:'AED', type:'formula', formula:'NUM({Base})/NUM({Rate})' }];
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = false; aegTpl.aggregateBy = [];
+  /* The AEG template does NOT read AED here: strip it, so the ONLY reader of
+     AED is the JV. That is exactly the premise Z1h asserts must not refuse. */
+  aegTpl.inputColumns = (aegTpl.inputColumns||[]).filter(c => c.name !== 'AED');
+  aegTpl.valueColumn = 'Base';
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id, keywordColumn:'', keywordValues:'',
+                       postEntryColumn:'Reco', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === tid);
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Rate','Reco','ToAccount','Cur','Doc'];
+  const mk = a => { const o={}; F.forEach((f,i)=>o[f]=a[i]); return o; };
+  await Reco.ingestData(tpl, [mk(['INV-1','100','2','','TCHX','AED','D1']),
+                              mk(['INV-2','300','3','','TCHX','AED','D2']),
+                              mk(['INV-3','500','0','','TCHX','AED','D3'])], F);
+  App.closeModal(); AppState.activeRecoId = tid;
+  const sess = AppState.recoSessions[tid];
+  const out = { cells: sess.data.map(r => r._pk + '=' +
+    String(Reco._extraValueForRow(tpl, sess, r, tpl.additionalColumns[0]))) };
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null; window.__toasts = [];
+  Reco.previewEntryFromSelection(true);
+  out.refused = !Reco._pendingEntry;
+  out.toasts = window.__toasts.map(t => t.kind + ': ' + String(t.msg));
+  if (!out.refused) {
+    out.buckets = Object.keys(Reco._pendingEntry.jvBuckets)
+      .map(k => k + '=' + Reco._pendingEntry.jvBuckets[k].length);
+    let seen = null;
+    const realOpen = SpecialJV.open;
+    SpecialJV.open = function (ref, payload, cb) {
+      seen = JSON.parse(JSON.stringify(payload));
+      const amt = jvReads ? 'AED' : 'Base';
+      const tot = payload.reduce((s, p) => s + U.num(p[amt]), 0);
+      cb({ type:'jvResult', ref: ref, jvId: 'JV_X',
+           lines: [{ Dr: tot.toFixed(2), Cr: '', Cur:'AED', Ref:'ACC1' },
+                   { Dr: '', Cr: tot.toFixed(2), Cur:'AED', Ref:'ACC2' }],
+           primaryKeys: payload.map(p => p._pk), inputData: payload });
+    };
+    try { Reco.openSpecialJv('TCHX'); } finally { SpecialJV.open = realOpen; }
+    out.payload = (seen || []).map(p => p._pk + '=' + String(p.AED == null ? '' : p.AED));
+    Reco.previewEntryFromSelection(true);
+    if (Reco._pendingEntry) {
+      const lc = Reco._jvLineCols(Reco._pendingEntry.aegTpl);
+      const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+      Reco.commitEntryFromPreview();
+      const hist = (AppState.entryHistory||{})[tid] || [];
+      const e = hist[hist.length - 1];
+      out.accountingId = e ? e.accountingId : null;
+      out.dr = e ? (e.lines||[]).reduce((s,l)=>s+val(l,lc.dr),0) : null;
+    }
+  }
+  App.closeModal();
+  out.histLen = ((AppState.entryHistory||{})[tid] || []).length;
+  out.stamped = sess.data.filter(r => String(r.Reco) === 'POSTED').map(r => r._pk);
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return out;
+})`;
+
+/* ---- MR-2. A FAILED LEDGER WRITE IS RETRIED. The write-failure path armed
+   no timer at all and m.intents is cleared only on success, so a posted
+   journal entry stayed buffered for the rest of the session while its rows
+   were stamped POSTED on the share. `down` holds the fault for that many ms,
+   then the folder answers again and the operator carries on working. */
+const MR2_RUN = `(async function (arg) {
+  const [down] = arg;
+  const api = window.pywebview.api;
+  const realWrite = api.write_file;
+  let faulting = true;
+  api.write_file = function (rel, txt) {
+    if (faulting && String(rel) === 'reco/entryHistory.json')
+      return Promise.reject(new Error('OSError: the shared folder refused the write'));
+    return realWrite.apply(api, arguments);
+  };
+  const out = {};
+  try {
+    const r = await (async () => {
+      const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+      const sess = AppState.recoSessions.TPL_E;
+      AppState.activeRecoId = 'TPL_E';
+      sess.selectedRows = {};
+      sess.data.forEach(x => { if (['INV-1','INV-2'].indexOf(x._pk) !== -1) sess.selectedRows[x._id] = true; });
+      Reco._pendingEntry = null; window.__toasts = [];
+      Reco.previewEntryFromSelection(true);
+      if (!Reco._pendingEntry) return { refused: true };
+      const lc = Reco._jvLineCols(Reco._pendingEntry.aegTpl);
+      const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+      Reco.commitEntryFromPreview();
+      const hist = (AppState.entryHistory||{}).TPL_E || [];
+      const e = hist[hist.length - 1];
+      App.closeModal();
+      await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+      return { accountingId: e.accountingId, dr: (e.lines||[]).reduce((s,l)=>s+val(l,lc.dr),0) };
+    })();
+    Object.assign(out, r);
+    out.whileDown = { lastError: Store.lastError ? Store.lastError.key + ': ' + Store.lastError.message : null,
+                      problems: Store.loadProblems.filter(s => /could not be written/.test(s)).length,
+                      pending: AppState.pendingCount() };
+    await new Promise(r2 => setTimeout(r2, down));
+  } finally {
+    faulting = false;
+    api.write_file = realWrite;
+  }
+  /* The operator carries on working. Nothing retypes the entry. */
+  for (let i = 0; i < 6; i++) {
+    const sess = AppState.recoSessions.TPL_E;
+    sess.page = (sess.page || 0) + 1;
+    AppState.save();
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r2 => setTimeout(r2, 60));
+  }
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  out.after = { pending: AppState.pendingCount(),
+                problems: Store.loadProblems.filter(s => /could not be written/.test(s)).length };
+  return out;
+})`;
+
+/* ---- MR-6. The ledger is latched read-only for the session (a damaged
+   reco/entryHistory.json at boot), so this entry can NEVER reach the share.
+   Generate used to go ahead and stamp the rows anyway. */
+const MR6_RUN = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  const sess = AppState.recoSessions.TPL_E;
+  AppState.activeRecoId = 'TPL_E';
+  sess.selectedRows = {};
+  sess.data.forEach(x => { if (['INV-1','INV-2'].indexOf(x._pk) !== -1) sess.selectedRows[x._id] = true; });
+  Reco._pendingEntry = null; window.__toasts = [];
+  Reco.previewEntryFromSelection(true);
+  const out = { previewRefused: !Reco._pendingEntry, latched: !!Store.readOnlyKeys.entryHistory,
+                bootProblems: Store.loadProblems.slice(),
+                quarantined: 0 };
+  if (Reco._pendingEntry) Reco.commitEntryFromPreview();
+  out.modal = (document.getElementById('appModalBody') || {}).textContent || '';
+  out.histLen = ((AppState.entryHistory||{}).TPL_E || []).length;
+  out.stamped = sess.data.filter(r => String(r.Desc) === 'POSTED').map(r => r._pk);
+  out.toasts = (window.__toasts||[]).map(t => t.kind + ': ' + t.msg);
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})`;
+
+/* ---- MR-7. One document number, two entries. Nothing tested whether the
+   number typed was already taken, so two colleagues could both be told
+   "Document numbers saved" and leave the shared master naming one of them
+   while BOTH entries claimed it. */
+const DNU_RUN = `(async function (arg) {
+  const [which, dn] = arg;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  AppState.activeRecoId = 'TPL_E';
+  const hist = (AppState.entryHistory||{}).TPL_E || [];
+  const e = hist[which] || hist[hist.length - 1];
+  window.__toasts = [];
+  Reco.openAllocateModal(e.accountingId);
+  const inp = document.getElementById('alloc_AED');
+  if (inp) inp.value = dn;
+  Reco.saveAllocation();          // synchronous on purpose — see MR-7 in Reco.saveAllocation
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return { accountingId: e.accountingId, hadInput: !!inp,
+           docNumbers: JSON.parse(JSON.stringify(e.docNumbers || {})),
+           toasts: (window.__toasts||[]).map(t => t.kind + ': ' + t.msg) };
+})`;
+
+/* ---- T-S10-10. GENUINELY OVERLAPPED, Promise.all and not await-then-await:
+   section [52] drives its two pages one after the other, which is the one
+   timing at which the merge cannot lose anything. */
+/* ---- T-S10-11's RESIDUE, MADE DETERMINISTIC. The per-window suffix takes a
+   same-millisecond collision from 1 in 1 to about 1 in 1,296, which no test
+   can wait for. So the mint is PINNED to one string in both windows, which is
+   exactly the state the two windows were in before the suffix existed, and the
+   question becomes the one that matters: when the reference really is taken,
+   is the entry still recorded? The old append answered no — it skipped on the
+   reference alone, so the second window's write was a silent no-op. */
+const S111_PIN = `(function (arg) {
+  const [pinned] = arg;
+  U.accountingId = function () { return pinned; };
+  return U.accountingId();
+})`;
+
+const S109_POST = `(async function (arg) {
+  const [pks] = arg;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  const sess = AppState.recoSessions.TPL_E;
+  AppState.activeRecoId = 'TPL_E';
+  sess.selectedRows = {};
+  sess.data.forEach(r => { if (pks.indexOf(r._pk) !== -1) sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null; window.__toasts = [];
+  Reco.previewEntryFromSelection(true);
+  if (!Reco._pendingEntry) return { refused: true };
+  Reco.commitEntryFromPreview();
+  const hist = (AppState.entryHistory||{}).TPL_E || [];
+  const e = hist[hist.length - 1];
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { accountingId: e.accountingId };
+})`;
+
+/* T-26-6's SHARE FIXTURE: page B boots BEFORE the entry is posted, so its
+   in-memory entry history is {} - and B is the one who loads next week's
+   extract. */
+const T266S_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_6S'; t.name = 'posted then duplicated';
+  t.columns = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.additionalColumns = [{ name:'AED', type:'formula', formula:'NUM({Base})*2', allowOverride:true }];
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = true; aegTpl.aggregateBy = ['Reco','ToAccount'];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id, keywordColumn:'', keywordValues:'',
+                       postEntryColumn:'Desc', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_6S');
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const mk = a => { const o={}; F.forEach((f,i)=>o[f]=a[i]); return o; };
+  await Reco.ingestData(tpl, [mk(['INV-7','10','R1','ACC1','AED','D7','seven','01/01/26','ACC1']),
+                              mk(['INV-8','10','R1','ACC1','AED','D8','eight','01/01/26','ACC1'])], F);
+  App.closeModal(); AppState.activeRecoId = 'TPL_6S';
+  const sess = AppState.recoSessions.TPL_6S;
+  await Reco.setOverride(sess.data.find(r => r._pk === 'INV-7')._id, 'AED', '1000');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const T266S_POST = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_6S');
+  const sess = AppState.recoSessions.TPL_6S;
+  AppState.activeRecoId = 'TPL_6S';
+  sess.selectedRows = {};
+  sess.data.forEach(r => { if (r._pk === 'INV-7') sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null; window.__toasts = [];
+  Reco.previewEntryFromSelection(true);
+  if (!Reco._pendingEntry) return { refused: true, toasts: window.__toasts.map(t=>t.msg) };
+  const lc = Reco._jvLineCols(Reco._pendingEntry.aegTpl);
+  const val = (l, k) => { const v = l[k]; return U.num(v && typeof v === 'object' ? v.value : v); };
+  Reco.commitEntryFromPreview();
+  const hist = (AppState.entryHistory||{}).TPL_6S || [];
+  const e = hist[hist.length - 1];
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  await new Promise(r => setTimeout(r, 1200));
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { accountingId: e.accountingId, dr: (e.lines||[]).reduce((s,l)=>s+val(l,lc.dr),0) };
+})`;
+
+const T266S_LOAD = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_6S');
+  AppState.activeRecoId = 'TPL_6S';
+  Versioning.dayFile = () => '02.csv';
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const mk = a => { const o={}; F.forEach((f,i)=>o[f]=a[i]); return o; };
+  window.__toasts = [];
+  const bootHist = JSON.stringify((AppState.entryHistory||{}).TPL_6S || []);
+  await Reco.ingestData(tpl, [mk(['INV-7','10','R1','ACC1','AED','D7b','seven again','02/01/26','ACC1']),
+                              mk(['INV-8','10','R1','ACC1','AED','D8b','eight again','02/01/26','ACC1'])], F);
+  for (let i = 0; i < 80 && document.querySelector('[data-dup-posted-pending]'); i++)
+    await new Promise(r => setTimeout(r, 50));
+  const body = document.getElementById('appModalBody');
+  const pb = body && body.querySelector('[data-dup-posted]');
+  const out = { bootHist: bootHist,
+                posted: pb ? pb.textContent.replace(/\\s+/g, ' ').trim() : '' };
+  App.closeModal();
+  return out;
+})`;
+
+
+const PORT_T303B = 21155;   // T-30-3  declining is recoverable
+const PORT_T265B = 21156;   // T-26-5  a column with nothing to add
+
+/* ---- T-30-3. DECLINING IS A REAL DECISION AND A RECOVERABLE ONE. The
+   confirm used to be asked from inside the promotion, i.e. AFTER the template
+   had been stored, so Cancel saved it with carry-forward ON and - the
+   promotion being offered once per column, EVER - was never offered again:
+   the operator declined, went and fixed the duplicate rows, came back, and
+   the feature they had switched on was silently off for that column for good.
+   `again` saves a second time and answers YES. */
+const T303B_RUN = `(async function (arg) {
+  const [tplId, answer, again] = arg;
+  const run = (ans) => {
+    RecoTemplate.edit(tplId);
+    const col = RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor');
+    col.carryForward = true;
+    const asks = [];
+    const real = window.confirm;
+    window.confirm = m => { asks.push(String(m)); return !!ans; };
+    window.__toasts = [];
+    try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+    App.closeModal();
+    return asks;
+  };
+  const out = { asks1: run(answer) };
+  await new Promise(r => setTimeout(r, 80));
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  const stored = () => {
+    const t = AppState.recoTemplates.find(x => x.id === tplId);
+    const c = (t.additionalColumns || []).find(a => a.name === 'Vendor');
+    return !!(c && c.carryForward === true);
+  };
+  out.flag1 = stored();
+  const rows = () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === tplId);
+    const sess = AppState.recoSessions[tplId];
+    return sess.data.map(r => {
+      const rec = Reco._extraRec(tpl, sess, r, 'Vendor');
+      return r._pk + '=' + (rec ? String(rec.v) : '-');
+    });
+  };
+  out.rows1 = rows();
+  if (again) {
+    out.asks2 = run(true);
+    await new Promise(r => setTimeout(r, 80));
+    await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    out.flag2 = stored();
+    out.rows2 = rows();
+    out.toasts2 = (window.__toasts || []).map(t => t.kind + ': ' + t.msg);
+  }
+  return out;
+})`;
+
+/* ---- T-30-3. A conflict NOTHING WOULD HAVE PROMOTED. A (key, column) that
+   already has a stored record is short-circuited by Reco._extraRec, so both
+   its rows have been reading one record all along and neither legacy value
+   was ever a candidate - yet the dialog raised it, and said those keys "are
+   therefore being LEFT ALONE" about values that were already not in use. */
+const T303C_RUN = `(async function () {
+  const tplId = 'TPL_P';
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = tplId; t.name = 'already stored';
+  t.columns = ['Invoice','Base'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.displayColumns = ['Invoice','Base'];
+  t.additionalColumns = [{ name:'Vendor', type:'custom' }, { name:'Note', type:'custom' }];
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === tplId);
+  RecoTemplate.open(tpl.id);
+  const rows = [['INV-7','10','Alice'], ['INV-7','10','Bob'], ['INV-8','10','Carol']];
+  await Reco.ingestData(tpl, rows.map(r => ({ Invoice:r[0], Base:r[1] })), ['Invoice','Base']);
+  App.closeModal();
+  const sess = AppState.recoSessions[tplId];
+  rows.forEach((r, i) => { sess.manualTags[Reco._tagKey(sess.data[i], 'Vendor')] = r[2]; });
+  /* A record already serving BOTH rows of INV-7, planted THROUGH THE REAL
+     WRITE so it reaches the share: a record only in memory is dropped by the
+     next merge, because for the ids this file owns the share is the authority
+     (Store._takeDisk) - which is exactly what made the first version of this
+     fixture lie. */
+  const rec0 = { k:'typed', v:'ALREADY STORED', ds:'', by:'x', at:'' };
+  AppState.extraValueMaster = AppState.extraValueMaster || {};
+  AppState.extraValueMaster[tplId] = { 'INV-7': { Vendor: rec0 } };
+  Reco._extraValueFlush(tplId, map => {
+    (map[tplId] || (map[tplId] = {}))['INV-7'] = { Vendor: rec0 };
+  });
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  RecoTemplate.edit(tplId);
+  RecoTemplate._editing.additionalColumns.forEach(a => { a.carryForward = true; });
+  const asks = [];
+  const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return true; };
+  window.__toasts = [];
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  App.closeModal();
+  await new Promise(r => setTimeout(r, 80));
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return { asks: asks, toasts: (window.__toasts||[]).map(t => t.kind + ': ' + t.msg),
+           rows: sess.data.map(r => { const rec = Reco._extraRec(tpl, sess, r, 'Vendor');
+             return r._pk + '=' + (rec ? String(rec.v) : '-'); }) };
+})`;
+
+/* ---- T-26-5. A column where EVERY cell was excluded. The total rendered
+   "0.00 *" - a number that is not a total of anything - while the Sum card
+   for the same column, twenty lines up, already answered the better way. */
+const T265B_RUN = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_N0'; t.name = 'nothing to add';
+  t.columns = ['Invoice','Base'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice']; t.valueColumn = 'Base'; t.displayColumns = ['Invoice','Base'];
+  t.additionalColumns = [{ name:'Net', type:'formula', formula:'NUM({Base})', allowOverride:true }];
+  t.enableReporting = true;
+  t.reports = [{ name:'R', columns:['Invoice','Net'], showTotalRow:true, totalColumns:['Net'],
+                 summaryCards:[{ col:'Net', func:'Sum' }] }];
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_N0');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [{Invoice:'INV-1',Base:'40'},{Invoice:'INV-2',Base:'60'}], ['Invoice','Base']);
+  App.closeModal(); AppState.activeRecoId = 'TPL_N0';
+  const sess = AppState.recoSessions.TPL_N0;
+  await Reco.setOverride(sess.data[0]._id, 'Net', 'n/a');
+  await Reco.setOverride(sess.data[1]._id, 'Net', 'tbc');
+  const rpt = tpl.reports[0];
+  const rows = Reco.runReport(tpl, sess, rpt);
+  const tot = Reco._reportColumnTotal(rows, 'Net');
+  const d = document.createElement('div');
+  d.innerHTML = Reco.renderCustomReport(tpl, sess, rpt, 0);
+  const td = d.querySelector('td[data-total-col="Net"]');
+  const nt = d.querySelector('[data-total-note]');
+  const card = Array.from(d.querySelectorAll('.card')).map(c => c.textContent.replace(/\\s+/g,' ').trim());
+  const out = { cells: rows.map(r => String(r.Net)), total: tot,
+                totalText: td ? td.textContent.trim() : null,
+                totalSum: td ? td.getAttribute('data-total-sum') : null,
+                excluded: td ? td.getAttribute('data-total-excluded') : null,
+                note: nt ? nt.textContent.replace(/\\s+/g,' ').trim() : '', cards: card };
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})`;
+
+
+const PORT_MR8 = 21157;     // MR-8  an intent registered while a write is in flight
+const PORT_S111 = 21158;    // T-S10-11 the forced same-reference collision
+
+/* ---- MR-8. A VALUE TYPED WHILE A MERGE WRITE IS IN FLIGHT. Store._mergeJob
+   applied m.intents, awaited the write, and then did `m.intents = []` - so
+   anything pushed during the await was cleared without ever being applied.
+   A write of a shared file is hundreds of milliseconds (600 ms at 50,000
+   records on local disk, plus the wire), and mergeWrite had already armed a
+   fresh timer for the new intent, so a second job ran, took the disk as the
+   authority, and wrote a file without it - AND _takeDisk had replaced memory
+   from that disk, so the value was gone from the screen too. No error, no
+   toast, no second copy: exactly the class T-S10-1 was filed about.
+   Found while chasing a document-number correction that never landed. */
+const MR8_RUN = `(async function () {
+  const id = 'TPL_E';
+  const api = window.pywebview.api;
+  const realWrite = api.write_file;
+  let slow = 0;
+  api.write_file = function (rel) {
+    const args = arguments;
+    if (slow && String(rel) === 'reco/extraValueMaster.json') {
+      const ms = slow;
+      return new Promise(res => setTimeout(() => res(realWrite.apply(api, args)), ms));
+    }
+    return realWrite.apply(api, args);
+  };
+  const put = (pk, col, v) => {
+    const rec = { k:'typed', v: String(v), ds:'', by:'x', at:'' };
+    AppState.extraValueMaster = AppState.extraValueMaster || {};
+    const byTpl = AppState.extraValueMaster[id] || (AppState.extraValueMaster[id] = {});
+    (byTpl[pk] || (byTpl[pk] = {}))[col] = rec;
+    Reco._extraValueFlush(id, map => {
+      const b = map[id] || (map[id] = {});
+      (b[pk] || (b[pk] = {}))[col] = rec;
+    });
+  };
+  const out = {};
+  try {
+    slow = 500;
+    put('INV-1', 'Note', 'first');
+    const running = AppState.flush();                 // starts the slow write
+    await new Promise(r => setTimeout(r, 250));        // it is mid-write now
+    out.inflight = Store.pendingCount() > 0;
+    put('INV-2', 'Note', 'second');                   // the intent that used to be dropped
+    slow = 0;
+    await running;
+    await AppState.flush();
+    if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    await new Promise(r => setTimeout(r, 250));
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+  } finally { api.write_file = realWrite; }
+  const mem = (AppState.extraValueMaster || {})[id] || {};
+  out.mem = { one: ((mem['INV-1']||{}).Note||{}).v || null, two: ((mem['INV-2']||{}).Note||{}).v || null };
+  return out;
+})`;
+
 const procs = [];
 const browser = await chromium.launch();
 try {
@@ -513,7 +1611,7 @@ try {
   note('s2', s2);
 
   /* =====================================================================
-     [4] S7 — decision E. extraValueMaster is NOT in PERSIST_KEYS, and a
+     [3] S7 — decision E. extraValueMaster is NOT in PERSIST_KEYS, and a
      flush with only an unrelated change must not write it AT ALL.
      ===================================================================== */
   section(3, 'S7 — decision E: `extraValueMaster` is not in PERSIST_KEYS');
@@ -547,7 +1645,7 @@ try {
     'S7d AppState.saveKeys ignores it too (it filters to PERSIST_KEYS), so S13 is the only writer', s7.saveKeys);
 
   /* =====================================================================
-     [5] S5 — Reco.storeKey's three clauses.
+     [4] S5 — Reco.storeKey's three clauses.
      ===================================================================== */
   section(4, 'S5 — `Reco.storeKey`: no keys → null, all components blank → null, else row._pk');
   const sk = await ob.page.evaluate(() => {
@@ -630,7 +1728,7 @@ try {
     'S5h and both are on screen, through the legacy arm of the same ladder', legacyBranch);
 
   /* =====================================================================
-     [6] S6 — decision P. Spreadsheet scratch columns must not write
+     [5] S6 — decision P. Spreadsheet scratch columns must not write
      durable shared records, and the cleanup must delete what it orphans.
      ===================================================================== */
   section(5, 'S6 — decision P: a `_ssSingleUse` spreadsheet column never reaches the store');
@@ -731,7 +1829,7 @@ try {
     { before: orphan.before, stillOnDisk: JSON.stringify(orphanDisk || {}).includes('will-be-removed') });
 
   /* =====================================================================
-     [7] S9 — decision T. Every new reader with sess = null.
+     [6] S9 — decision T. Every new reader with sess = null.
      ===================================================================== */
   section(6, 'S9 — decision T: every new reader starts `if (!sess) return null;`');
   const nulls = await ob.page.evaluate(() => {
@@ -761,7 +1859,7 @@ try {
     'S9b every one answers null — for a carry column and for a non-carry column', nulls.results);
 
   /* =====================================================================
-     [8] S8 — S13 under contention, and under readOnlyKeys.
+     [7] S8 — S13 under contention, and under readOnlyKeys.
      ===================================================================== */
   section(7, 'S8 — `Store.mergeWrite`: the operator\'s own writes, and a refusal that speaks once');
   await resetLog(bridgeA);
@@ -845,7 +1943,7 @@ try {
     'S8i and it tells the user ONCE, not once per intent', ro.toasts);
 
   /* =====================================================================
-     [9] S3 — THE GATE. Two pages, one share, different keys, both survive.
+     [8] S3 — THE GATE. Two pages, one share, different keys, both survive.
      ===================================================================== */
   section(8, 'S3 (THE GATE) — two pages typing different keys BOTH survive');
   const B = makeRoot('share-b');
@@ -906,7 +2004,7 @@ try {
   await p1.ctx.close(); await p2.ctx.close();
 
   /* =====================================================================
-     [10] S11 — the escape hatch of decision G.
+     [9] S11 — the escape hatch of decision G.
      ===================================================================== */
   section(9, 'S11 — decision G: reco/extraValues/<tplId>.json is merged at boot and never written back');
   const H = makeRoot('share-hatch');
@@ -957,7 +2055,7 @@ try {
   await h2.ctx.close();
 
   /* =====================================================================
-     [11] S10 — cost. A 2,000-edit burst is ONE write.
+     [10] S10 — cost. A 2,000-edit burst is ONE write.
      ===================================================================== */
   section(10, 'S10 — cost: a 2,000-edit burst is ONE write; wall clock best of 3 (the MINIMUM)');
   const BIG = makeRoot('share-big');
@@ -1143,7 +2241,7 @@ try {
   await bk.ctx.close();
 
   /* =====================================================================
-     [12] Decision U — no new ids, and nothing emitted unconditionally.
+     [11] Decision U — no new ids, and nothing emitted unconditionally.
      ===================================================================== */
   section(11, 'Decision U — the two-pane constraints are untouched');
   const ob3 = await openReco(browser, bridgeA);
@@ -4996,6 +6094,937 @@ try {
     'X8c THE CONTROL: an ordinary share says nothing - the sentence is a limit being reached, not a '
     + 'notice everyone reads every morning', smallBoot);
   await pgBIGF.ctx.close();
+
+
+  /* =====================================================================
+     [49] Z1 — A BROKEN FORMULA POSTED A SILENT ZERO INTO A JOURNAL ENTRY.
+     THE MONEY ROUND. This is the oldest deferred defect in the project and
+     it had never been reproduced, so it is written down here first:
+
+       an added `formula` column AED = NUM({Base})/NUM({Rate}) — an FC-to-AED
+       conversion, and 'AED' is already what the default AEG template's
+       valueColumn is called — on a file where ONE row's Rate cell is 0.
+       A blank or zero rate on one line of an FX extract is ordinary weather.
+
+     MEASURED on the build before the fix (scratchpad/money/out/
+     z1_repro_before.txt), the SAME cell on six surfaces:
+
+       the grid "#ERR" · the read ladder "#ERR" · the report cell "#ERR" ·
+       the CSV "#ERR" · the workbook "#ERR" · THE AEG SOURCE ROW "#ERR"
+       → POSTED ENTRY AEMVAUQHDL, lines Dr 150.00 / Cr 150.00
+
+     INV-1 is worth 50 and INV-2 is worth 100, so the third invoice — the
+     LARGEST of the three by Base — contributed NOTHING to a posted journal
+     entry, was stamped POSTED like the other two, and the only thing the
+     operator saw was "Entry AEMVAUQHDL generated (2 lines)".
+
+     AND THE TICKET'S OWN MECHANISM IS NOT THE ONE THAT BITES. The loop's
+     `catch(e) { r[ac.name] = ''; }` is UNREACHABLE: Formula.evaluate catches
+     internally and RETURNS '#ERR' on both of its paths, so the AEG loop was
+     already reading the same '#ERR' as the grid. The divergence the comment
+     and the ticket both name was never what posted the zero — U.num('#ERR')
+     === 0 inside Reco._buildEntryLines was. That is why shape (a) alone
+     (make the loop say '#ERR') fixes NOTHING, and why the fix is a REFUSAL
+     at the one door into entry history, next to RC-8's.
+     ===================================================================== */
+  section(49, 'Z1 — a formula that cannot be worked out REFUSES the posting (it used to post a zero)');
+  const Z = makeRoot('share-z1');
+  const brZ = await startBridge(Z.root, PORT_Z1); procs.push(brZ.proc);
+  const pz = await openReco(browser, brZ);
+  await pz.page.evaluate(Z1_SETUP + '([true])');
+
+  const z1 = await pz.page.evaluate(Z1_SURFACES + '()');
+  note('Z1 the same cell on five surfaces', { grid: z1.grid, ladder: z1.ladder, report: z1.reportCell,
+    csv: z1.csv, workbook: z1.workbook });
+  note('Z1 the AEG source rows', z1.aegSourceRows);
+  note('Z1 what it WOULD have posted', z1.wouldPost);
+  note('Z1 toasts', z1.toasts);
+  check(z1.grid === '#ERR' && z1.ladder === '#ERR' && z1.reportCell === '#ERR'
+        && z1.csv === '#ERR' && z1.workbook === '#ERR',
+    'Z1a PREMISE: every reader the operator can see says #ERR for INV-3 / AED', z1);
+  check(z1.aegSourceRows.join(' ') === 'INV-1=50 INV-2=100 INV-3=#ERR',
+    'Z1b and the AEG source row now says #ERR TOO — shape (a): the loop\'s own answer no longer '
+    + 'differs from the grid\'s, so the refusal below has ONE sentinel to key on', z1.aegSourceRows);
+  check(z1.wouldPost === 150,
+    'Z1c THE FIGURE THE OLD BUILD POSTED, measured in this run and not quoted: _buildEntryLines over '
+    + 'those three source rows totals 150 because U.num(\'#ERR\') is 0, where INV-3 is the largest '
+    + 'of the three by Base', z1.wouldPost);
+  check(z1.refused === true && z1.pending === null,
+    'Z1d THE GATE: the posting is REFUSED — Reco._pendingEntry is never set, so commitEntryFromPreview '
+    + 'has nothing to commit', { refused: z1.refused, pending: z1.pending });
+  check(z1.histLen === 0,
+    'Z1e AND NOTHING REACHED THE LEDGER (the value, not the toast): entryHistory is still empty',
+    z1.histLen);
+  check(/INV-3/.test(z1.refusal) && /AED/.test(z1.refusal)
+        && /NUM\(\{Base\}\)\/NUM\(\{Rate\}\)/.test(z1.refusal),
+    'Z1f the refusal names the KEY, the COLUMN and the FORMULA that failed, the way RC-8\'s does',
+    z1.refusal);
+
+  /* NOT A BLANKET BLOCK. Correct the rate and the same selection posts, with
+     the figure the three rows are actually worth. Without this the gate could
+     be "refuse everything" and still look green. */
+  const z1ok = await pz.page.evaluate(Z1_FIXRATE + '()');
+  note('Z1 after the rate is corrected', z1ok);
+  check(z1ok.postedDr === 250 && z1ok.histLen === 1,
+    'Z1g THE CONTROL: with Rate corrected to 5 on INV-3 the same selection posts 250 — 50 + 100 + 100, '
+    + 'all three rows in the figure. The refusal is about a cell that cannot be worked out, not about '
+    + 'the template', z1ok);
+
+  /* SCOPE. A broken formula in a column the linked AEG template does not read
+     cannot change a posted number, and refusing on it would change what an
+     existing template can post — which is the objection T-26-4 was deferred
+     for. 'Memo' is not an input column, not the value column, not an
+     aggregateBy, not an account column and not the keyword column. */
+  const z1scope = await pz.page.evaluate(Z1_SCOPE + '()');
+  note('Z1 scope', z1scope);
+  check(z1scope.memo === '#ERR' && z1scope.postedDr === 250 && z1scope.histLen === 2,
+    'Z1h SCOPE: a column reading #ERR that the AEG template never reads does NOT refuse the posting, '
+    + 'and the figure is unchanged', z1scope);
+
+  /* THE KEYWORD COLUMN, and it is the one arm that has to be tested BEFORE
+     the filter. A broken formula there makes the filter DROP the row, so a
+     check over the surviving rows would see nothing wrong and the row would
+     silently not post. RC-8's "after the keyword filter, deliberately" is
+     right for an override and wrong for the cell that decided the filter. */
+  const ZK = makeRoot('share-z1kw');
+  const brZK = await startBridge(ZK.root, PORT_Z1KW); procs.push(brZK.proc);
+  const pzk = await openReco(browser, brZK);
+  await pzk.page.evaluate(Z1_SETUP + '([true])');
+  const z1kw = await pzk.page.evaluate(Z1_KEYWORD + '()');
+  note('Z1 keyword arm', z1kw);
+  check(z1kw.droppedByFilter === 1,
+    'Z1i PREMISE: the keyword filter drops the row whose keyword formula says #ERR — it is not in the '
+    + 'entry, and nothing said so', z1kw);
+  check(z1kw.refused === true && z1kw.histLen === 0 && /INV-3/.test(z1kw.refusal),
+    'Z1j THE GATE for the keyword column is PRE-FILTER: the failure is what decided the row\'s fate, '
+    + 'so the posting is refused and the key is named', z1kw);
+  await pzk.ctx.close();
+
+  /* =====================================================================
+     [50] T-26-5 — A NON-NUMERIC OVERRIDE READ AS A NUMBER IN A TOTAL.
+     RC-8 refuses it at the journal door, so it can no longer reach the
+     ledger. It could still reach a SCREEN total: reviewer A's probe
+     (scratchpad/store/fix/p3.out) read REPORT TOTAL 101.2345 for three rows
+     worth 100 with Net overridden to '1.234,50'. The shipped total row is
+     guarded by U.isNumeric, so the real total was 100 — and SAID NOTHING
+     about the cell it had dropped, which is the same defect from the other
+     side: the column does not add up to what the column shows.
+     ===================================================================== */
+  section(50, 'T-26-5 — a cell that is not a number is out of the total AND the total says so');
+  const T5 = makeRoot('share-t265');
+  const brT5 = await startBridge(T5.root, PORT_T265); procs.push(brT5.proc);
+  const pt5 = await openReco(browser, brT5);
+  await pt5.page.evaluate(T265_SETUP + '()');
+
+  const t5bad = await pt5.page.evaluate(T265_TOTAL + `(['1.234,50'])`);
+  note('T-26-5 with "1.234,50" typed over Net', t5bad);
+  check(t5bad.cells.join(' ') === '40 60 1.234,50',
+    'T265a PREMISE: the report CELL shows the characters that were typed', t5bad.cells);
+  check(t5bad.naive === 101.2345,
+    'T265b and the naive reading of that column — U.num on every cell, which is what reviewer A\'s '
+    + 'probe did and what every other U.num reader of the column still does — is 101.2345',
+    t5bad.naive);
+  check(/^100\.00/.test(String(t5bad.totalText)) && t5bad.totalSum === 100,
+    'T265c THE TOTAL IS NOT 101.2345: the cell U.isNumeric rejects is out of it', t5bad);
+  check(t5bad.excluded === 1,
+    'T265d THE GATE, AS A VALUE: the total carries the COUNT of cells that are not in it', t5bad.excluded);
+  check(/1 cell/.test(t5bad.note) && /Net/.test(t5bad.note) && /1\.234,50/.test(t5bad.note),
+    'T265e and the footnote names the count, the column and the characters, so the operator can see '
+    + 'why the column does not add up', t5bad.note);
+
+  const t5ok = await pt5.page.evaluate(T265_TOTAL + `(['1,234.50'])`);
+  note('T-26-5 CONTROL with "1,234.50"', t5ok);
+  check(t5ok.totalSum === 1334.5 && t5ok.excluded === 0 && t5ok.note === '',
+    'T265f THE CONTROL: an override _setOverride canonicalises (1,234.50 -> 1234.5) is FULLY in the '
+    + 'total and there is no footnote — the note is a cell that cannot be added, not a cell somebody '
+    + 'typed', t5ok);
+
+  const t5blank = await pt5.page.evaluate(T265_TOTAL + `([''])`);
+  note('T-26-5 CONTROL with a deliberate blank', t5blank);
+  check(t5blank.totalSum === 100 && t5blank.excluded === 0 && t5blank.note === '',
+    'T265g THE SECOND CONTROL: an EMPTY override is a deliberate blank, not "not a number" — it has '
+    + 'always been out of every total and nobody reads a blank as an amount, so footnoting it would '
+    + 'put a warning on every sparse column in the app', t5blank);
+  await pt5.ctx.close();
+
+  /* =====================================================================
+     [51] T-26-6 — A POSTED ROW WHOSE KEY LATER BECOMES DUPLICATED.
+     RC-6 suppresses an override whose key stops naming one row, and that is
+     the right call: the alternative multiplies a number into a NEW entry.
+     But if the key had already been POSTED with that override, the ledger
+     holds the typed value and the screen now shows the computed one — the
+     one case where "the screen and the journal cannot disagree" does not
+     hold. What was missing is that nothing said so.
+     ===================================================================== */
+  section(51, 'T-26-6 — the duplicate-key panel names the keys that are POSTED, and the reference');
+  const T6 = makeRoot('share-t266');
+  const brT6 = await startBridge(T6.root, PORT_T266); procs.push(brT6.proc);
+  const pt6 = await openReco(browser, brT6);
+  await pt6.page.evaluate(T266_SETUP + '()');
+  const t6 = await pt6.page.evaluate(T266_RUN + '()');
+  note('T-26-6', { posted: t6.postedDr, entry: t6.accountingId, screenAfter: t6.screenAfter,
+    recStill: t6.recStill, dup: t6.dupCount });
+  note('T-26-6 the panel', String(t6.panel || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 700));
+  check(t6.postedDr === 1000,
+    'T266a PREMISE: the entry posted the OVERRIDE — 1000, not the 20 the formula says', t6.postedDr);
+  check(t6.screenAfter === '20' && t6.recStill === '1000',
+    'T266b and once a duplicate of that key arrives, the screen falls back to the computed 20 while '
+    + 'the LEDGER still holds 1000 and the record is still on the share', t6);
+  check(/INV-7/.test(t6.postedBlock) && t6.postedBlock.indexOf(t6.accountingId) !== -1,
+    'T266c THE GATE: the panel names that key as POSTED and names the ACCOUNTING REFERENCE the ledger '
+    + 'holds it under, so the answer is "reverse AEG-… first" rather than "why has my number changed"',
+    { block: t6.postedBlock, ref: t6.accountingId });
+  check(/general ledger/.test(t6.postedBlock) && /1000/.test(t6.postedBlock),
+    'T266d and it says which way round it is — the ledger holds the override, the screen shows the '
+    + 'computed value — with the amount the ledger holds', t6.postedBlock);
+  check(t6.unpostedNamed === true && t6.unpostedRefd === false,
+    'T266e THE CONTROL: a suppressed override on a key that was NEVER posted is still named as '
+    + 'suppressed and is NOT given an accounting reference it does not have', t6);
+  await pt6.ctx.close();
+
+  /* =====================================================================
+     [52] T-S10-1 — entryHistory AND docNumberMaster NOW MERGE-WRITE.
+     S13's own comment names three callers: the values store, entryHistory at
+     its pre-write re-read site, and docNumberMaster. Phase 1 converted only
+     the store, because the other two are in PERSIST_KEYS and membership IS
+     the blind overwrite. Two colleagues generating entries minutes apart
+     lost one of them: the later writer's whole-file entryHistory write drops
+     the entry the earlier one added, while the earlier one's rows keep their
+     Posted stamp — a closed row with no accounting record behind it.
+     ===================================================================== */
+  section(52, 'T-S10-1 — two colleagues generating entries at once BOTH keep their entry');
+  const SA = makeRoot('share-s101');
+  const brSA = await startBridge(SA.root, PORT_S101); procs.push(brSA.proc);
+  const pa = await openReco(browser, brSA);
+  await pa.page.evaluate(S101_SETUP + '()');
+
+  const s101keys = await pa.page.evaluate(() => ({
+    persist: AppState.PERSIST_KEYS.slice(),
+    eh: typeof AppState.entryHistory, dn: typeof AppState.docNumberMaster
+  }));
+  check(s101keys.persist.indexOf('entryHistory') === -1 && s101keys.persist.indexOf('docNumberMaster') === -1,
+    'S101a neither key is in PERSIST_KEYS any more — membership IS the blind overwrite',
+    s101keys.persist);
+  check(s101keys.eh === 'object' && s101keys.dn === 'object',
+    'S101b but both are still assigned in AppState.load and are still objects', s101keys);
+
+  await resetLog(brSA);
+  await pa.page.evaluate(async () => {
+    const sess = AppState.recoSessions.TPL_E;
+    sess.page = (sess.page || 0) + 1;            // an unrelated change
+    await AppState.flush(); await Store.idle();
+  });
+  const logS101 = await callLog(brSA);
+  check(writesOf(logS101, 'reco/entryHistory.json') === 0
+        && writesOf(logS101, 'reco/docNumberMaster.json') === 0,
+    'S101c an AppState.flush() with only an unrelated change writes NEITHER ledger file',
+    logS101.filter(c => c.method === 'write_file').map(c => c.arg0));
+
+  /* Page B boots AFTER A's template and rows are on the share and BEFORE A
+     posts anything, so its in-memory entryHistory pre-dates A's entry —
+     which is the whole condition. */
+  const pb = await openReco(browser, brSA);
+  const s101bSees = await pb.page.evaluate(() => ({
+    rows: (AppState.recoSessions.TPL_E || { data: [] }).data.length,
+    hist: JSON.stringify(AppState.entryHistory || {}), dn: JSON.stringify(AppState.docNumberMaster || {})
+  }));
+  note('page B booted with', s101bSees);
+
+  const s101ea = await pa.page.evaluate(S101_POST + `([['INV-1','INV-2']])`);
+  const s101bStill = await pb.page.evaluate(() => JSON.stringify(AppState.entryHistory || {}));
+  const s101eb = await pb.page.evaluate(S101_POST + `([['INV-3','INV-4']])`);
+  note('A posted', s101ea); note('B posted', s101eb);
+  note('B could not have known about A\'s entry', { itsMemoryBefore: s101bStill });
+
+  const s101fileEH = diskJson(SA.root, 'reco/entryHistory.json');
+  const s101fileDN = diskJson(SA.root, 'reco/docNumberMaster.json');
+  const s101ids = ((s101fileEH || {}).TPL_E || []).map(e => e && e.accountingId);
+  note('reco/entryHistory.json holds', s101ids);
+  note('reco/docNumberMaster.json holds', (s101fileDN || {}).TPL_E);
+  check(s101ids.indexOf(s101ea.accountingId) !== -1,
+    'S101d A\'s entry is in reco/entryHistory.json', { want: s101ea.accountingId, got: s101ids });
+  check(s101ids.indexOf(s101eb.accountingId) !== -1 && s101ids.length === 2,
+    'S101e THE GATE: B\'s entry is there TOO, and there are exactly two — B\'s write re-read the share '
+    + 'and merged instead of replacing the file with its own stale copy',
+    { want: s101eb.accountingId, got: s101ids });
+  const s101dnm = (s101fileDN || {}).TPL_E || {};
+  check(s101dnm['D1'] === s101ea.accountingId && s101dnm['D2'] === s101ea.accountingId
+        && s101dnm['D3'] === s101eb.accountingId && s101dnm['D4'] === s101eb.accountingId,
+    'S101f and all four document numbers are in reco/docNumberMaster.json, each pointing at the entry '
+    + 'that actually posted it — which is what the duplicate-document check reads', s101dnm);
+
+  /* A document number allocated by hand goes through the same door: it
+     mutates an entry INSIDE entryHistory, so the intent has to re-find the
+     entry on the freshly read file rather than mutating a detached copy. */
+  const s101alloc = await pa.page.evaluate(S101_ALLOC + `([${JSON.stringify('')}])`);
+  note('A allocated', s101alloc);
+  const s101fileEH2 = diskJson(SA.root, 'reco/entryHistory.json');
+  const s101aEntry = ((s101fileEH2 || {}).TPL_E || []).find(e => e && e.accountingId === s101alloc.accountingId);
+  const s101bEntry = ((s101fileEH2 || {}).TPL_E || []).find(e => e && e.accountingId === s101eb.accountingId);
+  check(!!(s101aEntry && s101aEntry.docNumbers && s101aEntry.docNumbers.AED === 'GL-9001'),
+    'S101g a document number allocated by hand reaches the share ON the entry it belongs to', s101aEntry && s101aEntry.docNumbers);
+  check(!!s101bEntry && ((s101fileEH2 || {}).TPL_E || []).length === 2,
+    'S101h and B\'s entry is still there afterwards — the allocate write is a merge, not a replacement',
+    ((s101fileEH2 || {}).TPL_E || []).map(e => e && e.accountingId));
+  check(((diskJson(SA.root, 'reco/docNumberMaster.json') || {}).TPL_E || {})['GL-9001'] === s101alloc.accountingId,
+    'S101i and the number is in the document-number master, which is the other file this ticket is about',
+    (diskJson(SA.root, 'reco/docNumberMaster.json') || {}).TPL_E);
+
+  /* And an entry written onto the share by a THIRD party between two of our
+     writes — a colleague's client this test does not run. */
+  const s101outEH = JSON.parse(fs.readFileSync(path.join(SA.root, 'reco/entryHistory.json'), 'utf8'));
+  s101outEH.TPL_E.push({ accountingId: 'AE-COLLEAGUE', lines: [], createdBy: 'colleague', docNumbers: {} });
+  fs.writeFileSync(path.join(SA.root, 'reco/entryHistory.json'), JSON.stringify(s101outEH));
+  const s101outDN = JSON.parse(fs.readFileSync(path.join(SA.root, 'reco/docNumberMaster.json'), 'utf8'));
+  s101outDN.TPL_E['D9'] = 'AE-COLLEAGUE';
+  fs.writeFileSync(path.join(SA.root, 'reco/docNumberMaster.json'), JSON.stringify(s101outDN));
+  const s101ec = await pb.page.evaluate(S101_POST + `([['INV-5','INV-6']])`);
+  const s101fileEH3 = diskJson(SA.root, 'reco/entryHistory.json');
+  const s101fileDN3 = diskJson(SA.root, 'reco/docNumberMaster.json');
+  const s101ids3 = ((s101fileEH3 || {}).TPL_E || []).map(e => e && e.accountingId);
+  check(s101ids3.indexOf('AE-COLLEAGUE') !== -1 && s101ids3.indexOf(s101ec.accountingId) !== -1 && s101ids3.length === 4,
+    'S101j an entry written onto the share between two of our writes is NOT destroyed by the next one',
+    s101ids3);
+  check(((s101fileDN3 || {}).TPL_E || {})['D9'] === 'AE-COLLEAGUE',
+    'S101k nor is their document number', (s101fileDN3 || {}).TPL_E);
+  await pb.ctx.close();
+  await pa.ctx.close();
+
+  /* =====================================================================
+     [53] T-30-3 — THE ONE-TIME PROMOTION ON A DUPLICATE KEY.
+     A duplicate _pk is a tolerated state and a k:'typed' record deliberately
+     broadcasts to every row with the key — broadcasting a note is the
+     feature. But the promotion walked sess.data in order and wrote ONE
+     record per key, so two rows sharing a key with DIFFERENT legacy values
+     lost one of them silently: last row wins, and the legacy entry the
+     loser came from is deleted in the same pass, so there is no second copy
+     and no warning.
+     ===================================================================== */
+  section(53, 'T-30-3 — a duplicate key with two different legacy values is NAMED, and neither is lost');
+  const T3 = makeRoot('share-t303');
+  const brT3 = await startBridge(T3.root, PORT_T303); procs.push(brT3.proc);
+  const pt3 = await openReco(browser, brT3);
+  await pt3.page.evaluate(T303_SETUP + '()');
+
+  /* Rows, in ingest order: INV-7/Alice, INV-7/Bob, INV-8/Carol, INV-9/Dave, INV-9/Dave. */
+  const t3yes = await pt3.page.evaluate(T303_RUN + `(['TPL_C', true])`);
+  note('T-30-3 answered YES', { asked: t3yes.asked, promoted: t3yes.promoted, rows: t3yes.rows });
+  note('T-30-3 toasts', t3yes.toasts);
+  check(/INV-7/.test(t3yes.conflictText) && /Alice/.test(t3yes.conflictText) && /Bob/.test(t3yes.conflictText),
+    'T303a THE GATE: the conflicting key is NAMED, with both values, in one confirm',
+    t3yes.conflictText || t3yes.allAsks);
+  check(t3yes.rows[0].tag === 'Alice' && t3yes.rows[1].tag === 'Bob',
+    'T303b AND NEITHER VALUE IS DELETED: both legacy entries are still in sess.manualTags, so nothing '
+    + 'is gone whichever way the operator answers', t3yes.rows.slice(0, 2));
+  check(t3yes.rows[0].rec === null && t3yes.rows[1].rec === null,
+    'T303c no record was written for the conflicting key — the promotion cannot pick between two '
+    + 'values, and picking is what deleted the loser with no second copy', t3yes.rows.slice(0, 2));
+  check(t3yes.rows[2].rec === 'Carol' && t3yes.rows[2].tag === null,
+    'T303d the NON-CONFLICTING cells are still promoted, and their legacy entry is cleaned up as '
+    + 'before — one truth per cell', t3yes.rows[2]);
+  check(t3yes.rows[3].rec === 'Dave' && t3yes.rows[4].rec === 'Dave'
+        && t3yes.rows[3].tag === null && t3yes.rows[4].tag === null,
+    'T303e and a duplicate key whose two rows hold the SAME value is NOT a conflict: there is nothing '
+    + 'to pick between, and broadcasting that one value to both rows is the feature',
+    t3yes.rows.slice(3));
+  check(t3yes.promoted === 3,
+    'T303f the toast counts the cells actually promoted (INV-8 once, INV-9 twice), not the five it '
+    + 'walked', { promoted: t3yes.promoted, toasts: t3yes.toasts });
+
+  const t3no = await pt3.page.evaluate(T303_RUN + `(['TPL_D', false])`);
+  note('T-30-3 answered NO', { asked: t3no.asked, promoted: t3no.promoted, rows: t3no.rows });
+  check(t3no.asked === true && t3no.rows.every(r => r.rec === null),
+    'T303g DECLINING THE CONFIRM PROMOTES NOTHING — the confirm has something to decide, which is '
+    + 'what makes it a question rather than a notice', t3no.rows);
+  check(t3no.rows[2].tag === 'Carol' && t3no.rows[0].tag === 'Alice' && t3no.rows[1].tag === 'Bob',
+    'T303h ...AND DELETES NOTHING: every legacy value is exactly where it was', t3no.rows);
+
+  const t3clean = await pt3.page.evaluate(T303_RUN + `(['TPL_Q', true])`);
+  note('T-30-3 CONTROL (no duplicate keys)', { asked: t3clean.asked, promoted: t3clean.promoted,
+    rows: t3clean.rows, asks: t3clean.allAsks });
+  check(t3clean.conflictText === '' && t3clean.rows[0].rec === 'Zoe' && t3clean.promoted === 1,
+    'T303i THE CONTROL: a template with no duplicate keys promotes SILENTLY, exactly as it did before '
+    + '— the dialog is a conflict, not a new step in saving a template', t3clean);
+  await pt3.ctx.close();
+
+
+  /* =====================================================================
+     [54] MR-1 — Z1'S TWO OPEN DOORS. The refusal built last round stopped
+     the honest operator and passed the one who did what its own message
+     asked. Both doors put the SAME wrong number into the ledger, so both
+     are measured here as FIGURES READ OFF reco/entryHistory.json, never as
+     the presence of a toast.
+     ===================================================================== */
+  section(54, 'MR-1 — an override on an ‘#ERR’ cell, and a Special JV bucket, are refused too');
+  const R9 = makeRoot('share-rc9ov');
+  const brR9 = await startBridge(R9.root, PORT_MR1OV); procs.push(brR9.proc);
+  const pr9 = await openReco(browser, brR9);
+  await pr9.page.evaluate(Z1_SETUP + '([true])');
+
+  const r9apo = await pr9.page.evaluate(MR1_OV + `([${JSON.stringify("'500")}])`);
+  note('MR-1 the Excel text-forcing apostrophe', r9apo);
+  check(r9apo.cell === "'500" && r9apo.override && r9apo.override.prev === '#ERR',
+    'MR1a PREMISE: the override is stored verbatim and the cell shows it, and what it replaced was '
+    + '#ERR — so RC-8\'s `prev` test could never fire for exactly the cell Z1 refuses over', r9apo);
+  check(r9apo.refused === true && r9apo.histLen === 0 && r9apo.dr === undefined,
+    'MR1b THE GATE: the posting is REFUSED. Before this it posted Dr 150 for three rows worth '
+    + '150 + INV-3 — INV-3 contributed nothing, had no journal line and was stamped POSTED',
+    { refused: r9apo.refused, histLen: r9apo.histLen, dr: r9apo.dr });
+  check(r9apo.stamped.length === 0 && !diskJson(R9.root, 'reco/entryHistory.json'),
+    'MR1c and NOTHING was stamped and nothing reached reco/entryHistory.json',
+    { stamped: r9apo.stamped, file: diskJson(R9.root, 'reco/entryHistory.json') });
+  check(/INV-3/.test(String(r9apo.toasts)) && /AED/.test(String(r9apo.toasts))
+        && /not a number/.test(String(r9apo.toasts)) && /read by this journal entry/.test(String(r9apo.toasts)),
+    'MR1d the refusal names the key, the column, the characters, and WHY a non-numeric cell whose '
+    + 'previous value was also non-numeric still counts here', r9apo.toasts);
+
+  const r9eu = await pr9.page.evaluate(MR1_OV + `([${JSON.stringify('1.234,50')}])`);
+  note('MR-1 the European decimal comma', r9eu);
+  check(r9eu.refused === true && r9eu.histLen === 0,
+    'MR1e the other shape RC-8 was written about is refused too: a cell reading 1.234,50 used to '
+    + 'reach the general ledger as Dr 151.23', r9eu);
+
+  const r9ok = await pr9.page.evaluate(MR1_OV + `([${JSON.stringify('250')}])`);
+  note('MR-1 CONTROL, the remedy the refusal asks for', r9ok);
+  check(r9ok.refused === false && r9ok.dr === 400 && r9ok.histLen === 1,
+    'MR1f THE CONTROL: a plain number typed over the broken cell POSTS, and the figure is '
+    + '50 + 100 + 250 = 400 — the gate passes the remedy its own message asks for', r9ok);
+  const r9file = ((diskJson(R9.root, 'reco/entryHistory.json') || {}).TPL_Z || []);
+  check(r9file.length === 1 && r9file[0].accountingId === r9ok.accountingId,
+    'MR1g ...and that entry, and only that entry, is on the shared folder',
+    r9file.map(e => e && e.accountingId));
+  await pr9.ctx.close();
+
+  /* DECISION J.8 IS UNTOUCHED, and this is the test that says what was
+     narrowed: the `prev` relaxation applies ONLY to a column this entry
+     reads. A column that was textual all along still takes a non-numeric
+     override and still posts. */
+  const RJ8 = makeRoot('share-rc9j8');
+  const brRJ8 = await startBridge(RJ8.root, PORT_MR1J8); procs.push(brRJ8.proc);
+  const prj8 = await openReco(browser, brRJ8);
+  const r9j8 = await prj8.page.evaluate(MR1_J8 + '()');
+  note('MR-1 decision J.8', r9j8);
+  check(!!r9j8.rec && r9j8.rec.k === 'override' && r9j8.rec.v === 'see email'
+        && !/^-?[\d]/.test(String(r9j8.rec.prev)),
+    'MR1h PREMISE: a column that was NOT a number to begin with has been typed over with text — '
+    + 'the exact case decision J.8 is about, and the one the `prev` test exists to protect. (RC-8 '
+    + 'already refuses a non-numeric override over a NUMERIC previous value, on any column; that '
+    + 'half is untouched.)', r9j8.rec);
+  check(r9j8.refused === false && r9j8.dr === 400,
+    'MR1i THE SCOPE: because the linked AEG template never reads that column, the posting is NOT '
+    + 'refused and the figure is unchanged (100 + 300). The relaxation is scoped to a column the '
+    + 'journal reads as an amount, not to every non-numeric override', r9j8);
+  await prj8.ctx.close();
+
+  const RJV = makeRoot('share-rc9jv');
+  const brRJV = await startBridge(RJV.root, PORT_MR1JV); procs.push(brRJV.proc);
+  const prjv = await openReco(browser, brRJV);
+  const r9jv = await prjv.page.evaluate(MR1_JV + '([true])');
+  note('MR-1 the Special JV door', r9jv);
+  check(String(r9jv.cells) === 'INV-1=50,INV-2=100,INV-3=#ERR',
+    'MR1j PREMISE: AED reads #ERR on INV-3, and the AEG template does not read AED at all — the JV '
+    + 'does', r9jv.cells);
+  check(r9jv.refused === true && r9jv.histLen === 0 && r9jv.stamped.length === 0,
+    'MR1k THE GATE: a row bucketed to a Special JV is judged on THAT JV\'s input columns, so the '
+    + 'posting is refused. Before this, Reco handed the JV page "AED":"#ERR" and an aggregating JV '
+    + 'posted Dr 150 for three rows worth 650 with all three stamped POSTED', r9jv);
+  check(/TCHX/.test(String(r9jv.toasts)) && /INV-3/.test(String(r9jv.toasts)),
+    'MR1l and the refusal names the Special JV the row would have been sent to', r9jv.toasts);
+
+  const r9jv0 = await prjv.page.evaluate(MR1_JV + '([false])');
+  note('MR-1 CONTROL: a JV that does not read the broken column', r9jv0);
+  check(r9jv0.refused === false && r9jv0.dr === 900 && r9jv0.histLen === 1,
+    'MR1m THE CONTROL, which is Z1h from the JV side: when neither the AEG template NOR the JV '
+    + 'reads AED, the same three rows post, and the figure is the JV\'s own 100 + 300 + 500 = 900. '
+    + 'A broken formula in a column nothing reads does not refuse', r9jv0);
+  await prjv.ctx.close();
+
+  /* =====================================================================
+     [55] MR-2 — A FAILED LEDGER WRITE IS RETRIED, AND THE ERROR SURVIVES.
+     Store._mergeJob called _retryLater only in the unreadable-READ branch;
+     a failed WRITE armed no timer, and m.intents is cleared only on
+     success. So the entry stayed in memory for ever with its rows stamped
+     POSTED on the share, and Store._enqueue had already wiped the error.
+     ===================================================================== */
+  section(55, 'MR-2 — a ledger write that fails is retried, and the failure outlives its toast');
+  const R11 = makeRoot('share-rc11');
+  const brR11 = await startBridge(R11.root, PORT_MR2); procs.push(brR11.proc);
+  const pr11 = await openReco(browser, brR11);
+  await pr11.page.evaluate(S101_SETUP + '()');
+  const r11 = await pr11.page.evaluate(MR2_RUN + '([400])');
+  note('MR-2 while the folder refused the write', r11.whileDown);
+  note('MR-2 after it answered again', r11.after);
+  check(r11.whileDown.lastError === 'entryHistory: OSError: the shared folder refused the write',
+    'MR2a Store.lastError still NAMES the failure after the flush — Store._enqueue used to treat '
+    + 'the caught write failure as a success and wipe it, which is why the reversal dialog\'s own '
+    + '"The last save error was:" sentence could never appear', r11.whileDown);
+  check(r11.whileDown.problems === 1,
+    'MR2b and it is in Store.loadProblems, which outlives a four-second toast', r11.whileDown);
+  const r11file = ((diskJson(R11.root, 'reco/entryHistory.json') || {}).TPL_E || []);
+  check(r11file.length === 1 && r11file[0].accountingId === r11.accountingId,
+    'MR2c THE GATE, AS A VALUE ON THE SHARE: the entry reached reco/entryHistory.json once the '
+    + 'folder answered, with nobody retyping anything. Before this it never arrived',
+    { want: r11.accountingId, got: r11file.map(e => e && e.accountingId) });
+  const r11dr = (r11file[0] ? (r11file[0].lines || []) : []).reduce((s, l) => {
+    const v = l && l.Dr;
+    const n = parseFloat(String((v && typeof v === 'object' ? v.value : v) || '0').replace(/,/g, ''));
+    return s + (isFinite(n) ? n : 0);
+  }, 0);
+  check(r11file.length === 1 && Math.abs(r11dr - r11.dr) < 0.005,
+    'MR2d ...and it is the same FIGURE that was previewed, not a re-derived one',
+    { previewed: r11.dr, onShare: r11dr });
+  check(r11.after.problems === 0,
+    'MR2e and the problem line is withdrawn once the write lands, so nothing says "still owed" '
+    + 'about a file that has it', r11.after);
+  await pr11.ctx.close();
+
+  /* =====================================================================
+     [56] MR-4 / MR-6 — THE TWO LEDGER KEYS ARE LATCHED AT BOOT, and
+     Generate refuses when they are. readJson's "starting it empty" branch
+     is honest for a whole-file PERSIST_KEY because flush() re-creates it;
+     these two left PERSIST_KEYS and are written only through mergeWrite, so
+     for them nothing is written for the rest of the session.
+     ===================================================================== */
+  section(56, 'MR-4/MR-6 — a damaged ledger file is latched at boot, and Generate says so');
+  const R13 = makeRoot('share-rc13');
+  const brR13 = await startBridge(R13.root, PORT_MR4); procs.push(brR13.proc);
+  const pr13 = await openReco(browser, brR13);
+  await pr13.page.evaluate(S101_SETUP + '()');
+  await pr13.ctx.close();
+  // a half-written file, the shape a share that dropped mid-write leaves
+  fs.writeFileSync(path.join(R13.root, 'reco/entryHistory.json'),
+    '{"TPL_E":[{"accountingId":"AEHALFWRIT');
+  fs.writeFileSync(path.join(R13.root, 'reco/docNumberMaster.json'), '{"TPL_E":{"D1":');
+  const pr13b = await openReco(browser, brR13);
+  const r13 = await pr13b.page.evaluate(() => ({
+    ehLatched: !!Store.readOnlyKeys.entryHistory,
+    dnLatched: !!Store.readOnlyKeys.docNumberMaster,
+    problems: Store.loadProblems.slice()
+  }));
+  note('MR-4 the boot', r13);
+  check(r13.ehLatched === true && r13.dnLatched === true,
+    'MR4a BOTH ledger keys are latched read-only AT BOOT, exactly as extraValueMaster is (X1f/X1g)',
+    r13);
+  check(r13.problems.some(s => /entryHistory/.test(s) && /nothing is being saved to it in this session/.test(s))
+        && !r13.problems.some(s => /entryHistory/.test(s) && /starting it empty/.test(s)),
+    'MR4b and the boot message is the honest one — "nothing is being saved to it in this session", '
+    + 'never "starting it empty", which has not been true since the key left PERSIST_KEYS',
+    r13.problems);
+  const r13q = fs.readdirSync(path.join(R13.root, 'reco/_corrupt'));
+  check(r13q.filter(f => /^entryHistory_/.test(f)).length === 1,
+    'MR4c and the damaged file is quarantined ONCE, not once by each reader — two copies of one '
+    + 'file with two timestamps is its own kind of wrong', r13q);
+
+  const r15 = await pr13b.page.evaluate(MR6_RUN + '()');
+  note('MR-6 Generate on a latched ledger', { modal: String(r15.modal).slice(0, 200),
+    histLen: r15.histLen, stamped: r15.stamped });
+  check(r15.histLen === 0 && r15.stamped.length === 0,
+    'MR6a THE GATE: Generate is REFUSED and NO ROW IS STAMPED. Before this the operator was told '
+    + '"Entry … generated", the rows were stamped POSTED on the share, and nothing would ever be '
+    + 'written to that file', { histLen: r15.histLen, stamped: r15.stamped });
+  check(/cannot be written|could not be read when this app started/.test(String(r15.modal)),
+    'MR6b and it says why, and what to do about it — the reversal door has refused on exactly '
+    + 'this since it was built', String(r15.modal).slice(0, 300));
+  const r15sess = diskJson(R13.root, 'reco/recoSessions.json') || {};
+  const r15rows = (((r15sess.TPL_E || {}).data) || []).filter(r => String(r.Desc) === 'POSTED');
+  check(r15rows.length === 0,
+    'MR6c and nothing on the SHARE reads POSTED either', r15rows.map(r => r._pk));
+  await pr13b.ctx.close();
+
+  /* =====================================================================
+     [57] T-S10-10 — TWO COLLEAGUES, GENUINELY OVERLAPPED. Section [52]
+     drives its two pages SEQUENTIALLY, which is the one timing at which the
+     per-page merge cannot lose anything. Pressed together, the write is
+     still not atomic BETWEEN pages (there is no compare-and-swap in the
+     bridge), so the entry is re-read after the dust settles and replayed.
+     This is the gate on that window: it reads green here and it read RED at
+     a 1,000 ms and a 3,000 ms stagger on 9a597da.
+     ===================================================================== */
+  section(57, 'T-S10-10 — two colleagues pressing Generate at the same moment keep both entries');
+  const S9 = makeRoot('share-s109');
+  const brS9 = await startBridge(S9.root, PORT_S109); procs.push(brS9.proc);
+  const p9a = await openReco(browser, brS9);
+  await p9a.page.evaluate(S101_SETUP + '()');
+  const p9b = await openReco(browser, brS9);
+  const [s9a, s9b] = await Promise.all([
+    p9a.page.evaluate(S109_POST + `([['INV-1','INV-2']])`),
+    p9b.page.evaluate(S109_POST + `([['INV-3','INV-4']])`)
+  ]);
+  note('T-S10-10 both posted', { a: s9a.accountingId, b: s9b.accountingId });
+  // past the settle, then one more flush on each page
+  await new Promise(r => setTimeout(r, 1600));
+  for (const p of [p9a, p9b]) await p.page.evaluate(async () => {
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle(); });
+  await new Promise(r => setTimeout(r, 300));
+  const s9ids = ((diskJson(S9.root, 'reco/entryHistory.json') || {}).TPL_E || [])
+    .map(e => e && e.accountingId);
+  const s9dn = (diskJson(S9.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  note('T-S10-10 reco/entryHistory.json holds', s9ids);
+  note('T-S10-10 reco/docNumberMaster.json holds', s9dn);
+  check(s9ids.indexOf(s9a.accountingId) !== -1 && s9ids.indexOf(s9b.accountingId) !== -1,
+    'S109a BOTH entries are on the shared folder after two OVERLAPPED Generates (Promise.all). One '
+    + 'of them used to be gone, with that colleague\'s rows stamped POSTED and nothing behind them, '
+    + 'and their own write having SUCCEEDED so nothing told them',
+    { a: s9a.accountingId, b: s9b.accountingId, got: s9ids });
+  check(s9dn['D1'] === s9a.accountingId && s9dn['D2'] === s9a.accountingId
+        && s9dn['D3'] === s9b.accountingId && s9dn['D4'] === s9b.accountingId,
+    'S109b and all four document numbers survive, each pointing at the entry that posted it — '
+    + 'losing one means a re-upload of the same data is not flagged as already processed', s9dn);
+  /* ---- T-S10-11. THE TWO ASSERTIONS S109a AND S109b CANNOT MAKE, and the
+     reason they both read GREEN over a lost entry on 5f61d76: they ask
+     whether each id is PRESENT, and when the two windows mint the SAME id
+     both lookups hit the same single record. 'AE'+base36(now) is one number
+     per millisecond, so a Promise.all at a 0 ms stagger produced
+     posted ["AEMVAYN4CT","AEMVAYN4CT"] with the file holding ONE entry —
+     one operator's journal entry gone, their rows stamped POSTED, their own
+     write having succeeded, and nothing anywhere saying so. Count the file
+     and compare the strings. */
+  check(s9a.accountingId !== s9b.accountingId,
+    'S109c the two accounting references DIFFER. Minted in the same millisecond they used to be '
+    + 'the SAME string, which made each window\'s append a no-op against the other\'s record — '
+    + 'one entry silently discarded and the two indistinguishable everywhere downstream (the '
+    + 'reversal takes the first match, docNumberMaster names one of them, _postedAuditIndex '
+    + 'resolves a row to whichever it met first)',
+    { a: s9a.accountingId, b: s9b.accountingId });
+  check(s9ids.length === 2,
+    'S109d and reco/entryHistory.json holds TWO entries, not one wearing two names',
+    { n: s9ids.length, ids: s9ids });
+  check(/^AE[0-9A-Z]{2,}$/.test(String(s9a.accountingId))
+        && String(s9a.accountingId).length === String(s9b.accountingId).length,
+    'S109e both references still have the shape people quote — AE + base-36, same length in '
+    + 'both windows. The fix lengthens the reference by two characters; it must not make it '
+    + 'ragged', { a: s9a.accountingId, b: s9b.accountingId });
+  /* ---- AND THE MECHANISM, NOT ONLY THE OUTCOME. S109c/S109d would still
+     read green with the suffix removed, because the content test in the
+     append re-mints the loser anyway - which is the fix doing its job, and
+     exactly why they cannot be the gate on option (a). Two windows colliding
+     is a 1-in-1,296 event now, so measuring it across two pages would be a
+     coin flip; these two measure the property that MAKES it 1 in 1,296,
+     inside one page and with no timing in the answer. */
+  const s9tag = await p9a.page.evaluate(() => {
+    const t0 = U.accountingId();
+    const start = Date.now();
+    while (Date.now() === start) { /* cross one millisecond, at most 1 ms */ }
+    const t1 = U.accountingId();
+    const keep = U._aeTag;
+    const tags = new Set();
+    for (let i = 0; i < 300; i++) { U._aeTag = ''; tags.add(U.accountingId().slice(-2)); }
+    U._aeTag = keep;
+    return { t0: t0, t1: t1, tail0: t0.slice(-2), tail1: t1.slice(-2),
+             head0: t0.slice(0, -2), head1: t1.slice(0, -2),
+             distinct: tags.size, sample: Array.from(tags).slice(0, 6) };
+  });
+  note('T-S10-11 two mints one millisecond apart', s9tag);
+  check(s9tag.tail0 === s9tag.tail1 && s9tag.head0 !== s9tag.head1
+        && /^[0-9A-Z]{2}$/.test(s9tag.tail0),
+    'S109f the last two characters of the reference are a PER-WINDOW suffix and not more clock: '
+    + 'two mints a millisecond apart share them while everything before them changes. Without '
+    + 'them the whole reference is one number per millisecond, which is what made two windows '
+    + 'mint the same string', s9tag);
+  check(s9tag.distinct >= 2,
+    'S109g and the suffix is DRAWN per window rather than compiled in: 300 fresh draws produce '
+    + 'more than one value. A constant would keep the reference two characters longer and leave '
+    + 'the collision at 1 in 1', { distinct: s9tag.distinct, sample: s9tag.sample });
+  await p9b.ctx.close();
+  await p9a.ctx.close();
+
+  /* =====================================================================
+     [57b] T-S10-11 — THE SAME REFERENCE, FORCED. [57] measures that two
+     windows minting at the same instant no longer produce the same string;
+     this measures what happens when they DO, which is the 1-in-1,296 the
+     suffix leaves behind and the state every build before it was in
+     permanently. The mint is pinned to one string in both windows and the
+     posts are SEQUENTIAL, so there is no timing in the answer: the second
+     window reads a file that already holds its reference under somebody
+     else's entry, and the only acceptable outcome is two entries on the
+     share. On 5f61d76 the second append skipped and the file held one.
+     ===================================================================== */
+  section('57b', 'T-S10-11 — an entry whose reference is already taken is RE-MINTED, not dropped');
+  const SB = makeRoot('share-s111');
+  const brSB = await startBridge(SB.root, PORT_S111); procs.push(brSB.proc);
+  const pba = await openReco(browser, brSB);
+  await pba.page.evaluate(S101_SETUP + '()');
+  /* ---- B BOOTS BEFORE ANYTHING IS POSTED, and that ordering IS the section.
+     AppState.entryHistory is read once at boot, so a B that opens after A has
+     posted already holds A's entry and the in-window uniqueness guard at the
+     mint site sidesteps the collision on its own - which is real, and is
+     ALREADY what [52] and [57] exercise. The case that reached the append and
+     lost an entry is the colleague whose window was open the whole time: the
+     reference it meets is on the SHARE and nowhere in its memory. Measured:
+     with this line below A's post instead of above it, the section reads
+     green against an append that skips on the reference alone. */
+  const pbb = await openReco(browser, brSB);
+  const pbPin = await pba.page.evaluate(S111_PIN + `(['AEPINNED1'])`);
+  await pbb.page.evaluate(S111_PIN + `(['AEPINNED1'])`);
+  const sba = await pba.page.evaluate(S109_POST + `([['INV-1','INV-2']])`);
+  const pbbBlind = await pbb.page.evaluate(
+    () => ((AppState.entryHistory || {}).TPL_E || []).map(e => e && e.accountingId));
+  const sbb = await pbb.page.evaluate(S109_POST + `([['INV-3','INV-4']])`);
+  await new Promise(r => setTimeout(r, 1600));
+  for (const p of [pba, pbb]) await p.page.evaluate(async () => {
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle(); });
+  await new Promise(r => setTimeout(r, 300));
+  const sbList = (diskJson(SB.root, 'reco/entryHistory.json') || {}).TPL_E || [];
+  const sbIds = sbList.map(e => e && e.accountingId);
+  const sbDn = (diskJson(SB.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  // What each window believes its own entry is called, AFTER the merge.
+  const sbaNow = await pba.page.evaluate(() => ((AppState.entryHistory||{}).TPL_E||[]).map(e => e.accountingId));
+  const sbbNow = await pbb.page.evaluate(() => ((AppState.entryHistory||{}).TPL_E||[]).map(e => e.accountingId));
+  note('T-S10-11 pinned mint returns', pbPin);
+  note('T-S10-11 share holds', sbIds);
+  note('T-S10-11 A/B believe', { a: sbaNow, b: sbbNow });
+  note('T-S10-11 doc numbers', sbDn);
+  /* THE PREMISE, AND IT HAS TO BE THE POSTED REFERENCE AND NOT THE STUB'S
+     RETURN VALUE: a build whose mint does not go through U.accountingId would
+     ignore the pin, post a real reference, meet no collision and read GREEN on
+     every assertion below while measuring nothing at all. */
+  check(pbPin === 'AEPINNED1' && sba.accountingId === 'AEPINNED1',
+    'S111a PREMISE: the pin reached the mint — the first window actually posted under the pinned '
+    + 'reference, so the second window really does meet a reference that is already taken',
+    { stub: pbPin, posted: sba.accountingId });
+  check(pbbBlind.length === 0,
+    'S111a2 PREMISE: and the second window cannot SEE that reference — its entry history was read '
+    + 'at boot and is empty, so the uniqueness guard at its mint site has nothing to compare '
+    + 'against and the collision really does reach the append', pbbBlind);
+  check(sbList.length === 2,
+    'S111b BOTH entries are on the shared folder even though both windows minted the SAME '
+    + 'reference. The append used to skip on the reference alone, so the second window\'s entry '
+    + 'was discarded while its operator was told "generated" and its rows were stamped POSTED',
+    { n: sbList.length, ids: sbIds });
+  check(sbIds.length === 2 && sbIds[0] !== sbIds[1],
+    'S111c and the two are under DIFFERENT references, so the reversal, the document-number '
+    + 'master and the posted-row index can each name one of them', sbIds);
+  check(sbIds.indexOf('AEPINNED1') !== -1,
+    'S111d the window that got there first KEEPS the reference it announced — re-minting the '
+    + 'wrong one would change a reference that is already quoted', sbIds);
+  {
+    const nonces = sbList.map(e => e && e.idNonce);
+    check(nonces.every(Boolean) && nonces[0] !== nonces[1],
+      'S111e each entry carries its own idNonce. That is what tells "my intent replayed" from '
+      + '"a stranger took my reference"; without it the append cannot be both idempotent and '
+      + 'safe', nonces);
+  }
+  /* B's memory holds A's entry as well as its own by the time this is read —
+     not from boot (it opened before A posted; that is S111a2) but because the
+     merge replaces this template's array with the one it just read off the
+     share (Store._takeDisk). So the thing being measured is that B's OWN
+     entry — the one S109_POST reads back off the end of B's history — carries
+     the re-minted reference and is the one on the share. Naming the old one
+     here is what would point B's entries tab, its reverse dialog and its
+     allocate modal at A's entry. */
+  check(sbb.accountingId !== 'AEPINNED1' && sbIds.indexOf(sbb.accountingId) !== -1
+        && sbbNow.indexOf(sbb.accountingId) !== -1,
+    'S111f the second window\'s own entry names the reference it actually landed under, in its own '
+    + 'memory as well as on the share — otherwise its entries tab, its reversal dialog and its '
+    + 'allocate modal all point at a colleague\'s entry',
+    { own: sbb.accountingId, believes: sbbNow, onShare: sbIds });
+  {
+    const d3 = sbDn['D3'], d4 = sbDn['D4'];
+    check(d3 === sbb.accountingId && d4 === sbb.accountingId,
+      'S111g and the document numbers of the re-minted entry follow it. Left pointing at the old '
+      + 'reference they would resolve these rows to a colleague\'s GL entry',
+      { D3: d3, D4: d4, b: sbb.accountingId });
+    check(sbDn['D1'] === 'AEPINNED1' && sbDn['D2'] === 'AEPINNED1',
+      'S111h while the first window\'s numbers are untouched', { D1: sbDn['D1'], D2: sbDn['D2'] });
+  }
+  await pbb.ctx.close();
+  await pba.ctx.close();
+
+  /* =====================================================================
+     [58] MR-7 — ONE DOCUMENT NUMBER, TWO ENTRIES. Nothing tested whether
+     the number typed was already taken.
+     ===================================================================== */
+  section(58, 'MR-7 — a document number another entry already holds is refused');
+  const DU = makeRoot('share-dnu');
+  const brDU = await startBridge(DU.root, PORT_DNU); procs.push(brDU.proc);
+  const pdua = await openReco(browser, brDU);
+  await pdua.page.evaluate(S101_SETUP + '()');
+  const dua = await pdua.page.evaluate(S101_POST + `([['INV-1','INV-2']])`);
+  const pdub = await openReco(browser, brDU);
+  const dub = await pdub.page.evaluate(S101_POST + `([['INV-3','INV-4']])`);
+  const duA = await pdua.page.evaluate(DNU_RUN + `([0, 'GL-7000'])`);
+  const duB = await pdub.page.evaluate(DNU_RUN + `([1, 'GL-7000'])`);
+  note('MR-7 A allocated', duA.toasts); note('MR-7 B allocated', duB.toasts);
+  /* THE SHARED MASTER IS THE RESOLVER — Reco._postedRefFor reads ix.dnm, not
+     the entry's own field — so it is checked IMMEDIATELY, with no settling. */
+  const duDN0 = (diskJson(DU.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  const duHold0 = Object.keys(duDN0).filter(k => k === 'GL-7000').map(k => duDN0[k]);
+  note('MR-7 the shared master, at once', duDN0);
+  check(duHold0.length === 1 && duHold0[0] === dua.accountingId,
+    'MR7a THE GATE, AS A VALUE ON THE SHARE: the shared document-number master names exactly ONE '
+    + 'entry for GL-7000, and it is the one that got there first. It is the master that resolves a '
+    + 'row to an accounting reference, so this is the half that decides whether a number is read '
+    + 'as the wrong entry', { master: duDN0['GL-7000'], a: dua.accountingId, b: dub.accountingId });
+  /* ...and the ENTRY'S OWN CLAIM follows within one save cycle. The two live
+     in different files with a merge queue each, so when B's entryHistory
+     write happened to go first it carried a claim the master then refused;
+     Reco._dnRefused registers a CORRECTION intent from inside the master's
+     own intent, and any further activity in the app lands it. Writing the
+     claim from inside that intent instead was tried and is worse: it delays
+     the entry's document numbers by a debounce cycle, which made the reverse
+     dialog and a re-plan from the share disagree and refused every reversal
+     (run_reverse_e2e 254 -> 236). */
+  const duClaimants = () => ((diskJson(DU.root, 'reco/entryHistory.json') || {}).TPL_E || [])
+    .filter(e => e && e.docNumbers && e.docNumbers.AED === 'GL-7000').map(e => e.accountingId);
+  let duClaim = duClaimants(), duCycles = 0;
+  /* BOUNDED, and a poll rather than one sleep: "within one further save
+     cycle" is the claim, and which cycle depends on whether the entry's merge
+     job or the master's happened to run first. A fixed wait made this read
+     red about one run in five. */
+  while (duClaim.length > 1 && duCycles < 10) {
+    duCycles++;
+    for (const p of [pdub, pdua]) await p.page.evaluate(async () => {
+      await AppState.flush();
+      if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    });
+    await sleep(250);
+    duClaim = duClaimants();
+  }
+  const duDN = (diskJson(DU.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  note('MR-7 who claims GL-7000', { master: duDN['GL-7000'], claimants: duClaim, cycles: duCycles });
+  check(duClaim.length === 1 && duDN['GL-7000'] === duClaim[0],
+    'MR7c and within one further save cycle exactly ONE entry claims GL-7000 on the share, the '
+    + 'same one the master names. Before this both entries claimed it for ever while the master '
+    + 'named one of them', { master: duDN['GL-7000'], claimants: duClaim,
+      a: dua.accountingId, b: dub.accountingId });
+  check(/already belongs to entry/.test(String(duB.toasts))
+        && /(Nothing was saved|was NOT saved)/.test(String(duB.toasts)),
+    'MR7b and the second person is TOLD, and told which entry holds it — they used to be told '
+    + '"Document numbers saved". Either wording is accepted because the refusal can come from the '
+    + 'in-memory test (immediate) or from inside the merge intent, which is the only test that '
+    + 'reads a file nobody has moved since', duB.toasts);
+  await pdub.ctx.close();
+  await pdua.ctx.close();
+
+  /* =====================================================================
+     [59] T-26-6 — THE COLLEAGUE WHO DID NOT POST THE ENTRY. The panel
+     resolved against AppState.entryHistory, which is read once, at boot.
+     ===================================================================== */
+  section(59, 'T-26-6 — the duplicate-key panel asks the SHARED folder, not this window’s copy');
+  const T6S = makeRoot('share-t266s');
+  const brT6S = await startBridge(T6S.root, PORT_T266S); procs.push(brT6S.proc);
+  const p6sa = await openReco(browser, brT6S);
+  await p6sa.page.evaluate(T266S_SETUP + '()');
+  const p6sb = await openReco(browser, brT6S);     // boots BEFORE anything is posted
+  const t6post = await p6sa.page.evaluate(T266S_POST + '()');
+  note('T-26-6 A posted the override', t6post);
+  check(t6post.dr === 1000,
+    'T266Sa PREMISE: A posted INV-7 with the override of 1000 in it, not the computed 20', t6post);
+  const t6b = await p6sb.page.evaluate(T266S_LOAD + '()');
+  note('T-26-6 B booted with', t6b.bootHist);
+  note('T-26-6 B\'s posted block', t6b.posted);
+  check(t6b.bootHist === '[]',
+    'T266Sb PREMISE: B\'s in-memory entry history is empty — it booted before A posted, which is '
+    + 'the ordinary case on a folder several people share', t6b.bootHist);
+  check(/POSTED to the general ledger/.test(t6b.posted) && /INV-7/.test(t6b.posted)
+        && /1000/.test(t6b.posted) && new RegExp(t6post.accountingId).test(t6b.posted),
+    'T266Sc THE GATE: B — the person who actually loads next week\'s extract — is told that the '
+    + 'LEDGER holds 1000 under that entry while their screen now shows the computed value. The '
+    + 'sentence this ticket exists to add was missing for its main reader', t6b.posted);
+  check(!/this window's copy/.test(t6b.posted),
+    'T266Sd and it does not carry the "checked against this window\'s copy" caveat, because it was '
+    + 'checked against reco/entryHistory.json', t6b.posted);
+  await p6sb.ctx.close();
+  await p6sa.ctx.close();
+
+
+  /* =====================================================================
+     [60] T-30-3 — DECLINING IS RECOVERABLE, and the dialog is about the
+     columns that actually conflict.
+     ===================================================================== */
+  section(60, 'T-30-3 — declining the conflict leaves the promotion OWED, not abandoned for ever');
+  const T3B = makeRoot('share-t303b');
+  const brT3B = await startBridge(T3B.root, PORT_T303B); procs.push(brT3B.proc);
+  const pt3b = await openReco(browser, brT3B);
+  await pt3b.page.evaluate(T303_SETUP + '()');
+  const t3bNo = await pt3b.page.evaluate(T303B_RUN + `(['TPL_D', false, true])`);
+  note('T-30-3 declined, then saved again and said yes', t3bNo);
+  check(t3bNo.asks1.length === 1 && t3bNo.flag1 === false,
+    'T303Ba DECLINING ABANDONS THE SAVE, the way the primary-key warning does: carryForward is NOT '
+    + 'stored. It used to be stored anyway, which is what made the decline a one-way door',
+    { asked: t3bNo.asks1.length, storedFlag: t3bNo.flag1 });
+  check(t3bNo.rows1.every(s => /=-$/.test(s)),
+    'T303Bb and nothing is promoted — the confirm still has something to decide', t3bNo.rows1);
+  check(t3bNo.asks2.length === 1,
+    'T303Bc THE GATE: saving again ASKS AGAIN. Before this, nothing was ever asked a second time '
+    + 'and the column could never be carried forward without unticking and re-ticking the box',
+    t3bNo.asks2);
+  check(t3bNo.flag2 === true && t3bNo.rows2.indexOf('INV-8=Carol') !== -1
+        && t3bNo.rows2.indexOf('INV-9=Dave') !== -1,
+    'T303Bd ...and the clean keys are promoted this time — the values are kept against the row key, '
+    + 'which is the whole point of the feature they ticked', t3bNo.rows2);
+  check(t3bNo.rows2.filter(s => /^INV-7=/.test(s)).every(s => s === 'INV-7=-'),
+    'T303Be while the conflicting key is still left alone, with neither value picked', t3bNo.rows2);
+  check(/read blank the next time this file is opened/.test(String(t3bNo.toasts2)),
+    'T303Bf and the operator is told what that costs: those cells read BLANK on the next load. '
+    + '"Both values stay exactly where they are and nothing is deleted" was true of the FILE and '
+    + 'false of the SCREEN', t3bNo.toasts2);
+
+  const t3bPre = await pt3b.page.evaluate(T303C_RUN + '()');
+  note('T-30-3 a conflict nothing would have promoted', t3bPre);
+  check(t3bPre.asks.length === 0,
+    'T303Bg NO QUESTION IS ASKED about a (key, column) that already has a stored record: both rows '
+    + 'have been reading that one record all along, so neither legacy value was ever a promotion '
+    + 'candidate. A gate that fires when nothing is at stake is how operators learn to click '
+    + 'through gates', t3bPre.asks);
+  check(t3bPre.rows.filter(s => /^INV-7=/.test(s)).every(s => s === 'INV-7=ALREADY STORED')
+        && t3bPre.rows.indexOf('INV-8=Carol') !== -1,
+    'T303Bh and the stored record is left exactly as it was, while the clean key is promoted',
+    t3bPre.rows);
+  await pt3b.ctx.close();
+
+  /* =====================================================================
+     [61] T-26-5 — A COLUMN WITH NOTHING TO ADD.
+     ===================================================================== */
+  section(61, 'T-26-5 — a total of no numbers is not 0.00');
+  const T5B = makeRoot('share-t265b');
+  const brT5B = await startBridge(T5B.root, PORT_T265B); procs.push(brT5B.proc);
+  const pt5b = await openReco(browser, brT5B);
+  const t5b = await pt5b.page.evaluate(T265B_RUN + '()');
+  note('T-26-5 every cell excluded', t5b);
+  check(String(t5b.cells) === 'n/a,tbc' && t5b.total.excluded === 2 && t5b.total.n === 0,
+    'T265Ba PREMISE: both cells are non-numeric, so nothing was added at all', t5b.total);
+  check(t5b.totalText === '— *' && t5b.totalSum === '0' && t5b.excluded === '2',
+    'T265Bb THE FIX: the total cell renders —, the same answer the Sum card gives, instead of '
+    + '"0.00 *" — a number that is not a total of anything. The figures are still on the cell as '
+    + 'data- attributes for anything that reads them', t5b);
+  check(/2 cell\(s\) in Net are not numbers/.test(t5b.note),
+    'T265Bc and the footnote still says why, naming the cells', t5b.note);
+  check(t5b.cards.some(c => /Sum of Net/.test(c) && /—/.test(c)),
+    'T265Bd ...which is what the summary card for the same column on the same screen already said, '
+    + 'so the two no longer disagree', t5b.cards);
+  await pt5b.ctx.close();
+
+
+  /* =====================================================================
+     [62] MR-8 — AN INTENT REGISTERED WHILE A MERGE WRITE IS IN FLIGHT.
+     Not in either review; found by this round while chasing a correction
+     intent that never reached the share, and it is the same harm as the one
+     T-S10-1 was filed about: a write that drops something with no second
+     copy and says nothing.
+     ===================================================================== */
+  section(62, 'MR-8 — a value written while a merge write is in flight is not dropped');
+  const M8 = makeRoot('share-mr8');
+  const brM8 = await startBridge(M8.root, PORT_MR8); procs.push(brM8.proc);
+  const pm8 = await openReco(browser, brM8);
+  await pm8.page.evaluate(S101_SETUP + '()');
+  const m8 = await pm8.page.evaluate(MR8_RUN + '()');
+  const m8file = (diskJson(M8.root, 'reco/extraValueMaster.json') || {}).TPL_E || {};
+  note('MR-8 in memory afterwards', m8.mem);
+  note('MR-8 reco/extraValueMaster.json afterwards', m8file);
+  check(m8.inflight === true,
+    'MR8a PREMISE: the second value really was written while the first write was still in the air',
+    m8.inflight);
+  check(((m8file['INV-1'] || {}).Note || {}).v === 'first',
+    'MR8b the value that was mid-write is on the share', m8file['INV-1']);
+  check(((m8file['INV-2'] || {}).Note || {}).v === 'second',
+    'MR8c THE GATE: so is the one registered DURING that write. `m.intents = []` used to clear it '
+    + 'without applying it, and the job mergeWrite had already armed then took the disk as the '
+    + 'authority and wrote a file without it', m8file['INV-2']);
+  check(m8.mem.one === 'first' && m8.mem.two === 'second',
+    'MR8d ...and it is still on the screen: Store._takeDisk replaces memory from the file it just '
+    + 'read, so a value dropped from the write was dropped from the window too', m8.mem);
+  await pm8.ctx.close();
 
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

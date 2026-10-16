@@ -877,6 +877,29 @@ function populateThemeSelect() {
    ================================================================ */
 const U = {
   uid() { return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); },
+  /* ---- T-S10-11. THE ACCOUNTING REFERENCE, MINTED IN ONE PLACE.
+     'AE' + base36(now) + TWO BASE-36 CHARACTERS DRAWN ONCE PER WINDOW. Those
+     two characters are the whole fix. Date.now() returns the same number in
+     two windows that press Generate in the same millisecond, and the append
+     that records an entry is idempotent BY THIS STRING, so the second entry
+     was dropped on the floor while both operators were told "generated" and
+     both row sets were stamped POSTED. Measured at a 0 ms stagger as
+     posted ["AEMVAYN4CT","AEMVAYN4CT"] with reco/entryHistory.json gaining
+     ONE entry (T-S10-11, option (a)).
+     IT LENGTHENS EVERY FUTURE REFERENCE BY TWO CHARACTERS - the one
+     user-visible half of this fix, because the reference is what people
+     quote to each other and write on documents.
+     The residue is 1 in 1,296 and is NOT silent either: the append in
+     commitEntryFromPreview tells our own entry from a stranger's by
+     idNonce and re-mints rather than discarding. */
+  _aeTag: '',
+  accountingId() {
+    if (!U._aeTag) {
+      const A = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      U._aeTag = A[Math.floor(Math.random() * 36)] + A[Math.floor(Math.random() * 36)];
+    }
+    return 'AE' + Date.now().toString(36).toUpperCase() + U._aeTag;
+  },
   esc(v) { if (v==null) return ''; return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); },
   escAttr(v) { return U.esc(v); },
   /* Value for a single-quoted JS string inside an HTML attribute, e.g.
@@ -3611,7 +3634,20 @@ const Store = {
         const j = q.pendingJob; q.pendingJob = null;
         if (!j) return;
         Store._inflight++;
-        try { await j(); Store.lastError = null; }
+        try {
+          const r = await j();
+          /* ---- MR-2. CLEARED ONLY IF THE JOB DID NOT RECORD ONE.
+             Store._mergeJob catches its own write failure and does NOT
+             rethrow, so this line used to treat a failed LEDGER write as a
+             success and wipe the error _reportError had recorded a moment
+             earlier. Measured: a Generate whose reco/entryHistory.json write
+             was refused with "No space left on device" left Store.lastError
+             null and Store.loadProblems empty, so the reversal dialog's own
+             "The last save error was:" sentence could never appear and
+             nothing at all outlived the four-second toast
+             (scratchpad/money/skB/probe/p2_told.mjs P2a). */
+          if (!(r && r.error) && Store.lastError && Store.lastError.key === key) Store.lastError = null;
+        }
         catch (e) { Store._reportError(key, e); }
         finally { Store._inflight--; }
       });
@@ -3637,12 +3673,59 @@ const Store = {
       .filter(m => m.timer || (m.intents && m.intents.length)).length;
     return Store._inflight + Object.values(Store._queues).filter(q => q.scheduled).length + merging;
   },
+  /* ---- MR-2. IS A WRITE OF THIS KEY STILL OWED TO THE SHARE? Read by the
+     reversal's "already reversed" refusal, so the operator the app has just
+     told to "reverse again" is told WHY they are being refused instead of
+     being left with no route out of the app at all. */
+  owes(key) {
+    return Object.keys(Store._merge || {}).some(q => {
+      const m = Store._merge[q];
+      return !!(m && m.key === key && ((m.intents && m.intents.length) || m.timer));
+    });
+  },
   _flushMergeTimers() {
     Object.keys(Store._merge || {}).forEach(qkey => {
       const m = Store._merge[qkey];
-      if (!m || !m.timer) return;
-      clearTimeout(m.timer);
-      m.timer = null;
+      if (!m) return;
+      if (m.timer) {
+        clearTimeout(m.timer);
+        m.timer = null;
+        Store._enqueue(qkey, () => Store._mergeJob(qkey));
+        return;
+      }
+      /* ---- MR-2. A WRITE THAT IS STILL OWED AND HAS NO TIMER LEFT IS
+         RE-TRIED FROM HERE. _retryLater's budget is bounded on purpose - a
+         folder that is gone for the afternoon must not be a write attempt
+         every 150 ms - and for the VALUES store nothing is lost when it runs
+         out, because the next keystroke re-arms it with a fresh budget.
+         A LEDGER HAS NO NEXT KEYSTROKE. A posted journal entry is written
+         once; when the budget ran out the intent sat in memory for the rest
+         of the session and the entry was lost for good while its rows stayed
+         stamped POSTED on the share, with the operator told "Entry … 
+         generated (2 lines)" and one toast that scrolls away. Measured before
+         and after on the same probe (scratchpad/money/skB/probe/p1_strand.mjs
+         and p2_told.mjs P2b): the folder came back, six more saves ran, and
+         reco/entryHistory.json finally held [].
+         This runs from Store.idle(), i.e. from every AppState.flush(), so the
+         operator carrying on working IS the retry - the thing the values
+         store gets from the keystroke. ONE ATTEMPT PER FLUSH, not a loop: a
+         failure re-arms through _retryLater, never from here, and the queue
+         tail Store.idle() awaits is captured after this returns, so the
+         attempt is part of the flush the caller is awaiting. */
+      if (!(m.intents && m.intents.length)) return;
+      /* ...but not while one is already in flight or queued for this file.
+         m.intents is cleared only when the write RESOLVES, so a flush that
+         lands in the middle of a merge write would otherwise queue a second
+         read+write of a multi-MB ledger file behind the first one, which
+         would then find the intents already gone and write the same bytes
+         again. _enqueue's own collapsing does not cover it: q.scheduled is
+         set false at the START of the job body, so a job that is mid-await
+         looks unscheduled. */
+      if (m.running) return;
+      const q = Store._queues[qkey];
+      if (q && q.scheduled) return;
+      if (Store.readOnlyKeys[m.key]) return;                       // nothing will be written
+      if (Store.readOnlyFiles && Store.readOnlyFiles[m.file]) return;
       Store._enqueue(qkey, () => Store._mergeJob(qkey));
     });
   },
@@ -3662,6 +3745,29 @@ const Store = {
         + 'to it yet. What was typed is still in this window; keep it open until the shared folder '
         + 'answers.');
     }
+  },
+
+  /* ---- MR-2. A FAILED WRITE OUTLIVES ITS TOAST. _reportError already
+     toasts, rate-limited to one per 4 s, and for a note or an offset that is
+     enough - the value is on screen and the next save rewrites it. It is not
+     enough for a LEDGER: four seconds later the toast is gone, the entry is
+     not on the share, and the only trace that anything was owed was an
+     in-memory array nobody can see. Once per file, like _sayUnreadable, and
+     withdrawn when a write of that file finally resolves - a problem line
+     that still says "owed" after it landed is its own kind of wrong. */
+  _sayWriteFailed(m, e) {
+    Store._woProblem = Store._woProblem || {};
+    if (Store._woProblem[m.file]) return;
+    Store._woProblem[m.file] = true;
+    Store.loadProblems.push(m.file + ' could not be written to the shared folder ('
+      + String((e && e.message) || e) + '). What this window holds is still owed to that file, and '
+      + 'is retried every time anything is saved; keep the app open until the folder answers.');
+  },
+  _writeOk(m) {
+    if (!Store._woProblem || !Store._woProblem[m.file]) return;
+    delete Store._woProblem[m.file];
+    const pre = m.file + ' could not be written to the shared folder';
+    Store.loadProblems = Store.loadProblems.filter(s => String(s).indexOf(pre) !== 0);
   },
 
   /* F11. The buffered intents are only cleared when a write RESOLVES, so
@@ -3813,10 +3919,11 @@ const Store = {
     if (!m) return;
     const waiters = m.waiters.splice(0);
     let out = { written: false, file: m.file };
+    m.running = true;                      // read by _flushMergeTimers' re-arm
     try {
-      if (Store.readOnlyKeys[m.key]) { out.refused = true; out.reason = 'readOnly'; return; }
+      if (Store.readOnlyKeys[m.key]) { out.refused = true; out.reason = 'readOnly'; return out; }
       if (Store.readOnlyFiles && Store.readOnlyFiles[m.file]) {
-        out.refused = true; out.reason = 'readOnlyFile'; return;   // F17, re-checked inside the queue
+        out.refused = true; out.reason = 'readOnlyFile'; return out;   // F17, re-checked inside the queue
       }
       const mem = AppState[m.key] || (AppState[m.key] = {});
       const disk = await Store._readJsonFile(m.file, m.key);
@@ -3840,7 +3947,7 @@ const Store = {
         out.refused = true; out.reason = 'unreadable';
         Store._sayUnreadable(m);
         Store._retryLater(qkey, m);
-        return;
+        return out;
       }
       /* THE SHARE IS THE AUTHORITY for the ids this file owns; this session's
          own unwritten changes are the intents, replayed immediately below. */
@@ -3848,19 +3955,57 @@ const Store = {
       /* ...and then the intents, which is what puts this session's own writes
          back on top - at CELL granularity, and including a DELETE, which is
          the one thing "what is in memory" cannot say. */
-      m.intents.forEach(fn => { try { fn(mem); } catch (e) { console.error('mergeWrite intent failed for ' + m.key, e); } });
+      /* ---- MR-8. WHICH INTENTS THIS JOB IS ANSWERING FOR, taken BEFORE the
+         write and used to clear exactly those afterwards. `m.intents = []`
+         discarded anything that arrived while the write was in flight, and a
+         write of a shared file is hundreds of milliseconds: a value typed in
+         that window was applied to nothing, cleared from the buffer, and lost
+         from the share with no error anywhere - and mergeWrite had already
+         armed a fresh timer for it, so a job ran and wrote a file without it.
+         Found while chasing a document-number correction that never landed,
+         and it is the same class as the one T-S10-1 was filed about: a write
+         with no second copy of what it dropped. Intents are only ever
+         APPENDED, so the newcomers are exactly the tail. */
+      const answering = m.intents.length;
+      m.intents.slice(0, answering).forEach(fn => { try { fn(mem); } catch (e) { console.error('mergeWrite intent failed for ' + m.key, e); } });
+      /* ---- MR-3. THE POSTED-ROW INDEX IS MEMOISED ON THIS MAP'S SHAPE, and
+         the two lines above have just replaced it with the share's. Every
+         caller that mutates a ledger in memory calls Reco._postedIdxReset()
+         itself; a MERGE had no such call, so a colleague's IN-PLACE reversal
+         arriving on one of our writes could leave the memo describing a
+         history that is no longer there - the symptom being T-26-6's panel
+         omitting "(reversed)" and telling somebody to reverse an entry twice.
+         It is also what lets the memo key stop COUNTING the document numbers
+         on every call (see Reco._postedAuditIndex, and T-26-6's 946x). */
+      if ((m.key === 'entryHistory' || m.key === 'docNumberMaster')
+          && typeof Reco !== 'undefined' && Reco._postedIdxReset) Reco._postedIdxReset();
       const body = m.owns ? Store._pick(mem, m.owns) : mem;
       await Store._writeJsonFile(m.file, Store.serialize(m.key, body));
       /* Cleared ONLY now that the write has resolved. A failure above leaves
          them buffered so the next job re-applies them onto a fresh read. */
-      m.intents = [];
+      // MR-8: only the ones this job applied; anything that arrived during
+      // the write stays buffered, and mergeWrite's timer will carry it.
+      m.intents = m.intents.slice(answering);
       m.retries = 0;
       out.written = true;
       Store.lastError = null;
+      Store._writeOk(m);
+      return out;
     } catch (e) {
+      /* ---- MR-2. THE WRITE FAILED, AND IT IS RETRIED. _retryLater was
+         called ONLY in the unreadable-READ branch above; a failed WRITE armed
+         no timer at all, and m.intents is cleared only on success - so the
+         entry stayed buffered with nothing to ever fire it again. That is how
+         a posted journal entry was lost for good while its rows stayed
+         stamped POSTED on the share (p1_strand.mjs). The read branch and the
+         write branch are the same weather and now get the same treatment. */
       Store._reportError(m.key, e);
+      Store._sayWriteFailed(m, e);
+      Store._retryLater(qkey, m);
       out.error = String((e && e.message) || e);
+      return out;
     } finally {
+      m.running = false;
       waiters.forEach(w => { try { w(out); } catch (e) {} });
     }
   },
@@ -4097,9 +4242,23 @@ const Store = {
     out.recoTemplates       = await readJson('recoTemplates', []);
     out.aegSettings         = await readJson('aegSettings', {});
     out.recoSessions        = await readJson('recoSessions', {});
-    out.entryHistory        = await readJson('entryHistory', {});
+    /* ---- MR-4. mergeManaged, exactly as extraValueMaster passes it below.
+       readJson's non-latched branch says "starting it empty", and its own
+       comment explains why that is honest for a whole-file PERSIST_KEY: it IS
+       re-created by AppState.flush(), so starting empty and saving over the
+       quarantined copy IS the recovery. These two keys stopped meeting that
+       precondition the moment they left PERSIST_KEYS - they are written ONLY
+       through Store.mergeWrite, which re-reads the file inside the queue and
+       refuses one it could not read. So without this the operator was told at
+       boot that a damaged shared entry history was "starting it empty", then
+       generated an entry, was told it was generated, had the rows stamped
+       POSTED on the share, and got a toast blaming the folder for not
+       answering - when in fact nothing would be written to that file for the
+       rest of the session. The damaged file was also quarantined TWICE, once
+       by each reader (scratchpad/money/skB/probe/p8_corrupt_stale.mjs P8a). */
+    out.entryHistory        = await readJson('entryHistory', {}, true);
     out.pendingSpecialJV    = await readJson('pendingSpecialJV', {});
-    out.docNumberMaster     = await readJson('docNumberMaster', {});
+    out.docNumberMaster     = await readJson('docNumberMaster', {}, true);   // MR-4, as above
     out.manualOffsetMaster  = await readJson('manualOffsetMaster', {});
     out.correctionMaster    = await readJson('correctionMaster', {});
     out.groupMaster         = await readJson('groupMaster', {});
@@ -9172,8 +9331,20 @@ const AppState = {
      on the network folder. */
   currentUser: '',
 
-  PERSIST_KEYS: ['recoTemplates','aegTemplates','aegMaster','aegSettings','recoSessions','entryHistory',
-                 'docNumberMaster','manualOffsetMaster','correctionMaster','pendingSpecialJV',
+  /* ---- T-S10-1. 'entryHistory' AND 'docNumberMaster' ARE NOT IN THIS LIST,
+     and their absence is load-bearing in exactly the way extraValueMaster's
+     is: flush() writes every member as a WHOLE FILE with no re-read and no
+     mtime check, so MEMBERSHIP IS THE BLIND OVERWRITE. Two colleagues
+     generating entries minutes apart lost one of them - the later writer's
+     file did not contain the earlier one's entry, while the earlier one's
+     rows kept their Posted stamp, leaving a closed row with no accounting
+     record behind it. Reproduced: run_store_e2e section 52 read ONE
+     accountingId back out of two, both ways round.
+     Both are still assigned in AppState.load like any other key and are
+     written ONLY through AppState.ledgerFlush -> Store.mergeWrite (S13),
+     which is the third and fourth of the callers S13's own comment names. */
+  PERSIST_KEYS: ['recoTemplates','aegTemplates','aegMaster','aegSettings','recoSessions',
+                 'manualOffsetMaster','correctionMaster','pendingSpecialJV',
                  'groupMaster','attachmentMaster','commentMaster','customMasters'],
   SAVE_DELAY: 250,
 
@@ -9295,6 +9466,37 @@ const AppState = {
     return AppState._keyPromise;
   },
 
+  /* ---- T-S10-1. THE ONE DOOR for the two ledger keys, the way
+     Reco._extraValueFlush is the one door for the values store, so the merge
+     rules are decided in ONE place rather than at six call sites.
+
+     `depth: 0` because the top-level value of each is a whole template's
+     ARRAY of entries and a whole template's MAP of document numbers: the
+     template is the unit a race happens in, and the merge takes the file as
+     the authority for every template id and then replays this session's own
+     buffered intents on top of it.
+
+     >>> EVERY INTENT MUST RE-FIND WHAT IT MUTATES, BY ID. Store._takeDisk
+     >>> replaces AppState[key][tplId] with the object just read off the
+     >>> share, so an intent that closes over an entry taken BEFORE that read
+     >>> mutates a detached copy and writes nothing at all. Every caller below
+     >>> looks its entry up by accountingId inside the map it is handed, and
+     >>> every one of them is written to be idempotent, because a failed write
+     >>> leaves the intent buffered and the next job replays it. */
+  ledgerFlush(key, mutate) {
+    return Store.mergeWrite(key, mutate, { depth: 0 });
+  },
+
+  /* T-S10-1. Replace a ledger map's CONTENTS without reassigning it. The
+     merge mutates AppState[key] in place and anything holding a reference to
+     it has to stay valid - the same rule the values store lives by - and
+     reverseEntry used to reassign AppState.entryHistory outright three times,
+     which would have left a buffered intent pointing at the old object. */
+  adoptLedger(key, next) {
+    const mem = AppState[key] || (AppState[key] = {});
+    return Store._takeDisk(mem, next || {});
+  },
+
   pendingCount() {
     return (AppState._saveTimer ? 1 : 0) + Store.pendingCount() + Versioning.pendingCount();
   },
@@ -9312,6 +9514,10 @@ const AppState = {
     AppState.recoSessionsOwned   = d.recoSessions || {};
     AppState.recoSessions        = {};
     Panes.syncViewTable();
+    /* T-S10-1. Assigned like any other key and then written ONLY through
+       AppState.ledgerFlush - neither is in PERSIST_KEYS, so the _snap loop
+       below skips both and no flush can blind-overwrite the ledger's own
+       records. */
     AppState.entryHistory        = d.entryHistory || {};
     AppState.docNumberMaster     = d.docNumberMaster || {};
     AppState.manualOffsetMaster  = d.manualOffsetMaster || {};
@@ -10901,9 +11107,30 @@ const App = {
         /* A reversal is a one-way fact: restoring a backup taken before one
            must not un-reverse the entry and leave the ledger short. The marks
            on the current history are re-applied to the matching ids. */
-        if (d.entryHistory) AppState.entryHistory = App._carryReversals(AppState.entryHistory, d.entryHistory);
+        /* T-S10-1. Through S13 and WITHOUT reassigning the map. A
+           whole-suite restore IS a deliberate replacement - the confirm above
+           says it replaces the entry history shared by everyone on the folder
+           - so the intent replaces every template's list; but it still has to
+           go through the merge, because the key is no longer in PERSIST_KEYS
+           and the AppState.flush() below would never write it: the restore
+           would look like it worked and be gone on the next boot. */
+        if (d.entryHistory) {
+          const ehBk = App._carryReversals(AppState.entryHistory, d.entryHistory);
+          AppState.adoptLedger('entryHistory', ehBk);
+          AppState.ledgerFlush('entryHistory', map => {
+            Object.keys(map).forEach(k => { delete map[k]; });
+            Object.keys(ehBk).forEach(k => { map[k] = ehBk[k]; });
+          });
+        }
         if (d.pendingSpecialJV) AppState.pendingSpecialJV = d.pendingSpecialJV;
-        if (d.docNumberMaster) AppState.docNumberMaster = d.docNumberMaster;
+        if (d.docNumberMaster) {
+          const dnBk = d.docNumberMaster;
+          AppState.adoptLedger('docNumberMaster', dnBk);
+          AppState.ledgerFlush('docNumberMaster', map => {
+            Object.keys(map).forEach(k => { delete map[k]; });
+            Object.keys(dnBk).forEach(k => { map[k] = dnBk[k]; });
+          });
+        }
         if (d.manualOffsetMaster) AppState.manualOffsetMaster = d.manualOffsetMaster;
         if (d.customMasters) AppState.customMasters = d.customMasters;
         if (d.correctionMaster) AppState.correctionMaster = d.correctionMaster;
@@ -11663,9 +11890,18 @@ defaultTemplate() {
        the one the `recoSessions[x] =` grep could never find because it is a
        delete. Panes.dropSession removes the owner AND un-points every pane. */
     Panes.dropSession(id);
-    ['entryHistory','docNumberMaster','manualOffsetMaster','correctionMaster',
+    ['manualOffsetMaster','correctionMaster',
      'pendingSpecialJV','groupMaster','attachmentMaster','commentMaster'].forEach(k => {
       if (AppState[k]) delete AppState[k][id];
+    });
+    /* T-S10-1. The two ledger keys LEFT that list, for the same reason S10 was
+       never in it: they are no longer whole-file writes, so a bare delete
+       here would be undone by the next boot. Out through S13 instead, which
+       also means a colleague's records for OTHER templates survive this
+       delete rather than being replaced by our copy of them. */
+    ['entryHistory','docNumberMaster'].forEach(k => {
+      if (AppState[k]) delete AppState[k][id];
+      AppState.ledgerFlush(k, map => { delete map[id]; });
     });
     /* S10 is the NINTH master and cannot join the list above: the list is
        keys AppState.flush writes as whole files, and extraValueMaster is
@@ -13216,15 +13452,70 @@ defaultTemplate() {
             + 'offsets, corrections, groups, comments' + alsoVals + ' (they are keyed by the old '
             + 'primary key). Continue?')) return;
       }
+      /* ---- T-30-3. THE CONFLICT QUESTION, MOVED ABOVE THE SWAP, so Cancel
+         means what the dialog says it means. It used to be asked from inside
+         Reco._promoteCarryForward - i.e. AFTER the template had been stored -
+         and the decline returned from the promotion only, so answering Cancel
+         still saved the template with carry-forward ON. And because the
+         promotion is offered exactly ONCE per column, ever (`was[name]` in
+         _cfGained), it was then never offered again: the operator did the
+         careful thing, declined, went and sorted the duplicate rows out, came
+         back and saved - and the feature they had switched on was silently
+         off for that column for good, with the box reading as ticked. The
+         only recovery was untick, save, re-tick, save, which nobody would
+         guess (measured: scratchpad/money/skA/probes/p2_t303_t265.mjs save 2
+         asks nothing and promotes nothing; skB/probe/p6g_decline_loss.mjs
+         loses every clean key's value with it). It abandons the save now, the
+         way the primary-key warning twenty lines above does: nothing is
+         stored, the flag is not stored, and the promotion is still owed. */
+      const cfc = Reco._carryForwardConflicts(t, prevExtras);
+      if (cfc.conflicts.length) {
+        const cfl = cfc.conflicts.slice(0, 8).map(c => '  \u2022 ' + Reco._pkLabel(t, c.pk) + ' / '
+          + c.col + ': ' + c.values.slice(0, 4).map(v => '"' + v + '"').join(' and ')
+          + (c.values.length > 4 ? ' and ' + (c.values.length - 4) + ' more' : '')
+          + ' (' + Reco._dupPkCountFor(t, (AppState.recoSessions || {})[t.id], c.pk)
+          + ' loaded rows share that key)');
+        if (!confirm(cfc.conflicts.length + ' row key(s) hold two or more different values in '
+            + cfc.cols.join(', ') + ', because more than one loaded row shares the key:\n\n'
+            + cfl.join('\n') + (cfc.conflicts.length > 8 ? '\n  \u2022 …and '
+                + (cfc.conflicts.length - 8) + ' more' : '')
+            + '\n\nA value kept against the row key applies to EVERY row with that key, so there is '
+            + 'no way to keep both. Those keys are therefore being LEFT ALONE: both values stay in '
+            + 'this file\'s own record and nothing is deleted — but they are NOT kept against the row '
+            + 'key, so those cells will read BLANK the next time this file is opened, until the '
+            + 'duplicate rows are corrected. Every other value already on screen WILL be kept against '
+            + 'its row key.\n\nGo on? (Choose Cancel to abandon this save completely — nothing is '
+            + 'stored, the box is not ticked, NOTHING in that column is kept against the row key yet, '
+            + 'and you are asked again the next time you save.)')) return;
+      }
       if (i!==-1) AppState.recoTemplates[i] = t;
       /* #30, DECISION Q. AFTER the swap, because the promotion reads the
          STORED template's columns, and with prevExtras from BEFORE it. A new
          template cannot have anything to promote - nothing has been typed
          into it yet - so this is inside the `else` and not after it. */
+      /* T-30-3. THE CONFLICT DIALOG LIVES HERE, beside the primary-key
+         warning, because its wording is a user-facing decision and because
+         this is the only caller that has a person in front of it. It is asked
+         BEFORE anything is written, so answering no leaves every legacy value
+         exactly where it is. */
+      /* The question above has already been answered, so nothing here asks
+         one: the non-conflicting cells are promoted and the conflicting keys
+         are reported. */
       const promoted = Reco._promoteCarryForward(t, prevExtras);
       if (promoted.cells) U.toast(promoted.cells + ' value(s) already on screen in '
         + promoted.cols.join(', ') + ' are now kept against the row key and will carry forward',
         'success');
+      /* Said whether or not anything was promoted, because "nothing happened"
+         is the answer that needs explaining. T-30-3: and it names what the
+         confirm names - that those cells read BLANK on the next load, which
+         "both values are still where they were" was true of the FILE and not
+         of the screen. */
+      if ((promoted.conflicts || []).length) U.toast((promoted.conflicts || []).length
+        + ' row key(s) were left alone because two loaded rows hold different values under the same '
+        + 'key in ' + Array.from(new Set(promoted.conflicts.map(c => c.col))).join(', ')
+        + ' — both values are still in this file\'s own record, but they are not kept against the row '
+        + 'key, so those cells read blank the next time this file is opened. Correct the duplicate '
+        + 'rows, then re-tick the box to carry them forward.', 'error');
       /* F12. AFTER the swap, for the same reason the promotion is: both write
          the store for the template as it is NOW. The confirms above have
          already been answered, so nothing here can surprise anyone. */
@@ -17644,16 +17935,42 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
            about, and a typed value is broadcast to all of them. The operator
            found out neither way round before. */
         const ovHit = [], tyHit = [];
+        /* ---- T-26-6. AND WHICH OF THE SUPPRESSED OVERRIDES ARE ALREADY IN
+           THE GENERAL LEDGER. RC-6's suppression is the right call - the
+           alternative multiplies a number into a NEW entry - but if the key
+           had already been POSTED with the override, the ledger holds the
+           typed value and the screen now falls back to the computed one. That
+           is the one case where §5c's "the screen and the journal cannot
+           disagree" does not hold, and what was missing is that nothing said
+           so: the operator saw a number change on a row they had closed, with
+           the panel telling them only that it had "stopped applying".
+           Reco._postedRefForPk answers from the key alone, which is exactly
+           what this pass has, and it is NEVER weak - the document-number
+           branch, which may name an entry a row was never posted by, is not
+           in it. So a key with no accounting reference gets no sentence
+           rather than a guess. */
+        const ovPosted = [];
         const byTpl = (AppState.extraValueMaster || {})[tpl.id] || {};
+        /* MR-3. THE INDEX IS BUILT ONCE, ABOVE THE LOOP. Calling
+           Reco._postedRefForPk per key re-entered _postedAuditIndex per key,
+           and its memo key was O(document numbers) to BUILD - so this pass
+           was quadratic in (overridden keys x vouchers) and a 15 ms Add Data
+           became 16,164 ms. The two lines below are all _postedRefForPk does
+           (see it, two of them, right there). */
+        const ovCells = [];
         dupKeys.forEach(([k]) => {
           const cells = byTpl[k] || {};
           Object.keys(cells).forEach(cn => {
             const rec = cells[cn];
             if (!rec) return;
-            if (rec.k === 'override') ovHit.push(Reco._pkLabel(tpl, k) + ' / ' + cn);
+            if (rec.k === 'override') {
+              ovHit.push(Reco._pkLabel(tpl, k) + ' / ' + cn);
+              ovCells.push({ k: String(k), cn: cn, v: String(rec.v == null ? '' : rec.v) });
+            }
             else if (rec.k === 'typed') tyHit.push(Reco._pkLabel(tpl, k) + ' / ' + cn);
           });
         });
+        Reco._resolveDupPosted(tpl, ovCells, ovPosted);
         App.openModal('Duplicate primary keys',
           '<div class="help"><b>' + extra + '</b> row(s) share a primary key (' + U.esc(tpl.primaryKeys.join(' + ')) + ') with another row. '
           + 'Edits, offsets, corrections and comments are tracked per key, and reopening this data from history keeps only one row per key.</div>'
@@ -17663,12 +17980,36 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
               + 'journal entry would post: ' + U.esc(ovHit.slice(0, 8).join(', '))
               + (ovHit.length > 8 ? ', …' : '') + '. They are not deleted - correct the duplicate rows '
               + 'and they apply again.</div>' : '')
+          /* T-26-6. The posted ones, named with the reference the ledger holds
+             them under, so the answer is "reverse AEG-… first" rather than
+             "why has my number changed". A reversed entry is marked as such:
+             its figure is no longer in the ledger and telling somebody to
+             reverse it twice would be wrong. */
+          /* T-26-6. A NAMED BOX, because the answer this window has may not be
+             the whole answer: see Reco._dupPostedFromShare, which reads
+             reco/entryHistory.json and fills it in. */
+          + '<div id="dupPostedBox">' + Reco._dupPostedBlock(tpl, ovPosted, false, ovCells.length) + '</div>'
           + (tyHit.length ? '<div class="help"><b>' + tyHit.length + ' typed value(s)</b> are stored '
               + 'against a duplicated key, so every row with that key shows them: '
               + U.esc(tyHit.slice(0, 8).join(', ')) + (tyHit.length > 8 ? ', …' : '') + '.</div>' : '')
           + '<div class="help">Consider adding more primary-key columns in the template. Examples:</div><ul>'
           + dupKeys.slice(0, 8).map(([k, n]) => '<li><code>' + U.esc(k) + '</code> × ' + n + '</li>').join('') + '</ul>',
           '<button class="primary" onclick="App.closeModal()">OK</button>');
+        /* ---- T-26-6. AND THEN ASK THE SHARED FOLDER, because the person who
+           loads next week's extract is usually NOT the person who posted last
+           week's entry. AppState.entryHistory is read ONCE, at boot
+           (AppState.load), so a window opened before the entry was generated
+           holds {} and the sentence this ticket exists to add was missing for
+           its main reader - while the sentence they DID get pointed at a key
+           already posted at the typed value (measured:
+           scratchpad/money/skB/probe/p8b_stale266.mjs: B's panel had no
+           posted block, B's screen read 20 and the ledger held 1000).
+           NOT AWAITED, and ingestData stays SYNCHRONOUS: it is called without
+           await from two places and from the suites, and making it async
+           would change when "Loaded n rows" and this panel appear relative to
+           everything a caller does next. The box above is filled in when the
+           answer arrives instead. */
+        Reco._dupPostedFromShare(tpl, ovCells, ovPosted);
       }
     }
   },
@@ -17967,30 +18308,112 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
 
      Returns what it did, so the caller can say so rather than the operator
      having to guess whether anything happened. */
-  _promoteCarryForward(tpl, prevExtras) {
-    const none = { cols: [], cells: 0 };
-    if (!tpl) return none;
+  /* ---- T-30-3. WHICH (key, column) PAIRS THE PROMOTION CANNOT PICK BETWEEN.
+     `clash` is what the pending loop must skip; `conflicts` is what the
+     operator is told about; `cols` is THE COLUMNS THE CONFLICTS ARE ACTUALLY
+     IN - the dialog used to name every column whose box had just been ticked,
+     so an operator went looking in a column that had no conflict in it.
+
+     IT APPLIES THE PENDING LOOP'S OWN TWO GUARDS. Without them a
+     (key, column) that nothing was ever going to promote still counted as a
+     conflict: a key that already HAS a stored record is short-circuited by
+     _extraRec, so both its rows have been reading one record all along, and a
+     row whose own cell is non-empty loses to that cell anyway. The dialog
+     then said two values "are therefore being LEFT ALONE" about values that
+     were already not being used - and a gate that fires when nothing is at
+     stake is how operators learn to click through gates
+     (scratchpad/money/skB/probe/p6_t303.mjs P6e). A conflict now means "two
+     values were both going to be promoted and I cannot pick", which is what
+     the dialog says. */
+  _cfScan(tpl, sess, gained) {
+    const seen = Object.create(null), clash = Object.create(null), conflictMap = Object.create(null);
+    ((sess && sess.data) || []).forEach(row => {
+      const pk = Reco.storeKey(tpl, row);
+      if (!pk) return;
+      gained.forEach(ac => {
+        const name = String(ac.name);
+        if (Reco._extraRec(tpl, sess, row, name)) return;    // already stored: never a candidate
+        if (row[name] != null && row[name] !== '') return;    // the row value wins anyway
+        const legacy = Reco._manualTag(sess, row, name);
+        if (!legacy) return;
+        const ck = pk + '\u0000' + name;
+        if (!(ck in seen)) { seen[ck] = String(legacy); return; }
+        if (seen[ck] === String(legacy)) return;
+        clash[ck] = true;
+        const c = conflictMap[ck] || (conflictMap[ck] = { pk: pk, col: name, values: [seen[ck]] });
+        if (c.values.indexOf(String(legacy)) === -1) c.values.push(String(legacy));
+      });
+    });
+    const conflicts = Object.keys(conflictMap).map(k => conflictMap[k]);
+    return { clash: clash, conflicts: conflicts,
+             cols: Array.from(new Set(conflicts.map(c => c.col))) };
+  },
+
+  /* The conflicts a save is about to raise, for the caller that has to ASK
+     before it stores anything. Same scan, same guards, no writes. */
+  _carryForwardConflicts(tpl, prevExtras) {
+    const gained = Reco._cfGained(tpl, prevExtras);
+    const sess = (AppState.recoSessions || {})[tpl && tpl.id];
+    if (!gained.length || !sess || !((sess.data || []).length)) return { conflicts: [], cols: [] };
+    const s = Reco._cfScan(tpl, sess, gained);
+    return { conflicts: s.conflicts, cols: s.cols };
+  },
+
+  /* The columns whose carry-forward box has JUST been ticked. */
+  _cfGained(tpl, prevExtras) {
     const was = {};
     (prevExtras || []).forEach(a => { if (a && a.name) was[String(a.name)] = (a.carryForward === true); });
-    const gained = (tpl.additionalColumns || []).filter(a => {
+    return ((tpl && tpl.additionalColumns) || []).filter(a => {
       if (!a || !a.name || a.carryForward !== true) return false;
       if (was[String(a.name)]) return false;                 // it already had the flag
       const type = a.type || 'custom';
       return type === 'custom' || type === 'dropdown';
     });
+  },
+
+  _promoteCarryForward(tpl, prevExtras, ask) {
+    const none = { cols: [], cells: 0, conflicts: [] };
+    if (!tpl) return none;
+    const gained = Reco._cfGained(tpl, prevExtras);
     if (!gained.length) return none;
     const cols = gained.map(a => String(a.name));
     /* NOT via AppState.activeRecoId: the editor is reachable from Home. */
     const sess = (AppState.recoSessions || {})[tpl.id];
-    if (!sess || !((sess.data || []).length)) return { cols: cols, cells: 0 };
+    if (!sess || !((sess.data || []).length)) return { cols: cols, cells: 0, conflicts: [] };
     const at = new Date().toISOString();
     const by = String(AppState.currentUser || '');
     const pending = [];
+    /* ---- T-30-3. A DUPLICATE KEY WITH TWO DIFFERENT LEGACY VALUES.
+       A duplicate _pk is a tolerated state and a k:'typed' record broadcasts
+       to every row with the key ON PURPOSE - broadcasting a note is the
+       feature, which is why only an override refuses. But this pass walks
+       sess.data IN ORDER and writes one record per key, so where two rows
+       held DIFFERENT values the last row silently won and the other value was
+       deleted in the same pass, with no second copy anywhere (the legacy
+       manualTags entry is the only home it had). Reproduced:
+       run_store_e2e section 53 read back 'Bob' on both rows with 'Alice' gone
+       from the store AND from sess.manualTags.
+       SO THE PROMOTION DOES NOT PICK. The conflicting (key, column) is left
+       out of `pending` and BOTH legacy entries are left exactly where they
+       are, which is what makes this recoverable: nothing is gone whichever
+       way the operator answers. `seen` is the first value found for a
+       (key, column); `clash` is the set that must not be promoted.
+       SAME VALUE ON BOTH ROWS IS NOT A CONFLICT - there is nothing to pick
+       between, and one record serving both rows is the feature working. */
+    const scan = Reco._cfScan(tpl, sess, gained);
+    const clash = scan.clash, conflicts = scan.conflicts;
+    /* ONE question, and it is asked by RecoTemplate.saveTemplate ABOVE the
+       template swap now, where Cancel can abandon the save. The hook is kept
+       for a caller that has a person in front of it and no save to abandon. */
+    if (conflicts.length && typeof ask === 'function' && !ask(conflicts, scan.cols)) {
+      return { cols: cols, cells: 0, conflicts: conflicts, declined: true };
+    }
     sess.data.forEach(row => {
       const pk = Reco.storeKey(tpl, row);
       if (!pk) return;                                       // no key, nothing to carry it on
       gained.forEach(ac => {
         const name = String(ac.name);
+        if (clash[pk + '\u0000' + name]) return;             // T-30-3: two values, no winner
         if (Reco._extraRec(tpl, sess, row, name)) return;    // already stored: leave it alone
         if (row[name] != null && row[name] !== '') return;   // the row value wins anyway
         const legacy = Reco._manualTag(sess, row, name);
@@ -18000,7 +18423,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
                  ds: String(Reco.dataSetOf(sess, row) || ''), by: by, at: at } });
       });
     });
-    if (!pending.length) return { cols: cols, cells: 0 };
+    if (!pending.length) return { cols: cols, cells: 0, conflicts: conflicts };
     const apply = map => {
       const byTpl = map[tpl.id] || (map[tpl.id] = {});
       pending.forEach(x => { (byTpl[x.pk] || (byTpl[x.pk] = {}))[x.col] = x.rec; });
@@ -18009,7 +18432,75 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     apply(AppState.extraValueMaster);                        // the next paint reads this
     Reco._extraValueFlush(tpl.id, apply);                    // S13, ONE write
     pending.forEach(x => { if (sess.manualTags) delete sess.manualTags[Reco._tagKey(x.row, x.col)]; });
-    return { cols: cols, cells: pending.length };
+    return { cols: cols, cells: pending.length, conflicts: conflicts };
+  },
+
+  /* ---- T-26-6. WHICH SUPPRESSED OVERRIDES ARE ALREADY IN THE LEDGER.
+     Resolved from whatever AppState.entryHistory holds right now, which is
+     why Reco._dupPostedFromShare refreshes it first. `out` is filled in
+     place, so one caller can render before the share has answered and the
+     other can re-render after. */
+  _resolveDupPosted(tpl, ovCells, out) {
+    out.length = 0;
+    if (!ovCells.length) return out;
+    const pix = Reco._postedAuditIndex(tpl);
+    ovCells.forEach(c => {
+      const hit = pix.byPk.get(c.k) || pix.revByPk.get(c.k);
+      const ref = hit ? Reco._postedMark(pix, hit) : null;
+      if (ref && ref.accountingId) out.push({ label: Reco._pkLabel(tpl, c.k), col: c.cn,
+        ref: String(ref.accountingId), v: c.v, reversed: !!ref.reversed });
+    });
+    return out;
+  },
+
+  /* The sentence itself, so the two renders cannot word it two ways.
+     `fromShare` false means the answer is this window's boot-time copy of the
+     entry history, and it SAYS SO rather than reading as the whole truth. */
+  _dupPostedBlock(tpl, list, fromShare, anyOv) {
+    if (!list.length) {
+      if (!anyOv || fromShare) return '';
+      return '<div class="help" data-dup-posted-pending="1">Checking the shared entry history for '
+        + 'those overrides…</div>';
+    }
+    return '<div class="help" data-dup-posted="1" style="color:var(--danger, #b91c1c);"><b>'
+      + list.length + ' of those are POSTED to the general ledger</b> — the ledger holds the '
+      + 'value that was typed and the screen now shows the computed one, so those two disagree '
+      + 'until the duplicate rows are corrected: '
+      + U.esc(list.slice(0, 8).map(p => p.label + ' / ' + p.col + ' = ' + p.v + ' under '
+          + p.ref + (p.reversed ? ' (reversed)' : '')).join(', '))
+      + (list.length > 8 ? ', …' : '') + '. Nothing on the shared folder has changed and the '
+      + 'records are still there; to change what the ledger says, reverse the entry.'
+      + (fromShare ? '' : ' (Checked against this window\'s copy of the shared entry history — '
+          + 'press Load if a colleague may have posted since this app was opened.)')
+      + '</div>';
+  },
+
+  /* ---- T-26-6. THE ANSWER FROM THE SHARED FOLDER. The same read and the
+     same merge the reversal uses (Reco._reverseReadShareHistory +
+     _reverseMergeHistory + AppState.adoptLedger), so a colleague's entry and
+     a one-way reversal fact both arrive and this window stops being wrong
+     about the ledger from here on. One read, only when there is a suppressed
+     override to resolve, so an ordinary Add Data costs nothing. */
+  async _dupPostedFromShare(tpl, ovCells, memAnswer) {
+    if (!ovCells || !ovCells.length) return;
+    try {
+      const sh = await Reco._reverseReadShareHistory();
+      let fromShare = false;
+      if (sh.ok) {
+        AppState.adoptLedger('entryHistory', Reco._reverseMergeHistory(sh.base));
+        Reco._postedIdxReset();
+        fromShare = true;
+      }
+      const list = Reco._resolveDupPosted(tpl, ovCells, []);
+      const box = document.getElementById('dupPostedBox');
+      if (box) { box.innerHTML = Reco._dupPostedBlock(tpl, list, fromShare, ovCells.length); return; }
+      // The panel was closed before the folder answered: say it anyway.
+      const grew = list.length > (memAnswer || []).length;
+      if (grew) U.toast(list.length + ' of the overrides that have stopped applying are POSTED to the '
+        + 'general ledger: ' + list.slice(0, 4).map(p => p.label + ' / ' + p.col + ' = ' + p.v
+        + ' under ' + p.ref).join(', ') + '. The ledger holds the typed value and the screen now '
+        + 'shows the computed one.', 'error');
+    } catch (e) { /* the window went away */ }
   },
 
   /* ---- #30. IS THE VALUE IN THIS CELL CARRIED FROM ANOTHER FILE?
@@ -24292,6 +24783,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
     });
 
     // 4. Render Total Row (Only for selected columns)
+    /* T-26-5. What each total LEFT OUT, so the footer below can say it. */
+    const totalNotes = [];
     if (rpt.showTotalRow && rows.length > 0) {
         const selectedTotals = rpt.totalColumns || []; // Fallback to empty array if undefined
         
@@ -24299,16 +24792,27 @@ renderCustomReport(tpl, sess, rpt, idx) {
         cols.forEach((c, idx) => {
             // Check if user selected this specific column for totals
             if (selectedTotals.includes(c)) {
-                let sum = 0;
-                rows.forEach(r => {
-                    // U.isNumeric, the same test the Sum card uses. The old
-                    // parseFloat guard rejected accounting negatives, so
-                    // '(50)' was dropped from the total while the Sum card
-                    // counted it as -50 and the two disagreed.
-                    const v = r[c];
-                    if (U.isNumeric(v)) sum += U.num(v);
-                });
-                h += '<td>'+U.fmtNum(sum)+'</td>';
+                /* U.isNumeric, the same test the Sum card uses. The old
+                   parseFloat guard rejected accounting negatives, so '(50)'
+                   was dropped from the total while the Sum card counted it as
+                   -50 and the two disagreed.
+                   T-26-5: the same arithmetic, moved into
+                   Reco._reportColumnTotal so the COUNT of cells it could not
+                   add comes back with the sum instead of being thrown away.
+                   The numbers are also on the cell as data- attributes,
+                   because a total is the one thing in a report a test has to
+                   be able to read as a VALUE and not as a sentence. */
+                const tt = Reco._reportColumnTotal(rows, c);
+                if (tt.excluded) totalNotes.push({ col: c, n: tt.excluded, samples: tt.samples });
+                h += '<td data-total-col="'+U.escAttr(c)+'" data-total-sum="'+tt.sum+'"'
+                  + ' data-total-excluded="'+tt.excluded+'"'
+                  + (tt.excluded ? ' title="'+U.escAttr(tt.excluded + ' cell(s) in this column are not '
+                      + 'numbers and are not in this total')+'"' : '')
+                  /* MR-5: nothing was added, so there is no total - the
+                     same answer the Sum card gives, with the * and the
+                     footnote still there to say why. */
+                  + '>'+((tt.excluded && !tt.n) ? '\u2014' : U.fmtNum(tt.sum))
+                  + (tt.excluded ? ' *' : '')+'</td>';
             }
             // If it's the first column and not a total, label it "Total"
             else if (idx === 0) { 
@@ -24323,6 +24827,18 @@ renderCustomReport(tpl, sess, rpt, idx) {
     }
 
     h += '</tbody></table></div>';
+    /* T-26-5. THE TOTAL SAYS WHAT IT LEFT OUT, beside the total, with the
+       characters that could not be added. Without this the column showed
+       three figures and a total that was not their sum, and the operator's
+       only way to find out which cell was missing was to add them up by
+       hand. The cell is also marked with a * so the eye lands here. */
+    totalNotes.forEach(tn => {
+      h += '<div class="help" data-total-note="1" style="color:var(--danger, #b91c1c);">* <b>'
+        + tn.n + ' cell(s)</b> in <b>' + U.esc(tn.col) + '</b> are not numbers and are <b>not in that '
+        + 'total</b> (' + tn.samples.map(U.esc).join(', ') + (tn.n > tn.samples.length ? ', …' : '')
+        + '), so the column does not add up to what the column shows. Correct or revert those cells.'
+        + '</div>';
+    });
     if (capped) h += '<div class="text-muted">Showing the first '+U.fmtInt(CAP)+' of '+U.fmtInt(rows.length)
       +' rows. The summary cards and the total row above cover all '+U.fmtInt(rows.length)
       +'; <b>Export CSV</b> writes all '+U.fmtInt(rows.length)+'.</div>';
@@ -24333,6 +24849,46 @@ renderCustomReport(tpl, sess, rpt, idx) {
      the summary cards, the total row, the CSV export — covers every row; only
      the on-screen table stops here so the browser stays responsive. */
   REPORT_ROW_CAP: 5000,
+
+  /* ---- T-26-5. WHAT ONE REPORT COLUMN ADDS UP TO, AND WHAT IT LEFT OUT.
+     RC-8 refuses a non-numeric override at the one door into entry history,
+     so it can no longer reach the ledger. It could still reach a SCREEN
+     total: with Net typed over by hand as '1.234,50' (a European decimal
+     comma, or the ' prefix Excel itself uses to force text) the report cell
+     shows those characters and the column does not add up to them. Reviewer
+     A's probe read the naive total of that column as 101.2345 for three rows
+     worth 100 (scratchpad/store/fix/p3.out).
+
+     The total row was already guarded by U.isNumeric, so the real total was
+     100 - AND IT SAID NOTHING ABOUT THE CELL IT HAD DROPPED, which is the
+     same defect from the other side: the operator reads a column of three
+     figures and a total that is not their sum, with nothing on screen saying
+     why. The count is what closes it, and it lives here so the total and the
+     footnote cannot disagree about how many.
+
+     A BLANK CELL IS NOT "NOT A NUMBER" and is not counted. It has always
+     been out of every total, nobody reads an empty cell as an amount, and
+     counting it would put a warning under every sparse column in the app -
+     including a deliberately blank override, which is a decision somebody
+     made and not a value that cannot be added. */
+  _reportColumnTotal(rows, col) {
+    let sum = 0, excluded = 0, n = 0;
+    const samples = [];
+    for (let i = 0; i < rows.length; i++) {
+      const v = rows[i][col];
+      if (v == null || v === '') continue;
+      if (U.isNumeric(v)) { sum += U.num(v); n++; continue; }
+      excluded++;
+      if (samples.length < 3) samples.push(String(v));
+    }
+    /* MR-5. `n` is the count of cells that WERE added, and it exists for one
+       case: every cell excluded. The total then rendered "0.00 *" - a number
+       that is not a total of anything - while the Sum card for the same
+       column on the same screen said '—', because the card already refuses
+       that case (`(n || !rows.length) ? fmtNum(sum) : '—'`). Two figures for
+       one column, and the card made the better choice. */
+    return { sum: sum, excluded: excluded, samples: samples, n: n };
+  },
 
   /* Run a custom report definition against the data */
   runReport(tpl, sess, rpt) {
@@ -24705,23 +25261,154 @@ renderCustomReport(tpl, sess, rpt, idx) {
     entry.docNumbers = entry.docNumbers || {};
     AppState.docNumberMaster[id] = AppState.docNumberMaster[id] || {};
     const dnm = AppState.docNumberMaster[id];
+    /* T-S10-1. WHAT THIS ALLOCATION DECIDED, per currency, so the two merge
+       intents below can replay it onto the file they have just read instead
+       of writing whatever this session happens to hold.
+       MR-7 collects them before anything is decided, because the two tests
+       below - this window's and the share's - have to judge the same list.
+       The modal's own text promises what MR-7 makes true: "Saved numbers are
+       added to the Document Number Master so future data loads can detect
+       duplicates", which it cannot do when the master holds one of two. */
+    const moves = [];
     currencies.forEach(cur => {
       const v = (document.getElementById('alloc_'+cur)?.value || '').trim();
       const old = entry.docNumbers[cur];
-      // A corrected doc number must not leave the old one pointing at this entry.
-      if (old && old !== v && dnm[old] === accountingId) delete dnm[old];
-      if (v) {
-        entry.docNumbers[cur] = v;
-        dnm[v] = accountingId;
-      } else {
-        delete entry.docNumbers[cur];
-      }
+      moves.push({ cur: cur, v: v, old: old == null ? '' : String(old) });
+    });
+    /* ---- MR-7, AND THIS FUNCTION IS SYNCHRONOUS AGAIN, which cost a suite
+       run to learn and is the more important half of the lesson. The first
+       version awaited a read of the shared master before deciding - and two
+       existing callers do not await saveAllocation, so its TAIL
+       (App.closeModal, App.navigate, the toast) moved to a later tick and
+       closed a dialog the caller had opened in the meantime. run_reverse_e2e
+       went 254 -> 236: Reco.reverseEntry() found Reco._reverseState already
+       null and silently did nothing, so no mirror was minted, no row was
+       released, and eighteen checks went red with no page error anywhere.
+       A UI entry point that other code drives must not become async quietly.
+
+       SO THE AUTHORITATIVE TEST LIVES INSIDE THE MERGE INTENT, which is the
+       right place anyway: it runs on the file the merge has just READ, inside
+       Store._enqueue, so it is the only test that is not already stale. The
+       in-memory test below is the immediate one - all this window can know -
+       and the intent catches what it cannot: a number a colleague took after
+       this app started and before this write. The ENTRY'S OWN CLAIM is
+       registered just below, in the SAME debounce window (see the comment
+       there, which is the second thing a suite run had to teach this
+       function), and carries only what the master did not refuse: the
+       `refused` set when the master's job ran first, and the correction
+       intent in Reco._dnRefused when it did not.
+       Nothing anywhere tested this before: two colleagues could allocate
+       GL-7000 to different entries, both be told "Document numbers saved",
+       and leave the master naming one of them while BOTH entries claimed it,
+       so a row carrying that number resolved to the wrong accounting
+       reference (scratchpad/money/skB/probe/p4_z1_side.mjs P7). */
+    const takenHere = moves.filter(x => x.v && dnm[x.v] && String(dnm[x.v]) !== String(accountingId))
+                           .map(x => ({ v: x.v, by: String(dnm[x.v]) }));
+    if (takenHere.length) {
+      U.toast('Nothing was saved. Document number ' + takenHere[0].v + ' already belongs to entry '
+        + takenHere[0].by
+        + (takenHere.length > 1 ? ' — and ' + (takenHere.length - 1) + ' more of these are taken: '
+            + takenHere.slice(1, 4).map(t => t.v + ' (' + t.by + ')').join(', ') : '')
+        + '. Two entries under one document number resolve a row to the wrong accounting reference, '
+        + 'so this is refused. Use a different number, or reverse the entry that holds it.', 'error');
+      return;
+    }
+    // Optimistic in memory, corrected by _dnRefused if the share disagrees.
+    moves.forEach(x => {
+      if (x.old && x.old !== x.v && dnm[x.old] === accountingId) delete dnm[x.old];
+      if (x.v) { entry.docNumbers[x.cur] = x.v; dnm[x.v] = accountingId; }
+      else delete entry.docNumbers[x.cur];
+    });
+    /* Filled in by the master intent when the share refuses a number, and
+       read by the entry's intent below. Both are registered NOW, in the same
+       debounce window, so the two files move together; whichever job runs
+       first, this set is what stops the entry claiming a number the master
+       would not grant. When the entry's job runs first the set is still
+       empty, and Reco._dnRefused's correction intent takes the claim back off
+       on the next cycle. */
+    const refused = new Set();
+    AppState.ledgerFlush('docNumberMaster', map => {
+      const m = map[id] || (map[id] = {});
+      const wrote = [], lost = [];
+      moves.forEach(x => {
+        if (x.old && x.old !== x.v && m[x.old] === accountingId) delete m[x.old];
+        if (!x.v) return;
+        if (m[x.v] && String(m[x.v]) !== String(accountingId)) {
+          lost.push({ cur: x.cur, v: x.v, by: String(m[x.v]) });
+          refused.add(x.v);
+          return;
+        }
+        m[x.v] = accountingId;
+        wrote.push(x);
+      });
+      if (lost.length) Reco._dnRefused(id, accountingId, lost);
+    });
+    /* ---- AND THE ENTRY'S OWN CLAIM IS REGISTERED HERE, NOT FROM INSIDE THAT
+       INTENT, which cost a second suite run to learn. Registering it from in
+       there delays it by one debounce cycle, so the entry's docNumbers
+       reached reco/entryHistory.json AFTER the reverse dialog had been opened
+       - and reverseEntry re-plans from the SHARE and refuses when the share's
+       copy would not reverse the way the dialog described ("The shared record
+       disagrees with this one"). run_reverse_e2e went 254 -> 236 on exactly
+       that refusal, with no page error and no toast to point at it.
+       So both writes go in the same debounce window again, as they always
+       did, and a refused number is taken BACK OFF the entry by the
+       correction intent in Reco._dnRefused. The clash is a race between two
+       people typing the same number; one merge cycle of an entry carrying a
+       claim the master has not granted is a far smaller thing than a reversal
+       that silently does nothing.
+       The thing being mutated lives INSIDE entryHistory, so the intent
+       re-finds the entry by accountingId: by the time it runs, _takeDisk has
+       replaced this template's array with the share's and `entry` above is a
+       detached copy. An entry the share no longer has is NOT resurrected - a
+       document number is not a reason to put a deleted entry back. */
+    AppState.ledgerFlush('entryHistory', map => {
+      const li = map[id] || (map[id] = []);
+      const e = li.find(x => x && x.accountingId === accountingId);
+      if (!e) return;
+      e.docNumbers = e.docNumbers || {};
+      moves.forEach(mv => {
+        if (mv.v && !refused.has(mv.v)) e.docNumbers[mv.cur] = mv.v;
+        else delete e.docNumbers[mv.cur];
+      });
     });
     Reco._postedIdxReset();   // docNumberMaster is one of the reference lookups
     AppState.save();
     App.closeModal();
     App.navigate('reco');
     U.toast('Document numbers saved','success');
+  },
+
+  /* ---- MR-7. A NUMBER THE SHARED MASTER WOULD NOT GIVE US. Reached from
+     inside the docNumberMaster merge intent, which has just read the file, so
+     this is the only test that is not already stale. The entry's own claim is
+     registered from the same intent and already excludes these; what is left
+     is this window's optimistic memory and telling the operator. */
+  _dnRefused(tplId, accountingId, lost) {
+    const m = AppState.docNumberMaster[tplId];
+    const hist = AppState.entryHistory[tplId] || [];
+    const e = hist.find(x => x && x.accountingId === accountingId);
+    lost.forEach(l => {
+      if (e && e.docNumbers && e.docNumbers[l.cur] === l.v) delete e.docNumbers[l.cur];
+      if (m && m[l.v] === accountingId) delete m[l.v];
+    });
+    /* ...and off the entry ON THE SHARE. This intent is registered AFTER the
+       allocation's own, so it replays after it on every merge and the removal
+       wins. */
+    const gone = lost.slice();
+    AppState.ledgerFlush('entryHistory', map => {
+      const li = map[tplId] || [];
+      const en = li.find(x => x && x.accountingId === accountingId);
+      if (!en || !en.docNumbers) return;
+      gone.forEach(l => { if (en.docNumbers[l.cur] === l.v) delete en.docNumbers[l.cur]; });
+    });
+    Reco._postedIdxReset();
+    U.toast('Document number ' + lost[0].v + ' already belongs to entry ' + lost[0].by
+      + ' on the shared folder, so it was NOT saved'
+      + (lost.length > 1 ? ' — nor were ' + lost.slice(1, 4).map(l => l.v).join(', ') : '')
+      + '. Two entries under one document number resolve a row to the wrong accounting reference. '
+      + 'It is not on this entry either — use a different number, or reverse the entry that holds '
+      + 'it.', 'error');
   },
 
   /* ============== REVERSE A GENERATED ENTRY ==============
@@ -24757,6 +25444,21 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
   _reverseFind(tpl, accountingId) {
     return (AppState.entryHistory[tpl.id] || []).find(e => e && e.accountingId === accountingId) || null;
+  },
+  /* ---- MR-2. THE ONE SENTENCE THAT CLOSES THE LOOP THE REFUSALS LEFT
+     OPEN. Step 10's "reverse again" instruction and step 3/4b's "already
+     reversed" block used to contradict each other: a reversal whose share
+     write failed was marked in memory, so the retry the app asked for was
+     refused by the app's own mark, and there was no route out. The write is
+     retried on every save now (Store._flushMergeTimers), so the honest answer
+     is "it is owed and being retried; keep the window open" - said here
+     rather than left for the operator to work out. */
+  _reverseOwedNote() {
+    if (!Store.owes || !Store.owes('entryHistory')) return '';
+    return '<br><br><b>That mark has not reached the shared folder yet.</b> It is still owed to '
+      + 'reco/entryHistory.json and is retried every time anything is saved, so reversing again '
+      + 'would not help - keep this window open until it lands. '
+      + (Store.lastError ? 'The last save error was: ' + U.esc(Store.lastError.message) + '.' : '');
   },
   _reverseRefuse(title, html) {
     App.openModal(title, '<div class="help">' + html + '</div>',
@@ -25257,7 +25959,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
       return Reco._reverseRefuse('Entry ' + accountingId + ' was already ' + U.esc(r.mode),
         'It was ' + U.esc(r.mode) + ' by <b>' + U.esc(r.by || 'someone') + '</b> at ' + U.esc(r.at || '')
         + (r.reversalId ? ' (reversing entry <b>' + U.esc(r.reversalId) + '</b>)' : '')
-        + '.<br>Reason: ' + U.esc(r.reason || '') + '<br><br>Nothing was changed.');
+        + '.<br>Reason: ' + U.esc(r.reason || '') + '<br><br>Nothing was changed.'
+        + Reco._reverseOwedNote());
     }
     /* flush() cannot tell you whether a write happened, and Store.save returns
        at once for a read-only key. If the shared entry history could not be
@@ -25700,7 +26403,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       'Entry ' + U.esc(st.accountingId) + ' is no longer in the entry history.');
     if (mem.reversal) return Reco._reverseRefuse('Nothing was changed', 'Entry ' + U.esc(st.accountingId)
       + ' was already ' + U.esc(mem.reversal.mode) + ' by <b>' + U.esc(mem.reversal.by || 'someone') + '</b> at '
-      + U.esc(mem.reversal.at || '') + '.');
+      + U.esc(mem.reversal.at || '') + '.' + Reco._reverseOwedNote());
 
     // 1 — the plan the dialog showed, re-run now
     let plan = Reco._reversePlan(tpl, sess, mem);
@@ -25797,7 +26500,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
       + U.esc(base0.reversal.at || '')
       + (base0.reversal.reversalId ? ' (reversing entry <b>' + U.esc(base0.reversal.reversalId) + '</b>)' : '')
       + ' — this is what the shared folder says, so your copy was out of date.');
-    AppState.entryHistory = merged0;
+    /* T-S10-1. IN PLACE, never a reassignment: a buffered merge intent and
+       everything else holding a reference to this map has to stay valid. */
+    AppState.adoptLedger('entryHistory', merged0);
     // The memo key no longer walks the history (it cost 175ms -> 1,280ms per
     // call), so replacing the history has to invalidate the index explicitly.
     Reco._postedIdxReset();
@@ -25870,7 +26575,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
          user to press Reverse again to see it, and without this the next press
          is refused by the step-3 check against the same stale history - three
          presses to recover from one mid-flight voucher, not the two promised. */
-      AppState.entryHistory = merged;
+      AppState.adoptLedger('entryHistory', merged);   // T-S10-1: in place
       Reco._postedIdxReset();
       return refuse('The reversal was not recorded', 'The accounting reference recorded against <b>'
         + U.esc(st.accountingId) + '</b> changed while the rows were being released: the shared record now reads '
@@ -25879,7 +26584,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
         + 'cancel and a reversal, so <b>' + U.esc(st.accountingId) + ' was NOT marked ' + U.esc(mode)
         + '</b>. ' + released + ' Press Reverse again to see the current picture.');
     }
-    AppState.entryHistory = merged;
+    AppState.adoptLedger('entryHistory', merged);   // T-S10-1: in place
     Reco._postedIdxReset();
 
     // 5 — mark the original, and (reverse) append the mirror
@@ -25887,9 +26592,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const by = AppState.currentUser || '';
     let newId = '';
     if (mode === 'reversed') {
-      newId = 'AE' + Date.now().toString(36).toUpperCase();
+      newId = U.accountingId();                       // T-S10-11: per-window suffix
       let n = 0;
-      while (list.some(e => e && e.accountingId === newId)) newId = 'AE' + Date.now().toString(36).toUpperCase() + (++n);
+      while (list.some(e => e && e.accountingId === newId)) newId = U.accountingId() + (++n);
       /* No postedPks, no sourceRowIds, no specialJvs - deliberately. Each one
          would corrupt a working control: _postedAuditIndex would resolve a row
          this entry just RELEASED to a clean accounting reference, JvCreator.inUse
@@ -25898,6 +26603,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
          walkable both ways. */
       list.push({
         accountingId: newId,
+        idNonce: U.uid(),                               // T-S10-11, as on a generated entry
         lines: plan.lines,
         sourceRowIds: [], specialJvIds: [], specialJvs: [],
         createdAt: new Date().toLocaleString(),
@@ -26001,8 +26707,64 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     // 10 — flush, then confirm from the share that the record carries it
     await say('Recording the reversal on the shared folder…', 85);
-    AppState._snap.entryHistory = null;
     Store.lastError = null;
+    /* ---- T-S10-1. reco/entryHistory.json IS NO LONGER A WHOLE-FILE WRITE, so
+       the reversal reaches the share as an INTENT replayed onto the file the
+       merge has just read - inside Store._enqueue, where a read cannot
+       overlap a write of the same file. That is what removes the residual
+       risk §12.6 used to name: this write used to drop an entry a colleague
+       generated while the un-stamp was running, which is the longest write
+       window in this app (over 100 s at 200,000 keys), and their row kept its
+       Posted stamp.
+
+       EVERYTHING IS RE-FOUND BY accountingId. By the time the intent runs,
+       _takeDisk has replaced this template's array with the share's, so
+       `base`, `list` and the mirror above are detached copies of objects that
+       are no longer in the map. Each step is idempotent, because a failed
+       write leaves the intent buffered and the next job replays it. */
+    const revId = base.accountingId;
+    const mirror = newId ? list.find(e => e && e.accountingId === newId) : null;
+    const cancelledOrig = (mode === 'cancelled' && base.reverses) ? String(base.reverses) : '';
+    AppState.ledgerFlush('entryHistory', map => {
+      const li = map[tpl.id] || (map[tpl.id] = []);
+      let e = li.find(x => x && x.accountingId === revId);
+      /* The share no longer holds the entry this reversal is about - somebody
+         restored a backup while the rows were being released. A reversal is a
+         one-way fact and the rows are already released, so the record goes
+         BACK rather than being dropped: an entry that reads posted with
+         released rows is the one state worth avoiding, and step 4b's check
+         has already refused the case where a second reversal could race. */
+      if (!e) { e = base; li.push(e); }
+      e.reversal = rec;
+      /* ---- T-S10-11. THE MIRROR BY THE SAME RULE AS EVERY OTHER APPEND.
+         `!li.some(x => x.accountingId === newId)` would stand down over a
+         colleague's entry that happened to mint this reference and the contra
+         would be gone, with the original marked reversed and nothing behind
+         it - the reversal's version of the bug the Generate door had. The
+         LINK follows the mirror: e.reversal.reversalId is what walks from the
+         original to the contra, and it is set from where the mirror actually
+         landed, inside the mutate, so a replay cannot leave it naming a
+         reference the mirror no longer has. */
+      if (mirror) {
+        Reco._appendEntryIntent(map, tpl.id, mirror);
+        if (e.reversal) e.reversal.reversalId = mirror.accountingId;
+      }
+      if (cancelledOrig) {
+        const o = li.find(x => x && x.accountingId === cancelledOrig);
+        if (o && o.reversal) o.reversal.reversalCancelled = { at, by, reason };
+      }
+    });
+    if (rec.freedDocNumbers.length) {
+      /* Only the numbers that still pointed at THIS entry are freed, re-tested
+         on the file: a colleague who allocated the same number to something
+         else since must not have it deleted. */
+      const freed = rec.freedDocNumbers.slice();
+      AppState.ledgerFlush('docNumberMaster', map => {
+        const m = map[tpl.id];
+        if (!m) return;
+        freed.forEach(k => { if (m[k] === revId) delete m[k]; });
+      });
+    }
     await AppState.flush();
     const back = await Reco._reverseReadShareHistory();
     const onShare = back.ok && ((back.base[tpl.id] || []).find(e => e && e.accountingId === base.accountingId) || {}).reversal;
@@ -26122,6 +26884,12 @@ renderCustomReport(tpl, sess, rpt, idx) {
         extraCols.push({ name: toCol, type: 'custom' });
       }
     }
+    /* ---- Z1. EVERY (ROW, COLUMN) WHOSE FORMULA COULD NOT BE WORKED OUT,
+       collected in the pass that computes them and read by the refusal below.
+       COLLECTED BEFORE THE KEYWORD FILTER ON PURPOSE: for the keyword column
+       the failure is what decides whether the row is in this entry at all, so
+       a check over the surviving rows could never see it. */
+    const badFx = [];
     extraCols.forEach(ac => {
       sourceRows.forEach(r => {
         /* S10's OVERRIDE GATE, in the same position and the same order as
@@ -26159,7 +26927,28 @@ renderCustomReport(tpl, sess, rpt, idx) {
           if (ac.name === toCol && r[ac.name] != null && r[ac.name] !== '') return;
           r[ac.name] = Masters.evalLookup(tpl, ac, r);
         } else if (ac.type === 'formula') {
-          try { r[ac.name] = Formula.evaluate(ac.formula, r); } catch(e) { r[ac.name] = ''; }
+          /* ---- Z1, AND THE DIVERGENCE NAMED ABOVE WAS NEVER THE MECHANISM.
+             This line used to answer '' where _extraComputedBase answers
+             '#ERR', and the comment above, the handover and the ticket all
+             call that the bug. IT IS UNREACHABLE: Formula.evaluate catches on
+             BOTH of its paths and RETURNS '#ERR', so this loop was already
+             reading the same characters the grid shows. What posted the zero
+             is U.num('#ERR') === 0 inside Reco._buildEntryLines - measured on
+             an FX column NUM({Base})/NUM({Rate}) with one row's rate 0: the
+             grid, the ladder, the report, the CSV and the workbook all read
+             #ERR, and the entry posted 150 where two of the three rows are
+             worth 150 and the third - the LARGEST by amount - contributed
+             nothing and was stamped POSTED anyway.
+             So closing the divergence is worth exactly one thing, and it is
+             why it is done here rather than left alone: it leaves the refusal
+             below a SINGLE sentinel to key on. If a later change ever does
+             make evaluate() throw, '' is indistinguishable from "this column
+             has no value" and the refusal would silently stop firing. */
+          let fx;
+          try { fx = Formula.evaluate(ac.formula, r); } catch(e) { fx = '#ERR'; }
+          r[ac.name] = fx;
+          if (fx === '#ERR') badFx.push({ id: r._id, pk: r._pk || '', col: ac.name,
+                                          formula: String(ac.formula || '') });
         } else {
           // 'custom' or 'dropdown' — the row value wins, then the stored
           // value, then manualTags: the same three lines as _extraOwnValue's
@@ -26211,6 +27000,91 @@ renderCustomReport(tpl, sess, rpt, idx) {
        AFTER THE KEYWORD FILTER, DELIBERATELY: a row the filter dropped is not
        in the entry, and refusing a posting because of it would be a refusal
        about a row the operator is not posting. */
+    /* ====== SPLIT: standard rows vs Special JV rows ======
+       MR-1. MOVED ABOVE BOTH LEDGER-WRITE REFUSALS, and that is the whole of
+       the second Z1 door. It used to sit BELOW them, so neither refusal could
+       tell a bucketed row from a standard one - and the amount a Special JV
+       reads is named by ITS OWN mapping's inputColumns, never by the linked
+       AEG template's. Measured on an FX column AED = NUM({Base})/NUM({Rate})
+       with INV-3's rate 0 and every row's To Account a registered JV ref: the
+       preview refused NOTHING, Reco handed the JV page "AED":"#ERR", and an
+       aggregating JV posted Dr 150 for three rows worth 650 with all three
+       stamped POSTED (scratchpad/money/skA/probes/p7_jv_agg.mjs). Nothing
+       downstream changes: the same two arrays, built from the same
+       post-keyword-filter sourceRows, in the same order. */
+    const standardRows = [];
+    const jvBuckets = Object.create(null);   // { jvRef: [rows] }
+    const rowJvRef = new Map();              // row _id -> the JV ref it is bucketed to
+    sourceRows.forEach(r => {
+      const ref = toCol ? String(r[toCol]||'').trim() : '';
+      if (ref && SpecialJV.isJvRef(ref)) {
+        jvBuckets[ref] = jvBuckets[ref] || [];
+        jvBuckets[ref].push(r);
+        rowJvRef.set(r._id, ref);
+      } else {
+        standardRows.push(r);
+      }
+    });
+
+    /* ---- MR-1. WHICH COLUMNS THIS ENTRY READS AS AN AMOUNT OR A CONTROL,
+       built ONCE, PER ROW, and read by BOTH ledger-write refusals below.
+       It was built inside the Z1 arm alone and from the AEG template alone,
+       and each of those was a door onto the same wrong number:
+
+         - RC-8, THE OVERRIDE REFUSAL, COULD NOT SEE IT AT ALL, so it fell
+           back on `rec.prev` being numeric to decide whether an override had
+           turned an amount into text. For a cell whose formula says '#ERR',
+           prev IS '#ERR' - so the one cell Z1 refuses over is the one cell
+           RC-8 stopped looking at the moment it was typed over, and the
+           override box is the ONE tool this app offers for correcting a
+           computed cell by hand, which is exactly what Z1's own refusal text
+           sends the operator to do. Measured: with "Allow manual override"
+           ticked on the AED column, an override of "'500" on the '#ERR' cell
+           posted Dr 150 for three rows worth 150 + INV-3 (INV-3 contributed
+           nothing, had no journal line and was stamped POSTED), and
+           '1.234,50' posted Dr 151.23 for a cell reading 1.234,50 while the
+           same column's report total read 150
+           (scratchpad/money/skA/probes/p1_override_bypass.mjs).
+         - A BUCKETED ROW IS JUDGED ON ITS OWN SPECIAL JV'S inputColumns.
+
+       A JV's read set carries the keyword column too, because the keyword
+       filter runs over every row whatever it is later bucketed to.
+       THE LABEL IS IN BOTH SETS ON PURPOSE: the role matrix S11 matches input
+       columns by `name` only, while the AEG loop falls back to `r[ic.label]`
+       and SpecialJV.pick reads by name, so an added column named after an
+       input column's LABEL is read by the entry and is refused here even
+       though the editor never objected to it. */
+    const aegReads = new Set();
+    const add = n => { if (n != null && n !== '') aegReads.add(String(n)); };
+    (aegTpl.inputColumns || []).forEach(ic => { if (ic) { add(ic.name); add(ic.label); } });
+    add(aegTpl.valueColumn);
+    (aegTpl.aggregateBy || []).forEach(add);
+    add(aegTpl.fromAccount && aegTpl.fromAccount.inputColumn);
+    add(aegTpl.toAccount && aegTpl.toAccount.inputColumn);
+    add(tpl.valueColumn);
+    /* '' when no filter actually ran, so an unused keywordColumn setting does
+       not quietly widen the pre-filter arm to a column nobody reads. */
+    const kwCol = (aeg.keywordColumn && aeg.keywordValues) ? String(aeg.keywordColumn) : '';
+    if (kwCol) aegReads.add(kwCol);
+    const jvReadCache = Object.create(null);
+    const jvReadsFor = ref => {
+      if (jvReadCache[ref]) return jvReadCache[ref];
+      const def = SpecialJV.get(ref);
+      const s = new Set();
+      /* Reco.openSpecialJv hands the JV page exactly `def.inputColumns`, by
+         name, through SpecialJV.pick - so that list is the whole of what a
+         Special JV can read off a row, and it is what has to be judged. */
+      ((def && def.inputColumns) || []).forEach(ic => {
+        if (!ic) return;
+        if (ic.name != null && ic.name !== '') s.add(String(ic.name));
+        if (ic.label != null && ic.label !== '') s.add(String(ic.label));
+      });
+      if (kwCol) s.add(kwCol);
+      return (jvReadCache[ref] = s);
+    };
+    const jvOf = r => (r ? (rowJvRef.get(r._id) || '') : '');
+    const readsForRow = r => { const ref = jvOf(r); return ref ? jvReadsFor(ref) : aegReads; };
+
     const badOv = [];
     sourceRows.forEach(r => {
       const pk = r._pk || '';
@@ -26221,14 +27095,27 @@ renderCustomReport(tpl, sess, rpt, idx) {
         const rec = cells[cn];
         if (!rec || rec.k !== 'override') return;
         if (U.isNumeric(rec.v)) return;
-        if (!U.isNumeric(rec.prev)) return;
-        badOv.push({ pk: pk, col: cn, v: String(rec.v == null ? '' : rec.v), prev: String(rec.prev) });
+        /* ---- MR-1. THE prev TEST IS DROPPED FOR A COLUMN THIS ENTRY READS.
+           The test exists to protect decision J.8 - a column that was textual
+           ALL ALONG, whose kind is derived from its values rather than
+           declared by anyone, and which exports as text. A column the journal
+           reads as an amount or an account code is never that one, so the
+           test has nothing to protect there and a cell reading '#ERR' (prev
+           '#ERR', not numeric) walked straight past both gates. */
+        if (!U.isNumeric(rec.prev) && !readsForRow(r).has(cn)) return;
+        badOv.push({ pk: pk, col: cn, v: String(rec.v == null ? '' : rec.v), prev: String(rec.prev),
+                     jv: jvOf(r) });
       });
     });
     if (badOv.length) {
       const one = badOv[0];
       U.toast('Nothing was posted. ' + Reco._pkLabel(tpl, one.pk) + ' / ' + one.col + ' was typed over '
-        + 'by hand with "' + one.v + '", which is not a number (it replaced ' + one.prev + '). An '
+        + 'by hand with "' + one.v + '", which is not a number (it replaced ' + one.prev + ')'
+        /* MR-1: when what it replaced was not a number either, say WHY the
+           cell still counts - it is a column this entry reads as an amount. */
+        + (U.isNumeric(one.prev) ? '' : ' and ' + one.col + ' is '
+            + (one.jv ? 'an input column of Special JV ' + one.jv : 'read by this journal entry')
+            + ' as an amount') + '. An '
         + 'amount worked out from it would reach the journal as a different number or as nothing at '
         + 'all, so this entry is refused'
         + (badOv.length > 1 ? ' — and ' + (badOv.length - 1) + ' more cell(s) in this selection are '
@@ -26238,18 +27125,94 @@ renderCustomReport(tpl, sess, rpt, idx) {
       return;
     }
 
-    // ====== SPLIT: standard rows vs Special JV rows ======
-    const standardRows = [];
-    const jvBuckets = Object.create(null);   // { jvRef: [rows] }
-    sourceRows.forEach(r => {
-      const ref = toCol ? String(r[toCol]||'').trim() : '';
-      if (ref && SpecialJV.isJvRef(ref)) {
-        jvBuckets[ref] = jvBuckets[ref] || [];
-        jvBuckets[ref].push(r);
-      } else {
-        standardRows.push(r);
+    /* ---- Z1. LEDGER-WRITE REFUSAL 3: A FORMULA THAT COULD NOT BE WORKED OUT
+       MUST NOT REACH A JOURNAL LINE EITHER. The oldest deferred defect in
+       this project, deferred across three rounds with "raise its priority"
+       each time, and never reproduced until now.
+
+       WHAT WAS MEASURED (scratchpad/money/out/z1_repro_before.txt, and
+       run_store_e2e section 49 re-measures the figure rather than quoting
+       it): an added formula column AED = NUM({Base})/NUM({Rate}) on three
+       rows where ONE row's Rate cell is 0 - a blank or zero rate on one line
+       of an FX extract. The grid, the one read ladder, the report cell, the
+       CSV and the real workbook ALL read '#ERR' for that cell. The entry
+       posted Dr 150.00, which is the other two rows, and the third - the
+       largest of the three by amount - contributed NOTHING, was stamped
+       POSTED with no line behind it, and the only thing on screen was
+       "Entry AEMVAUQHDL generated (2 lines)".
+
+       WHY A REFUSAL AND NOT AGREEMENT. The two candidates were (a) make this
+       loop answer '#ERR' like every other reader, so the divergence is gone,
+       and (b) refuse. (a) alone fixes NOTHING: U.num('#ERR') is 0 just as
+       U.num('') is, so the entry posts the same zero with the grid merely
+       agreeing about the cell - and on today's code the loop was ALREADY
+       answering '#ERR' (see the arm above), which is why the divergence the
+       ticket names had never actually posted anything. A wrong number in a
+       ledger is worse than a blocked entry, and this app's rule is to refuse
+       rather than guess wherever two readings are possible: '#ERR' could mean
+       0, or it could mean "nobody knows yet", and the app cannot tell. Both
+       are shipped, because (a) is what gives (b) one sentinel to key on.
+
+       WHY NOT GUESS A VALUE, which is the third thing a reader will think of:
+       there is no honest guess. The last good value is not in this file, the
+       formula is not invertible, and skipping the row would post an entry
+       that is quietly smaller than the selection the operator ticked - which
+       is the harm, not the remedy.
+
+       THE SCOPE IS NARROW ON PURPOSE, and it has to be: refusing on every
+       '#ERR' anywhere would change what every existing template can post,
+       which is the objection T-26-4 was deferred for. Only a column THIS
+       ENTRY READS counts - an AEG input column by name or by label, the
+       value column, an aggregateBy, either account column, the keyword
+       column, or the template's own value column (which is the fallback when
+       the AEG value field comes back blank). A broken formula in a column the
+       linked template never reads cannot change a posted number and does not
+       refuse (run_store_e2e Z1h).
+       DELIBERATELY NOT IN THE SET: the post-entry column. It is not an
+       amount, not an account and does not decide whether a row posts; it is
+       captured as postedPrev for a reversal, and a cancel restoring '#ERR'
+       into a cell whose formula already says '#ERR' changes nothing.
+
+       AND THE KEYWORD COLUMN IS TESTED PRE-FILTER, which is the one place
+       RC-8's "after the keyword filter, deliberately" is the wrong rule. For
+       an override, a row the filter dropped is not in the entry and refusing
+       over it would be a refusal about a row nobody is posting. For the
+       keyword column the failure IS what dropped the row: the cell could not
+       be worked out, so the filter could not match it, so the row silently
+       did not post. Every other column is judged on the SURVIVING rows. */
+    if (badFx.length) {
+      /* MR-1: the read set is built above now, and PER ROW, so a row in a
+         Special JV bucket is judged on that JV's input columns and a standard
+         row on the AEG template's. A row the keyword filter dropped is in
+         neither bucket, which is why the keyword arm is tested first. */
+      const keptRow = new Map();
+      sourceRows.forEach(r => keptRow.set(r._id, r));
+      const bad = badFx.filter(b => {
+        if (kwCol && b.col === kwCol) return true;         // pre-filter, by design
+        const r = keptRow.get(b.id);
+        return !!r && readsForRow(r).has(b.col);
+      });
+      if (bad.length) {
+        const name = b => (b.pk ? Reco._pkLabel(tpl, b.pk) : 'a row with no row key');
+        const one = bad[0];
+        U.toast('Nothing was posted. ' + name(one) + ' / ' + one.col + ' is worked out by the formula '
+          + one.formula + ', which could not be worked out on that row — the grid, the reports and '
+          + 'the exports all show #ERR there. An amount worked out from it would reach the journal as '
+          + '0, and the row would be marked posted with nothing behind it, so this entry is refused'
+          + (one.col === kwCol ? ' — and that column is this template\'s keyword column, so the row '
+              + 'was being left out of the entry altogether'
+             : (jvOf(keptRow.get(one.id)) ? ' — and that column is an input column of Special JV '
+              + jvOf(keptRow.get(one.id)) + ', which is what that row would be sent to' : ''))
+          + (bad.length > 1 ? '. ' + (bad.length - 1) + ' more cell(s) in this selection are the same: '
+              + bad.slice(1, 5).map(b => name(b) + ' / ' + b.col).join(', ')
+              + (bad.length > 5 ? ', …' : '') : '')
+          + '. Correct the data the formula reads, or correct the formula, then preview again.', 'error');
+        return;
       }
-    });
+    }
+
+    // The standard/JV split is ABOVE both refusals now (MR-1), because each
+    // judges a row against the columns the thing it is going to decides.
 
     // Build standard lines
     const aegInputs = standardRows.map(r => {
@@ -26583,7 +27546,47 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     if (!tpl || !sess) { App.closeModal(); return; }
-    const accountingId = 'AE'+Date.now().toString(36).toUpperCase();
+    /* ---- MR-6. LEDGER-WRITE REFUSAL 4: THE SHARED ENTRY HISTORY IS LATCHED
+       READ-ONLY FOR THIS SESSION, so this entry can NEVER reach it. The
+       reversal door has refused on exactly this since it was built ("a
+       reversal would be lost without a word"); the GENERATE door did not, so
+       with a damaged reco/entryHistory.json the operator was told at boot
+       that it was starting empty, generated an entry, was told it was
+       generated, had the rows stamped POSTED on the shared folder, and was
+       handed a toast blaming the folder for not answering - while nothing
+       would be written to that file for the rest of the session
+       (scratchpad/money/skB/probe/p8_corrupt_stale.mjs P8a). This is a
+       refusal and not a retry on purpose: the latch is set by a PARSE
+       failure, which no amount of waiting fixes. */
+    if (Store.readOnlyKeys.entryHistory
+        || (Store.readOnlyFiles && Store.readOnlyFiles['reco/entryHistory.json'])) {
+      App.closeModal();
+      App.openModal('Nothing was posted — the shared entry history cannot be written',
+        '<div class="help">The shared entry history (<code>reco/entryHistory.json</code>) could not be '
+        + 'read when this app started, so nothing is written to it in this session. An entry generated '
+        + 'now would stamp these rows as posted on the shared folder with no journal entry behind them, '
+        + 'which is worse than not posting at all.<br><br>Repair or remove that file (a copy of the '
+        + 'damaged one is in <code>reco/_corrupt/</code>) and reopen the app, then generate the entry '
+        + 'again. The selection is still ticked.</div>',
+        '<button class="primary" onclick="App.closeModal()">Close</button>');
+      return;
+    }
+    /* ---- T-S10-11. UNIQUE AGAINST THE HISTORY THIS WINDOW HOLDS, the same
+       guard reverseEntry has used for its mirror since it was built. Two
+       entries under one accountingId are indistinguishable everywhere - the
+       reversal finds the first, the document-number master names one of them,
+       and the posted-row index resolves a row to whichever it met first.
+       TWO SEPARATE WINDOWS, which neither can see, are covered by the two
+       per-window characters U.accountingId appends and by the content test in
+       the append intent below - T-S10-11, both halves. */
+    let accountingId = U.accountingId();
+    {
+      const have = AppState.entryHistory[id] || [];
+      let n = 0;
+      while (have.some(e => e && e.accountingId === accountingId)) {
+        accountingId = U.accountingId() + (++n);
+      }
+    }
 
     // Combine standard + JV lines
     const allLines = pending.lines.slice();
@@ -26609,6 +27612,16 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     const entry = {
       accountingId,
+      /* ---- T-S10-11. WHO THIS ENTRY IS, independently of its reference.
+         The append below has to tell "my own intent replayed onto a file that
+         already holds it" from "a stranger minted my reference in the same
+         millisecond", and it cannot do that by comparing the records: our own
+         first write goes out BEFORE postedPks / postedPrev are attached, so a
+         deep compare of the replay against what is on the share differs for
+         a perfectly ordinary entry. This does not collide (U.uid is random
+         per call) and an entry written by an older build has none, which
+         reads correctly as "not mine". */
+      idNonce: U.uid(),
       lines: allLines,
       sourceRowIds: sourceRowIds,
       specialJvIds: pending.jvCompleted.map(p => p.jvId),
@@ -26655,12 +27668,38 @@ renderCustomReport(tpl, sess, rpt, idx) {
     };
     AppState.entryHistory[id] = AppState.entryHistory[id] || [];
     AppState.entryHistory[id].push(entry);
+    /* T-S10-1. THE APPEND IS THE INTENT, and it is keyed on accountingId so a
+       replay onto a freshly read file cannot add the same entry twice. This
+       is the write that lost a colleague's entry: the whole-file flush wrote
+       a history that did not contain it, and their rows stayed stamped. */
+    /* T-S10-11. IDEMPOTENT ON OUR OWN ENTRY, NEVER ON A STRANGER'S. Keying
+       the skip on the accountingId alone is what LOST an entry: two windows
+       minting the same reference made each one's append a no-op against the
+       other's record, so one journal entry vanished and both operators were
+       told it was generated. _appendEntryIntent reads idNonce instead. */
+    AppState.ledgerFlush('entryHistory', map => Reco._appendEntryIntent(map, id, entry));
 
+    const regDns = [];     // T-S10-10: re-registered by the settle below if a colleague clobbers them
     if (tpl.docNumberColumn) {
       AppState.docNumberMaster[id] = AppState.docNumberMaster[id] || {};
+      /* Collected first, so the intent replays the numbers THIS entry
+         registered rather than whatever the map happens to hold when the
+         merge job runs. */
+      const dns = [];
       pending.sourceRows.forEach(r => {
         const dn = String(r[tpl.docNumberColumn] || '').trim();
-        if (dn) AppState.docNumberMaster[id][dn] = accountingId;
+        if (dn) { AppState.docNumberMaster[id][dn] = accountingId; dns.push(dn); }
+      });
+      dns.forEach(dn => regDns.push(dn));
+      /* T-S10-11: entry.accountingId, not the captured string - if the append
+         above re-mints, these numbers must point at where the entry actually
+         landed and not at the stranger that took the reference. The notice in
+         _confirmEntryOnShare repairs the ordering case (this file's merge job
+         running first) by rewriting only the numbers that still read the old
+         reference. */
+      if (dns.length) AppState.ledgerFlush('docNumberMaster', map => {
+        const m = map[id] || (map[id] = {});
+        dns.forEach(dn => { m[dn] = entry.accountingId; });
       });
     }
 
@@ -26740,7 +27779,288 @@ renderCustomReport(tpl, sess, rpt, idx) {
     AppState._activeEntryId = accountingId;
     App.navigate('reco');
     U.toast('Entry '+accountingId+' generated ('+entry.lines.length+' lines)','success');
-    setTimeout(() => Reco.openAllocateModal(accountingId), 300);
+    /* ---- MR-6. AND THEN READ THE SHARE BACK, the way reverseEntry has done
+       since the day it was built.
+       NOT AWAITED, AND THE 300 ms IS UNCHANGED, which cost a suite run to
+       learn: making the allocate modal WAIT for the share read pushed its
+       auto-open from 300 ms to about a second, and App.openModal replaces
+       whatever modal is open - so it landed on top of a reverse dialog the
+       operator had opened in between (run_reverse_e2e went 254 -> 235, with
+       the reverse dialog's own body reading "Enter a document number for each
+       currency"). A delayed modal that steals the screen a second after a
+       click is a worse behaviour than the one being guarded against, and the
+       guard is not lost: the refusal below opens on top of the allocate modal
+       when there IS something wrong, which is the right precedence - a
+       journal entry that is not on the share matters more than the number
+       being typed into it - and MR-7 re-reads the shared master before it
+       writes a document number anyway. */
+    Reco._confirmEntryOnShare(tpl, accountingId, entry, regDns);
+    // T-S10-11: whatever reference the entry ended up under, read at fire time.
+    setTimeout(() => Reco.openAllocateModal(entry.accountingId || accountingId), 300);
+  },
+
+  /* ---- MR-6. DID THE ENTRY ACTUALLY REACH THE SHARED FOLDER?
+     reverseEntry reads reco/entryHistory.json back and refuses when the mark
+     is not there. The GENERATE door did not, so an operator whose folder was
+     down for ten seconds was told "Entry … generated (2 lines)", had the rows
+     stamped POSTED on the share, and found out nothing - the one toast that
+     did fire scrolled away in four seconds (skB/probe/p1_strand.mjs).
+
+     IT DOES NOT UN-STAMP. Un-stamping would be a THIRD write that can fail
+     exactly the same way, and the rows were genuinely claimed by this entry;
+     the owed write is retried on every save (Store._flushMergeTimers), so the
+     right answer is to keep the window open, which is what this says.
+
+     ONE RE-REGISTRATION, and it is the honest half of T-S10-10: if nothing is
+     owed and the entry is still not on the share, a colleague's write landed
+     on top of ours between our write and this read. The append intent is
+     idempotent (it re-finds by accountingId), so replaying it once is free
+     and heals that case rather than leaving a journal entry nobody can see.
+     It does NOT close T-S10-10 - a clobber that happens after this read is
+     still invisible to this window - and the ticket says so. */
+  async _confirmEntryOnShare(tpl, accountingId, entry, regDns) {
+    try {
+      const announced = accountingId;
+      await AppState.flush();
+      /* T-S10-11. The flush ran the append intent, so if a stranger held this
+         reference the entry is under a new one by now. EVERYTHING below has to
+         look for where it actually is, or the "did it reach the share?" check
+         would find the stranger's record under our old reference and report
+         success over a lost entry - which is exactly the shape of the bug. */
+      if (entry && entry.accountingId) accountingId = entry.accountingId;
+      const look = async () => {
+        const back = await Reco._reverseReadShareHistory();
+        const want = (entry && entry.accountingId) || accountingId;
+        return { ok: back.ok,
+                 found: !!(back.ok && (back.base[tpl.id] || []).some(e => e
+                        && e.accountingId === want
+                        && (e.idNonce === entry.idNonce || !entry.idNonce))) };
+      };
+      let r = await look();
+      if (r.found) {
+        /* ---- T-S10-10, THE HALF THAT IS CLOSABLE FROM INSIDE THIS APP.
+           Our write landed. A colleague whose merge READ predated it can
+           still write a file that does not contain this entry a moment later
+           - the window is one read-write cycle, measured at 100-250 ms for a
+           2.2 MB history on local disk and proportionally longer over the
+           wire (skB/probe/p13_window.mjs). So look ONCE MORE after the dust
+           settles. NOT AWAITED: the allocate modal and the operator must not
+           wait on a second read of a multi-MB file, and nothing downstream
+           needs the answer. */
+        Reco._reSettleEntry(tpl, accountingId, entry, regDns);
+        Reco._noticeReMint(tpl, announced, entry, regDns);        // T-S10-11
+        return true;
+      }
+      const owed = !!(Store.owes && Store.owes('entryHistory'));
+      // Could not read it to tell, and nothing is owed: the write resolved.
+      if (!owed && !r.ok) return true;
+      if (!owed && r.ok) {
+        AppState.ledgerFlush('entryHistory', map => Reco._appendEntryIntent(map, tpl.id, entry));
+        await AppState.flush();
+        if (entry && entry.accountingId) accountingId = entry.accountingId;
+        r = await look();
+        /* The settle belongs on THIS path as well, and leaving it off was a
+           hole the suite caught: the entry was healed here and the document
+           numbers - clobbered by the same colleague's write - were never
+           re-checked, so section [57] read the master holding one pair of
+           two. */
+        if (r.found) {
+          Reco._reSettleEntry(tpl, accountingId, entry, regDns);
+          Reco._noticeReMint(tpl, announced, entry, regDns);      // T-S10-11
+          return true;
+        }
+      }
+      App.openModal('Entry ' + U.esc(accountingId) + ' may not have reached the shared folder',
+        '<div class="help">The rows of this entry are stamped as posted and this window shows '
+        + U.esc(accountingId) + ', but reading <code>reco/entryHistory.json</code> back did not find '
+        + 'it.<br><br>' + (Store.owes && Store.owes('entryHistory')
+            ? 'The write is still owed to the shared folder and is retried every time anything is '
+              + 'saved. <b>Keep this window open</b> until it lands - nothing else needs doing, and '
+              + 'generating the entry again would post it twice. '
+            : 'Nothing is waiting to be written, so something on the shared folder replaced the file '
+              + 'after this entry was written to it. ')
+        + (Store.lastError ? 'The last save error was: ' + U.esc(Store.lastError.message) + '. ' : '')
+        + 'No document number has been allocated. Tell whoever looks after the shared folder before '
+        + 'anyone reconciles these rows again.</div>',
+        '<button class="primary" onclick="App.closeModal()">Close</button>');
+      return false;
+    } catch (e) {
+      /* Cannot tell: say nothing rather than cry wolf over a posted entry.
+         Deliberately not console.error - this runs after the modal is closed
+         and after a test may have navigated away, and a noisy log line for
+         "the window went away" is not a problem anybody can act on. */
+      return true;
+    }
+  },
+
+  /* ---- T-S10-10. THE SECOND LOOK, after a colleague's own read-write cycle
+     has had time to finish. The merge write is atomic within ONE page
+     (Store._enqueue) and NOT between pages: there is no compare-and-swap in
+     the bridge's write_file and no lock file, so two people pressing Generate
+     within one read-write cycle of each other still produce one file that
+     holds only one of the two entries, and the loser's write SUCCEEDED so
+     nothing in their window ever says otherwise.
+     WHAT THIS DOES AND DOES NOT DO, because the ticket has been wrong about
+     this once already: it HEALS a clobber that lands within the settle window
+     below, by replaying the append intent - which is idempotent, re-finds by
+     accountingId and therefore converges even when both pages do it at once -
+     and it TELLS the operator when it cannot. It does NOT close T-S10-10: a
+     clobber after this look is still invisible here, and the complete fix is
+     a write-if-unchanged in the bridge, which is outside this round's files.
+     The delay is one settle, not a poll: a loop here would read a multi-MB
+     file off a shared folder every few seconds for every entry ever posted. */
+  _SETTLE_MS: 900,
+  /* The share's own copy of one ledger file, or null when it cannot be read.
+     Reco._reverseReadShareHistory is the same thing for entryHistory and is
+     left exactly as it is - its refusal text is quoted by the reversal. */
+  async _readShareLedger(rel) {
+    try {
+      if (!Store._hasApi()) return Store._localGet(rel === 'reco/docNumberMaster.json'
+        ? 'docNumberMaster' : 'entryHistory', {});
+      const txt = await window.pywebview.api.read_file(rel);
+      const o = (txt && String(txt).trim()) ? JSON.parse(txt) : {};
+      return (o && typeof o === 'object' && !Array.isArray(o)) ? o : null;
+    } catch (e) { return null; }
+  },
+  /* ---- T-S10-11. A FRESH REFERENCE, UNIQUE AGAINST THE LIST WE ARE WRITING
+     INTO. Called from inside a merge mutate, which can replay, so the result
+     is stored on the entry (not recomputed) and a replay that meets its own
+     nonce returns early before ever getting here. */
+  _reMintAgainst(list) {
+    let v = U.accountingId();
+    let n = 0;
+    while (list.some(e => e && e.accountingId === v)) v = U.accountingId() + (++n);
+    return v;
+  },
+
+  /* ---- T-S10-11. THE APPEND RULE, IN ONE PLACE. FOUR sites replay this
+     intent - the Generate door, the share-readback repair, the settle, and
+     reverseEntry's mirror - and all four have to agree, because the one that
+     skips on the reference alone is the one that loses the entry (for the
+     mirror: leaves the original marked reversed with no contra behind it).
+     Idempotent on OUR OWN record
+     (same object, or same idNonce after a round trip through the file) and
+     never on anybody else's. Re-minting mutates entry.accountingId in place,
+     so the next replay looks the new reference up, meets its own nonce and
+     does nothing. */
+  _appendEntryIntent(map, tplId, entry) {
+    const list = map[tplId] || (map[tplId] = []);
+    const held = list.find(e => e && e.accountingId === entry.accountingId);
+    if (!held) { list.push(entry); return false; }
+    if (held === entry || held.idNonce === entry.idNonce) return false;
+    entry.accountingId = Reco._reMintAgainst(list);
+    list.push(entry);
+    return true;
+  },
+
+  /* ---- T-S10-11. THE OPERATOR WAS GIVEN A REFERENCE THAT TURNED OUT TO
+     BELONG TO SOMEBODY ELSE. One in 1,296 of the same-millisecond posts, and
+     it has to be said out loud: the toast, the entries tab and anything the
+     operator wrote down all name the old one, and the number they are about
+     to quote into the GL is the new one. Nothing is lost on this path - the
+     entry IS on the share, under the reference named here.
+     The document numbers come with it: our own intent may have registered
+     them against the old reference before the history merge re-minted, and
+     only the ones still reading the old reference are ours to rewrite. */
+  _noticeReMint(tpl, announced, entry, regDns) {
+    const now = entry && entry.accountingId;
+    if (!now || !announced || now === announced) return;
+    const dns = (regDns || []).filter(Boolean);
+    if (dns.length) AppState.ledgerFlush('docNumberMaster', map => {
+      const m = map[tpl.id] || (map[tpl.id] = {});
+      dns.forEach(dn => { if (m[dn] === announced) m[dn] = now; });
+    });
+    if (AppState._activeEntryId === announced) AppState._activeEntryId = now;
+    // Same guarded re-render the rest of the app uses; the entries tab is on
+    // screen showing the old reference, and it must not contradict the modal.
+    if (AppState.currentPage === 'reco') App.navigate('reco');
+    /* PLAIN TEXT, NO TAGS AND NO U.esc: App.openModal assigns the title with
+       .textContent, so markup would render as characters and an escape would
+       double-encode. */
+    App.openModal('This entry is ' + now + ', not ' + announced,
+      '<div class="help">Another copy of the app generated its own entry in the same millisecond '
+      + 'and took the reference <b>' + U.esc(announced) + '</b>. Both entries are on the shared '
+      + 'folder and <b>nothing has been lost</b> &mdash; but this one is recorded as <b>'
+      + U.esc(now) + '</b>.<br><br>Quote <b>' + U.esc(now) + '</b> from here on. If you have '
+      + 'already written <b>' + U.esc(announced) + '</b> on a document or passed it to anyone, '
+      + 'correct it: <b>' + U.esc(announced) + '</b> is a colleague\'s entry, not yours.'
+      + (dns.length ? '<br><br>The document number(s) ' + U.esc(dns.join(', '))
+                      + ' now point at <b>' + U.esc(now) + '</b>.' : '')
+      + '</div>',
+      '<button class="primary" onclick="App.closeModal()">Close</button>');
+  },
+
+  _reSettleEntry(tpl, accountingId, entry, regDns) {
+    setTimeout(async () => {
+      try {
+        // T-S10-11: the reference the entry is under NOW, not the one announced.
+        if (entry && entry.accountingId) accountingId = entry.accountingId;
+        const settleFrom = accountingId;
+        /* ---- NOTHING TO SETTLE IF THIS ENTRY HAS MOVED ON, and this guard
+           cost a suite run to learn. A CANCEL frees the document numbers that
+           pointed at the entry (reverseEntry step 6) and a template delete
+           drops its entries altogether - both of which can happen inside the
+           settle window, and re-registering either would UNDO them. Measured:
+           run_reverse_e2e went 254 -> 235 with "every document number that
+           still pointed at this entry is freed" reading D1/D2/D3 still
+           pointing at it. This window's own memory is the right thing to ask:
+           it is where the cancel, the reversal and the delete happen, and if
+           the entry is not in it any more then nothing here is owed. */
+        const memList = (AppState.entryHistory || {})[tpl.id] || [];
+        const memE = memList.find(e => e && e.accountingId === accountingId);
+        if (!memE || memE.reversal) return;
+        /* The DOCUMENT NUMBERS first, because they are the cheaper file and
+           losing one means a re-upload of the same data is not flagged as
+           already processed - the thing the allocate modal promises. Same
+           shape as the entry: the intent is idempotent, so replaying it
+           converges even when both pages do it. */
+        const want = (regDns || []).filter(Boolean);
+        if (want.length) {
+          const dm = await Reco._readShareLedger('reco/docNumberMaster.json');
+          if (dm) {
+            const mine = (dm[tpl.id] || {});
+            const gone = want.filter(dn => mine[dn] !== accountingId && !mine[dn]);
+            if (gone.length) {
+              AppState.ledgerFlush('docNumberMaster', map => {
+                const m = map[tpl.id] || (map[tpl.id] = {});
+                gone.forEach(dn => { if (!m[dn]) m[dn] = accountingId; });
+              });
+              await AppState.flush();
+            }
+          }
+        }
+        const back = await Reco._reverseReadShareHistory();
+        if (!back.ok) return;                                  // cannot read it; nothing to say
+        const list = back.base[tpl.id] || [];
+        /* T-S10-11: OUR entry under that reference, not merely the reference.
+           A stranger who minted it in the same millisecond reads as "still
+           there" otherwise, which is the whole bug: the settle would stand
+           down over a record that is not ours and our entry would be gone. */
+        if (list.some(e => e && e.accountingId === accountingId
+                      && (!entry.idNonce || e.idNonce === entry.idNonce))) return;
+        // T-S10-11: the same rule as the other two sites, not a copy of it.
+        AppState.ledgerFlush('entryHistory', map => Reco._appendEntryIntent(map, tpl.id, entry));
+        await AppState.flush();
+        if (entry && entry.accountingId) accountingId = entry.accountingId;
+        const again = await Reco._reverseReadShareHistory();
+        const ok = again.ok && (again.base[tpl.id] || []).some(e => e && e.accountingId === accountingId);
+        if (ok) {
+          U.toast('Entry ' + accountingId + ' was written to the shared folder a second time: another '
+            + 'copy of the app replaced reco/entryHistory.json just after it was saved. It is there '
+            + 'now — press Load before you touch these rows.', 'error');
+          Reco._noticeReMint(tpl, settleFrom, entry, regDns);   // T-S10-11: no-op unless it moved
+          return;
+        }
+        App.openModal('Entry ' + U.esc(accountingId) + ' is no longer on the shared folder',
+          '<div class="help">This entry was written to <code>reco/entryHistory.json</code> and is not '
+          + 'in it any more, and writing it again did not stick. Another copy of the app is replacing '
+          + 'that file.<br><br>The rows are stamped as posted, so <b>do not generate this entry '
+          + 'again</b> — it would post twice. Tell whoever looks after the shared folder, and check '
+          + 'that everyone is on the same build of the app: an older copy writes the whole file with '
+          + 'no re-read.</div>',
+          '<button class="primary" onclick="App.closeModal()">Close</button>');
+      } catch (e) { /* the window went away; nothing to act on */ }
+    }, Reco._SETTLE_MS);
   }, 
 
 
@@ -27223,7 +28543,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       keys.sort().forEach(k => {
         h += '<tr><td><b>'+U.esc(k)+'</b></td><td>'+U.esc(dn[k])+'</td>';
         h += '<td><button class="small primary" onclick="App.closeModal(); Reco.openEntryByAccountingId(\''+U.jsq(dn[k])+'\')">View Entry</button>';
-        h += '<button class="small danger" onclick="delete AppState.docNumberMaster[\''+U.jsq(id)+'\'][\''+U.jsq(k)+'\']; Reco._postedIdxReset(); AppState.save(); App.closeModal(); Reco.viewDocNumberMaster()">Remove</button></td></tr>';
+        h += '<button class="small danger" onclick="Reco.removeDocNumber(\''+U.jsq(id)+'\',\''+U.jsq(k)+'\')">Remove</button></td></tr>';
       });
       h += '</tbody></table>';
     }
@@ -27262,8 +28582,19 @@ renderCustomReport(tpl, sess, rpt, idx) {
     // Keyed on more than the length: restoring a backup can swap in a
     // different history of the same size.
     const last = hist.length ? hist[hist.length - 1] : null;
+    /* ---- T-26-6 / MR-3. THE DOCUMENT-NUMBER COUNT IS NOT IN THE KEY ANY
+       MORE. `Object.keys(docNumberMaster[tplId]).length` allocated one array
+       of every voucher the template has ever had, ON EVERY CALL - and the
+       memo HIT, so the whole cost was building the key to compare it.
+       Measured: 1 us per _postedRefForPk call at 0 document numbers, 1,067 us
+       at 10,000 and 16,760 us at 100,000, which made T-26-6's new per-key
+       call turn a 15 ms "Add Data" into 16,164 ms at 2,000 overridden keys
+       and 50,000 vouchers (scratchpad/money/skA/probes/p8_baseline.mjs,
+       p3_t266_perf.mjs, p4_ingest_cost.mjs). The generation counter below
+       covers it instead: every writer of either ledger map calls
+       Reco._postedIdxReset(), INCLUDING Store._mergeJob now, which is the one
+       writer that had no such call (MR-3). A counter, not a walk. */
     const key = hist.length + '|' + ((last && last.accountingId) || '')
-      + '|' + Object.keys(AppState.docNumberMaster[tpl.id] || {}).length
       /* A reversal marks an entry IN PLACE, so the length and the last id do
          not move. _postedIdxReset() is called by every path that marks one
          (reverseEntry, restoreSession, importBackup) and nulls the memo on its
@@ -27441,6 +28772,23 @@ renderCustomReport(tpl, sess, rpt, idx) {
      has been closed since - and precisely the keys that have been posted).
      NEVER `weak`: the document-number branch, whose own comment says such a
      row may never have been posted by that entry, is not in here. */
+  /* ---- T-S10-1. Was an inline `delete AppState.docNumberMaster[...]` in the
+     Remove button's onclick, followed by AppState.save() - which no longer
+     writes this key at all, so the number would have come back on the next
+     boot. One door, like every other write of it, and the delete reaches the
+     share without taking a colleague's other numbers with it. */
+  removeDocNumber(tplId, dn) {
+    const m = AppState.docNumberMaster[tplId];
+    if (m) delete m[dn];
+    AppState.ledgerFlush('docNumberMaster', map => {
+      if (map[tplId]) delete map[tplId][dn];
+    });
+    Reco._postedIdxReset();
+    AppState.save();
+    App.closeModal();
+    Reco.viewDocNumberMaster();
+  },
+
   _postedRefForPk(tpl, pk) {
     if (!tpl || !pk) return null;
     const ix = Reco._postedAuditIndex(tpl);
@@ -27780,9 +29128,23 @@ renderCustomReport(tpl, sess, rpt, idx) {
           mergeBk(AppState.extraValueMaster);
           Reco._extraValueFlush(id, mergeBk);
         }
-        if (d.docNumberMaster) AppState.docNumberMaster[id] = d.docNumberMaster;
+        /* T-S10-1. Through S13, not a bare assignment: this file is shared
+           and a whole-file write would take a colleague's OTHER templates
+           with it - and since the key left PERSIST_KEYS, AppState.save()
+           would not write it at all. One template's subtree is replaced,
+           which is what a session restore means and what the confirm above
+           describes. */
+        if (d.docNumberMaster) {
+          const dnOne = d.docNumberMaster;
+          AppState.docNumberMaster[id] = dnOne;
+          AppState.ledgerFlush('docNumberMaster', map => { map[id] = dnOne; });
+        }
         // A reversal is a one-way fact across a restore (see App._carryReversalsList).
-        if (d.entryHistory) AppState.entryHistory[id] = App._carryReversalsList(AppState.entryHistory[id], d.entryHistory);
+        if (d.entryHistory) {
+          const ehOne = App._carryReversalsList(AppState.entryHistory[id], d.entryHistory);
+          AppState.entryHistory[id] = ehOne;
+          AppState.ledgerFlush('entryHistory', map => { map[id] = ehOne; });
+        }
         Reco._postedIdxReset();   // a restore swaps the history the index was built from
         AppState.save();
         App.navigate('reco');

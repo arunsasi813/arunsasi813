@@ -32,6 +32,26 @@ function check(cond, msg, extra) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+/* ---- T-S10-1. PUBLISH THE LEDGER MAPS THIS FIXTURE JUST CHANGED.
+   `entryHistory` and `docNumberMaster` left AppState.PERSIST_KEYS, so
+   AppState.flush() no longer writes them: every write goes through
+   Store.mergeWrite, which re-reads the file inside Store._enqueue and takes
+   THE SHARE as the authority for each template id. A fixture that mutates
+   AppState.entryHistory in memory is therefore no longer describing what the
+   app will read - the next merge write puts the share's copy back, which is
+   exactly the rule that stops a stale page clobbering a colleague's entry.
+   The fixtures below are simulating a state ON THE SHARE, so they say so.
+   NOT AN ASSERTION CHANGE: every check() in this file is unchanged. */
+const publishLedger = page => page.evaluate(async () => {
+  if (!Store._hasApi()) return false;
+  await window.pywebview.api.write_file('reco/entryHistory.json',
+    Store.serialize('entryHistory', AppState.entryHistory));
+  await window.pywebview.api.write_file('reco/docNumberMaster.json',
+    Store.serialize('docNumberMaster', AppState.docNumberMaster));
+  return true;
+});
+
+
 // ════════════════════════════════════════════════════════════════════════════
 // The fake JV page. It reports whatever window.parent._fakeMode asks for, and
 // it posts as soon as it has its rows — no click — so the suite also proves
@@ -529,6 +549,7 @@ try {
     AppState.docNumberMaster[id] = {};
     AppState.recoSessions[id].data.forEach(r => r.Status = '');
   }, tpl.id);
+  await publishLedger(page);   // T-S10-1: clearing it in memory is not clearing it
 
   await openJv('claim', ['D1', 'D2']);       // sent D1+D2, reports only D5
   const claim = await page.evaluate((id) => {
@@ -559,6 +580,7 @@ try {
     AppState.pendingSpecialJV[id] = []; AppState.entryHistory[id] = [];
     AppState.recoSessions[id].data.forEach(r => r.Status = '');
   }, tpl.id);
+  await publishLedger(page);   // T-S10-1: clearing it in memory is not clearing it
   await openJv('claimMix', ['D1', 'D2']);
   await page.click('#appModalFooter button:has-text("Generate")');
   await sleep(500);
@@ -594,6 +616,7 @@ try {
     AppState.docNumberMaster[id] = {};
     AppState.recoSessions[id].data.forEach(r => r.Status = '');
   }, tpl.id);
+  await publishLedger(page);   // T-S10-1: clearing it in memory is not clearing it
   await openJv('good', ['D1', 'D2']);
   await page.click('#appModalFooter button:has-text("Generate")');
   await sleep(500);

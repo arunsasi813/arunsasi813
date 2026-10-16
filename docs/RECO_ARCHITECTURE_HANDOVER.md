@@ -280,7 +280,8 @@ nothing warning anyone. Reproduced before the fix; `tests/e2e/run_store_e2e.mjs`
 - **It is NOT in `PERSIST_KEYS`, and that is load-bearing.** `AppState.flush` iterates
   `PERSIST_KEYS` and, for any key whose serialised text changed, calls `Store.save` →
   `write_file` with the whole file, no re-read and no mtime check. **Membership *is* the blind
-  overwrite** — and once `manualTags` stops being written there is no second copy of these values
+  overwrite** — and since **T-S10-1**, `entryHistory` and `docNumberMaster` are out of that list
+  for the same reason and go through `AppState.ledgerFlush` → `Store.mergeWrite` (§16) — and once `manualTags` stops being written there is no second copy of these values
   anywhere (no mirror on `sess`, no `Cn` row in the CSV). It is read in `Store.loadAll` via
   `readJson` (so it inherits the `readOnlyKeys` latch and the `reco/_corrupt/` quarantine),
   assigned in `AppState.load`, and written **only** through `Store.mergeWrite`.
@@ -486,12 +487,32 @@ AEG input column in this codebase is written: `NUM` reads `'1.234,50'` as 101.23
 **guarantee moved to the one door into entry history**: `Reco.previewEntryFromSelection` refuses
 the posting **by name**, naming the key, the column, the characters and what they replaced —
 *"… which is not a number (it replaced 20) … so this entry is refused"* — and builds nothing.
-The test is narrow on purpose: the stored value is not a number **and** `rec.prev` was, i.e. *this
-override turned a numeric cell non-numeric*. A column textual all along is untouched (decision
-J.8); `1,234.50`, `(500)` and `500 ` are canonicalised before they are stored, so none of them
-lands here; a record on a duplicated key is skipped because `_extraOverride` is no longer serving
-it; and it runs **after** the keyword filter, because refusing a posting over a row the filter
-dropped is a refusal about a row nobody is posting.
+**The test, as MR-1 left it.** This file used to say the test was *"the stored value is not a
+number **and** `rec.prev` was"* — i.e. only *this override turned a numeric cell non-numeric*.
+**MR-1 removed that conjunction**, and the removal is the fix, not a detail: for a cell whose
+formula reads `#ERR`, `rec.prev` **is** `'#ERR'` and is not numeric, so the one cell Z1 refuses
+over was the one cell this refusal stopped looking at the moment somebody typed over it — and the
+override box is the only tool the app offers for correcting a computed cell by hand, which is
+exactly where Z1's own message sends the operator. Measured: `"'500"` over an `#ERR` cell posted
+**Dr 150 for three rows worth 150 + INV-3**, with INV-3 contributing nothing and stamped
+`POSTED`. **If you are tempted to put the `prev` test back, that is blocker A1 and this paragraph
+is why it is not there.**
+
+What the code now reads is
+`if (!U.isNumeric(rec.prev) && !readsForRow(r).has(cn)) return;` — refuse when the stored value is
+not a number **and** (`rec.prev` was a number **or** this column is one *this journal entry
+actually reads*). `readsForRow` is the AEG template's input columns, their labels, its value /
+club-by / From-Account / To-Account columns and `tpl.valueColumn`, or — for a bucketed row — that
+row's **own Special JV's** `inputColumns`; the keyword column is in both sets. Labels are in it
+as well as names, because the AEG loop falls back to `r[ic.label]`, so an added column named
+after an input column's *label* is read by the entry even though the editor never objected.
+The `prev` arm is what still protects decision **J.8**: a column that was textual all along,
+whose kind is derived from its values rather than declared, and which exports as text. A column
+the journal reads as an amount or an account code is never that one, so there the test has
+nothing to protect and is dropped. `1,234.50`, `(500)` and `500 ` are canonicalised before they
+are stored, so none of them lands here; a record on a duplicated key is skipped because
+`_extraOverride` is no longer serving it; and it runs **after** the keyword filter, because
+refusing a posting over a row the filter dropped is a refusal about a row nobody is posting.
 **The residue is open and visible:** a report **TOTAL** still reads 101.2345 for three rows worth
 100 beside the characters it came from. It cannot be posted any more, which is why it is
 **T-26-5** and not a blocker.
@@ -638,7 +659,9 @@ Tests: `tests/e2e/run_store_e2e.mjs` sections [12]–[22] (O1–O14), with O1, O
 gates — **and sections [33]–[48]**, which the fix round added and where every one of the twenty
 review findings is pinned: [33]–[34] the two merge/data-set gates (RC-1, RC-2), [35]–[40]
 R1–R6 (F3, F10, F1, F5, F4, F9) and [41]–[48] X1–X8 (F11/F19, F17, F12, F20, F13, F18, F6, F15).
-`run_store_e2e` is **336 passed / 0 failed** and is the suite that holds all three features' gates.
+`run_store_e2e` is **378 passed / 0 failed** and is the suite that holds all three features'
+gates — **plus sections [49]–[53]**, which the money round added (Z1, T-26-5, T-26-6, T-S10-1,
+T-30-3; see §16).
 
 ### 5d. Carrying a typed value forward to the next file (#30)
 
@@ -1596,7 +1619,9 @@ reversing one that has none says so).
 5. mark the original, and (Reverse) append the mirror
 6. (Cancel) free the document numbers · 7 (Cancel) restore the pending Special JVs
 8. one `Comments.create` linked to the affected keys (capped at 500) · 9 `_postedIdxReset()`
-10. clear `AppState._snap.entryHistory`, flush, re-read the share to confirm the mark, and
+10. record the mark, the mirror and the freed document numbers as **merge intents**
+   (`AppState.ledgerFlush`, T-S10-1 — they used to be a whole-file flush of
+   `AppState._snap.entryHistory = null`), flush, re-read the share to confirm the mark, and
    append the reversal log
 
 **Step 4 before step 5 is load-bearing.** The stamp is what makes a row look dealt-with to
@@ -1605,14 +1630,23 @@ available, so the mark is refused unless the `Cn` rows come back off the share. 
 round — rows released, entry not yet marked — the user sees at once and simply presses Reverse
 again: the un-stamp is idempotent, because the second pass finds the column already clear.
 
-**Step 4b exists because `entryHistory.json` is whole-file last-writer-wins** and the un-stamp
-between step 3 and step 10 is the longest write window in the app — 900 ms per read on a share,
-14 s for 200,000 keys, over 100 s end to end. Step 3's read is what refuses a *conflict*; step
-4b's is what keeps the write from being a *clobber*: a colleague who generated an entry inside
-that window had it dropped by this write while their row kept its `Posted` stamp, leaving a
-closed row with no accounting record behind it. Re-checking `base.reversal` there also means
-two people reversing the same entry cannot both mint a mirror. The durable fix is S13
-`Store.mergeWrite`.
+**Step 4b exists because the un-stamp between step 3 and step 10 is the longest write window in
+the app** — 900 ms per read on a share, 14 s for 200,000 keys, over 100 s end to end. Step 3's
+read is what refuses a *conflict*; step 4b's is what re-bases the plan on a fresher record, and
+re-checking `base.reversal` there is what stops two people reversing the same entry both minting
+a mirror.
+
+**The clobber half of that paragraph is gone, and this is the durable fix it named.** Since
+**T-S10-1**, `reco/entryHistory.json` is no longer whole-file last-writer-wins: step 10 records
+the mark, the mirror and the `reversalCancelled` note as **merge intents** replayed onto the file
+`Store.mergeWrite` has just read *inside* `Store._enqueue`, so a colleague who generated an entry
+during the un-stamp no longer has it dropped by this write — which used to leave their row
+stamped `Posted` with no accounting record behind it. **Every intent re-finds what it mutates by
+`accountingId`**, because `Store._takeDisk` replaces the template's array with the share's before
+the intent runs, so `base`, `list` and the mirror are detached copies by then. An entry the share
+no longer holds (somebody restored a backup mid-reversal) is put **back** with its reversal
+rather than dropped: the rows are already released, and an entry reading posted with released
+rows is the one state worth avoiding.
 
 **The commit runs under `Reco._busy`** (`BUSY_ROWS: 100000`), naming each stage, and
 `_reversePlan` in `openReverseEntryModal` runs under `_withBusy`. A 200,000-row reversal used
@@ -2196,14 +2230,19 @@ Each row is a refusal somebody would otherwise meet, and the thing it protects i
 | #26 | a row with **no usable key** | the record itself — filed under no key it could never be found again. It goes to `res.rejected` with `noPk`, never counted as applied |
 | #26 | **more than one loaded row shares the `_pk`** (on the write) | a journal entry. Three AP lines under `INV-7`, one overridden to 1000, posts **3000** where the rows are worth **2030**. The count is in the message |
 | #26 | an override whose key **stops naming one row** (at the **reader**, independently) | the same journal entry, for the case the write guard cannot see: next week's Add Data makes the key shared **after** the value was typed. The record is **suppressed, not deleted**, every row posts its own formula, and the *Duplicate primary keys* modal names what stopped applying |
-| #26 | changing **or reverting** an override on a row **already posted to the ledger** — all four delete routes | the general ledger. The message names the accounting reference, so the answer is *"reverse entry AEG-… first"* rather than *"no"* |
-| #26 | **posting an entry** that contains an override which turned a numeric cell non-numeric | the ledger again, by name: the key, the column, the characters and what they replaced. Nothing is built |
+| #26 | changing **or reverting** an override on a row **already posted to the ledger** — all four delete routes | the general ledger. The message names the accounting reference — an `AE…` reference, *not* `AEG-…`; `AEG` is the journal-template module, never an id — so the answer is *"reverse `AEMVAUQHDL7K` first"* rather than *"no"* |
+| #26 | **posting an entry** that contains a non-numeric override in a column **this entry reads**, *or* one that turned a numeric cell non-numeric | the ledger again, by name: the key, the column, the characters and what they replaced — and, when what it replaced was not a number either, *why the cell still counts*. Nothing is built. **MR-1 widened this**: the `rec.prev`-was-numeric arm alone let an override of an `#ERR` cell through, which is the one cell Z1 refuses over. See §5c |
+| **Z1** | **posting an entry** in which a formula the linked AEG template *reads* could not be worked out (`#ERR`) | the ledger, by the amount. `U.num('#ERR')` is **0**, so the cell the grid, the reports, the CSV and the workbook all show as `#ERR` used to contribute a **silent zero** to a posted figure and its row was stamped `Posted` with no line behind it. Named: the key, the column and the formula. Scoped to the columns the entry reads, and judged **pre-filter** for the keyword column — see §16 |
 | #26 | assigning a column that still **holds override records** as an AEG control column — box ticked or not | whether a row posts at all. Two silent edits (untick, then assign) once posted **1007** where **7** was marked. The untick itself says how many records keep applying |
 | #30 | a **carry-flagged** column as any AEG control column — the **keyword**, **post-entry** or **To Account** column, or a linked AEG template's **input**, **From Account**, **To Account** or **club-by** column — in both editors and both directions | an account code and a row's posting. The AEG extras loop runs **before** the keyword filter, so a carried value there would decide whether a row posts at all |
 | #30 | the carry box at all on a template with **no primary keys** (disabled, with its reason) and on a **computed** column (absent — it has #26's box instead) | a record that could never be read back, and a column with two owners |
 | both | a write to a `reco/extraValues/*.json` that **could not be read** at boot | a colleague's record. One template must never have two homes, or the older copy replaces somebody's work when the share recovers. Per **file**, so one damaged template does not stop the team typing |
 | both | a record for a `_ssSingleUse` spreadsheet column | an orphan on the share for ever under a name nothing can show |
 | `k:'typed'` only | a row whose data set cannot be named | a file-scoped record that could never be read back. An **override** is key-scoped, so it needs no data set and stores `ds: ''` rather than refusing |
+| **MR-6** | **Generate** at all, while `reco/entryHistory.json` **could not be read at boot** | every entry already in that file. Nothing is written to a ledger this window cannot see, so generating cannot stamp rows `POSTED` on the share with no journal entry behind them. The modal says to repair the file (a copy is in `reco/_corrupt/`) and reopen; the selection is kept |
+| **MR-7** | a **document number another entry already holds** — tested in memory *and again inside the merge intent*, on the file the merge has just read | the resolver. `Reco._postedRefFor` reads the shared master, not the entry's own field, so two entries under one number resolve a row to the **wrong** accounting reference. Two colleagues could both be told *"Document numbers saved"* |
+| **§12** | a **reversal** whose entry's **document numbers changed** on the share while the dialog was open | the cancel-or-contra decision itself, which turns on exactly that fact. The entry is **not** marked, the rows are released, and the message prints both readings side by side |
+| **T-S10-11** | *nothing* — this one is a **re-mint**, not a refusal | an entry whose accounting reference a colleague minted in the same millisecond is recorded under a **new** reference rather than dropped, and the operator is told which. See §17 |
 
 ### 15.5 The cost, measured
 
@@ -2250,8 +2289,8 @@ the whole 29.6 MB crossing the wire twice** — roughly 6 s at 10 MB/s — for e
 burst, and `Store._enqueue` serialises per file, so bursts queue behind each other and two
 colleagues typing are each moving 30 MB a burst.
 
-**Verified, as opposed to argued.** `run_store_e2e` is 336 passed / 0 failed and holds all three
-features' gates; the **seventeen** node suites total **2,532** end-to-end checks (336 + 304 + 254 +
+**Verified, as opposed to argued.** `run_store_e2e` is 378 passed / 0 failed and holds all three
+features' gates; the **seventeen** node suites total **2,574** end-to-end checks (378 + 304 + 254 +
 250 + 170 + 163 + 147 + 123 + 119 + 107 + 107 + 100 + 94 + 79 + 73 + 65 + 41) and `pytest` — the
 eighteenth suite — is 75 passed / 1 skipped. Every suite is at or above its `4b8fd90` count; not
 one went down. The store gate was also shown
@@ -2280,16 +2319,19 @@ Named as plainly as the rest, because every one of these is reachable by an oper
   recovers) — but the value typed into that template while the file is broken is not kept
   anywhere. **T-S10-6.**
 - **A posted row whose key LATER becomes duplicated keeps the override in the ledger while the
-  screen stops showing it.** The new reader guard is what does this: it suppresses a record whose
+  screen stops showing it — and the panel now says so by name (T-26-6, §16).** The state is
+  unchanged; what changed is that it is no longer silent. The new reader guard is what does this: it suppresses a record whose
   key no longer names one row, so the reports, the CSV and the workbook fall back to the computed
   value while the entry already posted still carries the typed one — the ledger holds 1000 and
   the screen reads 20. It is the one case where §5c's *"the screen and the journal cannot
   disagree"* does not hold, and it is the price of the guard rather than a defect in it.
   **T-26-6.**
-- **The one-time promotion picks a winner on a duplicate key, silently.** Ticking carry-forward
-  moves the values already on screen into the store once; where two loaded rows share a key the
-  last one wins, the other legacy value is deleted with it, and there is no second copy and no
-  warning. **T-30-3.**
+- ~~**The one-time promotion picks a winner on a duplicate key, silently.**~~ **Closed by
+  T-30-3 (§16).** The promotion no longer picks: a key whose rows hold two *different* legacy
+  values is left alone, both values stay in `sess.manualTags`, the keys are named in one confirm
+  before anything is written, and declining it promotes nothing. A duplicate key whose rows hold
+  the *same* value is not a conflict — there is nothing to pick between, and one record serving
+  both rows is the feature.
 - **The in-app Excel view marks neither an override nor a carried cell.** The value is right
   there — it is the mark that is missing, so in that one surface a typed value is
   indistinguishable from a computed one. **T-26-1** and **T-30-2**.
@@ -2358,3 +2400,389 @@ Named as plainly as the rest, because every one of these is reachable by an oper
   163/1-plus-a-crash; with the default root they are 75 passed 1 skipped and 304/0. Anyone
   measuring a count from a contained temp root will see a regression that is not there.
   **T-S10-8.**
+
+---
+
+## 16. The money round — Z1, T-26-5, T-26-6, T-S10-1, T-30-3
+
+Five tickets, picked because each one either puts a **wrong number into a journal entry or a
+shared master** or **silently destroys somebody's work**. Gates: `run_store_e2e` sections
+[49]–[53], 42 checks.
+
+### 16.1 Z1 — a broken formula posted a SILENT ZERO, and here is it happening
+
+Deferred across three rounds with *"raise its priority"* each time, and never reproduced. It is
+now reproduced, on the build before the fix
+(`scratchpad/money/out/z1_repro_before.txt`, and `run_store_e2e` section [49] re-measures the
+figure in the same run rather than quoting it):
+
+> An added `formula` column **`AED = NUM({Base})/NUM({Rate})`** — an FC-to-AED conversion, and
+> `AED` is already the name of the default AEG template's `valueColumn` *and* one of its input
+> columns, so the template links with no re-mapping at all. Three rows: `INV-1` Base 100 Rate 2,
+> `INV-2` Base 300 Rate 3, **`INV-3` Base 500 Rate 0** — a blank or zero rate on one line of an
+> FX extract is ordinary weather.
+>
+> | the same cell, `INV-3 / AED` | reads |
+> |---|---|
+> | the grid (off the DOM it drew) | `#ERR` |
+> | `Reco._extraValueForRow` — the one read ladder | `#ERR` |
+> | the report cell | `#ERR` |
+> | the CSV export | `#ERR` |
+> | the real workbook cell | `#ERR` |
+> | **the AEG source row the journal is built from** | **`#ERR`** |
+>
+> **POSTED ENTRY `AEMVAUQHDL`, lines Dr 150.00 / Cr 150.00**, `postedPks` =
+> `["INV-1","INV-2","INV-3"]`, every row stamped `POSTED`, and the only thing on screen was
+> *"Entry AEMVAUQHDL generated (2 lines)"*. `INV-1` is worth 50 and `INV-2` is worth 100, so the
+> **largest of the three invoices contributed nothing** and was closed anyway. Un-aggregated the
+> same fixture posts four lines totalling 150 and `INV-3` gets **no line at all** while still
+> being stamped and still being in `postedPks`.
+
+**THE TICKET'S OWN MECHANISM IS NOT THE ONE THAT BITES, and this is the finding.** The AEG
+source-row loop's `catch(e) { r[ac.name] = ''; }` — the `''`-vs-`'#ERR'` divergence the loop's
+comment, this document and the ticket all name — is **unreachable**: `Formula.evaluate` catches on
+**both** of its paths (the compiled one and the text-substitution fallback) and *returns* `'#ERR'`.
+So the loop was already answering exactly what the grid shows, and the divergence had never posted
+anything. What posted the zero is **`U.num('#ERR') === 0`** inside `Reco._buildEntryLines`.
+
+**The shape chosen, and why.** Both candidates were built, and only one of them is the fix:
+
+- **(a) make the loop answer `'#ERR'`.** Done — but on its own it fixes **nothing**:
+  `U.num('#ERR')` is 0 just as `U.num('')` is, so the entry posts the same zero with the grid
+  merely agreeing about the cell. It is kept for exactly one reason: it leaves the refusal **one
+  sentinel to key on**. If a later change ever does make `evaluate()` throw, `''` is
+  indistinguishable from *"this column has no value"* and the refusal would silently stop firing.
+- **(b) REFUSE the posting**, at RC-8's door — `Reco.previewEntryFromSelection`, the one way into
+  entry history — naming the key, the column and the formula. A wrong number in a ledger is worse
+  than a blocked entry, and this app's rule is to refuse rather than guess wherever two readings
+  are possible: `#ERR` could mean 0 or *"nobody knows yet"*, and the app cannot tell. **There is
+  no honest guess available**: the last good value is not in the file, the formula is not
+  invertible, and dropping the row would post an entry quietly smaller than the selection the
+  operator ticked, which is the harm rather than the remedy.
+
+**The scope is narrow on purpose**, because refusing on every `#ERR` anywhere would change what
+every existing template can post — the objection **T-26-4** was deferred for. Only a column the
+entry **reads** counts: an AEG input column by `name` *or* by `label`, the `valueColumn`, an
+`aggregateBy`, either account `inputColumn`, the keyword column, or the template's own
+`valueColumn` (the fallback when the AEG value field comes back blank). A broken formula in a
+column the linked template never reads does **not** refuse (`Z1h`, with the figure unchanged).
+Deliberately **not** in the set: the **post-entry column** — it is not an amount, not an account,
+does not decide whether a row posts, and a cancel restoring `#ERR` into a cell whose formula
+already says `#ERR` changes nothing.
+
+**The keyword column is judged BEFORE the filter**, and it is the one place RC-8's *"after the
+keyword filter, deliberately"* is the wrong rule. For an override, a row the filter dropped is not
+in the entry and refusing over it would be a refusal about a row nobody is posting. For the
+keyword column **the failure is what dropped the row**: the cell could not be worked out, so the
+filter could not match it, so the row silently did not post (`Z1i`/`Z1j`). Every other column is
+judged on the surviving rows.
+
+### 16.2 T-26-5 — a total that is not the sum of the column it is under
+
+RC-8 keeps a non-numeric override out of the ledger; it could still reach a **screen total**. The
+shipped total row was already guarded by `U.isNumeric`, so with `Net` typed over as `1.234,50`
+the total read **100** for a column showing 40, 60 and `1.234,50` — **and said nothing about the
+cell it had dropped**. Reviewer A's naive reading of the same column is **101.2345**
+(`scratchpad/store/fix/p3.out`), which is what every other `U.num` reader of it still gives.
+
+`Reco._reportColumnTotal(rows, col)` is now the one place the arithmetic lives and returns
+`{sum, excluded, samples}`; the total cell carries `data-total-sum` / `data-total-excluded` and a
+`*`, and the report footer names the count, the column and the characters. **A blank cell is not
+"not a number"** and is not counted — it has always been out of every total, nobody reads an empty
+cell as an amount, and counting it would put a warning under every sparse column in the app,
+including a deliberately blank override. Controls: `1,234.50` is canonicalised by `_setOverride`
+to `1234.5` and is **fully** in the total with no footnote; an empty override likewise.
+
+### 16.3 T-26-6 — the duplicate-key panel names what is already in the ledger
+
+RC-6's suppression stands: an override whose key stops naming one row is not served, because the
+alternative multiplies a number into a **new** entry. Where that key had already been **posted**,
+the ledger holds the typed value and the screen falls back to the computed one — measured here as
+**ledger 1000, screen 20**. The *Duplicate primary keys* panel now carries a second block
+(`data-dup-posted`) naming those keys, the column, the amount the ledger holds and the
+**accounting reference**, from `Reco._postedRefForPk` — which answers from the key alone and is
+never `weak`, so a key with no reference gets no sentence rather than a guess. A reversed entry is
+marked as such, because telling somebody to reverse it twice would be wrong.
+
+### 16.4 T-S10-1 — the ledger's own two files now merge-write
+
+`entryHistory` and `docNumberMaster` left `PERSIST_KEYS`, are assigned in `AppState.load` as the
+values store is, and every write goes through **`AppState.ledgerFlush(key, mutate)` →
+`Store.mergeWrite(key, mutate, {depth: 0})`** — `depth: 0` because the top-level value of each is
+one template's *array* of entries and one template's *map* of document numbers, and the template
+is the unit a race happens in. Reproduced before the fix: two pages on one share, A posts, B
+(booted before A's entry existed) posts, and **`reco/entryHistory.json` held one accountingId out
+of two**, both ways round.
+
+The nine write sites: `commitEntryFromPreview` (the append — **keyed on `idNonce` since
+T-S10-11, not on `accountingId`**, because two windows can mint one reference and a skip on the
+reference alone discarded one of the two entries; see §17), `Reco.saveAllocation` (both keys), `Reco.removeDocNumber` (new — it was an
+inline `delete` in an `onclick` followed by `AppState.save()`, which would no longer have written
+anything), `RecoTemplate.remove`, `App.importBackup`, `Reco.restoreSession`, and `reverseEntry`
+(the mark, the mirror, the `reversalCancelled` note and the freed document numbers).
+
+> **THE RULE A FUTURE READER CANNOT GUESS: an intent must re-find what it mutates, by id.**
+> `Store._takeDisk` replaces `AppState[key][tplId]` with the object just read off the share, so
+> an intent that closes over an entry taken *before* that read mutates a detached copy and writes
+> nothing at all. Every intent looks its entry up by `accountingId` in the map it is handed, and
+> every one is idempotent, because a failed write leaves the intent buffered for the next job.
+>
+> **And the same rule binds the TESTS.** Changing `AppState.entryHistory` in memory is no longer
+> changing what the app will read — the next merge write puts the share's copy back, which is
+> precisely what stops a stale page clobbering a colleague. `run_reverse_e2e` and
+> `run_specialjv_e2e` had six fixtures that simulated a state *on the share* by mutating the map
+> in memory and relying on `reverseEntry`'s step-3 whole-file flush to publish it; that flush was
+> itself part of the clobber. Both suites now have a `publishLedger(page)` helper and call it
+> after those mutations. **No assertion in either file changed** by that work — `run_specialjv_e2e`
+> is still at 123/0, and `run_reverse_e2e` is at 255/0 after the MR-3 gate was rewritten (below).
+
+`AppState.adoptLedger(key, next)` replaces a map's *contents* in place (via `Store._takeDisk`)
+because `reverseEntry` used to reassign `AppState.entryHistory` outright three times, which would
+have left a buffered intent pointing at the old object.
+
+> **WHAT THIS DOES *NOT* CLOSE, because this file has claimed otherwise once already.** The
+> **boot-time** half of the clobber is gone. Two halves remain:
+> 1. **Cross-page, T-S10-10.** The merge write is atomic within one page (`Store._enqueue`) and
+>    **not between pages** — there is no compare-and-swap in the bridge's `write_file` and no lock
+>    file. Two people writing within one read-write cycle of each other still produce a file
+>    holding one of the two entries, and the loser's write **succeeded**. The window is measured
+>    at **100–250 ms** for a 2.2 MB history on local disk, and proportionally longer over the
+>    wire. `_confirmEntryOnShare` and `_reSettleEntry` heal what lands inside the settle and
+>    **say so when they cannot**; a clobber after that look is still invisible. The complete fix
+>    is a **write-if-unchanged in the Python bridge**, which no round has been allowed to edit.
+> 2. **A mixed fleet, T-S10-12.** An un-upgraded copy of the app on the same folder still writes
+>    `reco/entryHistory.json` and `reco/docNumberMaster.json` as **whole files with no re-read**,
+>    so it keeps destroying colleagues' entries while the fix appears to work for everyone else —
+>    and because this build refreshes memory on every write, it reads as *intermittent* rather
+>    than attributable to one machine. Measured on one share root with `apps/Reco.html` swapped
+>    between builds. **Every copy of the app on the folder has to be on this build** before the
+>    T-S10-1 fix holds. A build stamp written into `reco/` at boot, warning when an older stamp
+>    is seen, would make that enforceable instead of a request.
+
+### 16.4a MR-3's gate is an operation count, not a clock
+
+Worth reading before you touch a performance assertion anywhere in this project.
+
+MR-3's fix took an `O(history)` reversal count **out of** `_postedAuditIndex`'s memo key — the key
+was being rebuilt, and the history walked, on **every** `_postedRefFor` call, memo hit included.
+`run_reverse_e2e` guarded it with `check(memo.ratio < 4, …)` where `ratio = many / one`, two
+wall-clock figures **both under two microseconds**. Observed on consecutive runs of the same tree:
+`1.47 µs at 1 entry, 0.93 µs at 2,000 — ratio 0.64`. A scheduler hiccup inside the 3,000-call loop
+at *one* entry halves the denominator, and the only gate the fix has fails for a reason that has
+nothing to do with the code. The tempting response — raise the threshold — walks the gate down
+until it measures nothing.
+
+**The claim was never "it is fast". It is "a warm call does a constant amount of work whatever the
+history's length".** So the 2,000 fixture entries are built with `Object.defineProperty`
+accessors over `reversal` and `accountingId` that count reads, and the claim is read off the
+counters:
+
+| over 3,000 warm calls | at 1 entry | at 2,000 entries |
+|---|---|---|
+| `reversal` reads | **0** | **0** |
+| `accountingId` reads | **6,000** (2 per call: `_postedRefFor` and `_postedRefForPk` each ask for the index) | **6,000** |
+| the scan it replaced | — | **6,000,000** |
+| **one COLD `_postedAuditIndex`** | — | **4,001** `reversal` reads, and **0** on the memo hit straight after |
+
+Four assertions, no threshold in any of them: `reversal` is read **not at all**; the
+`accountingId` count at 2,000 **equals** the count at 1 (so the per-call work does not grow with
+the history); the removed scan really does read `2000 × 3000` properties; and — the probe's own
+premise — **a cold index build reads 4,001 and the memo hit after it reads 0**. That last one is
+not decoration. It is the only thing that proves the counting accessors are on the array *the
+code walks* rather than merely on the one the fixture is holding; without it, `0 reads` and a
+blind probe are the same reading. The timings are still printed, as a report.
+
+**Mutation-checked**, with the readings:
+
+| mutant | what it reads | which assertion dies |
+|---|---|---|
+| the reversal count back in the memo key | `reversal` **12,000,000** at 2,000 entries (4,000 per call — two index calls per `_postedRefFor`) | the `0 reversal reads` gate, and the premise with it |
+| a key that joins every `accountingId` | `accountingId` **12,000** at 1 entry vs **12,006,000** at 2,000 | the *same count at 2,000 as at 1* gate |
+
+> **And the trap that cost a round of runs: `run_reverse_e2e` has no `APP_REV` / `APP_FILE`
+> knob.** `run_store_e2e` does, so `APP_FILE=…/mutant.html node tests/e2e/run_reverse_e2e.mjs`
+> looks like it works, runs to completion, and quietly measures the **working tree**. Both
+> "mutants" came back 255/0 with identical property counts, which read as *the gate is blind*
+> when the truth was *the mutant was never loaded*. A mutation check on that suite has to put the
+> mutant **into `apps/Reco.html`** and copy the real file back afterwards (`trap … EXIT`, and
+> `cmp` at the end to prove it).
+
+### 16.5 T-30-3 — the promotion no longer picks between two legacy values
+
+`Reco._promoteCarryForward` walked `sess.data` in order and wrote one record per key, so two rows
+sharing a key with **different** legacy values lost one of them: last row wins, and the legacy
+`manualTags` entry the loser came from is deleted in the same pass, with no second copy anywhere.
+Reproduced: both rows read `Bob`, `Alice` gone from the store **and** from `sess.manualTags`.
+
+It now collects conflicts in the same pass, promotes the non-conflicting cells, leaves the
+conflicting `(key, column)` **and both legacy values** exactly where they are, and asks **one
+confirm in `saveTemplate`** — beside the primary-key warning, which is where that wording already
+lives — *before* anything is written, naming each key with `Reco._pkLabel`, both values and the
+`Reco._dupPkCountFor` row count. Declining promotes nothing and deletes nothing. **Same value on
+both rows is not a conflict**: there is nothing to pick between, and one record serving both rows
+is the feature (`k:'typed'` broadcasts on purpose; only an **override** refuses, because
+broadcasting money is a bug and broadcasting a note is the feature).
+
+> **"EXACTLY WHERE THEY ARE" IS NOT THE SAME AS REACHABLE, and this file has said otherwise.**
+> *Where they are* is `sess.manualTags`, whose key is `row._id + '||' + name` — and `row._id` is
+> re-minted by `U.uid()` on **every load**. So the characters survive in
+> `reco/recoSessions.json` under ids no reader can reach, and **the operator sees a cell that has
+> gone blank**. Measured on the same fixture: `INV-7=Bob` before this feature (which picked a
+> winner — the thing the ticket complained about) and `INV-7=` after it. Not picking is still
+> right; the confirm and the toast say so. Making the values **reachable** is **T-26-11**, and
+> until it is done, declining the promotion trades *one value silently lost* for *both values
+> silently unreachable*.
+
+### 16.6 Known limitations of this round
+
+- **A row whose amount works out to a legitimate 0 still produces no journal line and is still
+  stamped `Posted`.** `_buildEntryLines` has `if (value === 0) return;`, and
+  `commitEntryFromPreview` stamps every standard row. Z1 closes the `#ERR` case, which is the one
+  where the zero is a *failure*; a genuinely zero row is a different question and is **T-26-9**.
+- **The summary cards have T-26-5's silence too.** `Sum`, `Avg`, `Min` and `Max` skip a
+  non-numeric cell without saying how many. Only the total row and the footer were in the
+  ticket's **Fix**; the cards want the same treatment and are **T-26-10**.
+- **Z1's refusal is all-or-nothing.** There is no *"post the rows that are fine"* — that would
+  post an entry quietly smaller than the selection, which is the harm this refusal exists to
+  prevent. Correcting the data or the formula is the route.
+
+
+---
+
+## 17. T-S10-11 — two windows minting the same accounting reference
+
+### 17.1 The one thing to read if you read nothing else
+
+**The accounting reference is two characters longer than it used to be.** `AEMVAUQHDL` became
+`AEMVAUQHDL7K`. The last two characters are drawn once per window, at the first mint, and are the
+same on every reference that window produces. **Tell the team**, because the reference is what
+people quote to each other, write on documents and type into the GL.
+
+### 17.2 What was happening
+
+`'AE' + Date.now().toString(36).toUpperCase()` is **one string per millisecond**, with no window
+in it. Two people pressing *Generate* in the same millisecond minted the **same** reference — and
+the append that records an entry was idempotent **by that string**:
+
+```js
+if (!list.some(e => e && e.accountingId === accountingId)) list.push(entry);
+```
+
+So each window's append was a no-op against the other's record. **One journal entry was
+discarded.** Both operators were told *"Entry AEMVAYN4CT generated (2 lines)"*, **both** row sets
+were stamped `POSTED` on the share, and both writes **succeeded**, so nothing in either window
+ever said otherwise. Measured at a 0 ms stagger: `posted ["AEMVAYN4CT","AEMVAYN4CT"]` with
+`reco/entryHistory.json` gaining **one** entry.
+
+Downstream it was worse than a missing record, because the two entries were
+**indistinguishable**: the reversal takes the first match, `docNumberMaster` maps a number to one
+of them, and `_postedAuditIndex` resolves a row to whichever it met first.
+
+**And every test that covered this read green**, which is the part worth remembering. Section
+`[57]`'s S109a asked *"is each id present on the share?"* — with one id under two names, both
+lookups hit the same single record. S109b asked the same of the four document numbers. A
+presence test cannot see a collision; only a **count** and a **comparison** can.
+
+### 17.3 The fix, in two halves
+
+**One — a per-window suffix, `U.accountingId()`.** The mint lives in one place now and both
+callers use it (`commitEntryFromPreview`, and `reverseEntry`'s mirror). Two base-36 characters
+are drawn from `Math.random()` at the first call and cached in `U._aeTag` for the life of the
+window. A same-millisecond collision goes from **1 in 1** to about **1 in 1,296**. This is
+option (a) of the ticket; option (b) — a counter allocated through `Store.mergeWrite` — is exact
+but makes *Generate* wait on the shared folder, and was not taken.
+
+**Two — the append tells our own entry from a stranger's.** The suffix leaves a residue, and a
+residue that silently loses a journal entry is not acceptable, so the rule changed as well.
+Every entry carries an `idNonce` (`U.uid()`), and the one copy of the append rule is
+`Reco._appendEntryIntent`:
+
+```js
+const held = list.find(e => e && e.accountingId === entry.accountingId);
+if (!held) { list.push(entry); return false; }
+if (held === entry || held.idNonce === entry.idNonce) return false;   // our own intent, replayed
+entry.accountingId = Reco._reMintAgainst(list);                        // a stranger holds it
+list.push(entry);
+```
+
+**Why a nonce and not a deep compare:** the first write goes out *before* `postedPks` and
+`postedPrev` are attached to the entry, so a replay of a perfectly ordinary entry does not equal
+what is already on the share. An entry written by an older build has no nonce, which reads
+correctly as *"not mine"*.
+
+**Replays converge.** `entry.accountingId` is reassigned **in place**, so the next replay of the
+same intent looks the **new** reference up, meets its own nonce and does nothing. The same object
+is in `AppState.entryHistory`, so this window's own memory moves with it.
+
+**Four sites replay that intent** — the *Generate* door, `_confirmEntryOnShare`'s repair,
+`_reSettleEntry`, and `reverseEntry`'s **mirror** — and they call the one function rather than
+carrying four copies of the rule. A site that skips on the reference alone is a site that loses
+the entry.
+
+**The mirror is the reversal's version of the same bug**, and worse in one way: a skipped mirror
+leaves the original **marked reversed** with no contra behind it. So the mirror carries an
+`idNonce` too, goes through `_appendEntryIntent`, and the **link follows it** —
+`e.reversal.reversalId`, which is what walks from the original to the contra, is set from where
+the mirror actually landed, **inside the mutate**, so a replay cannot leave it naming a reference
+the mirror no longer has.
+
+### 17.4 Everything that had to stop trusting the announced reference
+
+| reader | now |
+|---|---|
+| `_confirmEntryOnShare`'s *"did it reach the share?"* look | matches on `accountingId` **and** `idNonce`. Matching the reference alone would find the **stranger's** record and report success over a lost entry — the bug's own shape |
+| `_reSettleEntry`'s *"still there"* test | the same, for the same reason |
+| the `docNumberMaster` intent | writes `entry.accountingId`, read when the merge job runs, not the string captured at mint |
+| the allocate modal (`setTimeout`, 300 ms) | `entry.accountingId || accountingId`, read at fire time |
+| `AppState._activeEntryId` | repointed by `Reco._noticeReMint` |
+
+### 17.5 When the 1-in-1,296 does happen, the operator is told
+
+`Reco._noticeReMint` is a no-op unless the reference moved. When it did, it opens a modal headed
+*"This entry is **AEMW1Q3R8F**, not AEMVAYN4CT"*, says that both entries are on the share and
+**nothing has been lost**, and says plainly that the old reference is **a colleague's entry** — so
+if it has already been written on a document, correct it. It also rewrites the document numbers
+that still read the old reference (only ours can), repoints `AppState._activeEntryId`, and
+re-renders the entries tab so the screen does not contradict the modal.
+
+### 17.6 The gates, and what each one is for
+
+In `tests/e2e/run_store_e2e.mjs`:
+
+- **`[57]` S109c / S109d** — the two assertions the ticket's *Test* paragraph asked for: two
+  windows posting in one `Promise.all` get **different** references and
+  `reco/entryHistory.json` holds **two** entries. S109e checks the shape people quote is still
+  `AE` + base-36 and the same length in both windows.
+- **`[57]` S109f / S109g** — the **mechanism**, inside one page and with no timing in the answer.
+  Two mints a millisecond apart share their last two characters while everything before them
+  changes (so the suffix is not more clock), and 300 fresh draws produce more than one value (so
+  it is drawn per window, not compiled in). These exist because **S109c/S109d would still read
+  green with the suffix removed** — the content test re-mints the loser anyway, which is the fix
+  working, and exactly why the outcome cannot be the gate on the suffix.
+- **`[57b]` S111a–S111h** — the residue, made deterministic. `U.accountingId` is **pinned** to one
+  string in both windows, which is the state every build before this one was in permanently.
+  **The ordering is the section:** page B boots **before** anything is posted, because
+  `AppState.entryHistory` is read once at boot and a B that opens later already holds A's entry,
+  where the in-window uniqueness guard at the mint site sidesteps the collision on its own. With
+  that line moved below A's post, the section reads green against an append that skips on the
+  reference alone. S111a and S111a2 are the two premises; S111b–S111h are the claims.
+
+Mutation-checked: removing the suffix fails S109b/c/f/g; restoring the reference-only append
+fails S111b/c/f.
+
+### 17.7 Still open
+
+- **T-S10-10's cross-page clobber is not closed by this.** A colleague's write landing *after*
+  `_reSettleEntry`'s look is still invisible, and the complete fix is a **write-if-unchanged in
+  the Python bridge**, which no round has been allowed to edit.
+- **A mixed fleet still destroys entries.** An un-upgraded copy of the app on the same folder
+  writes `reco/entryHistory.json` as a whole file with no re-read. See **T-S10-12**.
+- **The `idNonce` makes two colliding entries distinguishable to the *code*, not to a
+  person.** Nothing in the UI shows it; the modal in §17.5 is the human-facing half.
+- **A re-minted *mirror* does not get the §17.5 modal.** The mirror is never lost, and the
+  original→contra link always names where it landed, but the reversal's own toast and
+  `reco/reversals.log.csv` line are written from `newId` as announced. Reaching that case needs
+  two people reversing **different** entries in the same millisecond **and** drawing the same
+  two characters, so the announced reference is right about 1,295 times out of 1,296 — and when
+  it is not, the record on the share is correct and the log line is not. Worth a notice if
+  anybody ever meets it.

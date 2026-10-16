@@ -49,6 +49,26 @@ function check(cond, msg, extra) {
   else { failures++; console.log('  ✗ ' + msg + (extra !== undefined ? '  → ' + JSON.stringify(extra) : '')); }
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---- T-S10-1. PUBLISH THE LEDGER MAPS THIS FIXTURE JUST CHANGED.
+   `entryHistory` and `docNumberMaster` left AppState.PERSIST_KEYS, so
+   AppState.flush() no longer writes them: every write goes through
+   Store.mergeWrite, which re-reads the file inside Store._enqueue and takes
+   THE SHARE as the authority for each template id. A fixture that mutates
+   AppState.entryHistory in memory is therefore no longer describing what the
+   app will read - the next merge write puts the share's copy back, which is
+   exactly the rule that stops a stale page clobbering a colleague's entry.
+   The fixtures below are simulating a state ON THE SHARE, so they say so.
+   NOT AN ASSERTION CHANGE: every check() in this file is unchanged. */
+const publishLedger = page => page.evaluate(async () => {
+  if (!Store._hasApi()) return false;
+  await window.pywebview.api.write_file('reco/entryHistory.json',
+    Store.serialize('entryHistory', AppState.entryHistory));
+  await window.pywebview.api.write_file('reco/docNumberMaster.json',
+    Store.serialize('docNumberMaster', AppState.docNumberMaster));
+  return true;
+});
+
 /* An entry's reversal record, or {}. Every assertion about it goes through
    this: a build that records nothing must report all the verdicts, not die on
    the first missing field. */
@@ -1079,6 +1099,7 @@ try {
     const e = (AppState.entryHistory[id] || []).find(x => x.accountingId === aid);
     delete e.postedPrev;                       // every entry already on the share
   }, [t8.id, a8b]);
+  await publishLedger(page);   // T-S10-1: the share is what reverseEntry reads
   const seen10b = await openReverse(page, t8.id, a8b);
   check(/was not recorded, so it is left as it is/.test(seen10b.body),
     'for an entry generated before the capture existed the dialog says the value cannot be put back',
@@ -1142,6 +1163,7 @@ try {
     e.lines.push({ Reference: 'ACC1', RC: '100', Nominal: '1', SubNominal: '0', 'Analysis Key': '0', LOB: '51',
                    Cur: 'AED', Reco: '', Dr: '', Cr: '', Doc: 'D1', Desc: 'zero-net exchange leg' });
   }, [t9.id, aM]);
+  await publishLedger(page);   // T-S10-1: the share is what reverseEntry reads
   await openReverse(page, t9.id, aM);
   const seenM = await switchMode(page, 'reversed');
   check(/malformed/.test(seenM.body) && /carries neither a debit nor a credit/.test(seenM.body),
@@ -1196,6 +1218,7 @@ try {
     e.lines.push({ Reference: 'ACC1', RC: '100', Nominal: '1', SubNominal: '0', 'Analysis Key': '0', LOB: '51',
                    Cur: 'AED', Reco: '', Dr: '', Cr: '', Doc: 'D4', Desc: 'zero-net exchange leg' });
   }, [t9.id, aM2]);
+  await publishLedger(page);   // T-S10-1: the share is what reverseEntry reads
   await openReverse(page, t9.id, aM2);
   const rM2 = await runReverse(page, 'cancelled', 'cancel it instead');
   check(!rM2.btn.disabled, 'cancel is open to the user too — a malformed line never blocked that', rM2.btn);
@@ -1210,6 +1233,7 @@ try {
     const dr = e.lines.find(l => l.Dr);
     dr.Dr = String((parseFloat(dr.Dr) + 0.01).toFixed(2));
   }, [t9.id, aU]);
+  await publishLedger(page);   // T-S10-1: the share is what reverseEntry reads
   await openReverse(page, t9.id, aU);
   const seenU = await switchMode(page, 'reversed');
   check(/The original entry does not balance/.test(seenU.body) && /out by 0\.01/.test(seenU.body),
@@ -1306,6 +1330,7 @@ try {
     AppState.entryHistory[id] = hist;
     return { n: hist.length };
   }, t9.id);
+  await publishLedger(page);   // T-S10-1: the share is what reverseEntry reads
   const before12 = csvRows(file9).length;
   const seen12 = await openReverse(page, t9.id, 'AELEGACY1');
   check(/does not record which rows it closed/.test(seen12.body) && /no row will be changed/.test(seen12.body),
@@ -1880,6 +1905,7 @@ try {
     e.docNumbers = { AED: 'JV-7' };
     AppState.docNumberMaster[id] = Object.assign(AppState.docNumberMaster[id] || {}, { 'JV-7': aid });
   }, [tF.id, aF]);
+  await publishLedger(page);   // T-S10-1: the share is what reverseEntry reads
   await openReverse(page, tF.id, aF);
   await runReverse(page, 'reversed', 'post the contra for the log');
   await sleep(500);
@@ -2079,47 +2105,127 @@ try {
 
   /* The memo key. Verified finding: postedJvAudit went 175 ms at one entry to
      1,280 ms at 2,000, entirely from an O(history) reversal count recomputed
-     inside the memo key on every _postedRefFor call. */
+     inside the memo key on every _postedRefFor call.
+
+     MEASURED AS PROPERTY READS, NOT AS A CLOCK. This gate used to be
+     `many / one < 4`, a wall-clock ratio whose two operands are both well
+     under a microsecond — a scheduler hiccup inside the 3,000-call loop at
+     one entry could halve the denominator and fail the only gate MR-3's fix
+     has, and the obvious response (raise the threshold) weakens it until it
+     measures nothing. The claim is not "it is fast"; it is "a warm call does
+     a CONSTANT amount of work whatever the history's length". So the 2,000
+     entries are built with counting accessors and the claim is read off the
+     counters: a warm call must read `reversal` NO times and `accountingId`
+     exactly ONCE (the last entry, for the key), whatever n is. The timings
+     are still printed, as a report rather than as a gate. */
   const memo = await page.evaluate(([id]) => {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     const keys = sess.data.map(r => r._pk);
     const saved = AppState.entryHistory[id];
     const row = sess.data[0];
-    const time = (n) => {
+    const CALLS = 3000;
+    const hits = { reversal: 0, accountingId: 0 };
+    let counting = false;
+    // One entry, with `reversal` and `accountingId` behind counting accessors.
+    const mkEntry = (i) => {
+      const o = { lines: [], postedPks: keys.slice(), sourceRowIds: [], specialJvIds: [],
+                  specialJvs: [], createdAt: '', createdBy: '', docNumbers: {} };
+      let aid = 'AEX' + i, rev;
+      Object.defineProperty(o, 'accountingId', {
+        enumerable: true,
+        get() { if (counting) hits.accountingId++; return aid; },
+        set(v) { aid = v; } });
+      Object.defineProperty(o, 'reversal', {
+        enumerable: true,
+        get() { if (counting) hits.reversal++; return rev; },
+        set(v) { rev = v; } });
+      return o;
+    };
+    const run = (n) => {
       const h = [];
-      for (let i = 0; i < n; i++) h.push({ accountingId: 'AEX' + i, lines: [], postedPks: keys.slice(),
-        sourceRowIds: [], specialJvIds: [], specialJvs: [], createdAt: '', createdBy: '', docNumbers: {} });
+      for (let i = 0; i < n; i++) h.push(mkEntry(i));
       if (n > 1) h[1].reversal = { mode: 'cancelled', at: '', by: '', reason: '' };
       AppState.entryHistory[id] = h;
       Reco._postedIdxReset();
       Reco._postedRefFor(tpl, row);                       // warm the memo
+      hits.reversal = 0; hits.accountingId = 0; counting = true;
       const t = performance.now();
-      for (let k = 0; k < 3000; k++) Reco._postedRefFor(tpl, row);
-      return (performance.now() - t) / 3000;
+      for (let k = 0; k < CALLS; k++) Reco._postedRefFor(tpl, row);
+      const us = (performance.now() - t) / CALLS * 1000;
+      const loopRev = hits.reversal, loopAid = hits.accountingId;
+      /* ---- THE PROBE'S OWN PREMISE, and it is not optional: it proves the
+         accessors are on the array THE CODE WALKS and not merely on the one
+         this fixture is holding. A COLD _postedAuditIndex builds the maps and
+         therefore must read every entry's `reversal`; the very next call is a
+         memo hit and must read none. If `cold` comes back 0, every other
+         reading below is meaningless. */
+      Reco._postedIdxReset();
+      hits.reversal = 0;
+      Reco._postedAuditIndex(tpl);
+      const cold = hits.reversal;
+      hits.reversal = 0;
+      Reco._postedAuditIndex(tpl);
+      const warm = hits.reversal;
+      counting = false;
+      return { us: us, rev: loopRev, aid: loopAid, cold: cold, warm: warm };
     };
-    const one = time(1), many = time(2000);
-    /* The shape that used to be IN the key, timed on the same history, so the
-       report carries a before as well as an after. */
+    const one = run(1), many = run(2000);
+    /* The shape that used to be IN the key, on the same history, so the report
+       carries a before as well as an after — and in the same unit, so the two
+       are comparable without a clock. */
     const h = AppState.entryHistory[id] || [];
+    hits.reversal = 0; counting = true;
     const t0 = performance.now();
-    for (let k = 0; k < 3000; k++) h.reduce((n, e) => n + ((e && e.reversal) ? 1 : 0), 0);
-    const scanUs = (performance.now() - t0) / 3000 * 1000;
+    for (let k = 0; k < CALLS; k++) h.reduce((n, e) => n + ((e && e.reversal) ? 1 : 0), 0);
+    const scanUs = (performance.now() - t0) / CALLS * 1000;
+    const scanReads = hits.reversal;
+    counting = false;
     AppState.entryHistory[id] = saved;
     Reco._postedIdxReset();
-    return { oneUs: one * 1000, manyUs: many * 1000, ratio: many / Math.max(one, 1e-6),
-             oldKeyScanUs: scanUs };
+    return { calls: CALLS, n: 2000,
+             oneUs: one.us, manyUs: many.us, ratio: many.us / Math.max(one.us, 1e-6),
+             oneRev: one.rev, manyRev: many.rev,
+             oneAid: one.aid, manyAid: many.aid,
+             coldRev: many.cold, warmRev: many.warm,
+             oldKeyScanUs: scanUs, oldKeyScanReads: scanReads };
   }, [tF.id]);
   console.log('    _postedRefFor on a warm memo: ' + memo.oneUs.toFixed(2) + ' µs at 1 entry, '
     + memo.manyUs.toFixed(2) + ' µs at 2,000 — ratio ' + memo.ratio.toFixed(2)
-    + '; the reversal-count scan that used to be in the key costs '
+    + ' (reported, not asserted); the reversal-count scan that used to be in the key costs '
     + memo.oldKeyScanUs.toFixed(2) + ' µs per call at 2,000 entries');
-  check(memo.oldKeyScanUs > memo.manyUs,
-    'and the scan it replaced cost more on its own than the whole memoised lookup now does',
-    { scan: memo.oldKeyScanUs, call: memo.manyUs });
-  check(memo.ratio < 4,
-    'the posted-row index no longer walks the whole history on every call: the reversal count came out of the '
-    + 'memo key and _postedIdxReset bumps a counter instead', memo);
+  console.log('    property reads over ' + memo.calls + ' warm calls: reversal '
+    + memo.oneRev + ' at 1 entry / ' + memo.manyRev + ' at 2,000; accountingId '
+    + memo.oneAid + ' / ' + memo.manyAid + '; the scan it replaced reads '
+    + memo.oldKeyScanReads + '; one COLD _postedAuditIndex reads ' + memo.coldRev
+    + ' and the memo hit after it reads ' + memo.warmRev);
+  /* The premise asks ONE thing — can the probe see the array the code walks —
+     and deliberately says nothing about the warm path, which is what the gate
+     below is for. Measured: 4,001 cold on this build, 0 warm. (Both go red
+     together under the mutant that puts the reversal count back in the key,
+     and the gate is the one that should be read.) */
+  check(memo.coldRev >= 2000,
+    'PREMISE: the counting accessors are on the array the CODE walks, not just the one this '
+    + 'fixture holds — one COLD _postedAuditIndex build reads every entry\'s `reversal`. Without '
+    + 'this, the `0 reads` gate below could just as well mean a blind probe',
+    { cold: memo.coldRev, n: memo.n });
+  check(memo.manyRev === 0 && memo.oneRev === 0,
+    'a warm _postedRefFor reads no entry\'s `reversal` at all — the reversal count came out of the '
+    + 'memo key and _postedIdxReset bumps a counter instead. Counted, not timed: this is the whole '
+    + 'of MR-3 and it used to be guarded by a sub-microsecond wall-clock ratio',
+    { oneRev: memo.oneRev, manyRev: memo.manyRev, calls: memo.calls });
+  check(memo.manyAid === memo.oneAid && memo.manyAid > 0,
+    'and it reads the SAME NUMBER of accountingIds at 2,000 entries as at 1 — ' + memo.calls
+    + ' calls cost ' + memo.manyAid + ' reads either way, i.e. ' + (memo.manyAid / memo.calls)
+    + ' per call for the memo key (the last entry), with nothing per entry. A key that walked the '
+    + 'history would read ' + (2000 * memo.calls) + ' at 2,000. This is the O(1)-per-call claim '
+    + 'itself, and it needs no threshold: the two counts are either equal or they are not',
+    { oneAid: memo.oneAid, manyAid: memo.manyAid, calls: memo.calls,
+      perCall: memo.manyAid / memo.calls });
+  check(memo.oldKeyScanReads === 2000 * memo.calls,
+    'while the scan it replaced really does read every entry on every call — the PREMISE of the '
+    + 'two assertions above, so that `0 reads` means "the walk is gone" and not "the probe is '
+    + 'blind"', { reads: memo.oldKeyScanReads, expected: 2000 * memo.calls });
   check(errors.length === 0, 'no JavaScript errors', errors);
 
   clearTimeout(watchdog);

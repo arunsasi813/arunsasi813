@@ -844,7 +844,7 @@ try {
     String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
 
   /* ====================================================================
-     [8] T9 — the active format column, and a chip row that does not wander
+     [9] T9 — the active format column, and a chip row that does not wander
      ==================================================================== */
   section(9, 'T9: the active format column is offered DISABLED, and the chips do not change with the tab');
   try {
@@ -925,7 +925,7 @@ try {
     String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
 
   /* ====================================================================
-     [9] T10 — a keyless template
+     [10] T10 — a keyless template
      ==================================================================== */
   section(10, 'T10: a keyless template says so, shows three identifying columns, and writes no master');
 
@@ -992,7 +992,7 @@ try {
     + 'what the warning line is there to say', { master: t10.masterAfter, corrections: t10.corrections });
 
   /* ====================================================================
-     [10] T11 — the cost, best of three
+     [11] T11 — the cost, best of three
      ==================================================================== */
   section(11, 'T11: one master_lookup over a 50,000-row master, 200 rendered rows, under 1500ms');
 
@@ -2208,7 +2208,7 @@ try {
   check(S.errors.length === 0, 'no page or console errors in the single-pane run', S.errors.slice(0, 5));
 
   /* ====================================================================
-     [11] T13 / T14 — two panes, two templates, one shared modal
+     [13] T13 / T14 — two panes, two templates, one shared modal
      ==================================================================== */
   section(13, 'T13/T14: both panes on the Correction tab, and the picker that lives in the one modal');
 
