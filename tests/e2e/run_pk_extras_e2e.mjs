@@ -115,8 +115,17 @@ const PORT = 20701;
 const PORT_BIG = 20702;
 const PORT_BASE = 20703;
 /* The build G1 compares against: HEAD, i.e. the build before this feature.
-   Override with BASE_REV=<rev>. */
-const BASE_REV = process.env.BASE_REV || 'HEAD';
+   Override with BASE_REV=<rev>.
+
+   PINNED, AND IT MUST STAY PINNED. This defaulted to 'HEAD', which was the
+   commit before #24 on the day the suite was written and silently stopped
+   being so the moment #24 was committed: by the time #26 landed, the
+   "baseline" build CONTAINED the change the gate exists to measure, so G1
+   compared the build against itself and then failed on the one assertion that
+   says the old build carries no override title. A byte-identity gate whose
+   baseline moves with the branch tests nothing and then fails for the wrong
+   reason. 3047f82 is the commit immediately before #24. */
+const BASE_REV = process.env.BASE_REV || '3047f82';
 const BIG = Number(process.env.PK_BIG || 500000);
 /* G13's budget for the mint pass over BIG rows with three formula extras,
    best of three taking the minimum. Generous on purpose: this gate is here to
