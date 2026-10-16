@@ -6,11 +6,11 @@ is a rumour.
 
 Four are worth promoting above the rest:
 
-- **T-S10-16** — A4's `_keyStale` latch guards three of the five doors that write under a row key,
-  and `applyCorrection` is measured going through: after the key refusal it says a green
-  *"Correction applied"* and puts the correction on the shared folder under a key the folder's rule
-  no longer computes. It is the smallest remaining instance of the thing this round exists to stop,
-  and the decision it needs is one the last round already took once.
+- **T-S10-18** — the same harm as T-S10-16 (now closed), in the two doors its decision deliberately
+  did not reach: after the key refusal the **group** door files membership and the **comment** door
+  files a comment under the dead row key, both under a green toast, in two more shared masters
+  every colleague parses at boot. Measured, not predicted — `close/other_doors.txt`. It is now the
+  smallest remaining instance of the thing that round exists to stop.
 
 - **T-S10-10** — the ledger merge is atomic inside ONE page and not BETWEEN pages. Two people
   pressing Generate within one read-write cycle of each other can still lose a journal entry, and
@@ -826,8 +826,9 @@ rows on screen, and typing doors that refuse with a sentence until the rows are 
 by `Reco._mintKeysSync`, which every re-keying route goes through. `run_store_e2e` **[71]**, with a
 control that typing works normally after a reload — a latch, not a dead end. **The refusal itself
 stands, and T-S10-7's general merge must not be allowed to swallow it:** a key change is not a
-field, it decides what every other record is filed under. **See T-S10-16 for the doors the latch
-does not yet guard.**
+field, it decides what every other record is filed under. **T-S10-16 (CLOSED) took the latch from
+three doors to every operator gesture that writes under a row key; T-S10-18 is what measurement
+says it still leaves.**
 
 **CLOSED, AND AS A REFUSAL RATHER THAN A MERGE.** T-S10-7's general merge would have kept the
 folder's key definition silently, and the share would even have ended with one scheme — but B's
@@ -2399,7 +2400,7 @@ green in all 8. The reviewer's `p1_virt.mjs` / `p1b_line249.mjs` are the mechani
 
 ---
 
-## T-S10-16  A4's latch guards three typing doors; `applyCorrection` and `manualOffset` write under the same dead key and are not latched
+## T-S10-16  ~~A4's latch guards three typing doors; `applyCorrection` and `manualOffset` write under the same dead key and are not latched~~  **FIXED** — the latch is now asked per ACTION
 
 **Where** `apps/Reco.html` — `Reco._keyStaleBlock` is consulted by `Reco.setTag`,
 `Reco.setOverride` and `Reco.revertOverride`. It is **not** consulted by `Reco.applyCorrection`
@@ -2440,6 +2441,37 @@ Load, which is why `applyEdits` was not the chokepoint for B4/B6 either.
 `applyCorrection` and `manualOffset` are each REFUSED with a sentence naming the row key, and that
 `reco/correctionMaster.json` and `reco/manualOffsetMaster.json` hold **nothing** under the dead key.
 Control: after a reload both work normally and write under the folder's own key.
+
+**CLOSED — AS A PER-ACTION LATCH AT THE DOORS, NOT AS A RULE INSIDE `Reco.rowKey`.** Handover
+§18.9 carries the argument; the short version is that `rowKey` is a key **reader** — the renderer
+and every badge, the status filters, `runAutoOffset`'s restore, the drift check, `Groups.resolvePk`
+— and that **the machine paths go through it**: the Excel load-back and `ingestData` have no
+operator at the keyboard, so the Load sentence is addressed to nobody, which is why `applyEdits`
+was not the chokepoint for B4/B6 either. It also cannot carry four verbs, and it runs once per row
+per render. So `Reco._keyStaleBlock` stays the one place the rule lives and each **action** asks it
+at **every** entry point, with its own verb: *corrected* (`applyCorrection`), *offset*
+(`manualOffset`, `bulkMarkOffset`, `offsetSelected`, `_xlOffsetSelectedRows`), *unmarked*
+(`smartUnmark`, which is where both unmark gestures write), *changed* (`editCell`), beside A4's
+*saved* / *overridden* / *reverted*. `removeManualOffset` and `removeCorrection` are deliberately
+**not** latched: their key comes from the stored master the panel lists, not from a row on screen.
+The latch's own sentence now covers a DELETE as well as a write, because the unmark and the revert
+are changes to a record the folder holds rather than typing.
+
+**ALL FIVE DOORS WERE MEASURED FIRST, AND THE FIXTURE HOLE THIS TICKET NAMES IS CLOSED**
+(`scratchpad/dataloss/close/repro_before.txt`, port 21340). `manualOffset` said **nothing at all**
+and filed `D3`; `unmarkOffset` said a green *"Unmarked 1 row(s)"* and **deleted** `D5`'s record
+under the dead key, leaving the copy a colleague's load reads — a delete that did not happen;
+`editCell` said nothing and put a version row in the day file under `D4`. `R1_SETUP` now carries
+`toleranceValue` and an editable column so the offset and file-cell doors are reachable at all, and
+**R3g asserts that** rather than trusting it.
+
+**THE GATE** is `run_store_e2e` **[71]** R3g–R3v: 598 passed / 0 failed with the fix, and the ten
+new value-and-file assertions **all red** on the tree before it (`close/store_fail_first.txt`) and
+again through `APP_FILE=<f9329e7 Reco.html>` (`close/store_mutation.txt`). Every other suite is at
+its baseline.
+
+**WHAT IT LEAVES, MEASURED: T-S10-18.** The group and comment doors write pk-keyed shared masters
+from a row on screen as well, and still go through under a green toast.
 
 ---
 
@@ -2485,3 +2517,50 @@ age and the owed keys, so the next version of this deadlock is a console line ra
 slowed share read, then `await AppState.flush()` inside a `Promise.race` against a budget — assert
 it resolves and that `RecoTemplate._settleOwed` is back to 0. Mutation: put
 `_tplWritten = AppState.save()` back and assert it times out.
+
+
+---
+
+## T-S10-18  The group and comment doors still file under a dead row key after the key refusal
+
+**Where** `apps/Reco.html` — `Reco.createGroupFromSelection`, `Reco.addSelectionToGroup`,
+`Reco.removeSelectionFromGroup` (all three take their keys from `Reco._selectedPks`, i.e.
+`Reco.rowKey` over the selected rows) and `Comments.openAddDialog(tplId, pk)` →
+`Comments._confirmAdd` → `Comments.create(..., { linkedPks })`, whose `pk` is captured from the row
+the menu was opened on. `groupMaster`, `commentMaster` and `attachmentMaster` are all in
+`AppState.PERSIST_KEYS`, so each write is a whole-file blind write of a file every colleague parses
+at boot.
+
+**What** Measured, `scratchpad/dataloss/close/other_doors.txt` (port 21341), straight after the
+T-24R2-1 key refusal with `Reco._keyStale.TPL_X === true` and the folder's rule computing `D<n>-X`:
+
+| door | what it said | what reached the share |
+|---|---|---|
+| create group from selection | **`success: Group "G1" created with 1 member(s)`** | `reco/groupMaster.json` → members `["D1"]` |
+| post a comment on a row | **`success: Comment posted`** | `reco/commentMaster.json` → `linkedPks ["D2"]` |
+
+§18.2's argument for refusing a key change names *groups* and *comments* in the list of what a key
+change detaches from the rows, so this is the same harm T-S10-16 closed for corrections and
+offsets: the operator's own screen is right, the colleague's half is lost, and the toast is green.
+The **attachment** door (`Attachments.*`, keyed the same way) was **not measured** — do not assume
+either answer for it.
+
+**Why it is only a ticket** T-S10-16's decision was scoped to the two masters it measured, and
+these two doors are not a one-line repeat of it: a group is an accounting control with refusals of
+its own (`smartUnmark` refuses a partial unmark of an offset group, `sess.requireGroup` filters on
+membership), the comment door's key is captured when the MENU opens rather than when Post is
+pressed, and three of the four gestures are *removals* from a group, where the verb has to say that
+nothing was removed. Bolting the latch on without a measured test for each is how a rule becomes a
+list of function names again — the mistake B4/B6 were about.
+
+**Fix** The rule is already written at `Reco._keyStale`: a gesture whose key comes from a row on
+screen and which writes a pk-keyed shared store asks `Reco._keyStaleBlock(tpl, verb)` first. Apply
+it at the three group gestures (*grouped* / *removed from the group*) and at `Comments._confirmAdd`
+rather than at `openAddDialog`, so the operator is told when they press Post and not before they
+have typed. Measure the attachment door and do the same there or say why not.
+
+**Test** Extend `run_store_e2e` [71] the way R3g–R3v extends it: after the refusal, assert each
+door is refused with its own sentence and that `reco/groupMaster.json` / `reco/commentMaster.json`
+hold **nothing** under the dead key — files and values, not toasts — with the reload control that
+both work normally afterwards under the folder's own key. `close/q8_otherdoors.mjs` is the
+reproduction, already written.

@@ -16075,6 +16075,8 @@ _xlOffsetSelectedRows(rowIds) {
   const tpl = AppState.recoTemplates.find(x => x.id === id);
   const sess = AppState.recoSessions[id];
   if (!tpl || !sess) return;
+  /* T-S10-16. The Excel view: the offset action's fourth entry point. */
+  if (Reco._keyStaleBlock(tpl, 'offset')) return;
   const chk = Reco.checkOffsetTolerance(tpl, sess, rowIds);
   if (!chk.ok) { U.toast(chk.msg, 'error'); return; }
   const rid = 'M' + Date.now().toString(36);
@@ -18268,6 +18270,8 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       markAsOffset ? 'Mark Offset' : 'Unmark',
       markAsOffset ? 'nothing was marked' : 'nothing was unmarked');
     if (outside) { U.toast(outside.msg, 'error'); return; }
+    /* T-S10-16. The same two actions, from the bulk toolbar. One verb each. */
+    if (Reco._keyStaleBlock(tpl, markAsOffset ? 'offset' : 'unmarked')) return;
 
     if (markAsOffset) {
       // Tolerance check on eligible (non-offset) rows
@@ -18299,6 +18303,14 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     const S = Reco._paneSel(paneKey);
     const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
+    /* ---- T-S10-16. THE UNMARK, where the write is, so both gestures that
+       reach it are covered: the row menu's unmarkOffset and bulkMarkOffset's
+       unmark arm. It said a green "Unmarked N row(s)" while deleting mm[pk]
+       under a key the folder no longer computes - this window's copy goes,
+       the folder's stays, and the row is offset again at the next load for
+       everyone, this operator included. _unmarkBlockedGroups needs no check
+       of its own: its modal can only be opened from here. */
+    if (Reco._keyStaleBlock(tpl, 'unmarked')) return;
 
     selectedIds = (selectedIds||[]).filter(rid => sess.offsets[rid]);
     if (!selectedIds.length) { U.toast('No offset rows in selection', 'error'); return; }
@@ -24046,6 +24058,9 @@ renderRecoTable(tpl, sess) {
     const S = Reco._paneSel(paneKey);
     const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
+    /* T-S10-16. The selection sum bar: the offset action's third entry
+       point, and not one of the function names the ticket lists. */
+    if (Reco._keyStaleBlock(tpl, 'offset')) return;
 
     const selectedIds = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]);
     if (!selectedIds.length) { U.toast('Select rows first','error'); return; }
@@ -24302,6 +24317,14 @@ renderRecoTable(tpl, sess) {
       U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
       return;
     }
+    /* ---- T-S10-16. THE FILE-COLUMN DOOR, and it said nothing at all. Its
+       write is the row's version row in the day file, keyed by the same
+       frozen _pk, so after the key refusal this window files history under a
+       key the folder's rule no longer computes. applyEdits itself is
+       deliberately NOT the place: the Excel load-back and ingestData share
+       it and must not be told to press Load, which is exactly why applyEdits
+       was not the chokepoint for B4/B6 either. */
+    if (Reco._keyStaleBlock(tpl, 'changed')) return;
     Reco.applyEdits(tpl, sess, [{ row, col, value: val }], { source: 'grid', trusted: true });
     /* The grid has never repainted after an edit, so a formula or lookup
        column over the cell that just changed kept showing the old value until
@@ -24367,15 +24390,67 @@ renderRecoTable(tpl, sess) {
      reco/recoSessions.json and handed to a colleague who has nothing wrong.
      CLEARED BY THE LOAD ITSELF (Reco._mintKeysSync), which is the one place
      every route that re-keys a session goes through - an upload, Add Data, a
-     restore, a version load, an Excel load-back. */
+     restore, a version load, an Excel load-back.
+
+     T-S10-16: AND THE QUESTION IS ASKED PER ACTION, NOT PER FUNCTION NAME.
+     A4's fix put it at three doors - setTag, setOverride, revertOverride -
+     and the other writers keyed by the same frozen _pk never asked it:
+     applyCorrection filed correctionMaster[id][pk][col] under the dead key
+     and said a green "Correction applied"; manualOffset filed
+     manualOffsetMaster[id][pk] and said NOTHING AT ALL; the unmark said a
+     green "Unmarked 1 row(s)" about a delete that cannot reach the record the
+     folder would read; editCell wrote the row's version row into the day
+     file. Both masters are in AppState.PERSIST_KEYS - whole-file blind writes
+     of files every colleague parses at boot - so a record under a dead key is
+     invisible AND a permanent passenger. Measured, all five doors:
+     scratchpad/dataloss/close/repro_before.txt.
+
+     THE RULE, so the next writer is covered without being listed: a gesture
+     asks this question when its key comes from a ROW ON SCREEN (Reco.rowKey
+     over a loaded row) and it writes a pk-keyed store the folder shares. One
+     verb per ACTION, and the latch at EVERY entry point of that action - the
+     offset action has four (the row menu, the bulk toolbar, the selection sum
+     bar and the Excel view), the unmark two, the correction and the two
+     typing doors one each.
+
+     WHERE THE RULE IS TRUE AND NOT YET APPLIED, measured rather than
+     predicted (scratchpad/dataloss/close/other_doors.txt): group membership
+     and a comment are pk-keyed writes to groupMaster / commentMaster -
+     PERSIST_KEYS, both of them - and their key comes from a row on screen
+     too. After the refusal the group door still said a green 'Group "G1"
+     created with 1 member(s)' and filed the member as D1, and the comment
+     door said 'Comment posted' and linked it to D2, while the folder's rule
+     computes D1-X / D2-X. They are NOT latched here: a group is also an
+     offset control with refusals of its own and the attachment door has not
+     been measured at all, so that is a ticket (T-S10-18) and not an
+     untested bolt-on. Do not read the rule above as covering them.
+
+     A gesture whose key comes from the STORED FILE is deliberately NOT
+     latched: removeManualOffset and removeCorrection are handed a key the
+     panel read out of the master, not one minted on screen,
+     so it is still the key it always was and cleaning it up is right to let
+     through.
+
+     AND NOT INSIDE Reco.rowKey, which is the one function all of them go
+     through. rowKey is a KEY READER: the renderer's row attribute and every
+     badge, the status / attachment / comment filters, runAutoOffset's
+     restore, the drift check, Groups.resolvePk - and the MACHINE PATHS, the
+     Excel load-back and ingestData, which have no operator at the keyboard
+     to press Load. Refusing there would blank the screen this latch exists to
+     keep honest, could not carry a per-door verb, and would fire once per row
+     on a 500k-row extract. Handover 18.8 has the argument. */
   _keyStale: {},
   _keyStaleMark(tplId) { if (tplId) Reco._keyStale[String(tplId)] = true; },
   _keyStaleBlock(tpl, what) {
     if (!tpl || !Reco._keyStale[String(tpl.id)]) return false;
+    /* T-S10-16: the clause after the dash has to cover a DELETE as well as a
+       write, because the unmark and the revert are both "a change to a record
+       the folder holds" rather than typing. */
     U.toast('Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
       + 'its rows while these rows were loaded, so the keys on screen are the OLD ones \u2014 '
-      + 'anything typed against them is filed where nobody else can see it. Press Load to read '
-      + 'the rows again under the shared folder\'s rule, then try again.', 'error');
+      + 'anything filed against them goes where nobody else can see it, and anything meant to '
+      + 'change a record on the shared folder cannot reach it. Press Load to read the rows again '
+      + 'under the shared folder\'s rule, then try again.', 'error');
     return true;
   },
 
@@ -24755,6 +24830,11 @@ renderRecoTable(tpl, sess) {
       U.toast('That row is no longer in this pane\'s data \u2014 nothing was offset. Press Load, then try again.', 'error');
       return;
     }
+    /* ---- T-S10-16. THE OFFSET DOOR, measured and not inferred: it wrote
+       manualOffsetMaster under the dead key and said NOTHING AT ALL. (The
+       ticket could not measure it because its fixture carried no tolerance;
+       run_store_e2e's R3g now asserts the door is reachable.) */
+    if (Reco._keyStaleBlock(tpl, 'offset')) return;
     if (sess.offsets[row._id]) { U.toast('Row already offset','error'); return; }
 
     const chk = Reco.checkOffsetTolerance(tpl, sess, [row._id]);
@@ -25668,6 +25748,13 @@ renderRecoTable(tpl, sess) {
       U.toast('That row is no longer in this pane\'s data — nothing was corrected. Reopen the Correction tab.', 'error');
       return;
     }
+    /* ---- T-S10-16. A correction has a second copy in sess.corrections, so
+       this operator's screen is not wrong; what is lost is the colleague's
+       half - reco/correctionMaster.json gains a key the folder's rule does
+       not compute, under a green "Correction applied". ABOVE the blank-value
+       check because nothing can be filed at all until the rows are read
+       again. */
+    if (Reco._keyStaleBlock(tpl, 'corrected')) return;
     /* A CORRECTION WITH NOTHING IN IT IS A SLIP, NOT AN INSTRUCTION.
        FMT.validate passes an empty string, so a blank box used to clear a
        real reference, set _corrected_ so the row left the tab looking done,

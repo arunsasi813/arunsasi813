@@ -2832,7 +2832,8 @@ after the review of this round, **[69]–[77]** (§18.8) — reads a
 posts — and never a toast on its own.
 
 Ports **21240–21259** for the build, **21300–21319** for the review round. The suite goes from 441
-checks to **502**, and to **582** once the review's own sections are in.
+checks to **502**, to **582** once the review's own sections are in, and to **598** once
+T-S10-16's sixteen are added to **[71]** (§18.9).
 
 > **READ §18.8 BEFORE TRUSTING ANYTHING IN §18.1–§18.7.** Two reviewers put fourteen findings
 > against this round, **every one of them reproduced and confirmed** — two BLOCKERs, seven HIGHs —
@@ -3244,15 +3245,17 @@ A4 has no shared cause: it is the key refusal's own blind spot, fixed where the 
   `Reco._mintKeysSync`, which every re-keying route goes through — an upload, Add Data, a restore,
   a version load, an Excel load-back. **[71]** is the gate, with a control that typing works
   normally again after a reload: a latch, not a dead end.
-  **THE LATCH GUARDS THREE DOORS, AND THERE ARE FIVE.** `setTag`, `setOverride` and
-  `revertOverride` consult it; `applyCorrection`, `manualOffset`, `unmarkOffset` and `editCell` do
-  not, and `manualOffsetMaster[id][pk]` / `correctionMaster[id][pk][col]` are keyed by the same
-  frozen `_pk`. Measured after the refusal (`probes/q7_latchdoors.mjs`): `applyCorrection` said a
-  green *"Correction applied"* and `reco/correctionMaster.json` gained the key **`D3`** while the
-  folder's rule computes `D3-X`. Narrower than A4 — a correction has a second copy in
-  `sess.corrections`, so this operator's screen is not wrong; what is lost is the colleague's half —
-  and filed as **T-S10-16** rather than bolted on, because it needs the same decision A4 needed
-  taken once for all five doors.
+  **THE LATCH GUARDED THREE DOORS AND THERE WERE FIVE — ~~filed as T-S10-16~~, NOW CLOSED, AND
+  THE LATCH IS ASKED PER ACTION.** `setTag`, `setOverride` and `revertOverride` consulted it;
+  `applyCorrection`, `manualOffset`, `unmarkOffset` and `editCell` did not, and
+  `manualOffsetMaster[id][pk]` / `correctionMaster[id][pk][col]` are keyed by the same frozen
+  `_pk` — both files being in `AppState.PERSIST_KEYS`, i.e. whole-file blind writes of files every
+  colleague parses at boot. All five doors are now measured rather than three
+  (`scratchpad/dataloss/close/repro_before.txt`, port 21340; the ticket's own probe could not
+  measure the offset door because its fixture carried no tolerance). The decision taken is the
+  **per-ACTION latch at every entry point, not a rule inside `Reco.rowKey`**; §18.9 is the
+  five-door table, the argument against `rowKey` and the two doors that measurement leaves open
+  (**T-S10-18**).
 - **A5 / A7 (MEDIUM, LOW)** — the merge APPENDED a column the folder had gained and had no mirror
   for one the folder had **removed**, so an older clone silently resurrected it (blank, because the
   record delete had already run — operators learn that removing an added column "does not take");
@@ -3377,3 +3380,85 @@ Everything else in the nine that were red at the first checkpoint was **code**, 
 premise that never put the window into the state the finding is about (R3's page had no active
 reconciliation, so `setTag` was returning at `if (!tpl || !sess) return;` and exercising nothing).
 
+### 18.9 T-S10-16 — the latch is asked per ACTION, and why not inside `Reco.rowKey`
+
+A4's latch closed the two typing doors its own finding had measured. **Five doors write under a
+row key**, and the other three were measured, after the T-24R2-1 refusal and with
+`Reco._keyStale.TPL_X === true` while the folder's rule computes `D<n>-X`
+(`scratchpad/dataloss/close/repro_before.txt`, port 21340):
+
+| door | what it said | what reached the share |
+|---|---|---|
+| `setTag` | `error` — the latch's sentence | nothing |
+| `setOverride` | `error` — *"Nothing was overridden"* | nothing |
+| `revertOverride` | `error` — *"Nothing was reverted"* | nothing |
+| `applyCorrection` | **`success: Correction applied`** | `reco/correctionMaster.json` → **`D2`** |
+| `manualOffset` | **nothing at all** | `reco/manualOffsetMaster.json` → **`D3`** |
+| `unmarkOffset` | **`success: Unmarked 1 row(s)`** | **`D5`'s record DELETED** under the dead key |
+| `editCell` | **nothing at all** | day-file version row → **`D4`** |
+
+Two of them say something that is not true, two say nothing at all, and the unmark is a **delete
+that did not happen** where the folder is concerned: it removes this window's copy and leaves the
+one a colleague's load would read, so the row is offset again tomorrow under a green toast. The
+offset door is the one the ticket could only predict — its fixture had no tolerance, so
+`checkOffsetTolerance` refused every single-row offset before `manualOffset` wrote anything.
+`run_store_e2e`'s `R1_SETUP` now carries `toleranceValue` and an editable column, and **R3g asserts
+the door is reachable** so the hole cannot come back quietly.
+
+**THE DECISION: the latch at the doors, asked per ACTION — not a rule inside `Reco.rowKey`.**
+What was considered, and why the other was worse:
+
+- **`Reco.rowKey` is a key READER, not a write path.** The renderer takes a row's `pk` attribute and
+  every badge through it; so do the status / attachment / comment filters, `runAutoOffset`'s restore
+  of a manual offset, the ⚠ recalculated drift check, `Groups.resolvePk` and the timeline. A
+  refusal there would blank the screen this latch exists to keep **honest** — and §18.8's own
+  reason for a latch rather than a re-mint is that the operator's view of their own rows must not
+  change behind their back.
+- **THE MACHINE PATHS GO THROUGH IT.** The Excel load-back and `ingestData` compute keys with no
+  operator at the keyboard; a sentence telling them to *press Load* is addressed to nobody, which is
+  exactly why `applyEdits` was not the chokepoint for B4/B6 either.
+- **One function cannot carry four verbs.** `rowKey(tpl, row)` does not know whether its caller is
+  correcting, offsetting, unmarking or typing, so the sentence it could produce is the generic one —
+  and a sentence that reads like another function's is how an operator learns to ignore it.
+- **Cost.** `rowKey` runs once per row per render; on a 500k-row extract a check there is half a
+  million latch reads and, worse, half a million toasts in the one case it fires.
+
+So the question is asked where the **gesture** is, and the rule written at `Reco._keyStale` is
+deliberately about an action rather than a list of function names: *a gesture asks it when its key
+comes from a row on screen and it writes a pk-keyed store the folder shares.* One verb per action,
+the latch at **every** entry point of that action:
+
+| action | verb | entry points now latched |
+|---|---|---|
+| type into an added column | *saved* | `setTag` (A4) |
+| override / revert a computed column | *overridden* / *reverted* | `setOverride`, `revertOverride` (A4) |
+| correct a value | *corrected* | `applyCorrection` |
+| offset a row | *offset* | `manualOffset`, `bulkMarkOffset`, `offsetSelected`, `_xlOffsetSelectedRows` |
+| unmark an offset | *unmarked* | `smartUnmark` (both gestures reach it), `bulkMarkOffset`'s unmark arm |
+| change a file cell | *changed* | `editCell` |
+
+The offset action having **four** entry points is the point of the rule: T-S10-16 named four
+function names, and a fix applied to a list of names rather than to an action is the mistake B4/B6
+were about. `R3q` measures the selection-toolbar door for that reason.
+
+**NOT latched, deliberately:** `removeManualOffset(pk)` and `removeCorrection(pk, col)`. Their key
+comes from the **stored master** the panel is listing, not from a row on screen — it is still the
+key it always was, and cleaning up a record under it is right to let through.
+
+**The gate** is `run_store_e2e` **[71]**, extended with R3g–R3v: each door refused *with its own
+verb*, and then the files — `reco/correctionMaster.json` and `reco/manualOffsetMaster.json` hold
+nothing under the dead key, no version row for the refused file-cell edit reaches
+`reco_data/<folder>/<MMM-YY>/<DD>.csv`, and the record filed while the keys were still right is
+**still there**. The **control** is R3s–R3v: after a reload the latch lifts, both doors work
+normally, and the correction and the offset are filed under the folder's own key (`D7-X` / `D8-X`)
+with nothing said. A latch that never lifts is a worse bug than the one it fixes. Measured failing
+first on the unfixed tree (10 of 10 new assertions red, `close/store_fail_first.txt`) and again
+through `APP_FILE` against `f9329e7` (`close/store_mutation.txt`).
+
+**WHAT THIS DOES NOT CLOSE, MEASURED AND NOT PREDICTED** (`close/other_doors.txt`, port 21341):
+group membership and a comment are pk-keyed writes to `groupMaster` / `commentMaster` — both in
+`PERSIST_KEYS` — and their key comes from a row on screen too. After the refusal the group door
+said a green *"Group "G1" created with 1 member(s)"* and filed the member as **`D1`**; the comment
+door said *"Comment posted"* and linked it to **`D2`**. They are **not** latched here: a group is
+also an offset control with refusals of its own, and the attachment door was not measured at all.
+That is **T-S10-18**, with the measurement in it — not a prediction, and not an untested bolt-on.

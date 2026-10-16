@@ -8240,6 +8240,7 @@ const PORT_R7    = 21311;   // R7 journalDone's cost, as an operation count
 const PORT_R8    = 21312;   // R8 setTag at a row that has gone
 const PORT_R9    = 21313;   // R9 the four silent siblings of T-F2-8
 const PORT_R10   = 21314;   // R10 the T-26-4 banner past eight posted rows
+const PORT_R3D   = 21340;   // T-S10-16 the doors A4's latch did not guard
 
 /* R1's fixture. The key is an ADDED FORMULA COLUMN ("Ref"), which is what
    makes a colleague's formula edit a key-definition change (T-24R2-1), and
@@ -8255,6 +8256,18 @@ const R1_SETUP = `(async function () {
   t.primaryKeys = ['Ref'];
   t.valueColumn = 'Amount';
   t.displayColumns = ['Doc','Line','Amount'];
+  /* ---- T-S10-16'S FIXTURE FIX. Two of the five doors section [71] now
+     measures COULD NOT BE REACHED on this template: it carried no tolerance,
+     so checkOffsetTolerance refused every single-row offset before
+     manualOffset wrote anything ("outside tolerance \u00b1undefined"), and it
+     had no editable file column, so editCell had nothing to commit. That is
+     why T-S10-16's own probe could only PREDICT that the offset door behaves
+     like the correction door - "structurally identical" and unmeasured. A
+     value tolerance is what a team sets; R3h asserts the door is REACHABLE,
+     so this hole cannot come back quietly. Nothing in [69] reads either
+     field. */
+  t.toleranceMode = 'value'; t.toleranceValue = 1000;
+  t.editableColumns = ['Line'];
   const real = window.confirm; window.confirm = () => true;
   try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_X');
@@ -8697,6 +8710,223 @@ section(71, 'R3  T-24R2-1 — THE KEY REFUSAL MUST NOT LEAVE THIS WINDOW TYPING 
   check(!again.said.some(s => /error/.test(s)),
     'R3f CONTROL: ...with nothing said, because there is nothing wrong any more', again.said);
   await pa.ctx.close(); await pb.ctx.close();
+}
+
+/* ---- T-S10-16. A4's LATCH GUARDED THREE DOORS, AND THERE ARE FIVE. -----
+   Reco._keyStaleBlock was consulted by setTag, setOverride and
+   revertOverride. It was NOT consulted by applyCorrection
+   (correctionMaster[id][pk][col]), manualOffset / unmarkOffset
+   (manualOffsetMaster[id][pk]) or editCell (the version row Versioning writes
+   into the day file) - and `pk` in every one of them is Reco.rowKey(tpl, row),
+   i.e. the row's FROZEN _pk: exactly the key the refusal has just
+   invalidated. Both masters are in AppState.PERSIST_KEYS, so the write is a
+   whole-file blind write of a shared file every colleague parses at boot.
+
+   MEASURED on the tree before the fix — scratchpad/dataloss/close/
+   repro_before.txt, port 21340, straight after the T-24R2-1 refusal with
+   Reco._keyStale.TPL_X === true and the folder's rule computing `D<n>-X`:
+
+     setTag           error, the latch's sentence       nothing
+     setOverride      error, "Nothing was overridden"   nothing
+     revertOverride   error, "Nothing was reverted"     nothing
+     applyCorrection  success: "Correction applied"     correctionMaster.json <- D2
+     manualOffset     NOTHING AT ALL                    manualOffsetMaster.json <- D3
+     unmarkOffset     success: "Unmarked 1 row(s)"      D5's record DELETED under the dead key
+     editCell         NOTHING AT ALL                    day-file version row <- D4
+
+   Two of those three green-or-silent doors say something that is not true and
+   the other two say nothing at all, which is the A4 harm in the doors A4's
+   fix did not name. The decision taken here is the per-ACTION latch rather
+   than a rule inside Reco.rowKey: that function is called by the renderer,
+   the status filters, runAutoOffset's restore, the drift badge and the
+   machine paths (the Excel load-back and ingestData), none of which has an
+   operator at the keyboard to press Load — see handover 18.8. */
+
+/* D1 is offset while the keys on screen are STILL the folder's own, so the
+   unmark door has a record of its own to fail to reach afterwards. */
+const R3_OFFSET_BEFORE = `(async function () {
+  window.__toasts = [];
+  const sess = AppState.recoSessions.TPL_X;
+  Reco.manualOffset(0, null, sess.data[0]._id);
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { offsets: Object.keys((AppState.manualOffsetMaster||{}).TPL_X || {}),
+           said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           folder: (AppState.recoTemplates.find(x=>x.id==='TPL_X')||{}).dataFolder || '' };
+})`;
+
+/* B saves an ORDINARY field and is refused for the colleague's key change. */
+const R3_B_REFUSED = `(async function () {
+  window.__toasts = [];
+  const real = window.confirm; window.confirm = () => true;
+  try {
+    RecoTemplate.edit('TPL_X');
+    RecoTemplate._editing.description = 'B was here';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch(e){} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { toasts: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           stale: !!(Reco._keyStale||{}).TPL_X };
+})`;
+
+/* THE FOUR UNGUARDED DOORS, each on a row of its own so no door can erase
+   another's write, plus the SAME offset action from the selection toolbar -
+   which is not one of the function names the ticket lists, and is why this
+   fix is a rule about an action rather than a list of functions. */
+const R3_DOORS = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_X');
+  const sess = AppState.recoSessions.TPL_X;
+  const out = { doors: {} };
+  const grab = () => (window.__toasts||[]).map(x=>x.kind+': '+x.msg);
+  const door = (name, fn) => {
+    window.__toasts = [];
+    let threw = null;
+    try { fn(); } catch (e) { threw = String(e).slice(0, 160); }
+    out.doors[name] = { said: grab(), threw: threw,
+      offsets: Object.keys((AppState.manualOffsetMaster||{}).TPL_X || {}),
+      corrections: Object.keys((AppState.correctionMaster||{}).TPL_X || {}) };
+  };
+  door('applyCorrection', () => Reco.applyCorrection(0, 'Amount', '999', null, sess.data[1]._id));
+  door('manualOffset',    () => Reco.manualOffset(0, null, sess.data[2]._id));
+  door('unmarkOffset',    () => Reco.unmarkOffset(0, null, sess.data[0]._id));
+  door('editCell',        () => Reco.editCell(0, 'Line', 'L-after', null, sess.data[2]._id));
+  sess.selectedRows = {}; sess.selectedRows[sess.data[1]._id] = true;
+  door('offsetSelected',  () => Reco.offsetSelected(null));
+  sess.selectedRows = {};
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return Object.assign(out, {
+    pkOnScreen: (sess.data||[]).map(r => r._pk),
+    keyRuleNow: (tpl.additionalColumns||[]).find(a=>a.name==='Ref').formula });
+})`;
+
+/* THE CONTROL. After a reload both doors work normally and write under the
+   FOLDER'S own key. A latch that never lifts is a worse bug than the one it
+   fixes. */
+const R3_RELOAD_BOTH = `(async function () {
+  window.__toasts = [];
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_X');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [{Doc:'D7',Line:'L1',Amount:'700'},{Doc:'D8',Line:'L1',Amount:'800'}],
+                        ['Doc','Line','Amount']);
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_X;
+  const r7 = sess.data[sess.data.length - 2], r8 = sess.data[sess.data.length - 1];
+  Reco.applyCorrection(0, 'Amount', '777', null, r7._id);
+  Reco.manualOffset(0, null, r8._id);
+  Reco.editCell(0, 'Line', 'L-reload', null, r8._id);
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return { said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg), pks: [r7._pk, r8._pk],
+           stale: !!(Reco._keyStale||{}).TPL_X };
+})`;
+
+{
+  const KD2 = makeRoot('share-r3-doors');
+  const brKD2 = await startBridge(KD2.root, PORT_R3D); procs.push(brKD2.proc);
+  const pda = await openReco(browser, brKD2);
+  await pda.page.evaluate(R1_SETUP + '()');
+  const pdb = await openReco(browser, brKD2);
+  const dOpen = await pdb.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_X');
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_X';
+    return ((AppState.recoSessions.TPL_X||{}).data||[]).map(r => r._pk);
+  })()`);
+  const pre = await pdb.page.evaluate(R3_OFFSET_BEFORE + '()');
+  note('R3 the keys B has loaded / the offset it files while they are right',
+    [dOpen, pre.offsets, pre.said]);
+  check(same(dOpen, ['D1','D2','D3']) && same(pre.offsets, ['D1']),
+    'R3g premise, AND THE FIXTURE HOLE IS CLOSED: B has the three rows loaded under the rule the '
+    + 'folder is about to change, and a single-row offset really is REACHABLE on this template. '
+    + 'T-S10-16 could only predict this door\'s behaviour because the fixture had no tolerance and '
+    + 'every offset was refused before the write',
+    { pks: dOpen, offsets: pre.offsets });
+
+  await pda.page.evaluate(R1_A_KEY + '()');
+  const dRef = await pdb.page.evaluate(R3_B_REFUSED + '()');
+  check(dRef.toasts.some(s => /Nothing was saved/.test(s)) && dRef.stale === true,
+    'R3h premise: B\'s save was refused for the key definition and the latch is on', dRef);
+
+  const dd = await pdb.page.evaluate(R3_DOORS + '()');
+  note('R3 the keys on screen / the rule the folder now computes', [dd.pkOnScreen, dd.keyRuleNow]);
+  for (const k of ['applyCorrection','manualOffset','unmarkOffset','editCell','offsetSelected'])
+    note('R3 ' + k, dd.doors[k]);
+  const offF = (diskJson(KD2.root, 'reco/manualOffsetMaster.json') || {}).TPL_X || {};
+  const corrF = (diskJson(KD2.root, 'reco/correctionMaster.json') || {}).TPL_X || {};
+  const dayF = csvRows(verFile(KD2.root, pre.folder || 'Abandon'));
+  const deadKeys = ['D1','D2','D3'];
+  note('R3 SHARE reco/manualOffsetMaster.json', Object.keys(offF));
+  note('R3 SHARE reco/correctionMaster.json', Object.keys(corrF));
+  note('R3 the day file rows carrying the file-cell edit',
+    dayF.filter(r => /L-after/.test(JSON.stringify(r))).map(r => r._pk));
+
+  const say = k => (dd.doors[k].said || []).join(' | ');
+  const latched = k => /identifies its rows/.test(say(k)) && /error/.test(say(k));
+  check(latched('applyCorrection') && /Nothing was corrected/.test(say('applyCorrection')),
+    'R3i the CORRECTION door is refused with a sentence naming the row key, in its own words '
+    + '("corrected"). It said a green "Correction applied" and filed the correction under a key '
+    + 'the folder\'s rule no longer computes', dd.doors.applyCorrection.said);
+  check(Object.keys(corrF).filter(k => deadKeys.includes(k)).length === 0,
+    'R3j (THE FILE) reco/correctionMaster.json holds NOTHING under the dead key. That file is '
+    + 'read by every colleague at boot and written whole, so a correction filed under a key the '
+    + 'folder cannot compute is both invisible and a permanent passenger',
+    Object.keys(corrF));
+  check(latched('manualOffset') && /Nothing was offset/.test(say('manualOffset')),
+    'R3k the OFFSET door is refused, in its own words ("offset") - MEASURED on this fixture now '
+    + 'that a single-row offset is reachable, not inferred from the correction door. It wrote '
+    + 'manualOffsetMaster under the dead key and said nothing at all',
+    dd.doors.manualOffset.said);
+  check(Object.keys(offF).filter(k => deadKeys.includes(k) && k !== 'D1').length === 0,
+    'R3l (THE FILE) reco/manualOffsetMaster.json holds nothing new under a dead key',
+    Object.keys(offF));
+  check(latched('unmarkOffset') && /Nothing was unmarked/.test(say('unmarkOffset')),
+    'R3m the UNMARK door is refused, in its own words ("unmarked"). It said a green "Unmarked 1 '
+    + 'row(s)" about a delete that cannot reach the record the folder would read',
+    dd.doors.unmarkOffset.said);
+  check(!!offF.D1,
+    'R3n (THE FILE) ...and D1\'s record - filed while the keys were still right - is STILL THERE. '
+    + 'An unmark under a dead key deletes this window\'s copy and leaves the folder\'s, so the row '
+    + 'comes back offset for everyone including this operator', Object.keys(offF));
+  check(latched('editCell') && /Nothing was changed/.test(say('editCell')),
+    'R3o the FILE-CELL door is refused, in its own words ("changed"). editCell writes the row\'s '
+    + 'version row into the day file under the same frozen _pk, and said nothing at all',
+    dd.doors.editCell.said);
+  check(dayF.filter(r => /L-after/.test(JSON.stringify(r))).length === 0,
+    'R3p (THE FILE) ...and no version row for that edit reached reco_data/<folder>/<MMM-YY>/'
+    + '<DD>.csv under the dead key',
+    dayF.map(r => r._pk));
+  check(latched('offsetSelected') && /Nothing was offset/.test(say('offsetSelected')),
+    'R3q the SAME offset action from the selection toolbar is refused too. The ticket names four '
+    + 'function names; the offset action has four entry points (the row menu, the bulk toolbar, '
+    + 'the selection sum bar and the Excel view), and a fix applied to a list of names rather than '
+    + 'to the action is the mistake B4/B6 were about', dd.doors.offsetSelected.said);
+  const verbs = ['applyCorrection','manualOffset','unmarkOffset','editCell']
+    .map(k => (say(k).match(/Nothing was (\w+)/) || [])[1] || '?');
+  check(new Set(verbs).size === 4,
+    'R3r each door says what it did not do in its OWN verb - corrected / offset / unmarked / '
+    + 'changed. A sentence that reads like another function\'s is how an operator learns to '
+    + 'ignore it', verbs);
+
+  const ctrl = await pdb.page.evaluate(R3_RELOAD_BOTH + '()');
+  const offF2 = (diskJson(KD2.root, 'reco/manualOffsetMaster.json') || {}).TPL_X || {};
+  const corrF2 = (diskJson(KD2.root, 'reco/correctionMaster.json') || {}).TPL_X || {};
+  const dayF2 = csvRows(verFile(KD2.root, pre.folder || 'Abandon'));
+  note('R3 CONTROL: the keys the reload minted / what was said', [ctrl.pks, ctrl.said, ctrl.stale]);
+  note('R3 CONTROL: the two masters afterwards', [Object.keys(offF2), Object.keys(corrF2)]);
+  check(same(ctrl.pks, ['D7-X','D8-X']) && ctrl.stale === false,
+    'R3s CONTROL: a reload re-mints under the FOLDER\'S rule and lifts the latch', ctrl);
+  check(!!(corrF2['D7-X'] || {}).Amount && !!offF2['D8-X'],
+    'R3t CONTROL: ...and BOTH doors then work normally and write under the folder\'s own key. A '
+    + 'latch that never lifts is a worse bug than the one it fixes',
+    { corrections: Object.keys(corrF2), offsets: Object.keys(offF2) });
+  check(dayF2.filter(r => /L-reload/.test(JSON.stringify(r))).map(r => r._pk).join('') === 'D8-X',
+    'R3u CONTROL: ...and the file-cell edit\'s version row goes into the day file under that same '
+    + 'key', dayF2.map(r => r._pk));
+  check(!ctrl.said.some(s => /error/.test(s)),
+    'R3v CONTROL: ...with nothing said, because there is nothing wrong any more', ctrl.said);
+  await pda.ctx.close(); await pdb.ctx.close();
 }
 
 /* R4. _mergeShared's structural pass APPENDS a column the folder has that
