@@ -3662,13 +3662,27 @@ const Store = {
          makes a DELETE work: the caller has already removed the record from
          memory, the disk object is merged under memory, and without replaying
          the intent the merge would RESURRECT it;
-       - AppState[key] is NEVER replaced wholesale - the disk object is
-         deep-merged UNDER the in-memory one, so a local record always beats a
-         stale read;
-       - merge granularity is PER CELL ({pk: {col: rec}}), never per file:
-         `opts.depth` is how many levels of plain object to walk before a value
-         is taken whole. 2 for {tpl: {pk: {col: rec}}}, 0 (the default) for a
-         key whose top-level values are arrays, like entryHistory;
+       - FOR THE IDS THIS FILE OWNS, THE FILE ON THE SHARE IS THE AUTHORITY
+         and the buffered intents go on top of it (Store._takeDisk). The read
+         is inside the queue, so it cannot predate a write of ours that has
+         already resolved: everything of ours that reached the share is in the
+         object we just read, and everything that has not is in `m.intents`.
+         What is in memory and in neither is a record we read at BOOT and have
+         not touched since - and for that record a colleague is the authority,
+         INCLUDING WHEN THEY HAVE DELETED IT. The earlier rule ("the disk
+         object is deep-merged UNDER the in-memory one") could not express
+         that deletion at all, because absence in the file is
+         indistinguishable from absence in a stale read: the record was gone
+         from the share and still in our memory, so our next write - a note on
+         an unrelated row - put it back, on the share, on the reverting
+         operator's own screen and in the AEG source row the journal is built
+         from (suite F1);
+       - AppState[key] is still never REASSIGNED: _takeDisk mutates it in
+         place, so a reference anything else holds stays valid;
+       - merge granularity is PER CELL ({pk: {col: rec}}), never per file,
+         because the intents are what carry this session's own changes and
+         they mutate one cell each. `opts.depth` is kept for callers and is no
+         longer read by the merge;
        - 150 ms debounce, so a 50,000-cell fill-down is ONE write;
        - a readOnlyKeys entry refuses the write and tells the user ONCE.
 
@@ -3734,11 +3748,12 @@ const Store = {
         out.refused = true; out.reason = 'unreadable';
         return;
       }
-      /* UNDER, not over: a record this session wrote must beat a read that
-         may predate it by milliseconds. */
-      Store._mergeUnder(mem, disk, m.depth, m.owns);
-      /* ...and then the intents again, because a delete cannot be expressed by
-         "what is in memory" - the record is already gone from it. */
+      /* THE SHARE IS THE AUTHORITY for the ids this file owns; this session's
+         own unwritten changes are the intents, replayed immediately below. */
+      Store._takeDisk(mem, disk, m.owns);
+      /* ...and then the intents, which is what puts this session's own writes
+         back on top - at CELL granularity, and including a DELETE, which is
+         the one thing "what is in memory" cannot say. */
       m.intents.forEach(fn => { try { fn(mem); } catch (e) { console.error('mergeWrite intent failed for ' + m.key, e); } });
       const body = m.owns ? Store._pick(mem, m.owns) : mem;
       await Store._writeJsonFile(m.file, Store.serialize(m.key, body));
@@ -3795,17 +3810,31 @@ const Store = {
     return window.pywebview.api.write_file(rel, text);
   },
 
-  /* Fill in, from `disk`, only what `mem` does not already have. `depth` is
-     how many levels of plain object to walk before a value is taken WHOLE;
-     that is what makes the granularity per cell rather than per file. */
-  _mergeUnder(mem, disk, depth, owns) {
-    if (!disk || typeof disk !== 'object' || !mem || typeof mem !== 'object') return mem;
-    Object.keys(disk).forEach(k => {
-      if (owns && !owns(k)) return;        // another file owns this id
-      const d = disk[k], m = mem[k];
-      if (depth > 0 && d && typeof d === 'object' && !Array.isArray(d)
-          && m && typeof m === 'object' && !Array.isArray(m)) Store._mergeUnder(m, d, depth - 1, null);
-      else if (!Object.prototype.hasOwnProperty.call(mem, k)) mem[k] = d;
+  /* Make `mem` agree with `disk` for every top-level id THIS FILE OWNS, and
+     leave every other id alone (another file owns it - decision G). Mutated
+     in place, never reassigned, so a reference held elsewhere stays valid.
+
+     THIS IS HALF OF THE MERGE. The other half is _mergeJob replaying the
+     buffered intents straight afterwards, which is what puts this session's
+     own unwritten changes back - one cell each, so per-cell granularity is
+     kept without the merge needing to know the shape.
+
+     AN ID IN MEMORY THAT THE FILE DOES NOT HAVE IS DROPPED, and that is the
+     point: it can only be a record we read at boot which somebody has since
+     deleted, because anything we wrote ourselves either reached the file (and
+     so is in `disk`) or is still in `m.intents`. The rule this replaced kept
+     memory, which made every deletion in this store undoable by any other
+     open page's next keystroke. */
+  _takeDisk(mem, disk, owns) {
+    if (!mem || typeof mem !== 'object') return mem;
+    const d = (disk && typeof disk === 'object') ? disk : {};
+    Object.keys(mem).forEach(k => {
+      if (owns && !owns(k)) return;
+      if (!Object.prototype.hasOwnProperty.call(d, k)) delete mem[k];
+    });
+    Object.keys(d).forEach(k => {
+      if (owns && !owns(k)) return;
+      mem[k] = d[k];
     });
     return mem;
   },
@@ -10598,7 +10627,22 @@ const App = {
           U.toast('This file is not a Reco backup', 'error'); return;
         }
         const when = d.exportedAt ? ' taken ' + String(d.exportedAt).replace('T', ' ').substring(0, 16) : '';
+        /* THE TYPED VALUES ARE IN SCOPE AND THIS SENTENCE DID NOT SAY SO.
+           They are the one thing on that folder with no second copy - no
+           mirror on the session, no Cn row in the CSV - so an admin reaching
+           for this after a bad day has to be told. Counted, and described the
+           way it behaves (per key, not wholesale), because
+           Reco._extraValueFlush merges the backup's cells in rather than
+           replacing a template's records. */
+        let bkKeys = 0, bkTpls = 0;
+        Object.keys((d.extraValueMaster) || {}).forEach(tid => {
+          bkTpls++; bkKeys += Object.keys(d.extraValueMaster[tid] || {}).length;
+        });
         if (!confirm('Restore this backup' + when + '?\n\nIt REPLACES the templates, sessions, masters and entry history shared by everyone using this folder.'
+          + (bkTpls ? '\n\nIt also puts back the values people typed into added columns: ' + bkKeys
+              + ' row key(s) across ' + bkTpls + ' template(s). Those keys take the backup\'s values; '
+              + 'values typed against any other key since the backup was taken are kept.'
+            : '\n\nThis backup carries no typed values of added columns, so the ones on the folder are left alone.')
           + (d.entryHistory ? App._reversalWarning(AppState.entryHistory, d.entryHistory) : ''))) return;
         if (d.recoTemplates) AppState.recoTemplates = d.recoTemplates;
         if (d.aegTemplates) AppState.aegTemplates = d.aegTemplates;
@@ -10623,9 +10667,23 @@ const App = {
            AppState.flush() below would therefore never write it - the restore
            would look like it worked and be gone on the next boot. */
         if (d.extraValueMaster) {
-          AppState.extraValueMaster = d.extraValueMaster;
-          Object.keys(d.extraValueMaster).forEach(tid =>
-            Reco._extraValueFlush(tid, m => { m[tid] = d.extraValueMaster[tid]; }));
+          /* PER CELL, for the same reason as Reco.restoreSession: an admin
+             restoring last night's suite backup must not take with it every
+             value a colleague has typed today. The confirm above names the
+             count. */
+          const bkAll = d.extraValueMaster;
+          AppState.extraValueMaster = AppState.extraValueMaster || {};
+          Object.keys(bkAll).forEach(tid => {
+            const mergeBk = m => {
+              const into = m[tid] || (m[tid] = {});
+              Object.keys(bkAll[tid] || {}).forEach(pk => {
+                const cells = into[pk] || (into[pk] = {});
+                Object.keys(bkAll[tid][pk] || {}).forEach(col => { cells[col] = bkAll[tid][pk][col]; });
+              });
+            };
+            mergeBk(AppState.extraValueMaster);
+            Reco._extraValueFlush(tid, mergeBk);
+          });
         }
         if (d.groupMaster) AppState.groupMaster = d.groupMaster;
         if (d.attachmentMaster) AppState.attachmentMaster = d.attachmentMaster;
@@ -16812,17 +16870,33 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
        an October row - the cross-file carry #30 is explicitly off by default
        for. PUSHED, not replaced, for the same reason.
 
-       THE DATA SET IS NAMED BY THE DAY FILE THIS UPLOAD GOES INTO, which is
-       what Versioning.appendUpload is about to write and what
-       loadVersionedFile will name it when the operator reopens it - so a value
-       typed now is still in scope after a reload. That is the one legitimate
-       use of pathFor here: on a WRITE, `ds` is always
-       sess.dataSetIds[row._dsi] (Reco.dataSetOf), never today's day file,
-       because a row reopened from history on a later day belongs to its own
-       file and not to today's. */
+       THE DATA SET IS NAMED BY THIS UPLOAD: the day file it goes into plus an
+       upload stamp '#u<n>'. RC-2: naming it by the day file ALONE made two
+       uploads on one calendar day ONE data set, because both append to the
+       same CSV and indexOf then reused the first one's index - so a value
+       typed on the morning's bank extract appeared on the afternoon's GL
+       extract for the same reference, unmarked and unconfirmable, on every
+       template on the share with the flag OFF; and because the AEG extras
+       loop runs before the keyword filter, a leaked keyword value decided
+       whether a row posted at all (suite F2: 3,000 posted where 1,000 was
+       marked). A catch-up, a month-end with two periods open and a corrected
+       file re-uploaded are all this shape.
+       THE DAY FILE IS STILL THE PREFIX, and that is what makes the round trip
+       work: Reco._dsInScope compares the prefix, so a record typed against an
+       upload is still honoured when the operator reopens the day file that
+       upload went into (loadVersionedFile names the data set by the bare
+       path, because once the file is reopened its uploads really are one file
+       and cannot be told apart).
+       On a WRITE, `ds` is always sess.dataSetIds[row._dsi] (Reco.dataSetOf),
+       never today's day file, because a row reopened from history on a later
+       day belongs to its own file and not to today's. */
     const dsPath = Versioning.pathFor(tpl);
-    let dsi = sess.dataSetIds.indexOf(dsPath);
-    if (dsi === -1) { sess.dataSetIds.push(dsPath); dsi = sess.dataSetIds.length - 1; }
+    /* PUSHED UNCONDITIONALLY. The stamp is a per-session counter and not a
+       clock, so a test and a replay are deterministic. */
+    let nUp = 0;
+    sess.dataSetIds.forEach(x => { if (Reco._dsBase(x) === dsPath) nUp++; });
+    sess.dataSetIds.push(dsPath + '#u' + (nUp + 1));
+    const dsi = sess.dataSetIds.length - 1;
     const mapped = rawData.map(raw => {
       const row = { _id: U.uid() };
       definedCols.forEach(col => {
@@ -17020,6 +17094,43 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
      typed into the grid with + Row, or a session written by a build before
      this one. Null means "cannot say which file this row belongs to", and
      every caller treats that as out of scope rather than guessing. */
+  /* ---- RC-2. THE DAY FILE A DATA SET NAME IS ABOUT, without its upload
+     stamp. `reco_data/X/Oct-26/16.csv#u2` -> `reco_data/X/Oct-26/16.csv`. */
+  _dsBase(ds) {
+    const s = String(ds == null ? '' : ds);
+    const i = s.indexOf('#');
+    return i === -1 ? s : s.slice(0, i);
+  },
+
+  /* ---- RC-2. IS A RECORD TYPED AGAINST `recDs` IN SCOPE FOR A ROW WHOSE
+     DATA SET IS `rowDs`? The file-scoped half of Reco._extraTyped, and the
+     derivation behind Reco._extraCarried's mark, so both answer the same
+     question in one place.
+
+     THREE CASES AND THEY ARE NOT SYMMETRIC:
+       - the same data set            -> in scope. The ordinary case.
+       - different DAY FILES          -> out of scope. This is decision M: a
+                                         typed value does not cross files
+                                         unless the carry box is ticked.
+       - the same day file, different
+         uploads                      -> in scope ONLY IF the ROW's data set
+                                         is the bare day file, i.e. the
+                                         operator has reopened that file from
+                                         history. Then its uploads are one
+                                         file again and nothing can tell them
+                                         apart, so every record typed into it
+                                         is honoured. A row from a FRESH
+                                         upload is a different extract that
+                                         happens to land in the same CSV, and
+                                         a value typed on another upload is
+                                         not about it. */
+  _dsInScope(rowDs, recDs) {
+    const a = String(rowDs == null ? '' : rowDs), b = String(recDs == null ? '' : recDs);
+    if (a === b) return true;
+    if (Reco._dsBase(a) !== Reco._dsBase(b)) return false;
+    return a.indexOf('#') === -1;
+  },
+
   dataSetOf(sess, row) {
     if (!sess) return null;                                  // decision T
     const i = (row && typeof row._dsi === 'number') ? row._dsi : -1;
@@ -17115,7 +17226,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     if (ac && ac.carryForward === true) return rec;
     const ds = Reco.dataSetOf(sess, row);
     if (ds == null) return null;
-    return ds === rec.ds ? rec : null;
+    return Reco._dsInScope(ds, rec.ds) ? rec : null;
   },
 
   /* ---- #30, DECISION Q. THE ONE-TIME PROMOTION, when a column is first
@@ -17213,7 +17324,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     if (!rec) return null;
     const ds = Reco.dataSetOf(sess, row);
     if (ds == null) return null;
-    return String(rec.ds == null ? '' : rec.ds) === String(ds) ? null : rec;
+    /* THE SAME PREDICATE THE SCOPE TEST USES (RC-2), so the mark cannot
+       disagree with whether the value was honoured: carried means "typed
+       against a data set this row is not from", which now includes another
+       upload of the same day file. */
+    return Reco._dsInScope(ds, rec.ds) ? null : rec;
   },
 
   /* ---- #30. The added column this name resolves to WITH the carry box
@@ -20094,7 +20209,7 @@ _renderExtraCell(tpl, sess, row, desc, i, fullOf) {
   const carried = Reco._extraCarried(tpl, sess, row, ac.name);
   let cAttr = '', cBtn = '';
   if (carried) {
-    const from = String(carried.ds || '').split('/').slice(-2).join('/');
+    const from = Reco._dsBase(carried.ds).split('/').slice(-2).join('/');
     cAttr = ' class="carry-set" title="' + U.escAttr('Carried forward. '
       + (carried.by || 'Someone') + ' typed "' + (carried.v == null ? '' : carried.v)
       + '" against this row key' + (from ? ' in ' + from : '') + ' on '
@@ -21991,7 +22106,7 @@ renderRecoTable(tpl, sess) {
         + '<th>By</th><th>When</th><th></th></tr></thead><tbody>';
       list.forEach(it => {
         const r = it.rec;
-        const from = String(r.ds || '').split('/').slice(-2).join('/');
+        const from = Reco._dsBase(r.ds).split('/').slice(-2).join('/');
         h += '<tr>';
         h += '<td><code>' + U.esc(Reco._pkLabel(tpl, it.pk)) + '</code>'
            + (it.inData ? '' : ' <span class="badge general" title="This key is not in the data loaded right now. The value is kept: it is used again when the key comes back.">not loaded</span>')
@@ -25153,15 +25268,28 @@ renderCustomReport(tpl, sess, rpt, idx) {
            onto _rowWithExtras, because it has its own To-Account exception
            below and its own ''-vs-'#ERR' divergence from the grid, and
            rewriting it would change posted numbers in a UI commit.
-           IT IS SAFE TO READ THE STORE HERE ONLY BECAUSE S11
-           (RecoTemplate._exclusiveRoleConflict) forbids an override- or
-           carry-enabled column from being any AEG control column. This loop
-           runs BEFORE the keyword filter below, so a value read here can
-           decide whether a row posts at all; and an AEG input or aggregateBy
-           column matched by name would set an account code and change how
-           amounts group. The alternative - leave this loop reading manualTags
-           only - ships a permanent divergence where the grid shows the value
-           and the journal posts without it. */
+           THIS LOOP RUNS BEFORE THE KEYWORD FILTER BELOW, so a value read
+           here can decide whether a row posts at all; and an AEG input or
+           aggregateBy column matched by name would set an account code and
+           change how amounts group. TWO SEPARATE THINGS MAKE READING THE
+           STORE HERE SAFE, and the distinction was wrong in this comment
+           before (it credited S11 with both):
+             - for a FLAGGED column (allowOverride or carryForward), S11
+               (RecoTemplate._exclusiveRoleConflict) forbids it from being any
+               AEG control column, so a key-scoped value - one that applies to
+               a row nobody typed it on - can never reach this loop;
+             - for an UNFLAGGED column, which S11 says nothing about and which
+               may legitimately be the keyword column, the record is
+               FILE-SCOPED: Reco._extraTyped honours it only for rows of the
+               data set it was typed against, so this loop reads it on exactly
+               the rows the operator typed it on and the grid shows the same
+               value. That is only true since RC-2 made the data set the
+               UPLOAD rather than the day file; while it was the day file, a
+               value typed on the morning's extract marked the afternoon's
+               rows and posted them (suite F2).
+           The alternative - leave this loop reading manualTags only - ships a
+           permanent divergence where the grid shows the value and the journal
+           posts without it. */
         const ov = Reco._extraOverride(tpl, sess, r, ac.name);
         if (ov) { r[ac.name] = ov.v; return; }
         if (ac.type === 'master' || ac.type === 'master_lookup') {
@@ -26598,8 +26726,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
            exists nowhere else: a typed added-column value has no mirror on the
            session and no row in the version history, so replacing it is
            irreversible in a way replacing the loaded data is not. */
-        } else if (!confirm('Replace the loaded data, manual offsets, corrections, document numbers, '
-            + 'typed values of added columns, and entries of this template with the backup?' + revWarn)) return;
+        } else if (!confirm('Replace the loaded data, manual offsets, corrections, document numbers '
+            + 'and entries of this template with the backup?\n\nThe typed values of added columns in '
+            + 'the backup replace the ones on the shared folder for the SAME row keys ('
+            + Object.keys(d.extraValueMaster || {}).length + ' key(s)); values typed against any other '
+            + 'key since the backup was taken are kept.' + revWarn)) return;
         /* THE TWO LEGACY SHARED FIELDS ARE READ-ONLY - the column order
            (Reco._legacyTeamOrder) and #27's sess.correctionExtraCols - and a
            restore is the second route that used to write them: the backup
@@ -26641,9 +26772,27 @@ renderCustomReport(tpl, sess, rpt, idx) {
            An older backup has no extraValueMaster and leaves the stored
            values alone, which is the only safe reading of its absence. */
         if (d.extraValueMaster) {
+          /* PER CELL, AND DELIBERATELY NOT A SUBTREE REPLACEMENT. The backup's
+             records win for the cells it names; a key a colleague has typed
+             since - which the backup cannot know about - is KEPT, because
+             destroying a colleague's work to undo your own is not a trade
+             this screen is allowed to make. The confirm above says exactly
+             that rather than promising a replacement.
+             It used to come out this way by accident: the old merge refilled
+             the backup's own object from disk before the intent re-assigned
+             it. Spelled out now, because _takeDisk no longer does that. */
+          const mergeBk = m => {
+            const into = m[id] || (m[id] = {});
+            Object.keys(d.extraValueMaster).forEach(pk => {
+              const cells = into[pk] || (into[pk] = {});
+              Object.keys(d.extraValueMaster[pk] || {}).forEach(col => {
+                cells[col] = d.extraValueMaster[pk][col];
+              });
+            });
+          };
           AppState.extraValueMaster = AppState.extraValueMaster || {};
-          AppState.extraValueMaster[id] = d.extraValueMaster;
-          Reco._extraValueFlush(id, m => { m[id] = d.extraValueMaster; });
+          mergeBk(AppState.extraValueMaster);
+          Reco._extraValueFlush(id, mergeBk);
         }
         if (d.docNumberMaster) AppState.docNumberMaster[id] = d.docNumberMaster;
         // A reversal is a one-way fact across a restore (see App._carryReversalsList).

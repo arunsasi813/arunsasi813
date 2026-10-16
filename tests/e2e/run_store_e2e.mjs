@@ -110,6 +110,19 @@ const PORT_BK = 20805;    // the four backup sites
 const PORT_OV = 20821;    // #26: the override fixture
 const PORT_DUP = 20822;   // #26: O2's duplicate key
 const PORT_BIGO = 20823;  // #26: O7/O9 at 200,000 rows
+/* THE FIXER ROUND (F1-F12). Each section that needs its own share gets its
+   own port, because a two-page contention test cannot share a root. */
+const PORT_FIX_DEL  = 20847;   // F1  RC-1: the delete vs a stale page
+const PORT_FIX_DS   = 20848;   // F2  RC-2: two uploads in one calendar day
+const PORT_FIX_DUP  = 20849;   // F3  RC-3a: a duplicate arriving by Add Data
+const PORT_FIX_POST = 20850;   // F4/F5 RC-3b/c: the posted mark and the delete routes
+const PORT_FIX_ROLE = 20851;   // F6  RC-3d: the role matrix and the untick
+const PORT_FIX_NUM  = 20852;   // F7/F8 RC-4: the non-numeric override, the kind scan
+const PORT_FIX_COL  = 20853;   // F9  the added column's lifecycle
+const PORT_FIX_SAY  = 20854;   // F10 the store says when it could not save
+const PORT_FIX_SPL  = 20855;   // F10 the damaged split file
+const PORT_FIX_DRAG = 20856;   // F11 the spreadsheet fill drag
+const PORT_FIX_SAFE = 20857;   // F12 the confirms that name the values
 /* The build every assertion here was shown to FAIL against. Override with
    BASE_REV=<rev>. */
 const BASE_REV = process.env.BASE_REV || 'e9851b4';
@@ -3060,6 +3073,301 @@ try {
     'C12b and no UNEXPECTED error toast was left behind after the last section reset the log',
     cfLate.map(t => t.msg.slice(0, 120)));
   await cfp.ctx.close();
+
+  /* =====================================================================
+     THE FIXER ROUND — F1-F12, sections [33]-[43].
+
+     Twenty findings came back from two reviewers against the three phases
+     above. These sections pin the ones that were CONFIRMED, each one written
+     from the reviewer's own reproduction and asserting on VALUES: what the
+     file on the share holds, what the ladder resolves, and what the journal
+     preview posts.
+
+     THE FOUR ROOT CAUSES, because most of the twenty are faces of one of
+     them and it matters that the fix is at the chokepoint:
+
+       RC-1  THE MERGE COULD NOT EXPRESS A DELETE. Store._mergeJob merged the
+             disk object UNDER memory, so a record this session never wrote
+             and that somebody else has since deleted was re-imposed on the
+             share by our next write. F1.
+       RC-2  THE DATA SET WAS THE DAY FILE, so two uploads in one calendar
+             day were ONE scope and a value typed on the first appeared on
+             the second - unmarked, unconfirmable, and able to decide whether
+             a row posts. F2.
+       RC-3  THE OVERRIDE'S REFUSALS GUARDED ONLY THE WRITE. A duplicate key
+             arriving later, a posted mark that evaporated on reload, a
+             delete route that never asked the ledger, and a role matrix that
+             asked about the FLAG rather than the records. F3-F6.
+       RC-4  A NON-NUMERIC OVERRIDE REACHED A JOURNAL AS A SILENT 0 (or as
+             1.23 for a European-formatted 1.234,50), because U.num is what
+             NUM() and every report total call. F7.
+     ===================================================================== */
+
+  /* ---------------------------------------------------------------------
+     [33] F1 (THE GATE) — RC-1. ONE SHARE, TWO PAGES. The preparer reverts an
+     override; a colleague who never saw the revert types one unrelated cell;
+     the reverted record must NOT come back - not on the share, not on the
+     preparer's own screen, and not in the AEG source row the journal is
+     built from. The same for a cleared typed value.
+
+     AND THE OTHER DIRECTION IN THE SAME SECTION, because a fix that makes
+     disk win everywhere would pass the first half and silently throw away
+     the operator's own work: F1f/F1g assert that both pages' own records are
+     still in the file and that a record planted on the share by a third
+     client is untouched.
+     --------------------------------------------------------------------- */
+  section(33, 'F1 (THE GATE) — RC-1: a revert is not resurrected by another open page\'s next write');
+  const FD = makeRoot('share-fix-del');
+  const bridgeFD = await startBridge(FD.root, PORT_FIX_DEL); procs.push(bridgeFD.proc);
+  const fd1 = await openReco(browser, bridgeFD);
+  await fd1.page.evaluate(OV_SETUP + `([3, 'TPL_FD'])`);
+  /* The preparer overrides INV-1 Net 20 -> 1000 and types a Note on INV-3. */
+  const fdSet = await fd1.page.evaluate(async () => {
+    const sess = AppState.recoSessions.TPL_FD;
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_FD');
+    await Reco.setOverride(sess.data[0]._id, 'Net', '1000');
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[2], col: 'Note', value: 'ACME' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    await new Promise(r => setTimeout(r, 400)); if (Store.idle) await Store.idle();
+    return true;
+  });
+  const fdDisk0 = diskJson(FD.root, 'reco/extraValueMaster.json');
+  check(!!(fdDisk0 && fdDisk0.TPL_FD && fdDisk0.TPL_FD['INV-1'] && fdDisk0.TPL_FD['INV-1'].Net
+           && fdDisk0.TPL_FD['INV-3'] && fdDisk0.TPL_FD['INV-3'].Note),
+    'F1 premise: the preparer\'s override and typed value are both on the share',
+    fdDisk0 && fdDisk0.TPL_FD);
+  /* THE COLLEAGUE OPENS THE APP and holds both records in memory. */
+  const fd2 = await openReco(browser, bridgeFD);
+  const fdBoot = await fd2.page.evaluate(() => {
+    AppState.activeRecoId = 'TPL_FD'; AppState.activeSubSection = 'reco';
+    return JSON.parse(JSON.stringify((AppState.extraValueMaster || {}).TPL_FD || {}));
+  });
+  check(!!(fdBoot['INV-1'] && fdBoot['INV-1'].Net && fdBoot['INV-3'] && fdBoot['INV-3'].Note),
+    'F1 premise: page 2 booted holding both records — which is the condition under which a stale '
+    + 'memory can re-impose them', fdBoot);
+  /* THE PREPARER UNDOES BOTH: the override was wrong and the vendor name was wrong. */
+  const fdRev = await fd1.page.evaluate(async () => {
+    const sess = AppState.recoSessions.TPL_FD;
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_FD');
+    const a = await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col: 'Net', clear: true }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    const b = await Reco.applyEdits(tpl, sess, [{ row: sess.data[2], col: 'Note', value: '' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    await new Promise(r => setTimeout(r, 400)); if (Store.idle) await Store.idle();
+    return { ovApplied: a.applied, tagApplied: b.applied };
+  });
+  const fdDisk1 = diskJson(FD.root, 'reco/extraValueMaster.json');
+  check(fdRev.ovApplied === 1 && !((fdDisk1.TPL_FD || {})['INV-1'] || {}).Net
+        && !((fdDisk1.TPL_FD || {})['INV-3'] || {}).Note,
+    'F1 premise: both deletions reached the shared file', { fdRev, after: fdDisk1.TPL_FD });
+  /* THE COLLEAGUE, who never saw either undo, types ONE UNRELATED CELL. */
+  await fd2.page.evaluate(async () => {
+    const sess = AppState.recoSessions.TPL_FD;
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_FD');
+    await Reco.setOverride(sess.data[1]._id, 'Net', '77');
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    await new Promise(r => setTimeout(r, 400)); if (Store.idle) await Store.idle();
+  });
+  const fdDisk2 = diskJson(FD.root, 'reco/extraValueMaster.json') || {};
+  note('F1 the share after the colleague\'s unrelated override', fdDisk2.TPL_FD);
+  check(!(((fdDisk2.TPL_FD || {})['INV-1']) || {}).Net,
+    'F1a (THE GATE) the colleague\'s unrelated edit does NOT resurrect the override the preparer '
+    + 'reverted', (fdDisk2.TPL_FD || {})['INV-1']);
+  check(!(((fdDisk2.TPL_FD || {})['INV-3']) || {}).Note,
+    'F1b and it does not resurrect the typed value the preparer cleared either — every deletion in '
+    + 'this store went the same way', (fdDisk2.TPL_FD || {})['INV-3']);
+  check(!!(((fdDisk2.TPL_FD || {})['INV-2']) || {}).Net,
+    'F1c (control) the colleague\'s OWN record is in the file, so F1a is not passing because nothing '
+    + 'was written', (fdDisk2.TPL_FD || {})['INV-2']);
+  /* THE PREPARER'S OWN SCREEN AND THE JOURNAL, after their next store write
+     re-reads the share inside the merge. */
+  const fdMoney = await fd1.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_FD');
+    const sess = AppState.recoSessions.TPL_FD;
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[2], col: 'Note', value: 'later' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    await new Promise(r => setTimeout(r, 400)); if (Store.idle) await Store.idle();
+    Reco._fullPass();
+    let net; try { net = String(Reco.rowFull(tpl, sess, sess.data[0]).Net); } finally { Reco._fullEnd(); }
+    App.closeModal();
+    sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+    Reco.previewEntryFromSelection(false);
+    const ctx = Reco._pendingEntry || {};
+    const inputs = (ctx.aegInputs || []).map(o => U.num(o[ctx.aegTpl.valueColumn]));
+    const srcNets = (ctx.sourceRows || []).map(r => String(r.Net));
+    App.closeModal();
+    return { net, srcNets, sum: inputs.reduce((a, b) => a + b, 0),
+             rec: (((AppState.extraValueMaster || {}).TPL_FD || {})['INV-1'] || {}).Net || null };
+  });
+  note('F1 the preparer\'s own screen and journal afterwards', fdMoney);
+  check(fdMoney.net === '20' && !fdMoney.rec,
+    'F1d the preparer\'s own screen still shows the computed 20 they reverted to', fdMoney);
+  /* Base 10/20/30 -> Net 20/40/60; INV-2 is overridden to 77 by the colleague,
+     which is a legitimate record. 20 + 77 + 60 = 157. The resurrected override
+     would make it 1000 + 77 + 60 = 1137. */
+  check(fdMoney.sum === 157 && fdMoney.srcNets.join() === '20,77,60',
+    'F1e (THE MONEY) and the journal posts 20 + 77 + 60 = 157, not the 1137 the resurrected '
+    + 'override would have posted', fdMoney);
+  /* THE OTHER DIRECTION: a third client's record written straight onto the
+     share must survive our next write, and ours must survive too. */
+  const fdThird = await fd1.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_FD');
+    const sess = AppState.recoSessions.TPL_FD;
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[1], col: 'Note', value: 'mine' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    await new Promise(r => setTimeout(r, 400)); if (Store.idle) await Store.idle();
+    return true;
+  });
+  const fdFile = path.join(FD.root, 'reco/extraValueMaster.json');
+  const fdNow = JSON.parse(fs.readFileSync(fdFile, 'utf8'));
+  fdNow.TPL_FD['INV-9'] = { Note: { k: 'typed', v: 'A COLLEAGUE', ds: '', by: 'Other',
+                                    at: new Date().toISOString() } };
+  fs.writeFileSync(fdFile, JSON.stringify(fdNow));
+  await fd1.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_FD');
+    const sess = AppState.recoSessions.TPL_FD;
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[2], col: 'Note', value: 'again' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    await new Promise(r => setTimeout(r, 400)); if (Store.idle) await Store.idle();
+  });
+  const fdDisk3 = (diskJson(FD.root, 'reco/extraValueMaster.json') || {}).TPL_FD || {};
+  check(!!(fdDisk3['INV-9'] && fdDisk3['INV-9'].Note
+           && fdDisk3['INV-9'].Note.v === 'A COLLEAGUE'),
+    'F1f a record written onto the share by a third client between two of our writes is untouched',
+    fdDisk3['INV-9']);
+  check(!!(fdDisk3['INV-2'] && fdDisk3['INV-2'].Note && fdDisk3['INV-2'].Note.v === 'mine'
+           && fdDisk3['INV-2'].Net && fdDisk3['INV-3'] && fdDisk3['INV-3'].Note.v === 'again'),
+    'F1g and this session\'s own records - from THREE separate bursts - are all still there, so the '
+    + 'fix is not "the disk always wins"', fdDisk3);
+  const fdErr = [...fd1.errors, ...fd2.errors].filter(e => !/Could not save|injected fault/.test(e));
+  check(fdErr.length === 0, 'F1h no page error in the two-page run', fdErr.slice(0, 4));
+  await fd2.ctx.close();
+  await fd1.ctx.close();
+
+  /* ---------------------------------------------------------------------
+     [34] F2 (THE GATE) — RC-2. TWO UPLOADS ON ONE CALENDAR DAY, with the
+     REAL CLOCK and no stub: a catch-up, a month-end where last period and
+     this period are both opened, a corrected file re-uploaded. Both append to
+     the same day file, so `Versioning.pathFor` named ONE data set for both
+     and a value typed on the first upload was in scope for the second's rows
+     - with no carry flag, no accent, no tooltip and nothing to confirm.
+
+     C1 could not catch this because its fixture stubs Versioning.dayFile so
+     the two uploads land in different day files. This section is the same
+     scenario with the clock left alone, and it carries the money: the added
+     dropdown is the AEG keyword column (which S11 permits for a column with
+     no flag, and `run_store_e2e` O14a pins that it does), the AEG extras loop
+     runs BEFORE the keyword filter, so the leaked value decides whether a row
+     posts at all.
+     --------------------------------------------------------------------- */
+  section(34, 'F2 (THE GATE) — RC-2: two uploads on one calendar day are two data sets');
+  const DS = makeRoot('share-fix-ds');
+  const bridgeDS = await startBridge(DS.root, PORT_FIX_DS); procs.push(bridgeDS.proc);
+  const dsp = await openReco(browser, bridgeDS);
+  const f2 = await dsp.page.evaluate(async () => {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_F2'; t.name = 'Money';
+    t.columns = ['Invoice', 'Amount', 'Reco', 'ToAccount']
+      .map(n => ({ name: n, label: n, formats: [], isValue: n === 'Amount' }));
+    t.primaryKeys = ['Invoice'];
+    t.valueColumn = 'Amount';
+    t.displayColumns = t.columns.map(c => c.name);
+    /* ONE added dropdown, NO FLAGS AT ALL - carryForward and allowOverride
+       are both undefined, which is every template that exists today. */
+    t.additionalColumns = [{ name: 'Status', type: 'dropdown', options: 'Open,Closed' },
+                           { name: 'AED', type: 'formula', formula: 'NUM({Amount})' }];
+    t.aegIntegration = { enabled: true, aegTemplateId: AppState.aegTemplates[0].id,
+      keywordColumn: 'Status', keywordValues: 'Closed', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate();
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_F2');
+    const out = {};
+    /* S11 says NOTHING about an unflagged added column as the keyword column,
+       which is what makes this reachable from the editor at all. */
+    out.s11 = RecoTemplate._exclusiveRoleConflict(tpl, 'Status', 'aeg.keywordColumn');
+    const fields = ['Invoice', 'Amount', 'Reco', 'ToAccount'];
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Amount: '1000', Reco: 'R1', ToAccount: 'ACC1' },
+                                { Invoice: 'INV-2', Amount: '50', Reco: 'R1', ToAccount: 'ACC1' }], fields);
+    App.closeModal();
+    AppState.activeRecoId = 'TPL_F2';
+    const sess = AppState.recoSessions.TPL_F2;
+    /* THE PREPARER MARKS SEPTEMBER'S INV-1 'Closed'. */
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col: 'Status', value: 'Closed' }],
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) });
+    out.dayFile = Versioning.pathFor(tpl);
+    /* SAME AFTERNOON: "Add Data" of October. Nobody touches the new rows. */
+    await Reco.ingestData(tpl, [{ Invoice: 'INV-1', Amount: '2000', Reco: 'R1', ToAccount: 'ACC1' },
+                                { Invoice: 'INV-3', Amount: '70', Reco: 'R1', ToAccount: 'ACC1' }], fields);
+    App.closeModal();
+    await AppState.flush(); if (Store.idle) await Store.idle();
+    out.dataSetIds = sess.dataSetIds.slice();
+    out.dsi = sess.data.map(r => r._dsi);
+    Reco._fullPass();
+    try {
+      const ac = tpl.additionalColumns.find(a => a.name === 'Status');
+      out.status = sess.data.map(r => r.Invoice + ':' + r.Amount + '=' + String(Reco._extraValueForRow(tpl, sess, r, ac)));
+      out.marked = sess.data.map(r => !!Reco._extraCarried(tpl, sess, r, 'Status'));
+    } finally { Reco._fullEnd(); }
+    /* THE JOURNAL, through the real preview. */
+    App.closeModal();
+    sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+    Reco.previewEntryFromSelection(false);
+    const ctx = Reco._pendingEntry || {};
+    out.picked = (ctx.sourceRows || []).map(r => r.Invoice + ':' + r.Amount);
+    out.sum = (ctx.aegInputs || []).reduce((s, o) => s + U.num(o[ctx.aegTpl.valueColumn]), 0);
+    App.closeModal();
+    return out;
+  });
+  note('F2', f2);
+  check(f2.s11 === null,
+    'F2 premise: S11 permits an UNFLAGGED added column as the AEG keyword column, so this is '
+    + 'reachable from the editor and not a hand-built state', { s11: f2.s11 });
+  check(f2.dsi.join() === '0,0,1,1' && f2.dataSetIds.length === 2,
+    'F2a (THE GATE) two uploads on ONE calendar day are TWO data sets — both append to the same day '
+    + 'file, so naming the data set by that file made them one', { ids: f2.dataSetIds, dsi: f2.dsi });
+  check(f2.status.join('|') === 'INV-1:1000=Closed|INV-2:50=|INV-1:2000=|INV-3:70=',
+    'F2b (THE GATE) September\'s "Closed" is NOT on October\'s row for the same invoice — and it IS '
+    + 'still on the row it was typed on, so this is not "nothing was ever typed"', f2.status);
+  check(f2.picked.join() === 'INV-1:1000',
+    'F2c (THE MONEY) only the row the preparer actually marked reaches the journal', f2.picked);
+  check(f2.sum === 1000,
+    'F2d and the entry posts 1000, the amount that was marked — not 3000', { sum: f2.sum });
+  check(f2.marked.every(m => m === false),
+    'F2e and nothing is marked as carried, because nothing was carried (the flag is off)', f2.marked);
+  /* THE ROUND TRIP MUST STILL WORK. A record typed against an upload has to
+     be honoured when the operator reopens the DAY FILE that upload went into:
+     once it is reopened from history the two uploads really are one file and
+     cannot be told apart, so the day file is the honest scope then. */
+  const f2b = await dsp.page.evaluate(async () => {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_F2');
+    const files = await Versioning.listFiles(tpl);
+    const f = files[files.length - 1];
+    await Reco.loadVersionedFile(f.fullPath || f.path, tpl.id);
+    const sess = AppState.recoSessions.TPL_F2;
+    Reco._fullPass();
+    try {
+      const ac = tpl.additionalColumns.find(a => a.name === 'Status');
+      return { ids: sess.dataSetIds.slice(),
+               cells: sess.data.map(r => r.Invoice + '=' + String(Reco._extraValueForRow(tpl, sess, r, ac))),
+               marked: sess.data.map(r => !!Reco._extraCarried(tpl, sess, r, 'Status')) };
+    } finally { Reco._fullEnd(); }
+  });
+  note('F2 after reopening the day file from history', f2b);
+  check(f2b.cells.some(c => c === 'INV-1=Closed'),
+    'F2f and the value is STILL honoured when the day file it was typed into is reopened from '
+    + 'history — the scope is the upload while both are on screen, and the file once it is one file '
+    + 'again', f2b.cells);
+  check(f2b.marked.every(m => m === false),
+    'F2g ...and it is not marked as carried there either, because it was typed into that file', f2b);
+  const f2err = dsp.errors.filter(e => !/Could not save|injected fault/.test(e));
+  check(f2err.length === 0, 'F2h no page error in the two-upload run', f2err.slice(0, 4));
+  await dsp.ctx.close();
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
   check(allErrors.length === 0, 'U5 no page error across the whole run', allErrors.slice(0, 6));
