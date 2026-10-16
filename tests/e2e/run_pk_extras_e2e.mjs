@@ -114,8 +114,12 @@ const OS_USER = os.userInfo().username;
 const PORT = 20701;
 const PORT_BIG = 20702;
 const PORT_BASE = 20703;
-/* The build G1 compares against: HEAD, i.e. the build before this feature.
-   Override with BASE_REV=<rev>.
+/* The build G1 compares against: 3047f82, the commit immediately before this
+   feature. Override with BASE_REV=<rev>.
+   ROUND 5: this line used to read "HEAD, i.e. the build before this feature",
+   which is the exact sentence the paragraph below is about - nine lines above
+   the pinned literal that corrects it. Deleted rather than left to be read
+   first.
 
    PINNED, AND IT MUST STAY PINNED. This defaulted to 'HEAD', which was the
    commit before #24 on the day the suite was written and silently stopped

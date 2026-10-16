@@ -6143,6 +6143,17 @@ const Timeline = {
 
     const meta = { comments: comment };
     if (sel.value === 'row') {
+      /* ---- ROUND 5, T-S10-18's UNMEASURED DOOR, MEASURED. attachmentMaster
+         is in AppState.PERSIST_KEYS and `linkedPks` is Reco.rowKey over a row
+         on screen, so it is the same harm as the comment: after the key
+         refusal this said a green "Uploaded: note.txt" and linked the file to
+         E5 while the folder's rule computes E5-X. The FILE itself still
+         reaches the shared folder, which is why the question is asked before
+         the upload rather than after it - a file saved and then linked where
+         nobody can see it is worse than one not saved at all. The group
+         branch is not latched: that record is filed against the group's id. */
+      const atpl = AppState.recoTemplates.find(x => x && x.id === p.tplId);
+      if (atpl && Reco._keyStaleBlock(atpl, 'attached')) return;
       meta.linkedPks = [p.pk];
     } else if (sel.value.startsWith('group:')) {
       meta.linkedGroups = [sel.value.slice(6)];
@@ -6284,6 +6295,17 @@ const Comments = {
 
     const meta = {};
     if (sel.value === 'row') {
+      /* ---- ROUND 5, T-S10-18. `p.pk` was captured when the MENU opened, by
+         Reco.rowKey over a row on screen, and commentMaster is in
+         AppState.PERSIST_KEYS. Measured after the key refusal: a green
+         "Comment posted" with linkedPks ["E3"] while the folder's rule
+         computes E3-X - a note nobody else will ever see on the row it is
+         about. Asked HERE rather than in openAddDialog, so the operator is
+         told when they press Post and not before they have typed; and only
+         on this branch, because a GROUP-linked comment is filed against the
+         group's id and not against a row key. */
+      const ctpl = AppState.recoTemplates.find(x => x && x.id === p.tplId);
+      if (ctpl && Reco._keyStaleBlock(ctpl, 'commented')) return;
       meta.linkedPks = [p.pk];
     } else if (sel.value.startsWith('group:')) {
       meta.linkedGroups = [sel.value.slice(6)];
@@ -9289,6 +9311,20 @@ const ExcelLink = {
     ExcelLink._keepOffset();
     const { tpl, sess } = ExcelLink._ctx();
     if (!tpl || !sess || tpl.id !== plan.tplId) { U.toast('Open the template this review belongs to', 'error'); return; }
+    /* ---- ROUND 5. THE SIXTH DOOR, and the one T-S10-16 argued away. Its
+       §18.9 reason for not putting the latch inside Reco.rowKey was that "the
+       machine paths go through it - the Excel load-back and ingestData have no
+       operator at the keyboard". Half of that is true. THIS IS THE APPLY
+       BUTTON of the review dialog, with an operator's finger on it, and the
+       write below (`Reco.applyEdits(..., { source: 'excel' })`) lands in the
+       same pk-keyed shared store as Reco.setTag. Measured after the key
+       refusal: a green "Applied 1 change to 1 row(s)" and E2 in
+       reco/extraValueMaster.json while the folder's rule computes E2-X.
+       THE LATCH IS HERE AND NOT IN applyEdits, which ingestData and the real
+       machine paths share and which must never tell a machine to load
+       anything again. The review dialog stays open, as it does for every
+       other abort, so the operator's decisions are not thrown away. */
+    if (Reco._keyStaleBlock(tpl, 'loaded back from Excel')) return;
     const picks = plan.changes.filter(x => x.tick).concat(plan.conflicts.filter(x => x.take));
     const kept = plan.conflicts.filter(x => !x.take);
     if (!picks.length && !kept.length) return;
@@ -13637,12 +13673,18 @@ defaultTemplate() {
      here is named by its own key - which is what a field added after this map
      was written will get, and is still better than the silence this ticket is
      about. */
+  /* ROUND 5: THE STAMPS CARRY THE LABEL OF THE FIELD THEY STAMP, and
+     _askMerged de-duplicates, so a colleague who published a team order is
+     ONE bullet rather than three ("the team column order", "who published
+     the team column order", "when the team column order was published").
+     Two fields sharing a label is deliberate here; what was wrong was a
+     bulleted list that said the same thing twice. */
   _FIELD_SAY: {
-    displayOrder: 'the team column order', displayOrderBy: 'who published the team column order',
-    displayOrderAt: 'when the team column order was published',
+    displayOrder: 'the team column order', displayOrderBy: 'the team column order',
+    displayOrderAt: 'the team column order',
     correctionContextCols: 'the correction tab’s context columns',
-    correctionContextColsBy: 'who published the correction context',
-    correctionContextColsAt: 'when the correction context was published',
+    correctionContextColsBy: 'the correction tab’s context columns',
+    correctionContextColsAt: 'the correction tab’s context columns',
     columns: 'the file column list', displayColumns: 'which columns are shown',
     aegIntegration: 'the entry (AEG) settings', reports: 'the saved reports',
     name: 'the template name', description: 'the description',
@@ -13893,11 +13935,28 @@ defaultTemplate() {
      because Cancel has to mean something: the operator may want to go and
      look at what a colleague did before their own edit lands on top of it. */
   _askMerged(said, both) {
-    both = both || [];
-    return confirm('Someone else changed this template on the shared folder while you had it open:'
-      + '\n\n' + said.map(s => '  • ' + s).join('\n')
-      + '\n\nThose are being kept AS THE FOLDER HAS THEM, because you did not change them in this '
-      + 'editor. Everything you did change here is saved.'
+    /* ROUND 5, TWO THINGS, AND BOTH BELONG HERE BECAUSE THIS IS THE ONE PLACE
+       THE QUESTION IS BUILT.
+       (1) DE-DUPLICATED. _sayField maps more than one field to a label on
+       purpose - toleranceMode and toleranceValue are both "the offset
+       tolerance", and a team order's who/when stamps belong to the order they
+       stamp - so a colleague who changed two of them was listed TWICE in a
+       bulleted list the operator has to read. Done here rather than at each
+       push, so the next pair of fields that share a label cannot bring it
+       back.
+       (2) `said` CAN NOW BE EMPTY. _settleShared asks this question when the
+       only difference is a field BOTH sides changed (finding A7), and a
+       bulleted list of nothing under "those are being kept as the folder has
+       them" is how an operator learns to click through a dialog. */
+    const uniq = a => (a || []).filter((s, i, arr) => arr.indexOf(s) === i);
+    said = uniq(said); both = uniq(both);
+    return confirm('Someone else changed this template on the shared folder while you had it open'
+      + (said.length ? ':' : '.')
+      + (said.length
+          ? '\n\n' + said.map(s => '  • ' + s).join('\n')
+            + '\n\nThose are being kept AS THE FOLDER HAS THEM, because you did not change them '
+            + 'in this editor. Everything you did change here is saved.'
+          : '')
       /* ROUND 4, FINDING 7: and what is being saved OVER somebody. */
       + (both.length
           ? '\n\nYou and somebody else both changed ' + both.join(' and ') + ' — yours is '
@@ -13969,14 +14028,34 @@ defaultTemplate() {
         + 'this window now carries their key and your change can go on top of it. Saving over them '
         + 'would leave the next upload minting row keys under a scheme neither of you chose, and one '
         + 'day file holding two identities for the same business rows.'
-        + ' AND THE ROWS ON SCREEN ARE STILL KEYED THE OLD WAY: press Load to read them again '
-        + 'under the folder\'s rule before you type anything else into them, or what you type '
-        + 'will be filed under a key nobody else can see.');
+        /* ROUND 5. THIS CLAUSE USED TO PRESCRIBE A RECOVERY THAT DOES NOT
+           WORK. "Press Load" is "Add Data", the only file input there is, and
+           it APPENDS: the rows this clause is about kept their dead keys, the
+           latch came off, and the next thing the operator typed went to the
+           shared folder under a key nobody else computes. Measured end to end
+           through this exact route (scratchpad/dataloss/lift/logs/
+           v5c_before.txt). Clear Loaded Data keeps the typed values, the
+           offsets and the corrections - its own confirm says which - so it
+           costs the rows on screen and nothing else. */
+        + ' AND THE ROWS ON SCREEN ARE STILL KEYED THE OLD WAY: use Clear Loaded Data and then '
+        + 'load the rows again under the folder\'s rule before you type anything else into them, '
+        + 'or what you type will be filed under a key nobody else can see. (Add Data on its own '
+        + 'ADDS to what is on screen, so those rows would keep the old keys. Your typed values, '
+        + 'offsets and corrections stay on the shared folder either way.)');
       return false;
     }
     const both = [];
     const said = RecoTemplate._mergeShared(t, stored, opened, both);
-    if (!said.length) return true;
+    /* ---- ROUND 5, FINDING A7, WHICH WAS REPORTED FIXED AND WAS NOT. The
+       `both` list was collected in _mergeShared and then thrown away right
+       here: `if (!said.length) return true;` returns before _askMerged, which
+       is the one place the "you and somebody else both changed X" sentence is
+       said. So the sentence only ever fired when the folder ALSO changed a
+       field this editor had left alone - and the case the finding measured is
+       the one where the ONLY difference is a field both sides changed.
+       Measured: B saves over A's description and B's confirms are []. The
+       value saved is unchanged either way; the silence was the finding. */
+    if (!said.length && !both.length) return true;
     if (!RecoTemplate._askMerged(said, both)) {
       RecoTemplate._abandonSave(tplId, stored,
         'Nothing more was saved. The template on the shared folder is untouched and this window now '
@@ -14290,6 +14369,53 @@ defaultTemplate() {
         if (String(was.type || '') !== String(now.type || '')) return;
         renamedCols.push({ from: String(was.name), to: String(now.name) });
       });
+      /* ---- ROUND 5. A RENAME THAT TAKES A NAME ANOTHER ADDED COLUMN IS
+         GIVING UP IN THE SAME SAVE IS REFUSED, and it is refused for the same
+         reason as the three name checks above: every typed value is filed
+         against the column NAME, so there is ONE SLOT per name and this save
+         needs two.
+         MEASURED on the build before this (logs/w2_before.txt): delete the
+         added column "Legacy" and rename "Vendor" -> "Legacy" in one save,
+         and the only question asked is 'Removing "Vendor" (3) also deletes 3
+         value(s)' - naming the column being RENAMED, not the one being
+         removed - after which the column called Legacy holds the DELETED
+         column's L1/L2/L3 and Vendor's Acme/Bosch/Cummins are gone, under a
+         green "Template saved to database". The rename arm above declines to
+         migrate onto an occupied name, which is right - it would merge two
+         columns' records - so the rename quietly degrades into a removal.
+         Two saves do it properly (remove, save, then rename), which is what
+         the sentence asks for; making one save do it would mean ordering a
+         delete and a migration against the same slot in the same shared file,
+         for a gesture nobody needs in one step.
+         _cid-PAIRED RENAMES ONLY. On a column written before the stable id
+         the pair is the editor's SLOT (T-S10-5, §18.3), which cannot tell a
+         rename from a removal plus a move - refusing there would refuse a
+         plain removal of the first of two columns. Such a template keeps
+         today's behaviour and its own removal confirm. */
+      let collide = null;
+      (prevExtras || []).forEach(was => {
+        if (collide || !was || !was.name || !was._cid) return;
+        const now = extraNow.find(a => a && a._cid && String(a._cid) === String(was._cid));
+        if (!now || !now.name || String(now.name) === String(was.name)) return;
+        const from = String(was.name), to = String(now.name);
+        const held = (prevExtras || []).some(a => a && a !== was && String(a.name) === to);
+        const taken = extraNow.some(a => a && a !== now && String(a.name) === from);
+        if (held || taken) collide = { from: from, to: to, held: held };
+      });
+      if (collide) {
+        U.toast('"' + collide.from + '" is being renamed to "' + collide.to + '" in the same save '
+          + 'as another added column gives that name up or takes it — '
+          + (collide.held
+              ? '"' + collide.to + '" is a name another added column already had in this template'
+              : '"' + collide.from + '" is a name another added column already had and something '
+                + 'else in this save is taking')
+          + '. Every value people have typed is filed against the column NAME, so one save cannot '
+          + 'empty a name and refill it: "' + collide.from + '"’s values would be deleted and '
+          + 'the values stored under "' + collide.to + '" would show up in the renamed column. Do '
+          + 'it in TWO saves — remove or rename the other column first and save, then rename '
+          + '"' + collide.from + '".', 'error');
+        return;
+      }
       const droppedCols = (prevExtras || []).filter(a => a && a.name
         && !nameNow.has(String(a.name))
         && !renamedCols.some(r => r.from === String(a.name)));
@@ -18090,6 +18216,10 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
   },
 
   async _bulkUploadToRow(tplId, pk, files) {
+    // ROUND 5, T-S10-18: the same ATTACH action, a second entry point (a
+    // multi-file drop onto a row). See Timeline._confirmUpload.
+    const btpl = AppState.recoTemplates.find(x => x && x.id === tplId);
+    if (btpl && Reco._keyStaleBlock(btpl, 'attached')) return;
     U.toast('Uploading ' + files.length + ' files…');
     let ok = 0;
     for (const f of files) {
@@ -18910,6 +19040,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       }
     });
     sess.data = sess.data.concat(mapped);
+    /* ROUND 5. THE LATCH COMES OFF HERE AND NOWHERE ELSE, because this is the
+       first line at which the question it asks - "is every row on screen keyed
+       by the folder's rule?" - can be ANSWERED rather than assumed. See
+       Reco._keyStaleLift. */
+    Reco._keyStaleLift(tpl, sess, mapped);
     /* loadedAt means "when the rows I HOLD came from the share" - it is the
        watermark a later reversal rebases its un-stamp onto. Adding rows to an
        open session must NOT move it: the appended rows are brand new, have no
@@ -20760,13 +20895,14 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
                  its parts and decision G's frozen value cannot be shown. */
   _mintKeysSync(tpl, sess, rows, from, to, acc) {
     const a = acc || Reco._mintAcc(tpl);
-    /* ROUND 4, FINDING 4. THE LATCH COMES OFF HERE, and only here: this is
-       the one function every route that re-keys a session goes through, so a
-       Load, an Add Data, a restore, a version load and an Excel load-back all
-       clear it without a line of their own. `from` is set only for the
-       chunked pass's later chunks, so the first chunk is what clears it. */
-    if (tpl && tpl.id && from == null && Reco._keyStale[String(tpl.id)])
-      delete Reco._keyStale[String(tpl.id)];
+    /* ROUND 5: THE LATCH IS NOT TOUCHED HERE. The comment that used to stand
+       on this line wrote the bug down as the design - it claimed every route
+       that re-keys a session comes through here and that "the first chunk is
+       what clears it", and the chunked pass passes `from`=0 for the first
+       chunk, so the clear never ran at all above Reco.BUSY_ROWS. The mint
+       also runs over the rows an upload is BRINGING, before the concat and
+       before _keyIngestCheck can refuse the load. Reco._keyStaleLift is the
+       one place it comes off now, after the rows are in the session. */
     const pks = (tpl.primaryKeys || []);
     const i0 = from == null ? 0 : from;
     const i1 = to == null ? rows.length : to;
@@ -24388,9 +24524,37 @@ renderRecoTable(tpl, sess) {
 
      PER WINDOW AND NEVER ON THE SESSION, so it cannot be serialised into
      reco/recoSessions.json and handed to a colleague who has nothing wrong.
-     CLEARED BY THE LOAD ITSELF (Reco._mintKeysSync), which is the one place
-     every route that re-keys a session goes through - an upload, Add Data, a
-     restore, a version load, an Excel load-back.
+
+     CLEARED BY Reco._keyStaleLift, AND ONLY WHEN NO ROW ON SCREEN IS LEFT
+     UNDER THE OLD RULE. Round 4 cleared it at the head of Reco._mintKeysSync
+     and called that "the one place every route that re-keys a session goes
+     through". Neither half was true. Walked, the only caller of _mintKeysSync
+     is Reco.ingestData (an upload or a paste): a session restore does not
+     come through it, Reco.loadVersionedFile copies `_pk` straight out of the
+     day file, and the Excel load-back applies to rows already in sess.data.
+     And ingestData CONCATENATES (S14, deliberately - September's rows must
+     stay), so the mint it runs covers the rows the upload BRINGS and no
+     others. Measured on that build: B is refused, B presses the only file
+     input the UI has, the appended row is keyed correctly, the three rows
+     already on screen keep their dead keys, the latch comes off for all of
+     them and Reco.setTag on an old row says NOTHING while the shared values
+     file gains the dead key (scratchpad/dataloss/lift/logs/v5c_before.txt).
+     Two more holes in the same clear: the chunked pass passes `from`=0 for
+     the first chunk, so `from == null` was false and above Reco.BUSY_ROWS the
+     latch NEVER came off - on a 100,001-row load, typing into a row that very
+     load had minted under the folder's own rule was refused for ever - and
+     the head of the mint is ahead of Reco._keyIngestCheck, so a load the
+     operator DECLINED lifted the latch and re-keyed nothing.
+
+     WHY THE WHOLE SESSION AND NOT PER ROW. A per-row mark would let typing
+     through on the rows a later upload keyed correctly, which is kinder, and
+     it cannot be made safe: the routes that put a dead-keyed row on screen
+     without minting it - a version load copying `_pk` out of the day file, a
+     session restore - would hand back rows no mark knows about, and the
+     doors that write a SET of rows (the bulk offset, the selection sum bar,
+     the Excel load-back's Apply) would each need a partial refusal of their
+     own. One flag, one lift, one sentence. The cost is a refusal on a row
+     whose key is right, and the sentence names the route that fixes it.
 
      T-S10-16: AND THE QUESTION IS ASKED PER ACTION, NOT PER FUNCTION NAME.
      A4's fix put it at three doors - setTag, setOverride, revertOverride -
@@ -24413,17 +24577,17 @@ renderRecoTable(tpl, sess) {
      bar and the Excel view), the unmark two, the correction and the two
      typing doors one each.
 
-     WHERE THE RULE IS TRUE AND NOT YET APPLIED, measured rather than
-     predicted (scratchpad/dataloss/close/other_doors.txt): group membership
-     and a comment are pk-keyed writes to groupMaster / commentMaster -
-     PERSIST_KEYS, both of them - and their key comes from a row on screen
-     too. After the refusal the group door still said a green 'Group "G1"
-     created with 1 member(s)' and filed the member as D1, and the comment
-     door said 'Comment posted' and linked it to D2, while the folder's rule
-     computes D1-X / D2-X. They are NOT latched here: a group is also an
-     offset control with refusals of its own and the attachment door has not
-     been measured at all, so that is a ticket (T-S10-18) and not an
-     untested bolt-on. Do not read the rule above as covering them.
+     T-S10-18, CLOSED HERE: the group, the comment and the ATTACHMENT doors
+     are pk-keyed writes to groupMaster / commentMaster / attachmentMaster -
+     PERSIST_KEYS, all three - and their key comes from a row on screen too.
+     Measured open first (scratchpad/dataloss/lift/logs/w1_before.txt): a
+     green 'Group "VG2" created with 1 member(s)' filing E1; 'Added 1 new
+     member(s)' filing E2; 'Removed 1 member(s) from group' DELETING the E4
+     membership filed while the keys were still right and leaving the copy a
+     colleague's load reads; 'Comment posted' linking E3; and - the door
+     T-S10-18 recorded as unmeasured, with instructions not to assume either
+     answer - 'Uploaded: note.txt' linking E5, plus the multi-file drop
+     linking E1 twice. Every one of them now asks, with the verbs below.
 
      A gesture whose key comes from the STORED FILE is deliberately NOT
      latched: removeManualOffset and removeCorrection are handed a key the
@@ -24434,23 +24598,54 @@ renderRecoTable(tpl, sess) {
      AND NOT INSIDE Reco.rowKey, which is the one function all of them go
      through. rowKey is a KEY READER: the renderer's row attribute and every
      badge, the status / attachment / comment filters, runAutoOffset's
-     restore, the drift check, Groups.resolvePk - and the MACHINE PATHS, the
-     Excel load-back and ingestData, which have no operator at the keyboard
-     to press Load. Refusing there would blank the screen this latch exists to
-     keep honest, could not carry a per-door verb, and would fire once per row
-     on a 500k-row extract. Handover 18.8 has the argument. */
+     restore, the drift check, Groups.resolvePk - and THE MACHINE PATH,
+     Reco.ingestData, which computes a key with nobody at the keyboard, so a
+     sentence telling it to load the rows again is addressed to nobody.
+     Refusing there would blank the screen this latch exists to keep honest,
+     could not carry a per-door verb, and would fire once per row on a 500k-row
+     extract. Handover 18.8 has the argument.
+     ROUND 5 CORRECTED THE SECOND LEG OF IT: the Excel load-back was named
+     here as a machine path and HALF of it is not. ExcelLink.apply() is the
+     Apply button in the review dialog, with an operator pressing it, and its
+     write went into the same pk-keyed shared store under the dead key with
+     nothing said. The latch is at ExcelLink.apply and NOT at Reco.applyEdits,
+     which ingestData and the machine paths share and which must never tell a
+     machine to load anything again. */
   _keyStale: {},
   _keyStaleMark(tplId) { if (tplId) Reco._keyStale[String(tplId)] = true; },
+  /* THE LIFT. `minted` is the array of rows the mint has just keyed and which
+     have just been added to the session; the latch comes off only when the
+     session holds NOTHING ELSE, i.e. when no row on screen can still be
+     carrying a key from before the colleague's change. The identity checks
+     are not belt-and-braces: a later caller that minted a sub-range, or
+     minted into a session it then replaced, would otherwise lift the latch on
+     a length coincidence, and this is the one line that stands between a dead
+     key and the shared folder. */
+  _keyStaleLift(tpl, sess, minted) {
+    if (!tpl || !tpl.id || !Reco._keyStale[String(tpl.id)]) return;
+    const rows = (sess && sess.data) || [];
+    if (!minted || !minted.length || rows.length !== minted.length) return;
+    if (rows[0] !== minted[0] || rows[rows.length - 1] !== minted[minted.length - 1]) return;
+    delete Reco._keyStale[String(tpl.id)];
+  },
   _keyStaleBlock(tpl, what) {
     if (!tpl || !Reco._keyStale[String(tpl.id)]) return false;
     /* T-S10-16: the clause after the dash has to cover a DELETE as well as a
        write, because the unmark and the revert are both "a change to a record
        the folder holds" rather than typing. */
+    /* ROUND 5: AND IT NAMES A RECOVERY THAT WORKS. "Press Load" sent the
+       operator to the only file input the UI has, which is "Add Data" and
+       which APPENDS - so the rows this sentence is about kept their dead keys
+       and the next gesture went through in silence. Clear Loaded Data is the
+       control that empties the screen (and it keeps the typed values, the
+       offsets and the corrections - its own confirm says so), so the load
+       after it re-keys everything and the latch lifts. */
     U.toast('Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
       + 'its rows while these rows were loaded, so the keys on screen are the OLD ones \u2014 '
       + 'anything filed against them goes where nobody else can see it, and anything meant to '
-      + 'change a record on the shared folder cannot reach it. Press Load to read the rows again '
-      + 'under the shared folder\'s rule, then try again.', 'error');
+      + 'change a record on the shared folder cannot reach it. Use Clear Loaded Data and then '
+      + 'load the rows again under the shared folder\'s rule, and try again. (Add Data on its '
+      + 'own ADDS to what is on screen, so those rows would keep the old keys.)', 'error');
     return true;
   },
 
@@ -29541,6 +29736,15 @@ renderCustomReport(tpl, sess, rpt, idx) {
       Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]),
       'Create Group from Selection', 'no group was created');
     if (outside) { U.toast(outside.msg, 'error'); return; }
+    /* ---- ROUND 5, T-S10-18. The key comes from Reco._selectedPks, i.e.
+       Reco.rowKey over the rows on screen, and groupMaster is in
+       AppState.PERSIST_KEYS - a whole-file blind write of a file every
+       colleague parses at boot. Measured after the key refusal: a green
+       'Group "VG2" created with 1 member(s)' with the member filed as E1
+       while the folder's rule computes E1-X. The latch is asked here rather
+       than at the prompt, so the operator is not interrupted before they
+       have typed a name. */
+    if (Reco._keyStaleBlock(tpl, 'grouped')) return;
     const pks = Reco._selectedPks(paneKey);
     if (!pks.length) { U.toast('Select rows first', 'error'); return; }
     const name = prompt('Group name:');
@@ -29561,6 +29765,9 @@ renderCustomReport(tpl, sess, rpt, idx) {
       Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]),
       'Add selected rows to a group', 'the group was not changed');
     if (outside) { U.toast(outside.msg, 'error'); return; }
+    // ROUND 5, T-S10-18: the same ACTION, a second entry point. See
+    // Reco.createGroupFromSelection for the measurement.
+    if (Reco._keyStaleBlock(tpl, 'grouped')) return;
     const pks = Reco._selectedPks(paneKey);
     if (!pks.length) { U.toast('Select rows first', 'error'); return; }
     const added = Groups.addMembers(tpl.id, gid, pks);
@@ -29579,6 +29786,12 @@ renderCustomReport(tpl, sess, rpt, idx) {
       Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]),
       'Remove selected rows from a group', 'nothing was removed');
     if (outside) { U.toast(outside.msg, 'error'); return; }
+    /* ---- ROUND 5, T-S10-18, AND IT IS smartUnmark's SHAPE: a DELETE that
+       cannot reach the folder's record. Measured after the refusal: a green
+       "Removed 1 member(s) from group" that deleted the E4 membership filed
+       while the keys were still right and left a colleague's E4-X one in
+       place, so the row is in the group again tomorrow for everybody. */
+    if (Reco._keyStaleBlock(tpl, 'removed from the group')) return;
     const pks = Reco._selectedPks(paneKey);
     if (!pks.length) { U.toast('Select rows first', 'error'); return; }
     const removed = Groups.removeMembers(tpl.id, gid, pks);

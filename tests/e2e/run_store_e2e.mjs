@@ -8637,10 +8637,18 @@ const R3_TYPE_AFTER = `(async function () {
 })`;
 
 /* ...and after a RELOAD the same typing must work normally, under the
-   folder's own rule. */
+   folder's own rule.
+   ROUND 5: THROUGH A CLEAR AND THEN THE LOAD, which is the route that leaves
+   no row on screen keyed by the old rule. "Add Data" on its own CONCATENATES
+   (apps/Reco.html:18798), so it re-keys only the rows it appends and the
+   latch stays up by design - section [79] is the gate for that, and this
+   control's own claim ("a reload re-mints the keys and lifts the latch") is
+   only true of a load that covers the session. The assertions below are
+   unchanged. */
 const R3_RELOAD_AND_TYPE = `(async function () {
   window.__toasts = [];
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_X');
+  Reco.clearSession();
   RecoTemplate.open(tpl.id);
   await Reco.ingestData(tpl, [{Doc:'D1',Line:'L1',Amount:'100'}], ['Doc','Line','Amount']);
   App.closeModal();
@@ -8807,6 +8815,8 @@ const R3_DOORS = `(async function () {
 const R3_RELOAD_BOTH = `(async function () {
   window.__toasts = [];
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_X');
+  /* ROUND 5: a CLEAR first, for the reason R3_RELOAD_AND_TYPE gives. */
+  Reco.clearSession();
   RecoTemplate.open(tpl.id);
   await Reco.ingestData(tpl, [{Doc:'D7',Line:'L1',Amount:'700'},{Doc:'D8',Line:'L1',Amount:'800'}],
                         ['Doc','Line','Amount']);
@@ -9543,6 +9553,739 @@ section(78, 'R10 T-26-4 — THE BANNER NAMES EVERY ALREADY-POSTED ROW, NOT THE F
   check(/Leave them out/.test(prev.banner) && /already posted/.test(prev.banner),
     'R10b CONTROL: both ways on are still offered beside it', prev.banner.slice(0, 160));
   await pp.ctx.close();
+}
+
+/* ===========================================================================
+   ROUND 5 — THE LIFT, AND THE DOORS THE LIFT ROUND INHERITS (sections
+   [79]-[81]).
+
+   T-S10-16 was reported closed with the latch at every operator gesture, and
+   the verifier found the LATCH ITSELF wrong in three ways and three more
+   doors open. Every section below FAILED on eb33073 and the pre-fix run is
+   scratchpad/dataloss/lift/logs/store_fail_first.txt. They assert on FILES
+   and VALUES - what is on the shared folder, what the colleague's next upload
+   reads - and never on a toast alone.
+
+   Ports 21380-21399, which is this round's own block.
+--------------------------------------------------------------------------- */
+const PORT_R11  = 21380;   // R11 the lift: "Add Data" APPENDS, so the old rows keep their dead keys
+const PORT_R11B = 21381;   // R11 the lift above Reco.BUSY_ROWS, where it never came off at all
+const PORT_R12  = 21382;   // R12 the sixth door (the Excel load-back's Apply) and T-S10-18's four
+const PORT_R13A = 21383;   // R13 A7: the only difference is a field BOTH sides changed
+const PORT_R13B = 21384;   // R13 two fields, one label: "the offset tolerance" twice
+const PORT_R13C = 21385;   // R13 a rename whose target name another column had in the same save
+
+/* R11's fixture. Same shape as R1_SETUP - an added FORMULA column is the key,
+   so a colleague's formula edit is a key-definition change - with one value
+   typed while the keys are still the folder's own, which is the record the
+   dead-key assertions must not disturb. */
+const R11_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_L'; t.name = 'Lift';
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                         { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1000; t.editableColumns = ['Line'];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'W'+i, Line:'L'+i, Amount:String(i*100) })),
+                        ['Doc','Line','Amount']);
+  App.closeModal(); AppState.activeRecoId = 'TPL_L';
+  const sess = AppState.recoSessions.TPL_L;
+  await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col:'Vendor', value:'kept-while-right' }],
+                        { source:'grid', trusted:true });
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return (sess.data||[]).map(r => r._pk);
+})`;
+
+const R11_A_KEY = `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_L');
+    RecoTemplate._editing.additionalColumns.find(a=>a.name==='Ref').formula = 'CONCAT({Doc},"-X")';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch(e){} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const R11_B_REFUSED = `(async function () {
+  window.__toasts = [];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_L'); RecoTemplate._editing.description = 'B was here';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch(e){} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { toasts: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           stale: !!(Reco._keyStale||{}).TPL_L };
+})`;
+
+/* THE ROUTE THE REFUSAL USED TO PRESCRIBE. "Add Data" is the only file input
+   the UI has (apps/Reco.html:18597) and ingestData CONCATENATES (18798), so
+   this re-keys the APPENDED rows and leaves every row already on screen
+   carrying the key the folder's rule no longer computes. */
+const R11_ADD_DATA = `(async function (arg) {
+  const [doc] = arg;
+  window.__toasts = [];
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [{ Doc: doc, Line:'L9', Amount:'900' }], ['Doc','Line','Amount']);
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_L;
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           pks: (sess.data||[]).map(r=>r._pk), stale: !!(Reco._keyStale||{}).TPL_L };
+})`;
+
+/* A load the OPERATOR DECLINES at the key question: one row whose key value
+   holds '||', which _keyIngestCheck asks about before anything is written
+   (KEY_BAD_FLOOR is 1). Nothing is loaded, so nothing was re-keyed. */
+const R11_DECLINED_LOAD = `(async function () {
+  window.__toasts = [];
+  const asks = []; const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return false; };
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+  try {
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [{ Doc:'A||B', Line:'L0', Amount:'1' }], ['Doc','Line','Amount']);
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_L;
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { asked: asks.length, said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           pks: (sess.data||[]).map(r=>r._pk), stale: !!(Reco._keyStale||{}).TPL_L };
+})`;
+
+/* Every door this round guards, fired at ONE named row so the assertions can
+   say which key they are about. `which` is an index into sess.data. */
+const R11_DOORS_AT = `(async function (arg) {
+  const [which] = arg;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+  const sess = AppState.recoSessions.TPL_L;
+  const row = sess.data[which];
+  const out = { pk: row._pk, doors: {} };
+  const door = (name, fn) => { window.__toasts = [];
+    try { fn(); } catch (e) {}
+    out.doors[name] = (window.__toasts||[]).map(x=>x.kind+': '+x.msg); };
+  door('setTag',          () => Reco.setTag(row._id, 'Vendor', 'typed-at-row-' + which));
+  door('applyCorrection', () => Reco.applyCorrection(0, 'Amount', '999', null, row._id));
+  door('manualOffset',    () => Reco.manualOffset(0, null, row._id));
+  door('editCell',        () => Reco.editCell(0, 'Line', 'L-after-' + which, null, row._id));
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})`;
+
+/* THE RECOVERY THE REFUSAL NOW NAMES: the operator's own Clear Loaded Data
+   card (Reco.confirmClearSession, apps/Reco.html:29808) and then the load.
+   This is the one route that leaves NO row on screen keyed by the old rule,
+   which is the whole condition for the lift. */
+const R11_CLEAR_AND_LOAD = `(async function () {
+  window.__toasts = [];
+  const asks = []; const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return true; };
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+  try {
+    Reco.confirmClearSession();
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'W'+i, Line:'L'+i, Amount:String(i*100) })),
+                          ['Doc','Line','Amount']);
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_L;
+  const r = sess.data[0];
+  Reco.setTag(r._id, 'Vendor', 'typed-after-the-clear-and-load');
+  Reco.applyCorrection(0, 'Amount', '777', null, sess.data[1]._id);
+  Reco.manualOffset(0, null, sess.data[2]._id);
+  Reco.editCell(0, 'Line', 'L-recovered', null, sess.data[2]._id);
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r2 => setTimeout(r2, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return { asks: asks.map(m => m.slice(0, 60)),
+           said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           pks: (sess.data||[]).map(x=>x._pk), stale: !!(Reco._keyStale||{}).TPL_L };
+})`;
+
+section(79, 'R11 T-S10-16 — THE LATCH MUST NOT LIFT WHILE A ROW ON SCREEN STILL CARRIES A DEAD KEY');
+{
+  const L = makeRoot('share-r11');
+  const brL = await startBridge(L.root, PORT_R11); procs.push(brL.proc);
+  const la = await openReco(browser, brL);
+  const pks0 = await la.page.evaluate(R11_SETUP + '()');
+  const lb = await openReco(browser, brL);
+  await lb.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_L'; App.closeModal();
+    return ((AppState.recoSessions.TPL_L||{}).data||[]).map(r => r._pk); })()`);
+  note('R11 the keys B has loaded', pks0);
+  await la.page.evaluate(R11_A_KEY + '()');
+  const lRef = await lb.page.evaluate(R11_B_REFUSED + '()');
+  check(lRef.toasts.some(s => /Nothing was saved/.test(s)) && lRef.stale === true,
+    'R11 premise: B\'s save is refused for the key definition and the latch is on', lRef);
+  check(lRef.toasts.some(s => /Clear/.test(s) && /load the rows again/i.test(s)),
+    'R11a THE REFUSAL NAMES A RECOVERY THAT WORKS. It used to say "press Load", and the only file '
+    + 'input the UI has is "Add Data", which APPENDS - so the rows it was protecting kept their '
+    + 'dead keys and every door opened again. A refusal that prescribes a recovery that does not '
+    + 'work is worse than one that says reopen the reconciliation',
+    lRef.toasts);
+
+  /* The operator does what the old sentence said: presses the file input. */
+  const add = await lb.page.evaluate(R11_ADD_DATA + '(["W9"])');
+  note('R11 after "Add Data": the keys on screen / the latch', [add.pks, add.stale]);
+  check(add.pks.slice(0, 3).join() === 'W1,W2,W3' && add.pks[3] === 'W9-X',
+    'R11b premise: "Add Data" re-keyed only the row it APPENDED - the three rows already on '
+    + 'screen still carry W1/W2/W3, which the folder\'s rule no longer computes', add.pks);
+  check(add.stale === true,
+    'R11c THE LATCH IS STILL UP after that load, because a row on screen still carries a dead '
+    + 'key. This is the blocker: the latch used to come off in _mintKeysSync for the appended '
+    + 'rows and leave the rest of the session dead-keyed', add.stale);
+
+  const oldRow = await lb.page.evaluate(R11_DOORS_AT + '([0])');
+  note('R11 every door fired at an OLD row (' + oldRow.pk + ')', oldRow.doors);
+  const vals = () => (diskJson(L.root, 'reco/extraValueMaster.json') || {}).TPL_L || {};
+  const corrs = () => (diskJson(L.root, 'reco/correctionMaster.json') || {}).TPL_L || {};
+  const offs = () => (diskJson(L.root, 'reco/manualOffsetMaster.json') || {}).TPL_L || {};
+  const dayRows = () => csvRows(verFile(L.root, 'Lift'));
+  note('R11 SHARE extraValueMaster / correctionMaster / manualOffsetMaster',
+    [Object.keys(vals()), Object.keys(corrs()), Object.keys(offs())]);
+  check(Object.values(oldRow.doors).every(a => a.some(s => /error/.test(s) && /identifies its rows/.test(s))),
+    'R11d AN OLD ROW IS STILL REFUSED AT EVERY DOOR. [71]\'s own control cannot see this: R3s-R3v '
+    + 'read sess.data[length-2] and [length-1], i.e. only the rows the reload minted',
+    oldRow.doors);
+  check(String(((vals()['W1'] || {}).Vendor || {}).v || '') === 'kept-while-right',
+    'R11e (THE FILE) ...and nothing new reached reco/extraValueMaster.json under the dead key: it '
+    + 'still holds only what was typed while the keys were right',
+    vals()['W1']);
+  check(!corrs()['W1'] && !offs()['W1'] && dayRows().filter(r => /L-after-0/.test(JSON.stringify(r))).length === 0,
+    'R11f (THE FILES) ...and no correction, no offset and no day-file version row reached the '
+    + 'share under it either',
+    { corr: Object.keys(corrs()), off: Object.keys(offs()),
+      day: dayRows().map(r => r._pk) });
+
+  /* A load the operator DECLINES re-keys nothing, so it cannot lift either. */
+  const dec = await lb.page.evaluate(R11_DECLINED_LOAD + '()');
+  note('R11 a declined load', dec);
+  check(dec.asked > 0 && dec.said.some(s => /Nothing was loaded/.test(s)) && dec.pks.length === 4,
+    'R11g premise: the key question was put and the operator said no, so nothing was loaded',
+    { asked: dec.asked, said: dec.said, pks: dec.pks });
+  check(dec.stale === true,
+    'R11h ...AND THE LATCH IS STILL UP. The old clear site ran at the head of the mint, which is '
+    + 'BEFORE _keyIngestCheck can refuse the whole load, so a load the operator aborted lifted the '
+    + 'latch and re-keyed nothing', dec.stale);
+
+  const rec = await lb.page.evaluate(R11_CLEAR_AND_LOAD + '()');
+  note('R11 CONTROL: after Clear Loaded Data and a load', [rec.pks, rec.stale, rec.said]);
+  check(rec.pks.join() === 'W1-X,W2-X,W3-X' && rec.stale === false,
+    'R11i CONTROL: the route the refusal names does lift it - a Clear leaves no row on screen, so '
+    + 'the load re-keys the whole session under the FOLDER\'S rule. A latch that never lifts is a '
+    + 'worse bug than the one it fixes', rec);
+  check(String(((vals()['W1-X'] || {}).Vendor || {}).v || '') === 'typed-after-the-clear-and-load',
+    'R11j (THE FILE) CONTROL: ...and typing then lands under the folder\'s own key',
+    vals()['W1-X']);
+  check(!!(corrs()['W2-X'] || {}).Amount && !!offs()['W3-X']
+        && dayRows().filter(r => /L-recovered/.test(JSON.stringify(r))).map(r => r._pk).join('') === 'W3-X',
+    'R11k (THE FILES) CONTROL: ...and so do the correction, the offset and the file-cell edit',
+    { corr: Object.keys(corrs()), off: Object.keys(offs()), day: dayRows().map(r => r._pk) });
+  check(!rec.said.some(s => /error/.test(s)),
+    'R11l CONTROL: ...with nothing said in error, because there is nothing wrong any more',
+    rec.said);
+  check(String(((vals()['W1'] || {}).Vendor || {}).v || '') === 'kept-while-right',
+    'R11m CONTROL: ...and the record filed under the old key while the keys were right is still '
+    + 'on the share. The latch refuses new writes under a dead key; it never deletes one',
+    vals()['W1']);
+  await la.ctx.close(); await lb.ctx.close();
+}
+
+/* THE SAME LIFT ABOVE Reco.BUSY_ROWS. _mintKeys' chunked pass called
+   _mintKeysSync(tpl, sess, rows, i, end, acc) from i=0, so `from == null` was
+   false for the FIRST chunk too and the one clear site never ran at all: a
+   100,001-row load re-minted every key correctly and left the latch up for
+   ever, on exactly the extracts this app is built for.
+   THE GATE IS AN OPERATION COUNT'S WORTH OF WORK, NOT A CLOCK (§16.4a): the
+   rows are built in the page and the whole arm measured 0.4 s. */
+const R11B_BIG_LOAD = `(async function () {
+  window.__toasts = [];
+  const asks = []; const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return true; };
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+  const n = Reco.BUSY_ROWS + 1;
+  const rows = new Array(n);
+  for (let i = 0; i < n; i++) rows[i] = { Doc: 'B' + i, Line: 'L', Amount: '1' };
+  /* REPORTED, NEVER ASSERTED (§16.4a): a wall clock is not a gate. It is here
+     because "the gate must not take ten minutes to run" is a claim about this
+     arm, and a claim is worth a reading. */
+  const t0 = Date.now();
+  try {
+    Reco.confirmClearSession();
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, rows, ['Doc','Line','Amount']);
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_L;
+  const last = sess.data[sess.data.length - 1];
+  window.__toasts = [];
+  Reco.setTag(last._id, 'Vendor', 'typed-on-a-row-the-big-load-minted');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return { n: n, busy: Reco.BUSY_ROWS, rows: sess.data.length, ms: Date.now() - t0,
+           lastPk: last._pk, stale: !!(Reco._keyStale||{}).TPL_L,
+           said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg) };
+})`;
+
+{
+  const LB = makeRoot('share-r11b');
+  const brLB = await startBridge(LB.root, PORT_R11B); procs.push(brLB.proc);
+  const ba = await openReco(browser, brLB);
+  await ba.page.evaluate(R11_SETUP + '()');
+  const bb = await openReco(browser, brLB);
+  await bb.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_L'; App.closeModal(); return true; })()`);
+  await ba.page.evaluate(R11_A_KEY + '()');
+  const bRef = await bb.page.evaluate(R11_B_REFUSED + '()');
+  check(bRef.stale === true, 'R11n premise: refused again, latch on again', bRef);
+  const big = await bb.page.evaluate(R11B_BIG_LOAD + '()', { timeout: 600000 });
+  note('R11 a load of BUSY_ROWS+1 rows after a Clear', big);
+  check(big.rows === big.n && big.lastPk === 'B' + (big.n - 1) + '-X',
+    'R11o premise: the big load really did re-mint every key under the folder\'s rule, through '
+    + 'the CHUNKED pass (n > Reco.BUSY_ROWS)', { rows: big.rows, lastPk: big.lastPk });
+  check(big.stale === false,
+    'R11p THE LATCH LIFTS ABOVE Reco.BUSY_ROWS TOO. The chunked pass passed `from`=0 for the '
+    + 'first chunk, so `from == null` was false and the one clear site never ran - the latch never '
+    + 'came off on a 100,001-row load and typing into a row THAT LOAD minted was refused for ever',
+    big.stale);
+  const bigVals = (diskJson(LB.root, 'reco/extraValueMaster.json') || {}).TPL_L || {};
+  check(!big.said.some(s => /identifies its rows/.test(s))
+        && String(((bigVals[big.lastPk] || {}).Vendor || {}).v || '')
+             === 'typed-on-a-row-the-big-load-minted',
+    'R11q (THE FILE) ...and typing into a row that load minted is not refused and reaches the '
+    + 'share under the key the folder computes',
+    { said: big.said, record: bigVals[big.lastPk] });
+  await ba.ctx.close(); await bb.ctx.close();
+}
+
+/* ---- R12. THE SIXTH DOOR, AND T-S10-18's FOUR. ------------------------
+   §18.9 and T-S10-16 excuse the Excel load-back as a machine path with "no
+   operator at the keyboard". Half of it is: ExcelLink's own APPLY is an
+   operator pressing Apply in the review dialog (apps/Reco.html:9222 is
+   `id="xlApplyBtn" onclick="ExcelLink.apply()"`), and its write at 9329 is
+   `Reco.applyEdits(tpl, sess, edits, { source:'excel', ... })` - the same
+   pk-keyed shared store, under the dead key, with NOTHING said. Measured:
+   scratchpad/dataloss/lift/logs/w1_before.txt, key E2.
+
+   The latch therefore goes on ExcelLink.apply and NOT on applyEdits, which
+   ingestData and the machine paths also use and which must never tell a
+   machine to press Load.
+
+   And T-S10-18's doors, measured in the same run: a group membership, a
+   comment and - the one the ticket records as unmeasured - AN ATTACHMENT,
+   whose linkedPks go into attachmentMaster, a PERSIST_KEYS file every
+   colleague parses at boot.
+
+   THE PLAN HANDED TO apply() IS SYNTHETIC, deliberately: the workbook round
+   trip is run_xllink_e2e's job (65 checks of it), and what is in question
+   here is the button's own path. The control below proves the synthetic plan
+   really does reach the store, so the refusal cannot be passing by accident
+   of a plan that was never going to write. */
+const R12_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_W'; t.name = 'Doors';
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                         { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1000; t.editableColumns = ['Line'];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [1,2,3,4,5].map(i => ({ Doc:'E'+i, Line:'L'+i, Amount:String(i*100) })),
+                        ['Doc','Line','Amount']);
+  App.closeModal(); AppState.activeRecoId = 'TPL_W';
+  const sess = AppState.recoSessions.TPL_W;
+  /* A membership filed WHILE THE KEYS ARE RIGHT, so the remove gesture has a
+     record of its own to fail to reach afterwards (R3n's shape). */
+  const g0 = Groups.create('TPL_W', 'VG0', 'filed while the keys were right');
+  Groups.addMembers('TPL_W', g0.id, [sess.data[3]._pk]);
+  const g1 = Groups.create('TPL_W', 'VG1', 'the add-to-group target');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { pks: sess.data.map(r => r._pk), g0: g0.id, g1: g1.id };
+})`;
+
+const R12_A_KEY = `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_W');
+    RecoTemplate._editing.additionalColumns.find(a=>a.name==='Ref').formula = 'CONCAT({Doc},"-X")';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch(e){} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+const R12_B_REFUSED = `(async function () {
+  window.__toasts = [];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_W'); RecoTemplate._editing.description = 'B was here';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch(e){} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { toasts: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           stale: !!(Reco._keyStale||{}).TPL_W };
+})`;
+
+/* `which` indexes sess.data; the plan is built from the app's own schema so
+   the descriptor, the canon and the coercion are the real ones. */
+const R12_XL_APPLY = `(async function (arg) {
+  const [which] = arg;
+  window.__toasts = [];
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  const sess = AppState.recoSessions.TPL_W;
+  const row = sess.data[which];
+  const S = XlSchema.build(tpl, sess, { scope:'template', includeHidden:true, showExtras:'all' });
+  const desc = S.byName.get('Vendor');
+  const liveRaw = XlSchema.currentValue(desc, row, Reco._rowWithExtras(tpl, sess, row), sess);
+  const cLive = XlSchema.canon(desc, liveRaw, 'reco').c;
+  ExcelLink._plan = {
+    tplId: 'TPL_W', exportId: '', createdAt: new Date().toISOString(), schema: S,
+    changes: [{ id:0, r:2, rid: row._id, pk: row._pk, row: row, col:'Vendor', desc: desc,
+                B: cLive, C: cLive, cLive: cLive, E: 'came-back-from-excel', liveRaw: liveRaw,
+                badges: [], key: row._id + '|Vendor', cat: 'change', tick: true }],
+    conflicts: [], problems: [], previouslyKept: [], info: { unchanged:0, alreadyApplied:0 },
+    pulledByPk: {}, file: {}, reRunOffset: false, head: { _synthetic: true } };
+  try { await ExcelLink.apply(); } catch (e) { window.__toasts.push({ kind:'threw', msg:String(e) }); }
+  ExcelLink._plan = null; ExcelLink._busy = false;
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return { said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg), pk: row._pk };
+})`;
+
+const R12_OTHER_DOORS = `(async function (arg) {
+  const [g0, g1] = arg;
+  const sess = AppState.recoSessions.TPL_W;
+  const out = {};
+  const door = async (name, fn) => { window.__toasts = [];
+    try { await fn(); } catch (e) {}
+    out[name] = (window.__toasts||[]).map(x=>x.kind+': '+x.msg); };
+  const sel = i => { sess.selectedRows = {}; sess.selectedRows[sess.data[i]._id] = true; };
+  const realPrompt = window.prompt;
+  window.prompt = m => /name/i.test(String(m)) ? 'VG2' : '';
+  try {
+    sel(0); await door('createGroup',  () => Reco.createGroupFromSelection(null));
+    sel(1); await door('addToGroup',   () => Reco.addSelectionToGroup(g1, null));
+    sel(3); await door('removeFromGroup', () => Reco.removeSelectionFromGroup(g0, null));
+  } finally { window.prompt = realPrompt; sess.selectedRows = {}; }
+  await door('comment', () => {
+    Comments.openAddDialog('TPL_W', sess.data[2]._pk);
+    const ta = document.getElementById('commentText');
+    if (ta) ta.value = 'posted-after-the-refusal';
+    Comments._confirmAdd();
+  });
+  await door('attachOne', async () => {
+    Timeline._showLinkDialog('TPL_W', sess.data[4]._pk,
+      new File(['hello'], 'note.txt', { type:'text/plain' }));
+    await Timeline._confirmUpload();
+  });
+  await door('attachBulk', () => Reco._bulkUploadToRow('TPL_W', sess.data[0]._pk,
+    [new File(['a'], 'a.txt', { type:'text/plain' }), new File(['b'], 'b.txt', { type:'text/plain' })]));
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})`;
+
+/* THE CONTROL, after a Clear and a load: every one of the six gestures works
+   normally and files under the FOLDER'S own key. */
+const R12_CONTROL = `(async function (arg) {
+  const [g1] = arg;
+  window.__toasts = [];
+  const asks = []; const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return true; };
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  try {
+    Reco.confirmClearSession();
+    RecoTemplate.open(tpl.id);
+    await Reco.ingestData(tpl, [1,2,3,4,5].map(i => ({ Doc:'E'+i, Line:'L'+i, Amount:String(i*100) })),
+                          ['Doc','Line','Amount']);
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_W;
+  const realPrompt = window.prompt;
+  window.prompt = () => 'VG3';
+  try {
+    sess.selectedRows = {}; sess.selectedRows[sess.data[0]._id] = true;
+    Reco.createGroupFromSelection(null);
+    sess.selectedRows = {}; sess.selectedRows[sess.data[1]._id] = true;
+    Reco.addSelectionToGroup(g1, null);
+    sess.selectedRows = {};
+  } finally { window.prompt = realPrompt; }
+  Comments.openAddDialog('TPL_W', sess.data[2]._pk);
+  const ta = document.getElementById('commentText');
+  if (ta) ta.value = 'posted-after-the-recovery';
+  Comments._confirmAdd();
+  Timeline._showLinkDialog('TPL_W', sess.data[4]._pk,
+    new File(['hello'], 'ok.txt', { type:'text/plain' }));
+  await Timeline._confirmUpload();
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  return { said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           pks: (sess.data||[]).map(r=>r._pk), stale: !!(Reco._keyStale||{}).TPL_W };
+})`;
+
+section(80, 'R12 T-S10-16/T-S10-18 — THE EXCEL LOAD-BACK\'S APPLY, THE GROUP, THE COMMENT AND THE ATTACHMENT');
+{
+  const W = makeRoot('share-r12');
+  const brW = await startBridge(W.root, PORT_R12); procs.push(brW.proc);
+  const wa = await openReco(browser, brW);
+  const made = await wa.page.evaluate(R12_SETUP + '()');
+  note('R12 the keys, and the group filed while they were right', made);
+  const wb = await openReco(browser, brW);
+  await wb.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_W'; App.closeModal(); return true; })()`);
+  await wa.page.evaluate(R12_A_KEY + '()');
+  const wRef = await wb.page.evaluate(R12_B_REFUSED + '()');
+  check(wRef.toasts.some(s => /Nothing was saved/.test(s)) && wRef.stale === true,
+    'R12 premise: B is refused for the key definition and the latch is on', wRef);
+
+  const xl = await wb.page.evaluate(R12_XL_APPLY + '([1])');
+  const vals = () => (diskJson(W.root, 'reco/extraValueMaster.json') || {}).TPL_W || {};
+  note('R12 the Excel review dialog\'s Apply', [xl.said, Object.keys(vals())]);
+  check(xl.said.some(s => /error/.test(s) && /Nothing was loaded back/.test(s)
+                          && /identifies its rows/.test(s)),
+    'R12a THE SIXTH DOOR: an operator pressing Apply in the Excel load-back review is refused in '
+    + 'its own words ("loaded back"). It said a green "Applied 1 change to 1 row(s)"',
+    xl.said);
+  check(!vals()[xl.pk],
+    'R12b (THE FILE) ...and nothing of that load-back reached reco/extraValueMaster.json under '
+    + 'the dead key ' + xl.pk, Object.keys(vals()));
+
+  const od = await wb.page.evaluate(R12_OTHER_DOORS + '([' + JSON.stringify(made.g0) + ','
+    + JSON.stringify(made.g1) + '])');
+  for (const k of Object.keys(od)) note('R12 door ' + k, od[k]);
+  const grp = () => Object.values((diskJson(W.root, 'reco/groupMaster.json') || {}).TPL_W || {})
+    .map(g => g.name + ':' + (g.members || []).join('/'));
+  const cmt = () => Object.values((diskJson(W.root, 'reco/commentMaster.json') || {}).TPL_W || {})
+    .map(c => (c.linkedPks || []).join('/'));
+  const att = () => Object.values((diskJson(W.root, 'reco/attachmentMaster.json') || {}).TPL_W || {})
+    .map(a => a.filename + ':' + (a.linkedPks || []).join('/'));
+  note('R12 SHARE groupMaster / commentMaster / attachmentMaster', [grp(), cmt(), att()]);
+  const DEAD = /(^|[:/])E[1-5]($|\/)/;
+  check(od.createGroup.some(s => /error/.test(s) && /Nothing was grouped/.test(s)),
+    'R12c the CREATE GROUP door is refused in its own verb ("grouped"). It said a green '
+    + '\'Group "VG2" created with 1 member(s)\'', od.createGroup);
+  check(!grp().some(s => /^VG2:/.test(s) && DEAD.test(s)),
+    'R12d (THE FILE) ...and reco/groupMaster.json holds no membership under a dead key', grp());
+  check(od.addToGroup.some(s => /error/.test(s) && /Nothing was grouped/.test(s))
+        && !grp().some(s => /^VG1:/.test(s) && DEAD.test(s)),
+    'R12e the SAME group action from the second entry point (add the selection to an existing '
+    + 'group) is refused too, and files nothing. T-S10-18 names three gestures; the rule is about '
+    + 'the ACTION', { said: od.addToGroup, members: grp() });
+  check(od.removeFromGroup.some(s => /error/.test(s) && /Nothing was removed/.test(s)),
+    'R12f the REMOVE FROM GROUP door is refused in its own words. It said a green "Removed 1 '
+    + 'member(s) from group" about a delete that cannot reach the record a colleague\'s load '
+    + 'would read', od.removeFromGroup);
+  check(grp().some(s => s === 'VG0:E4'),
+    'R12g (THE FILE) ...and the membership filed while the keys were still right is STILL THERE. '
+    + 'Measured before this round: it was deleted, leaving the colleague-visible copy behind',
+    grp());
+  check(od.comment.some(s => /error/.test(s) && /Nothing was commented/.test(s)) && !cmt().some(s => DEAD.test(s)),
+    'R12h the COMMENT door is refused in its own verb ("commented") and reco/commentMaster.json '
+    + 'holds no linkedPks under a dead key. It said a green "Comment posted"',
+    { said: od.comment, linked: cmt() });
+  check(od.attachOne.some(s => /error/.test(s) && /Nothing was attached/.test(s)),
+    'R12i THE ATTACHMENT DOOR, which T-S10-18 records as UNMEASURED and says not to assume '
+    + 'either answer for: MEASURED open (a green "Uploaded: note.txt" with linkedPks ["E5"]), and '
+    + 'now refused in its own verb ("attached")', od.attachOne);
+  check(!att().some(s => DEAD.test(s)),
+    'R12j (THE FILE) ...and reco/attachmentMaster.json - a PERSIST_KEYS file every colleague '
+    + 'parses at boot - holds no linkedPks under a dead key', att());
+  check(od.attachBulk.some(s => /error/.test(s) && /Nothing was attached/.test(s)),
+    'R12k ...and so is the multi-file drop onto a row, which is the same action by its second '
+    + 'entry point', od.attachBulk);
+
+  const ctrl = await wb.page.evaluate(R12_CONTROL + '([' + JSON.stringify(made.g1) + '])');
+  note('R12 CONTROL: after Clear Loaded Data and a load', [ctrl.pks, ctrl.stale]);
+  const xl2 = await wb.page.evaluate(R12_XL_APPLY + '([1])');
+  note('R12 CONTROL: the same Apply afterwards', [xl2.said, Object.keys(vals())]);
+  check(ctrl.stale === false && ctrl.pks.join() === 'E1-X,E2-X,E3-X,E4-X,E5-X',
+    'R12l CONTROL: the recovery lifts the latch and re-keys the session', ctrl);
+  check(!ctrl.said.some(s => /error/.test(s))
+        && grp().some(s => /^VG3:E1-X$/.test(s)) && grp().some(s => /^VG1:E2-X$/.test(s))
+        && cmt().some(s => s === 'E3-X') && att().some(s => s === 'ok.txt:E5-X'),
+    'R12m CONTROL: ...and all four doors then file under the folder\'s own key, with nothing said '
+    + 'in error', { said: ctrl.said, members: grp(), comments: cmt(), attachments: att() });
+  check(xl2.said.some(s => /Applied 1 change/.test(s))
+        && String(((vals()['E2-X'] || {}).Vendor || {}).v || '') === 'came-back-from-excel',
+    'R12n CONTROL: ...and so does the Excel load-back\'s Apply. This is also what proves the '
+    + 'synthetic plan really reaches the store, so R12a/R12b cannot be green by accident of a '
+    + 'plan that was never going to write', { said: xl2.said, record: vals()['E2-X'] });
+  await wa.ctx.close(); await wb.ctx.close();
+}
+
+/* ---- R13. THE MERGE QUESTION. ----------------------------------------
+   A7 was reported fixed and is not: _mergeShared collects the `both` list and
+   RecoTemplate._settleShared returns at `if (!said.length) return true;`
+   before _askMerged is ever called, so in the case the finding actually
+   measured - the ONLY difference is a field both sides changed - the
+   colleague is told nothing at all.
+   Beside it, two sentence defects the same question has: two fields that map
+   to ONE label are listed twice, and a rename onto a name another column had
+   in the same save goes through with a question that names the wrong
+   column. */
+const R13_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_M'; t.name = 'Merge';
+  t.columns = ['Invoice','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.primaryKeys = ['Invoice']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Invoice','Amount'];
+  t.description = 'first'; t.toleranceMode = 'none';
+  RecoTemplate.addExtraCol(); t.additionalColumns[0].name = 'Vendor';
+  RecoTemplate.addExtraCol(); t.additionalColumns[1].name = 'Status';
+  RecoTemplate.addExtraCol(); t.additionalColumns[2].name = 'Legacy';
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_M');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [1,2,3].map(i => ({ Invoice:'INV-'+i, Amount:String(i*100) })),
+                        ['Invoice','Amount']);
+  App.closeModal(); AppState.activeRecoId = 'TPL_M';
+  const sess = AppState.recoSessions.TPL_M;
+  const V = ['Acme','Bosch','Cummins'], L = ['L1','L2','L3'];
+  for (let i = 0; i < 3; i++) {
+    await Reco.applyEdits(tpl, sess, [{row:sess.data[i],col:'Vendor',value:V[i]}], {source:'grid',trusted:true});
+    await Reco.applyEdits(tpl, sess, [{row:sess.data[i],col:'Legacy',value:L[i]}], {source:'grid',trusted:true});
+  }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return (tpl.additionalColumns||[]).map(a=>a.name);
+})`;
+
+const R13_SAVE = `(async function (arg) {
+  const [src] = arg;
+  window.__toasts = [];
+  const asks = []; const real = window.confirm;
+  window.confirm = m => { asks.push(String(m)); return true; };
+  try {
+    RecoTemplate.edit('TPL_M');
+    (new Function('t', src))(RecoTemplate._editing);
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch(e){} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  const t = AppState.recoTemplates.find(x=>x.id==='TPL_M') || {};
+  const sess = AppState.recoSessions.TPL_M;
+  const onScreen = {};
+  (t.additionalColumns||[]).forEach(ac => {
+    onScreen[ac.name] = (sess.data||[]).map(r => String(Reco._extraValueForRow(t, sess, r, ac)));
+  });
+  return { asks, toasts: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+           desc: t.description, extras: (t.additionalColumns||[]).map(a=>a.name), onScreen };
+})`;
+
+const R13_OPEN = `(function () {
+  const t = AppState.recoTemplates.find(x => x.id === 'TPL_M');
+  RecoTemplate.open(t.id); AppState.activeRecoId = 'TPL_M'; App.closeModal(); return true;
+})`;
+
+section(81, 'R13 T-S10-7/A7 — THE MERGE QUESTION: WHAT IT SAYS NOTHING ABOUT, AND WHAT IT SAYS TWICE');
+{
+  const M = makeRoot('share-r13a');
+  const brM = await startBridge(M.root, PORT_R13A); procs.push(brM.proc);
+  const ma = await openReco(browser, brM);
+  await ma.page.evaluate(R13_SETUP + '()');
+  const mb = await openReco(browser, brM);
+  await mb.page.evaluate(R13_OPEN + '()');
+  await ma.page.evaluate(R13_SAVE + '(["t.description = \'A was here\';"])');
+  const r = await mb.page.evaluate(R13_SAVE + '(["t.description = \'B was here\';"])');
+  const shared = () => ((diskJson(M.root, 'reco/recoTemplates.json') || [])
+    .find(t => t && t.id === 'TPL_M') || {});
+  note('R13 every question B was asked', r.asks.map(m => m.slice(0, 200)));
+  note('R13 the description on the share afterwards', shared().description);
+  check(shared().description === 'B was here',
+    'R13 premise: the editor still wins. That is the settled decision and not the finding - the '
+    + 'SILENCE is', shared().description);
+  const both = r.asks.find(m => /both changed/.test(m)) || '';
+  check(/both changed/.test(both) && /the description/.test(both),
+    'R13a A7: B IS TOLD IT HAS SAVED OVER A COLLEAGUE. The `both` list was collected in '
+    + '_mergeShared and thrown away by `if (!said.length) return true;`, so in the case the '
+    + 'finding measured - the only difference is a field both sides changed - B was told nothing '
+    + 'at all and the one person who could go and ask did not know there was anything to ask',
+    r.asks);
+  check(both && !/Those are being kept AS THE FOLDER HAS THEM/.test(both),
+    'R13b THE GATE A7 ASKS FOR: the sentence is put when there is no KEPT field in the question, '
+    + 'so the question must not claim to be keeping anything. A bulleted list of nothing, under '
+    + '"those are being kept as the folder has them", is how an operator learns to click through '
+    + 'this dialog', both.slice(0, 300));
+  await ma.ctx.close(); await mb.ctx.close();
+}
+{
+  const M2 = makeRoot('share-r13b');
+  const brM2 = await startBridge(M2.root, PORT_R13B); procs.push(brM2.proc);
+  const m2a = await openReco(browser, brM2);
+  await m2a.page.evaluate(R13_SETUP + '()');
+  const m2b = await openReco(browser, brM2);
+  await m2b.page.evaluate(R13_OPEN + '()');
+  await m2a.page.evaluate(R13_SAVE + '(["t.toleranceMode = \'value\'; t.toleranceValue = 1000;"])');
+  const r2 = await m2b.page.evaluate(R13_SAVE + '(["t.description = \'B was here\';"])');
+  const q = r2.asks.find(m => /Someone else changed this template/.test(m)) || '';
+  note('R13 the merge question', q.slice(0, 300));
+  check(/the offset tolerance/.test(q),
+    'R13c premise: a colleague changed toleranceMode AND toleranceValue, and the question names '
+    + 'the offset tolerance', q.slice(0, 200));
+  check((q.match(/the offset tolerance/g) || []).length === 1,
+    'R13d ...ONCE. RecoTemplate._sayField maps both fields to one label, so the list the operator '
+    + 'has to read said "the offset tolerance" twice. Deduplicated where the question is built, so '
+    + 'the next pair of fields that share a label cannot bring it back',
+    (q.match(/the offset tolerance/g) || []).length);
+  await m2a.ctx.close(); await m2b.ctx.close();
+}
+{
+  const M3 = makeRoot('share-r13c');
+  const brM3 = await startBridge(M3.root, PORT_R13C); procs.push(brM3.proc);
+  const m3 = await openReco(browser, brM3);
+  await m3.page.evaluate(R13_SETUP + '()');
+  await m3.page.evaluate(R13_OPEN + '()');
+  const vals = () => (diskJson(M3.root, 'reco/extraValueMaster.json') || {}).TPL_M || {};
+  const valOf = col => ['INV-1','INV-2','INV-3'].map(k => String(((vals()[k] || {})[col] || {}).v || ''));
+  note('R13 the share before', { Vendor: valOf('Vendor'), Legacy: valOf('Legacy') });
+  const r3 = await m3.page.evaluate(R13_SAVE + '(['
+    + JSON.stringify("t.additionalColumns = t.additionalColumns.filter(a=>a.name!=='Legacy');"
+      + "t.additionalColumns.find(a=>a.name==='Vendor').name='Legacy';") + '])');
+  note('R13 every question asked', r3.asks.map(m => m.slice(0, 120)));
+  note('R13 what was said', r3.toasts);
+  note('R13 the columns afterwards / what the grid reads', [r3.extras, r3.onScreen]);
+  note('R13 the share afterwards', { Vendor: valOf('Vendor'), Legacy: valOf('Legacy') });
+  check(r3.toasts.some(s => /error/.test(s) && /another added column already had/.test(s)),
+    'R13e A RENAME ONTO A NAME ANOTHER ADDED COLUMN HAD IN THE SAME SAVE IS REFUSED, and the '
+    + 'sentence names both columns. Measured before this round: deleting "Legacy" and renaming '
+    + '"Vendor" to "Legacy" in one save asked only \'Removing "Vendor" (3) also deletes 3 '
+    + 'value(s)\' - naming the column being RENAMED - and went through green',
+    r3.toasts);
+  check(r3.extras.join() === 'Vendor,Status,Legacy'
+        && valOf('Vendor').join() === 'Acme,Bosch,Cummins'
+        && valOf('Legacy').join() === 'L1,L2,L3',
+    'R13f (THE FILE) ...and nothing was saved: both columns and both sets of values are exactly '
+    + 'as they were. A record is filed against the column NAME, so one save cannot empty a name '
+    + 'and refill it - and the measured outcome was the renamed column showing the DELETED '
+    + 'column\'s values while Vendor\'s were gone',
+    { extras: r3.extras, Vendor: valOf('Vendor'), Legacy: valOf('Legacy') });
+  await m3.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

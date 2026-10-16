@@ -6,11 +6,11 @@ is a rumour.
 
 Four are worth promoting above the rest:
 
-- **T-S10-18** — the same harm as T-S10-16 (now closed), in the two doors its decision deliberately
-  did not reach: after the key refusal the **group** door files membership and the **comment** door
-  files a comment under the dead row key, both under a green toast, in two more shared masters
-  every colleague parses at boot. Measured, not predicted — `close/other_doors.txt`. It is now the
-  smallest remaining instance of the thing that round exists to stop.
+- **T-S10-17** — `AppState.flush()` can now wait on a template settle, so the three rules that
+  keep that safe are invariants nothing enforces. It is here because of how it fails: not a wrong
+  number and not a lost value, but a **HANG** — `run_store_e2e` stopped dead at section [28] for
+  fourteen minutes and a checkpoint was committed in that state. The next engineer to make a settle
+  path wait for a write will rediscover it the same way.
 
 - **T-S10-10** — the ledger merge is atomic inside ONE page and not BETWEEN pages. Two people
   pressing Generate within one read-write cycle of each other can still lose a journal entry, and
@@ -822,13 +822,17 @@ reload. Measured: B did exactly what the sentence said, typed into `Vendor`, the
 no toast anywhere. The round had traded a silent revert of a colleague's key rule for a silent loss
 of this operator's typing. Fixed with a per-window latch (`Reco._keyStale`, never on the session so
 it cannot be serialised to a colleague who has nothing wrong), the refusal's new sentence about the
-rows on screen, and typing doors that refuse with a sentence until the rows are read again; cleared
-by `Reco._mintKeysSync`, which every re-keying route goes through. `run_store_e2e` **[71]**, with a
-control that typing works normally after a reload — a latch, not a dead end. **The refusal itself
-stands, and T-S10-7's general merge must not be allowed to swallow it:** a key change is not a
-field, it decides what every other record is filed under. **T-S10-16 (CLOSED) took the latch from
-three doors to every operator gesture that writes under a row key; T-S10-18 is what measurement
-says it still leaves.**
+rows on screen, and typing doors that refuse with a sentence until the rows are read again; lifted
+by `Reco._keyStaleLift` once no row on screen is left under the old rule. `run_store_e2e` **[71]**
+and **[79]**, with a control that typing works normally after Clear Loaded Data and a load — a
+latch, not a dead end. (This paragraph said "cleared by `Reco._mintKeysSync`, which every re-keying
+route goes through" until round 5. `_mintKeysSync` has one caller, `Reco.ingestData`, and clearing
+the latch there lifted it for rows the upload had never touched — handover §18.10.)
+**The refusal itself stands, and T-S10-7's general merge must not be allowed to swallow it:** a key change is not a
+field, it decides what every other record is filed under. **T-S10-16 took the latch from three
+doors to every operator gesture that writes under a row key, and round 5 fixed the LIFT, which was
+coming off while the rows it guarded were still dead-keyed; T-S10-18 (also CLOSED) was the group,
+comment and attachment doors.**
 
 **CLOSED, AND AS A REFUSAL RATHER THAN A MERGE.** T-S10-7's general merge would have kept the
 folder's key definition silently, and the share would even have ended with one scheme — but B's
@@ -2400,7 +2404,15 @@ green in all 8. The reviewer's `p1_virt.mjs` / `p1b_line249.mjs` are the mechani
 
 ---
 
-## T-S10-16  ~~A4's latch guards three typing doors; `applyCorrection` and `manualOffset` write under the same dead key and are not latched~~  **FIXED** — the latch is now asked per ACTION
+## T-S10-16  ~~A4's latch guards three typing doors; `applyCorrection` and `manualOffset` write under the same dead key and are not latched~~  **FIXED** — the latch is asked per ACTION, and round 5 fixed the LIFT
+
+> **REOPENED BY THE VERIFIER AND CLOSED AGAIN IN ROUND 5.** The per-action latch below is right and
+> every door it names is green. **The latch itself lifted too early**, which made all of it
+> reachable again by the route the refusal's own sentence prescribed, and **above
+> `Reco.BUSY_ROWS` it never lifted at all**. Three more doors were open (the Excel load-back's
+> Apply, and T-S10-18's). The gate claims in this ticket are therefore true of what they measure
+> and were **not enough**: see handover **§18.10** and `run_store_e2e` **[79]–[81]**. The counts
+> below are the round-4 ones; the suite is now **638**.
 
 **Where** `apps/Reco.html` — `Reco._keyStaleBlock` is consulted by `Reco.setTag`,
 `Reco.setOverride` and `Reco.revertOverride`. It is **not** consulted by `Reco.applyCorrection`
@@ -2445,9 +2457,13 @@ Control: after a reload both work normally and write under the folder's own key.
 **CLOSED — AS A PER-ACTION LATCH AT THE DOORS, NOT AS A RULE INSIDE `Reco.rowKey`.** Handover
 §18.9 carries the argument; the short version is that `rowKey` is a key **reader** — the renderer
 and every badge, the status filters, `runAutoOffset`'s restore, the drift check, `Groups.resolvePk`
-— and that **the machine paths go through it**: the Excel load-back and `ingestData` have no
-operator at the keyboard, so the Load sentence is addressed to nobody, which is why `applyEdits`
-was not the chokepoint for B4/B6 either. It also cannot carry four verbs, and it runs once per row
+— and that **the machine path goes through it**: `ingestData` has no operator at the keyboard, so
+the Load sentence is addressed to nobody, which is why `applyEdits` was not the chokepoint for
+B4/B6 either. (**This sentence said "the Excel load-back AND `ingestData`" and round 5 corrected
+it.** `ExcelLink.apply()` is the Apply button of the review dialog, with an operator pressing it,
+and it was filing under the dead key behind a green *"Applied 1 change to 1 row(s)"*. It is latched
+at `ExcelLink.apply`, not at `applyEdits`. The argument against `rowKey` stands on `ingestData`
+alone.) It also cannot carry four verbs, and it runs once per row
 per render. So `Reco._keyStaleBlock` stays the one place the rule lives and each **action** asks it
 at **every** entry point, with its own verb: *corrected* (`applyCorrection`), *offset*
 (`manualOffset`, `bulkMarkOffset`, `offsetSelected`, `_xlOffsetSelectedRows`), *unmarked*
@@ -2470,8 +2486,19 @@ new value-and-file assertions **all red** on the tree before it (`close/store_fa
 again through `APP_FILE=<f9329e7 Reco.html>` (`close/store_mutation.txt`). Every other suite is at
 its baseline.
 
-**WHAT IT LEAVES, MEASURED: T-S10-18.** The group and comment doors write pk-keyed shared masters
-from a row on screen as well, and still go through under a green toast.
+**WHAT IT LEFT, AND WHAT ROUND 5 DID WITH IT.** `R3s–R3v` — the control that says the latch lifts —
+reads `sess.data[length-2]` and `[length-1]`, i.e. **only the rows the reload minted**, so it could
+not see that the latch had come off while the rest of the session was still dead-keyed. Measured:
+after the refusal the operator presses the only file input the UI has, which **appends**, and
+`Reco.setTag` on a row that was already on screen says **nothing** while `extraValueMaster` gains
+the dead key. Above `Reco.BUSY_ROWS` the chunked pass passes `from`=0 for the first chunk, so the
+clear site never ran and the latch **never came off** on a 100,001-row load. And a load the operator
+**declined** lifted it too, because the clear was above `Reco._keyIngestCheck`. All three are one
+site now (`Reco._keyStaleLift`, called after the concat), the refusal names **Clear Loaded Data and
+then the load** instead of "press Load", and **[79]** R11d fires every door at an **OLD** row —
+the gate this ticket's own control could not be. Also closed with it: the **Excel load-back's
+Apply** (this ticket's Fix paragraph argued it away as a machine path — it is the Apply button in
+the review dialog) and **T-S10-18**'s group, comment and attachment doors. Handover **§18.10**.
 
 ---
 
@@ -2521,7 +2548,17 @@ it resolves and that `RecoTemplate._settleOwed` is back to 0. Mutation: put
 
 ---
 
-## T-S10-18  The group and comment doors still file under a dead row key after the key refusal
+## T-S10-18  ~~The group and comment doors still file under a dead row key after the key refusal~~  **FIXED** in round 5, with the attachment door measured
+
+> **CLOSED.** All three gestures are latched (*grouped* / *removed from the group*), so is
+> `Comments._confirmAdd` (*commented*), and so is the door this ticket recorded as **unmeasured**:
+> the **attachment** one (*attached*), at both of its entry points — the Attach File dialog's
+> Upload and the multi-file drop onto a row. It was measured OPEN first, exactly as this ticket
+> asked: a green *"Uploaded: note.txt"* with `linkedPks ["E5"]` in `reco/attachmentMaster.json`
+> while the folder's rule computed `E5-X`. The remove arm was measured too, and it was the unmark's
+> shape: a green *"Removed 1 member(s) from group"* that **deleted** the membership filed while the
+> keys were still right and left the colleague-visible one behind. The gate is `run_store_e2e`
+> **[80]** R12c–R12n, files and values, with the reload control. Handover **§18.10**.
 
 **Where** `apps/Reco.html` — `Reco.createGroupFromSelection`, `Reco.addSelectionToGroup`,
 `Reco.removeSelectionFromGroup` (all three take their keys from `Reco._selectedPks`, i.e.
@@ -2564,3 +2601,72 @@ door is refused with its own sentence and that `reco/groupMaster.json` / `reco/c
 hold **nothing** under the dead key — files and values, not toasts — with the reload control that
 both work normally afterwards under the folder's own key. `close/q8_otherdoors.mjs` is the
 reproduction, already written.
+
+**DONE, in section [80]** (`PORT_R12` 21382), with `reco/attachmentMaster.json` read as well and a
+control that all four doors — and the Excel load-back's Apply — file under the folder's own key
+afterwards. The reproduction this round used is `scratchpad/dataloss/lift/probes/w1_doors.mjs`
+(`logs/w1_before.txt` is the before, 1 as-expected / 7 not). Only the **row** branch of the comment
+and attachment dialogs is latched: a group-linked record is filed against the group's id and not
+against a row key.
+
+---
+
+## T-S10-19  A day file written before a key change hands its OLD keys back to any window, with no latch anywhere
+
+**Where** `apps/Reco.html` — `Reco.loadVersionedFile` hydrates each row with `_pk: r._pk` straight
+out of `reco_data/<folder>/<MMM-YY>/<DD>.csv`. The day file is written by the upload that minted
+those keys, so a file written before a colleague changed the key definition carries the OLD keys for
+ever. `Reco._keyStale` cannot help: it is per window and it is about **this** window's refused save,
+and this state is reachable with no refusal in the story at all — including by the colleague who
+made the change.
+
+**What** Measured, `scratchpad/dataloss/lift/probes/w4_dayfile.mjs` (port 21386,
+`logs/w4_before.txt`), AFTER a correct recovery, i.e. with the latch down and every row on screen
+keyed by the folder's rule:
+
+| | measured |
+|---|---|
+| B uploads `K1/K2/K3`, A changes the key rule, B is refused | latch ON |
+| B does what the refusal says — Clear Loaded Data, then load | rows `K1-X/K2-X/K3-X`, latch **OFF**, correctly |
+| B presses **Open Existing** and reopens today's day file | rows `["K1","K2","K3","K1-X","K2-X","K3-X"]` — **three rows on screen carrying the old keys**, latch still off |
+| B types into the `K1` row (`Reco.setTag`) | **nothing said**, and `reco/extraValueMaster.json` gains **`K1`** |
+| what the screen shows for those rows' key cell | `K1`, `K2`, `K3` — the **frozen** value, so it looks ordinary |
+| `Reco.keyDriftCount(tplId)` | **3** — the drift check already knows about exactly those three rows |
+
+So the answer to "can a row that was on screen before the refusal be written under its dead key by
+any gesture" is **no through any latched gesture while the latch is up** (sections [71], [79], [80]
+measure twelve of them plus the Excel Apply and T-S10-18's four), and **yes by this route**, which
+is not a latch hole: it is what a key change does to the files already on the share.
+
+**Why it is only a ticket** It is the state **#24's own confirm warns about** when the key is
+changed — *"Rows saved before this change will no longer match their version history, manual
+offsets, corrections, groups, comments, and the values typed into added columns"* — so it is a
+documented consequence rather than a new silence, and the three remedies are all bigger than this
+round and pull against each other:
+
+* **re-mint on load** changes every reopened row's identity behind the operator's back, which is the
+  argument §18.8 gives for a latch rather than a re-mint in the first place, and it would detach the
+  day file's rows from the records a colleague has filed under the old keys since;
+* **refuse to open the file** locks a day's work out of the app over a key change somebody else
+  made;
+* **mark the rows and refuse the write** is the per-row latch §18.10 rejects — and it is the only
+  one of the three that could be right here, because `Reco.keyDriftCount` shows the mechanism to
+  carry the mark already exists (3 of 6 rows, with no extra pass).
+
+Any of them needs its own measurement of what happens to the records already filed under both
+schemes, which is the part no round has done.
+
+**Fix** The one that fits the house rule ("a gesture asks the question when its key comes from a row
+on screen and it writes a pk-keyed store the folder shares"): give the DRIFT check a write-side arm.
+`Reco._keyFrozenPart` already compares the frozen component against the recomputed one per row, and
+`Reco._noteKeyDrift` already counts the rows where they differ; a row whose key has drifted is
+exactly a row whose `_pk` the folder's rule no longer computes, so the row-level writers can ask
+**per row** rather than per session, with the same sentence and the existing verbs. That also closes
+the case this ticket is about for a colleague who never saw a refusal.
+
+**Test** `w4_dayfile.mjs` as a suite section on this round's port block: after a refusal and a
+correct recovery, reopen the day file and assert that a row carrying a pre-change key is refused at
+every row-level door and that `reco/extraValueMaster.json` gains nothing under it — with the control
+that the rows the recovery minted still write normally, and that `Reco.keyDriftCount` is the premise
+rather than the assertion.
+
