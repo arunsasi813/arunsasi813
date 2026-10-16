@@ -30,7 +30,8 @@ Also still open from earlier rounds, listed here so there is one place to look:
 - The general `Store.save` merge for every `PERSIST_KEY`, now that the one merge-write primitive
   exists. Three named callers, not a sweep.
 - The Excel export's dropdown list is built from `d.options` only, so a carried or overridden
-  value outside the option list exports as a cell outside its own list.
+  value outside the option list exports as a cell outside its own list. **Now reachable**: #30
+  ships carried dropdown values, and the grid already keeps and marks a stale option.
 - Context columns on the Master List of Corrections, modelled on `openGroupDetails`.
 - A sticky `right: 0` Apply cell in the correction table.
 
@@ -933,7 +934,17 @@ NOT painted when nothing has drifted (today it is, correctly, because the value 
 recovered).
 
 
-## T-24R2-6  The AEG editor's input-column RENAME is the one arm of S11 still ungated
+## T-24R2-6  (LANDED with #26) The AEG editor's input-column RENAME is the one arm of S11 still ungated
+
+**LANDED in the same commit as #26's `allowOverride` box, which is what this ticket asked for.**
+`aeg.inputColumns` joined the existing arm of `RecoTemplate._exclusiveRoleConflict` (one arm
+extended, not a second gate), `AEG.updateInputCol` asks it when the NAME changes and the name
+input moved from `oninput` to `onchange`, and `AEG.selectInputCol`'s two inline writes
+(`currencyColumn`, `valueColumn`) now go through `AEG.setEditingPath` — the one writer that asks.
+`currencyColumn` and `valueColumn` are covered transitively, because both are the NAME of an
+input column. Test: `run_store_e2e` O14 (the refusal, the unchanged name, and the control that an
+ordinary rename is silent). The text below is kept for the reasoning.
+
 
 **Where** `apps/Reco.html` `AEG.updateInputCol` and `AEG.selectInputCol` (which writes
 `AEG.editingTemplate.<key>=this.value` inline) against `AEG._roleClash`, which round 2 added and
@@ -947,7 +958,10 @@ inline (`currencyColumn`, `valueColumn`).
 
 **Why it is only a ticket** With override and carry-forward not built, the matrix refuses
 NOTHING on those paths today — `_exclusiveRoleConflict` returns null for every rename, so the
-gate would be a call that cannot fire. `updateInputCol` is also called per keystroke, so a
+gate would be a call that cannot fire. **STILL TRUE AFTER THE S10 STORE ROUND:** phase 1 added no
+flag, so `ac.allowOverride` and `ac.carryForward` are falsy on every template that exists. This
+becomes live work the moment either flag can be set — i.e. in the SAME commit as #26's
+`allowOverride` box or #30's `carryForward` box, not after it. `updateInputCol` is also called per keystroke, so a
 refusal there needs debouncing or a move to `onchange` before it can toast anything. #26 and
 #30 are the tickets that make those roles exist, and the function they are told to write into is
 now whole.
@@ -959,3 +973,233 @@ pass through the gate that already exists.
 **Test** With an override-enabled column in a linked reconciliation, rename an AEG input column
 onto it and assert the refusal sentence and that the name is unchanged; and the control, that an
 ordinary rename is silent.
+
+# From the S10 store round (#26 / #30 phase 1)
+
+## T-S10-1  `Store.mergeWrite` is built but `entryHistory` and `docNumberMaster` still blind-write
+
+**Where** `apps/Reco.html` `Store.mergeWrite` (built, three rules, used by the store),
+`AppState.flush` / `AppState.saveKeys` (the whole-file writers), and the entry-history write path
+around `if (Store.readOnlyKeys.entryHistory) {`.
+
+**What** PLAN2's S13 names **three** callers of the read-merge-write primitive: the new values
+store, `entryHistory` at its one pre-write re-read site, and `docNumberMaster` — the last of which
+is what would let the reverse feature delete its "residual risk, named" paragraph instead of
+documenting it. Phase 1 built the primitive and converted **only the values store**, because that
+is the key step 6 enumerates and the only one with NO second copy of its data anywhere.
+
+**Why it is only a ticket** `entryHistory` and `docNumberMaster` are in `PERSIST_KEYS`, so they
+are written by `AppState.flush` as whole files on a timer that is not the store's. Converting them
+means taking them OUT of `PERSIST_KEYS` (or teaching `flush` to route them), which changes when
+and how the ledger's own records reach the share — a change to the money path, with its own
+review, not a line in a plumbing commit. The hazard it leaves is the one the reverse spec already
+names: two clients generating entries minutes apart can lose one client's `docNumberMaster`
+entries, and the later writer's `entryHistory` can drop an entry the earlier one added.
+
+**Fix** Remove the two keys from `PERSIST_KEYS`, assign them in `AppState.load` as the store is,
+and route every write through `Store.mergeWrite(key, mutate)` with `depth: 0` (their top-level
+values are arrays and plain maps, so per-template granularity is the right unit). Delete the
+reverse feature's residual-risk paragraph in the same commit.
+
+**Test** Two browser contexts on one share: A generates an entry, B (whose in-memory history
+predates it) generates another, and both entries plus both document numbers are in the files
+afterwards. The control: the same test against the build before, which loses one.
+
+## T-S10-2  The reverse dialog still says a tag un-stamp "affects your session only"
+
+**Where** `apps/Reco.html`, the reversal explanation at `if (st.kind === 'tag' || st.kind ===
+'sessionOnly') {` — *"is not a template column, so the stamp was never written to the shared
+history in the first place … Clearing it affects your session only."*
+
+**What** The sentence is still TRUE of the stamp — the stamp is a plain row property and no `Cn`
+row is written for it — but it is now misleading about what is revealed underneath. Before S10 the
+value the un-stamp uncovered was in `sess.manualTags` and really was this session's alone. It is
+now a record in `reco/extraValueMaster.json` on the shared folder, so what the operator sees after
+the reverse is **the team's** value for that key, which a colleague may have typed.
+
+**Why it is only a ticket** Nothing is wrong: the reverse writes nothing to the store, and
+`run_reverse_e2e` pins the behaviour (the row property goes, the stored value is the value again).
+It is a wording change on a dialog, and the right wording depends on #26's Overrides panel and
+#30's Values panel existing, so that the sentence can point somewhere.
+
+**Fix** When the post-entry column resolves to a store-served added column
+(`Reco._storeEligible(tpl, col)` and a non-null `Reco.storeKey`), say instead that the column goes
+back to the value stored against the row key, naming who typed it (`rec.by`, `rec.at`).
+
+**Test** A reversal on a template whose post-entry column is an added column with a stored value
+typed by another user: assert the dialog names that user and the stored value, and the control,
+that a template whose post-entry column is a file column is worded as it is today.
+
+## T-26-1  An overridden cell has no mark in the in-app Excel view
+
+**Where** `apps/Reco.html` `Reco._xlRender` / `Reco._xlJssColumn`, against the grid's
+`.ov-cell.ov-set` accent and the `↺` revert control in `Reco._renderExtraCell`.
+
+**What** In the grid an overridden cell is accented, carries a `title` naming who overrode it and
+what the formula said, and has a revert control beside it. In the Excel view the same cell is an
+ordinary editable cell: the number is right (it comes through the same ladder) but nothing says it
+is a person's value rather than the formula's, and there is no way to revert from there.
+
+**Why it is only a ticket** The view is a spreadsheet surface, and the decision list for #26 asks
+for the override to be *listed* (the Overrides panel) and *reverted* (the grid and the panel),
+both of which it is. Adding a per-cell decoration means a `_xlRender` branch and a style, and
+`_xlRender` is on the hot path for every visible cell of a 200k-row sheet — measured work, not a
+line. Nothing is wrong on screen today; something is merely unsaid.
+
+**Fix** In `_xlRender`, when `C.S.byName.get(col).writeTo === 'override'` and
+`Reco._extraOverride(...)` answers for the row, add a class (reuse `.ov-set`) and the same title
+the grid builds. Reuse `Reco.badgeIndex`-style per-pass memoisation rather than asking per cell.
+
+**Test** With an override on a row, open the Excel view and assert the cell carries the class and
+the title; and the control, that a cell with no override carries neither.
+
+## T-26-2  The column-header override count only refreshes from the grid's own two handlers
+
+**Where** `apps/Reco.html` `Reco._refreshOverrideBadge`, called by `Reco._afterOverride`
+(`setOverride` / `revertOverride`), against the `<th>`'s `.ov-count` span.
+
+**What** The count in the column header is patched after an override typed **in the grid**. An
+override applied from the in-app Excel view, from an Excel-link load-back, or by a colleague whose
+write arrives in the merged file leaves that number stale until the next full render.
+
+**Why it is only a ticket** The number is an honest map-key count with a tooltip that says it may
+include keys that are not loaded, so a stale one is wrong in the same direction as the thing it
+already admits to; and `_repaintRow` swaps one `<tr>` while `_refreshVirtBody` writes only
+`tbody.innerHTML`, so there is no existing path that touches the `<thead>` at all. The right fix
+is the one PLAN.md names — `_repaintRow` patches the one `<th>` as well — which is a change to the
+shared repaint path and belongs with #25's render work, not inside #26.
+
+**Fix** Give `_repaintRow` an optional column name, patch that `<th>` through
+`_refreshOverrideBadge`, and call it from `_xlApply`'s resolution and from `ExcelLink`'s apply.
+
+**Test** Type an override in the Excel view and assert the grid's `<th>` count moved without a
+navigate.
+
+## T-26-3  Turning the override box OFF leaves its records applying, with no way to clear them in bulk
+
+**Where** `apps/Reco.html` `Reco._extraOverride` (which does not consult `ac.allowOverride`),
+`Reco._overrideColumn` (which does), and the Overrides panel's per-row Revert.
+
+**What** A record written while the box was ticked keeps being read if the box is later cleared —
+deliberately: the value is still a decision somebody made about that invoice, and silently
+recomputing a number a preparer signed off is worse. The panel marks such a column **box off** and
+each record can be reverted one at a time. What is missing is "clear every override on this
+column", which is what a template owner who just turned the box off actually wants.
+
+**Why it is only a ticket** It is a bulk action over shared records, so it needs a confirm naming
+the count and the column, and it belongs beside #30's Values panel (where the same shape is needed
+for typed values) rather than as a second one-off dialog.
+
+**Fix** With the Values panel: a per-column row with its record count and a "clear all for this
+column" action writing through `Reco._dropExtraValueCols` (which already exists and already goes
+through S13).
+
+**Still open after #30.** The Values panel landed (`Reco.openValuesModal`) with per-record Remove
+and "remove all for keys not in the current data", but **not** the per-column clear-all this
+ticket asks for — that is a different axis (every key, one column) and it applies equally to a
+carry column whose box was turned off. `Reco._dropExtraValueCols` is still the primitive to use.
+
+**Test** Two overrides on one column, box turned off, clear-all run: both records gone, a record
+on ANOTHER column of the same key untouched, and the file written once.
+
+## T-30-1  A spreadsheet-mode fill drag over an added column bypasses the store
+
+**Where** `apps/Reco.html` `Reco._ssCommitFill`, which does `row[col] = srcVal;` for every column
+in the dragged rectangle, and `Reco._ssVisibleCols()`, which reads `thead th[data-col]` — and that
+includes **added** columns.
+
+**What** A fill drag over a `custom` or `dropdown` added column writes the value **onto the row**.
+It therefore bypasses `applyEdits`, bypasses `Reco._setExtraTyped` and bypasses `sess.manualTags`.
+The value does show, because the ladder's dropdown/custom tail gives a row value priority — but it
+is not in the store, so it does not survive a reload, it is not carried forward, it is not in the
+Values panel, and a colleague never sees it. The same drag over a template column writes a `Cn`
+row and is durable, so two cells that look identical behave differently.
+
+**Why it is only a ticket** It is pre-existing (it predates S10 and #30) and it is on the money
+path: `Versioning.appendChangesBatch` is called with those rows, so changing what `_ssCommitFill`
+writes changes what reaches `reco_data/`. It is a write-path change with its own review, not a
+line inside a UI commit — the same reason the AEG source-row loop keeps its own copy of the ladder.
+
+**Fix** Split the loop by descriptor: a cell whose `XlSchema` descriptor has `writeTo:'tag'` (or
+`'override'`) collects into an `applyEdits` batch with the cached schema, exactly as a paste in the
+Excel view does; only `writeTo:'row'` cells keep today's direct assignment and the
+`appendChangesBatch` call. The store write is then one debounced merge write for the whole drag.
+
+**Test** Fill a `custom` added column down 50 rows on a keyed template: 50 records in
+`AppState.extraValueMaster`, **one** `write_file` for `reco/extraValueMaster.json`, nothing written
+onto any row for that column, and no new `Cn` row. Plus the control: the same drag over a template
+column still writes its `Cn` rows.
+
+## T-30-2  The in-app Excel view does not mark a carried cell, and cannot confirm one
+
+**Where** `apps/Reco.html` `Reco._xlRender` / `_xlApply`, against `Reco._extraCarried` and
+`Reco.setTag`'s `{force:true}` branch.
+
+**What** A carried value reaches the Excel view through the same ladder, so the number is right and
+the cell is editable — but there is no accent, no audit title and no `✓`, and because `_xlApply`
+routes through `applyEdits` without `force`, **re-entering the same value there is a no-op**: `ds`
+is never re-stamped, so an operator who confirms every carried cell in the Excel view finds them
+all still marked when they go back to the grid. The twin of T-26-1.
+
+**Why it is only a ticket** `_xlRender` is on the hot path for every visible cell of a 200k-row
+sheet, so a per-cell `_extraCarried` call is measured work rather than a line, and the confirm half
+needs a control the jspreadsheet cell model does not have today.
+
+**Fix** Build the carried set once per render (one sparse walk of the template's records, which
+`_overrideValuesFor` already shows the shape of) and use it for the cell class and comment. For the
+confirm, give `_xlApply` the same question `Reco.setTag` asks: if the cell is carried, set
+`force: true` on that edit.
+
+**Test** A carried cell in the Excel view carries the mark; re-entering the same value there
+re-stamps `ds` and clears the mark in the grid as well; and the render cost of a 200k-row sheet
+with no records is unchanged.
+
+## T-30-3  The promotion picks arbitrarily between two legacy values on a duplicate key
+
+**Where** `apps/Reco.html` `Reco._promoteCarryForward`.
+
+**What** A duplicate `_pk` is a tolerated state, and a `k:'typed'` record deliberately broadcasts
+to every row with the key (the policy table: only an **override** refuses, because broadcasting a
+number multiplies money into a journal entry). But the promotion walks `sess.data` in order and
+writes one record per key, so if two rows share a key and hold **different** legacy values, the
+last row silently wins and the other value is gone — with no warning and no second copy, because
+the legacy entry it came from is deleted in the same pass.
+
+**Why it is only a ticket** It needs a decision about what to show, not code: the honest options
+are to refuse the promotion for that key and say so, or to promote and list the conflicts. Both are
+a dialog in `saveTemplate`, which is where the primary-key warning already lives, and that dialog's
+wording is a user-facing decision.
+
+**Fix** Collect conflicts in the same pass (`pk` seen with a different `v`), and when there are
+any, promote the non-conflicting cells and name the conflicting keys in one confirm — reusing
+`Reco._pkLabel` and `Reco._dupPkCountFor`, both of which exist.
+
+**Test** Two rows sharing `INV-7` with `Alice` and `Bob` in the same column, box ticked, template
+saved: the conflict is named, neither value is deleted from `sess.manualTags` without being
+reported, and a template with no duplicate keys promotes silently as it does now.
+
+## T-S10-3  The main values file is never pruned of records whose key is in no file
+
+**Where** `apps/Reco.html` `AppState.extraValueMaster`, and `Store.loadAll`'s read of
+`reco/extraValueMaster.json`.
+
+**What** A record is kept for ever under its `_pk`, by design: that is what makes a value survive
+a reopen, and an orphan is deliberately NOT deleted because the key may come back in next
+month's extract. So the file only grows. At ~135 bytes a record (measured by
+`run_store_e2e` S10 at 2,000 records: 263 KB) a share that types two columns onto 200,000 rows a
+month reaches tens of MB in a year, and the file is re-read on every merge write.
+
+**Why it is only a ticket** The escape hatch is already in the loader (decision G): `loadAll`
+reads `reco/extraValueMaster.json` and then merges `reco/extraValues/*.json`, and
+`Reco._extraValueFile` already routes a split template's writes to its own file, so nothing has
+to be converted. What is missing is the UI that *moves* a template — and a count the operator can
+see before they need it.
+
+**Fix** With #30's Values panel: show the record count and the boot size, offer "move this
+template's values into their own file" (write `reco/extraValues/<tplId>.json`, remove that
+template from the main file in the same `Store.mergeWrite` pair), and offer "remove all for keys
+not in the current data" as a separate, explicitly confirmed action.
+
+**Test** A template with records in the main file is moved: assert the split file holds them, the
+main file no longer does, a reload reads the same values, and a `Store.mergeWrite` for a second
+template does not touch either.

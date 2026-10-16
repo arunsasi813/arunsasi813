@@ -466,14 +466,38 @@ try {
     };
     check(!g1Old.error, 'the baseline build ran the same fixture', g1Old.error);
     check(g1New.snap.thead === g1Old.snap.thead, 'THE HEADER IS BYTE-IDENTICAL to the build before this change');
-    check(g1New.snap.tbody === g1Old.snap.tbody, 'THE <tbody> IS BYTE-IDENTICAL to the build before this change', {
-      newLen: g1New.snap.tbody.length, oldLen: g1Old.snap.tbody.length,
+    /* #26 (the manual override) adds ONE difference to the grid body, and it
+       is the only one: a computed added column's cell used to render as a bare
+       locked <td> with NO `title` at all, so a user double-clicked, typed and
+       nothing happened with no explanation anywhere on the screen. Since
+       `allowOverride` defaults false, every template that exists today
+       renders that cell - including both of this fixture's computed extras.
+       Normalised out of the NEW text only, and then asserted positively below
+       so this cannot become "identical apart from anything I ignore". */
+    const OV_TITLE = / title="Computed in Reco\. To let people type their own value here[^"]*"/g;
+    const OV_CURSOR = / cursor:not-allowed;/g;
+    const nOvTitle = (g1New.snap.tbody.match(OV_TITLE) || []).length;
+    const nOvCursor = (g1New.snap.tbody.match(OV_CURSOR) || []).length;
+    const newBody = g1New.snap.tbody.replace(OV_TITLE, '').replace(OV_CURSOR, '');
+    check(newBody === g1Old.snap.tbody,
+      'THE <tbody> IS BYTE-IDENTICAL to the build before this change, apart from #26\'s one declared '
+      + 'insertion - the locked computed cell\'s title and cursor', {
+      newLen: newBody.length, oldLen: g1Old.snap.tbody.length,
       firstDiff: (() => {
-        const a = g1New.snap.tbody, b = g1Old.snap.tbody;
+        const a = newBody, b = g1Old.snap.tbody;
         for (let i = 0; i < Math.max(a.length, b.length); i++) if (a[i] !== b[i]) return { at: i, got: a.slice(i, i + 90), want: b.slice(i, i + 90) };
         return null;
       })()
     });
+    const nComputedTd = (g1Old.snap.tbody.match(/<td data-col="(Calc|VLook)"/g) || []).length;
+    check(nOvTitle > 0 && nOvTitle === nComputedTd && nOvCursor === nComputedTd,
+      'and the normalisation removed EXACTLY one title and one cursor per computed-extra cell, so the '
+      + 'comparison above is not hiding a second change',
+      { titles: nOvTitle, cursors: nOvCursor, computedCells: nComputedTd });
+    check(!/title="Computed in Reco\./.test(g1Old.snap.tbody)
+          && /title="Computed in Reco\./.test(g1New.snap.tbody),
+      'and the declared difference is exactly that: the locked computed cell now says how to turn typing '
+      + 'on, where the build before carried no title there at all');
     check(g1New.csv === g1Old.csv, 'THE CSV EXPORT IS BYTE-IDENTICAL', { newHead: (g1New.csv || '').split('\n')[0], oldHead: (g1Old.csv || '').split('\n')[0] });
     check(same(g1New.report, g1Old.report), 'A REPORT IS BYTE-IDENTICAL');
     check(g1NewFiles.day === g1OldFiles.day && g1NewFiles.day != null,

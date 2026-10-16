@@ -1017,19 +1017,26 @@ try {
     postEntryColumn: 'Workflow', postEntryValue: 'Posted'
   });
   const file8 = dayFile(root8, t8.folder);
-  // D1 already carries a value the user typed into their own column. It lives
-  // in sess.manualTags, NOT on the row.
+  /* D1 already carries a value the user typed into their own column. It is
+     NOT on the row - which is the whole reason the un-stamp below has to be
+     session-only. S10 moved WHERE it is: from sess.manualTags, keyed on a row
+     id re-minted on every load, to AppState.extraValueMaster[tplId][_pk][col].
+     Both homes are read by the same ladder, so what this section tests is
+     unchanged; only the lookup is. */
   const tagPre = await page.evaluate((id) => {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     const row = sess.data.find(r => r.Doc === 'D1');
     Reco.setTag(row._id, 'Workflow', 'Reviewed');
-    return { inTags: sess.manualTags[Reco._tagKey(row, 'Workflow')],
+    const rec = Reco._extraRec(tpl, sess, row, 'Workflow');
+    return { stored: rec ? rec.v : null, kind: rec ? rec.k : null,
+             inLegacyTags: (sess.manualTags || {})[Reco._tagKey(row, 'Workflow')] || null,
              onRow: Object.prototype.hasOwnProperty.call(row, 'Workflow'),
              enriched: Reco._rowWithExtras(tpl, sess, row).Workflow };
   }, t8.id);
-  check(tagPre.inTags === 'Reviewed' && !tagPre.onRow && tagPre.enriched === 'Reviewed',
-    'the premise: an added column\'s value is in sess.manualTags and not on the row', tagPre);
+  check(tagPre.stored === 'Reviewed' && tagPre.kind === 'typed' && !tagPre.onRow
+        && tagPre.enriched === 'Reviewed',
+    'the premise: an added column\'s value is in the pk-keyed values store and not on the row', tagPre);
   const a8 = await genEntry(page, t8.id, ['D1', 'D2']);
   const seen10 = await openReverse(page, t8.id, a8);
   check(/is not a template column/.test(seen10.body) && /Clearing it affects your session only/.test(seen10.body),
@@ -1044,8 +1051,12 @@ try {
     const e = (AppState.entryHistory[id] || []).find(x => x.accountingId === aid);
     const of = (doc) => {
       const row = sess.data.find(r => r.Doc === doc);
+      const rec = Reco._extraRec(tpl, sess, row, 'Workflow');
       return { onRow: Object.prototype.hasOwnProperty.call(row, 'Workflow') ? row.Workflow : null,
-               tag: sess.manualTags[Reco._tagKey(row, 'Workflow')] || null,
+               /* S10: the user's own value, wherever it lives. The legacy map
+                  is still read as a permanent fallback, so both are checked. */
+               tag: (rec ? rec.v : null)
+                    || sess.manualTags[Reco._tagKey(row, 'Workflow')] || null,
                enriched: Reco._rowWithExtras(tpl, sess, row).Workflow,
                posted: Reco.isRowPosted(tpl, row) };
     };
@@ -1055,7 +1066,7 @@ try {
     && (rv(c8).unstamped || []).length === 0,
     'the reversal records both keys as session-only and none as written to the share', c8.rev);
   check(c8.d1.onRow === null && c8.d1.tag === 'Reviewed' && c8.d1.enriched === 'Reviewed' && !c8.d1.posted,
-    'the row property the stamp wrote is gone and the user\'s own value is the value again', c8.d1);
+    'the row property the stamp wrote is gone and the user\'s own stored value is the value again', c8.d1);
   check(c8.d2.onRow === null && c8.d2.tag === null && c8.d2.enriched === '' && !c8.d2.posted,
     'and a row that held nothing holds nothing — the tag is deleted, not set to ""', c8.d2);
   check(!csvRows(file8).some(r => r._src === 'reverse:' + a8),

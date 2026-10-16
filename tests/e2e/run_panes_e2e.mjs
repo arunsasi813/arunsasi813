@@ -356,6 +356,15 @@ function normalise(txt) {
     if (s.clearedAt) s.clearedAt = 'FIXED';
     if (s.activeVersionFile) s.activeVersionFile = 'FIXED';
     (s.data || []).forEach(r => { if (r && !/^[a-d][0-9]+$/.test(String(r._id))) r._id = 'MINTED'; });
+    /* S14 ADDED TWO FIELDS AND THEY ARE THE ONLY INTENDED DIFFERENCE from the
+       build before. sess.dataSetIds names the data sets whose rows are in
+       sess.data (a day-file path, so it carries today's date) and row._dsi is
+       a small integer index into it; together they are what makes a typed
+       value FILE-SCOPED instead of carried across every file on the share by
+       default. They are dropped here and asserted POSITIVELY below, so this
+       check keeps its job: catching an UNINTENDED change. */
+    if ('dataSetIds' in s) delete s.dataSetIds;
+    (s.data || []).forEach(r => { if (r && '_dsi' in r) delete r._dsi; });
     if (s.manualTags) {
       const out = {};
       Object.keys(s.manualTags).sort().forEach(tk => { out[tk.replace(/^[^|]+\|\|/, m => /^[a-d]\d/.test(m) ? m : 'MINTED||')] = s.manualTags[tk]; });
@@ -656,6 +665,65 @@ try {
       note('lengths', { now: nowTxt.length, base: baseTxt.length });
     }
     check(rB.errors.length === 0, 'the baseline build logged no errors either', rB.errors.slice(0, 3));
+    /* THE POSITIVE HALF of what normalise() drops. Without this, dropping the
+       two fields would turn the byte check into "identical apart from
+       anything I choose to ignore". */
+    const ds = await page.evaluate(() => {
+      const out = {};
+      Object.keys(AppState.recoSessionsOwned).sort().forEach(id => {
+        const s = AppState.recoSessionsOwned[id];
+        out[id] = {
+          isArray: Array.isArray(s.dataSetIds),
+          n: (s.dataSetIds || []).length,
+          allPaths: (s.dataSetIds || []).every(p => /^reco_data\//.test(String(p))),
+          /* A row gets _dsi from ingestData or loadVersionedFile. TPL_A's
+             rows above are assigned onto sess.data by hand, exactly as a
+             session persisted by an older build would be, so they have none -
+             and that is the case the design routes to the LEGACY
+             sess.manualTags branch rather than guessing a scope. The
+             invariant is therefore: a _dsi, if present, indexes into its own
+             session's dataSetIds. Never a dangling index. */
+          dangling: (s.data || []).filter(r => typeof r._dsi === 'number'
+            && !(r._dsi >= 0 && r._dsi < (s.dataSetIds || []).length)).length,
+          indexed: (s.data || []).filter(r => typeof r._dsi === 'number').length,
+          rows: (s.data || []).length
+        };
+      });
+      return out;
+    });
+    note('S14 dataSetIds / _dsi', ds);
+    check(Object.values(ds).every(v => v.isArray && v.allPaths),
+      'S14: every session carries dataSetIds as an array of reco_data/ paths', ds);
+    check(Object.values(ds).every(v => v.dangling === 0),
+      'S14: and no row carries a _dsi that does not index into its own session\'s dataSetIds — '
+      + 'a dangling index would scope a typed value to a file that is not loaded', ds);
+    /* THE CONTROL, in its own template so it does not depend on what the
+       sitting above happens to have left behind: a session that really did
+       come through ingestData has a data set and every row indexed into it.
+       Run AFTER the byte comparison above, which read its text earlier. */
+    const dsCtl = await page.evaluate(async () => {
+      RecoTemplate.create();
+      const t = RecoTemplate._editing;
+      t.id = 'TPL_DSI'; t.name = 'Data set index';
+      t.columns = [{ name: 'Doc', label: 'Doc', formats: [] }];
+      t.primaryKeys = ['Doc']; t.displayColumns = ['Doc'];
+      RecoTemplate.saveTemplate();
+      const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_DSI');
+      RecoTemplate.open('TPL_DSI');
+      await Reco.ingestData(tpl, [{ Doc: 'X1' }, { Doc: 'X2' }], ['Doc']);
+      App.closeModal();
+      const s = AppState.recoSessionsOwned.TPL_DSI;
+      return { n: (s.dataSetIds || []).length, rows: (s.data || []).length,
+               paths: (s.dataSetIds || []).slice(),
+               indexed: (s.data || []).filter(r => typeof r._dsi === 'number'
+                 && r._dsi >= 0 && r._dsi < (s.dataSetIds || []).length).length,
+               scopes: (s.data || []).map(r => Reco.dataSetOf(s, r)) };
+    });
+    note('S14 control (ingested)', dsCtl);
+    check(dsCtl.n === 1 && dsCtl.rows === 2 && dsCtl.indexed === 2
+          && dsCtl.scopes.every(x => x === dsCtl.paths[0]),
+      'S14: (control) an INGESTED session names one data set and every row resolves to it, '
+      + 'so the no-dangling check above is not about nothing', dsCtl);
   }
 
   /* ====================================================================
@@ -2337,6 +2405,7 @@ try {
       panes: Panes.panes().map(p => p.key + ':' + p.tplId).join(','),
       bankFolder: Versioning.folderFor(tb), ledgerFolder: Versioning.folderFor(tl),
       bk1: AppState.recoSessionsOwned.BANK.data[1]._id,
+      bk1pk: AppState.recoSessionsOwned.BANK.data[1]._pk,
       bk2: AppState.recoSessionsOwned.BANK.data[2]._id,
       bk3: AppState.recoSessionsOwned.BANK.data[3]._id,
       lg2: AppState.recoSessionsOwned.LEDGER.data[2]._id
@@ -2391,7 +2460,17 @@ try {
     bankStatus: AppState.recoSessionsOwned.BANK.data.map(r => r.Doc + '=' + r.Status),
     ledgerStatus: AppState.recoSessionsOwned.LEDGER.data.map(r => r.Doc + '=' + r.Status),
     bankTags: JSON.parse(JSON.stringify(AppState.recoSessionsOwned.BANK.manualTags || {})),
-    ledgerTags: JSON.parse(JSON.stringify(AppState.recoSessionsOwned.LEDGER.manualTags || {}))
+    ledgerTags: JSON.parse(JSON.stringify(AppState.recoSessionsOwned.LEDGER.manualTags || {})),
+    /* S10. A typed added-column value now lives in the pk-keyed store, not in
+       sess.manualTags - see the rewritten assertion below. */
+    bankStore: JSON.parse(JSON.stringify((AppState.extraValueMaster || {}).BANK || {})),
+    ledgerStore: JSON.parse(JSON.stringify((AppState.extraValueMaster || {}).LEDGER || {})),
+    bankNoteOnScreen: (() => {
+      const tpl = AppState.recoTemplates.find(t => t.id === 'BANK');
+      const sess = AppState.recoSessionsOwned.BANK;
+      const ac = (tpl.additionalColumns || []).find(a => a.name === 'Note');
+      return ac ? String(Reco._extraValueForRow(tpl, sess, sess.data[1], ac)) : '(no Note column)';
+    })()
   }));
   const diskBL = JSON.parse(fs.readFileSync(path.join(G.root, 'reco/recoSessions.json'), 'utf8'));
   const grepUnder = (root, dir, needle) => {
@@ -2425,13 +2504,23 @@ try {
   check(afterF6.owner === 'p1' && afterF6.active === 'LEDGER', 'B — F6 did move the ownership', afterF6);
   check(afterF6.focusInRight === true,
     'B — AND IT MOVED THE KEYBOARD WITH IT: an edit cannot stay pending in a pane that owns nothing', afterF6);
-  const noteKeys = Object.keys(blur.bankTags).filter(k => /\|\|Note$/.test(k));
-  check(noteKeys.length === 1 && blur.bankTags[noteKeys[0]] === 'NOTE-FOR-BK1'
-        && noteKeys[0].indexOf(BL.bk1) === 0,
+  /* S10 MOVED WHERE THIS LIVES; IT DID NOT CHANGE WHAT IS BEING ASSERTED.
+     The typed value of an added column used to be in sess.manualTags keyed
+     `row._id + '||' + name`, and row._id is re-minted on every load - which is
+     the data-loss bug S10 exists to fix. It is now in
+     AppState.extraValueMaster[tplId][_pk][col]. Still asserted, in substance
+     unchanged: the Note is on the BANK row it was typed on, it is not lost,
+     and the other template holds nothing for a row it does not have. Read
+     through the LADDER as well, because that is what the operator sees. */
+  const notePk = blur.bankStore[BL.bk1pk] || {};
+  check(Object.keys(blur.bankStore).length === 1 && notePk.Note
+        && notePk.Note.v === 'NOTE-FOR-BK1' && notePk.Note.k === 'typed'
+        && blur.bankNoteOnScreen === 'NOTE-FOR-BK1',
     'B — the typed Note is on the BANK row it was typed on, and is not lost',
-    { bankTags: blur.bankTags, expectedRow: BL.bk1 });
-  check(Object.keys(blur.ledgerTags).length === 0,
-    'B — and the other template has no orphan tag key for a row id it does not have', blur.ledgerTags);
+    { bankStore: blur.bankStore, onScreen: blur.bankNoteOnScreen, expectedPk: BL.bk1pk });
+  check(Object.keys(blur.ledgerTags).length === 0 && Object.keys(blur.ledgerStore).length === 0,
+    'B — and the other template has no orphan record for a row id (or a key) it does not have',
+    { tags: blur.ledgerTags, store: blur.ledgerStore });
   /* ---- ACTIONS C: THE KEYBOARD CROSSING, WHICH WAS ALREADY CORRECT BEFORE
      THIS ROUND AND MUST STAY SO. Moving the focus into the other pane without
      a pointerdown means the capture-phase `focusin` is the FIRST thing that
@@ -2958,9 +3047,18 @@ try {
     await new Promise(r => setTimeout(r, 200));
     out.afterE3 = E.data[3].Status; out.afterF3 = F.data[3].Status;
     out.tagsEBefore = Object.keys(E.manualTags || {}).length;
+    out.storeEBefore = Object.keys((AppState.extraValueMaster || {}).TPL_E || {}).length;
     Reco.setTag(F.data[4]._id, 'Note', 'PROG-NOTE-RIGHT', 'p1');
     await new Promise(r => setTimeout(r, 200));
     out.tagsE = Object.keys(E.manualTags || {}); out.tagsF = Object.keys(F.manualTags || {});
+    /* S10: the typed value is in the pk-keyed store now, not on the session. */
+    out.storeE = Object.keys((AppState.extraValueMaster || {}).TPL_E || {});
+    out.storeF = Object.keys((AppState.extraValueMaster || {}).TPL_F || {});
+    out.noteOnScreenF = (() => {
+      const tpl = AppState.recoTemplates.find(t => t.id === 'TPL_F');
+      const ac = (tpl.additionalColumns || []).find(a => a.name === 'Note');
+      return ac ? String(Reco._extraValueForRow(tpl, F, F.data[4], ac)) : '(no Note column)';
+    })();
     Reco.toggleRowSelect(F.data[5]._id, true, 'p1');
     await new Promise(r => setTimeout(r, 100));
     out.selE = Object.keys(E.selectedRows || {}).filter(k => E.selectedRows[k]);
@@ -2978,9 +3076,14 @@ try {
     'the premise: the LEFT pane owns the screen and activeRecoId throughout — so only the pane key can be right', a6);
   check(a6.afterF3 === 'PROG-FOR-RIGHT' && a6.afterE3 === a6.before.e3,
     'A6 — editCell with a pane key writes THAT pane\'s template, not the owner\'s', { e: a6.afterE3, f: a6.afterF3 });
-  check(a6.tagsF.length === 1 && a6.tagsE.length === a6.tagsEBefore,
-    'A6 — setTag with a pane key writes that pane\'s manualTags only (the orphan-key shape — an \'<a TPL_E row id>||Note\' key on TPL_F is what this prevents)',
-    { e: a6.tagsE, eBefore: a6.tagsEBefore, f: a6.tagsF });
+  /* S10 moved the home; the shape this guards is the same one. The failure it
+     prevents was an orphan key under a row id the OTHER template does not
+     have - now it would be a record under the other template's id. */
+  check(a6.storeF.length === 1 && a6.storeE.length === a6.storeEBefore
+        && a6.noteOnScreenF === 'PROG-NOTE-RIGHT',
+    'A6 — setTag with a pane key writes that pane\'s stored values only (the orphan shape — a record for a TPL_E row filed under TPL_F, or the reverse, is what this prevents)',
+    { e: a6.storeE, eBefore: a6.storeEBefore, f: a6.storeF, onScreen: a6.noteOnScreenF,
+      tagsE: a6.tagsE, tagsF: a6.tagsF });
   check(a6.selF.length === 1 && a6.selE.length === 0,
     'A6 — toggleRowSelect with a pane key ticks that pane\'s row only', { e: a6.selE, f: a6.selF });
   check(a6.byId === 'BY-ID-NOT-INDEX',

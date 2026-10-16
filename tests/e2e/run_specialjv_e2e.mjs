@@ -1013,8 +1013,11 @@ try {
 
   // ── 7b. the post-entry column is an ADDED column ──────────────────────────
   /* The picker offers extras as well as file columns, and an added column's
-     value is NOT on the row: a custom extra lives in sess.manualTags, and the
-     stamp writes a plain row property that shadows it. */
+     value is NOT on the row: a custom extra's typed value lives in the
+     pk-keyed values store (S10 - AppState.extraValueMaster[tplId][_pk][col];
+     before S10 it was sess.manualTags, keyed on a row id re-minted on every
+     load, which is the data-loss bug S10 fixed), and the stamp writes a plain
+     row property that shadows it. */
   const tplA = await createCaptureTemplate(page, 'Cap Added Col', ROWS, {
     additionalColumns: [
       // A master-backed extra declared FIRST, so the enriched read walks a
@@ -1031,15 +1034,17 @@ try {
     const row = s.data.find(r => r.Doc === 'D5');
     await Reco.applyEdits(tplo, s, [{ row: row, col: 'Workflow', value: 'Reviewed' }], { source: 'grid', trusted: true });
     const full = Reco._rowWithExtras(tplo, s, row);
-    return { tag: (s.manualTags || {})[row._id + '||Workflow'],
+    const rec = Reco._extraRec(tplo, s, row, 'Workflow');
+    return { stored: rec ? rec.v : null, kind: rec ? rec.k : null,
+             tag: (s.manualTags || {})[row._id + '||Workflow'] || null,
              onRow: Object.prototype.hasOwnProperty.call(row, 'Workflow'),
              raw: row.Workflow == null ? '' : String(row.Workflow),
              enriched: full.Workflow, nom: full.Nom,
              extras: (tplo.additionalColumns || []).map(a => a.name + ':' + a.type).join() };
   }, tplA.id);
-  check(premise.tag === 'Reviewed' && premise.onRow === false && premise.raw === ''
-     && premise.enriched === 'Reviewed',
-    'the premise: an added column\'s value is in sess.manualTags and NOT on the row', premise);
+  check(premise.stored === 'Reviewed' && premise.kind === 'typed' && premise.onRow === false
+     && premise.raw === '' && premise.enriched === 'Reviewed',
+    'the premise: an added column\'s value is in the pk-keyed values store and NOT on the row', premise);
   check(premise.nom === '12345', 'and the master-backed extra beside it resolves', premise.nom);
   await genEntry(tplA.id, ['D5', 'D6']);
   const capA = await lastEntry(tplA.id);

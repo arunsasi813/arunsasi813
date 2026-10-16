@@ -67,6 +67,21 @@ window.__xv = {
   tpl() { return AppState.recoTemplates.find(t => t.id === AppState.activeRecoId); },
   row(doc) { return this.sess().data.find(r => r.Doc === doc); },
   names() { return Reco._xlWorksheet.options.columns.map(c => c.name); },
+  /* WHERE AN ADDED COLUMN'S TYPED VALUE LIVES, in one place.
+     S10 moved it off sess.manualTags - which was keyed on row._id, re-minted
+     on every load, so the value died on a reopen - into
+     AppState.extraValueMaster[tplId][_pk][col]. The legacy map is still read
+     as a permanent fallback (a keyless template, a blank-key row and a
+     spreadsheet scratch column have no other home), so this reads the same
+     ladder the app does and answers undefined when there is nothing. */
+  tag(doc, col) {
+    const sess = this.sess(), tpl = this.tpl(), row = this.row(doc);
+    if (!row) return undefined;
+    const rec = Reco._extraRec(tpl, sess, row, col);
+    if (rec) return rec.v;
+    const legacy = (sess.manualTags || {})[row._id + '||' + col];
+    return legacy == null ? undefined : legacy;
+  },
   toasts: [],
 };
 (function () {
@@ -450,15 +465,20 @@ try {
   await typeInto(page, 'D2', 'Note', 'n1');
   await flush(page);
   const j12 = await page.evaluate(() => {
-    const s = __xv.sess(), r = __xv.row('D2');
-    return { tag: (s.manualTags || {})[r._id + '||Note'], own: Object.prototype.hasOwnProperty.call(r, 'Note'), cell: __xv.td('D2', 'Note').textContent };
+    const r = __xv.row('D2');
+    return { tag: __xv.tag('D2', 'Note'), own: Object.prototype.hasOwnProperty.call(r, 'Note'),
+             cell: __xv.td('D2', 'Note').textContent,
+             /* S10: it is in the pk-keyed store, not on the session. */
+             inStore: !!Reco._extraRec(__xv.tpl(), __xv.sess(), r, 'Note'),
+             inLegacy: (__xv.sess().manualTags || {})[r._id + '||Note'] };
   });
-  check(j12.tag === 'n1' && !j12.own && j12.cell === 'n1', 'J12: editing tag Note writes sess.manualTags (row.Note absent)', j12);
+  check(j12.tag === 'n1' && !j12.own && j12.cell === 'n1' && j12.inStore && j12.inLegacy === undefined,
+    'J12: editing tag Note writes the pk-keyed values store, not the row and not sess.manualTags', j12);
   check(cnRows(root, tpl.dataFolder, 'D2').length === 0, 'tag edits are session-only (no Cn)');
   // dropdown tag: a value outside the list is refused
   await page.evaluate(() => { __xv.toasts.length = 0; Reco._xlWorksheet.setValueFromCoords(__xv.x('Flag'), __xv.y('D2'), 'Q'); Reco._xlWorksheet.setValueFromCoords(__xv.x('Flag'), __xv.y('D3'), 'b'); });
   await sleep(100);
-  const flag = await page.evaluate(() => { const s = __xv.sess(); return { d2: s.manualTags[__xv.row('D2')._id + '||Flag'], d3: s.manualTags[__xv.row('D3')._id + '||Flag'], toasts: __xv.toasts.slice() }; });
+  const flag = await page.evaluate(() => ({ d2: __xv.tag('D2', 'Flag'), d3: __xv.tag('D3', 'Flag'), toasts: __xv.toasts.slice() }));
   check(flag.d2 === undefined && flag.d3 === 'B' && flag.toasts.some(t => /not one of the allowed values/.test(t[0])), 'dropdown tag: "Q" refused, "b" stored as the option spelling "B"', flag);
 
   // ── J6 dates ────────────────────────────────────────────────────────────
@@ -772,7 +792,7 @@ try {
     document.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
   });
   await sleep(150);
-  const wide = await page.evaluate(() => { const s = __xv.sess(), r = __xv.row('D1'); return { note: s.manualTags[r._id + '||Note'], flag: s.manualTags[r._id + '||Flag'],
+  const wide = await page.evaluate(() => { const r = __xv.row('D1'); return { note: __xv.tag('D1', 'Note'), flag: __xv.tag('D1', 'Flag'),
     rid: Reco._xlWorksheet.options.data[__xv.y('D1')][Reco._xlCtx.ridX] === r._id, toasts: __xv.toasts.filter(t => t[1] === 'error') }; });
   check(wide.note === 'wide' && wide.flag === 'B' && wide.rid && wide.toasts.length === 0, 'a 4-wide paste at the second-last column fills Note and Flag only', wide);
 

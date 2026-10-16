@@ -245,9 +245,26 @@ try {
   await applyReview(page);
   let r1 = await rowOf(page, tpl.id, 'D1'), r2 = await rowOf(page, tpl.id, 'D2'), r3 = await rowOf(page, tpl.id, 'D3');
   const tags = await page.evaluate((id) => AppState.recoSessions[id].manualTags, tpl.id);
+  /* S10. An added column's typed value is no longer in sess.manualTags keyed
+     on a row id that is re-minted on every load (that was the data-loss bug);
+     it is in AppState.extraValueMaster[tplId][_pk][col]. Read the record AND
+     what the screen says, so this still asserts the value as well as where it
+     is - and still asserts the thing that matters most, that it is NOT written
+     onto the row (a row property would reach the versioned CSV). */
+  const tagStore = await page.evaluate((id) => {
+    const t = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    const row = sess.data.find(r => r.Doc === 'D1');
+    const ac = (t.additionalColumns || []).find(a => a.name === 'Note');
+    return { rec: Reco._extraRec(t, sess, row, 'Note'),
+             onScreen: String(Reco._extraValueForRow(t, sess, row, ac)) };
+  }, tpl.id);
   check(r1.Status === 'Cleared' && r2.Remarks === 'x', 'E2 session rows updated', { s: r1.Status, r: r2.Remarks });
   check(r3.When === '01/11/2026', 'E2 date written back in the row\'s own style (DD/MM/YYYY)', r3.When);
-  check(tags[rid.D1 + '||Note'] === 'n1' && !('Note' in r1), 'E2 tag column written to manualTags (not the row)', { tag: tags[rid.D1 + '||Note'], row: r1.Note });
+  check(tagStore.rec && tagStore.rec.v === 'n1' && tagStore.rec.k === 'typed'
+        && tagStore.onScreen === 'n1' && !('Note' in r1),
+    'E2 tag column written to the pk-keyed values store, NOT onto the row (a row property would reach the versioned CSV)',
+    { rec: tagStore.rec, onScreen: tagStore.onScreen, row: r1.Note, legacyTags: tags });
   const vrows = parseCsv(fs.readFileSync(vf, 'utf8'));
   const added = vrows.slice(beforeLen);
   check(added.length === 3 && added.every(r => /^C\d+$/.test(r._ver)) && new Set(added.map(r => r._pk)).size === 3, 'E2 one Cn per changed key (D1, D2, D3)', added.map(r => r._pk + ':' + r._ver));
@@ -326,11 +343,21 @@ try {
   await post(B, '/__fault', { append_csv_rows: true });
   P = await loadBack(page, { exportId: X.exportId });
   const tagsBefore = JSON.stringify(await page.evaluate((id) => AppState.recoSessions[id].manualTags, tpl.id));
+  /* S10. "tags unchanged" went VACUOUS the moment an added column's value
+     stopped being written to sess.manualTags: the map is empty before and
+     after whatever happens. The thing this assertion is for - a failed
+     history write must change NOTHING - now lives in the store, so that is
+     what is snapshotted. */
+  const storeBefore = JSON.stringify(await page.evaluate((id) => (AppState.extraValueMaster || {})[id] || {}, tpl.id));
   await page.click('#xlApplyBtn');
   await page.waitForFunction(() => /Nothing was changed/.test(document.getElementById('appModalBody').textContent), null, { timeout: 10000 }).catch(() => {});
   check(/Nothing was changed/.test(await page.textContent('#appModalBody')), 'E13 history failure reported');
   check((await rowOf(page, tpl.id, 'D10')).Remarks === 'init', 'E13 session row unchanged');
-  check(JSON.stringify(await page.evaluate((id) => AppState.recoSessions[id].manualTags, tpl.id)) === tagsBefore, 'E13 tags unchanged');
+  check(JSON.stringify(await page.evaluate((id) => AppState.recoSessions[id].manualTags, tpl.id)) === tagsBefore, 'E13 legacy tags unchanged');
+  check(JSON.stringify(await page.evaluate((id) => (AppState.extraValueMaster || {})[id] || {}, tpl.id)) === storeBefore,
+    'E13 THE STORE is unchanged too — the assertion that used to be about manualTags, moved to where the value now lives');
+  check(storeBefore !== '{}',
+    'E13 (control) the store was NOT empty before the failure, so the check above is not vacuous', storeBefore.slice(0, 120));
   check(!Object.keys(JSON.parse(fs.readFileSync(X.headPath, 'utf8')).rebased).some(k => k.startsWith(rid.D10)), 'E13 manifest not rebased');
   await post(B, '/__fault', { append_csv_rows: false });
   await page.evaluate(() => App.closeModal());

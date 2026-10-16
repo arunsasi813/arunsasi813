@@ -168,13 +168,13 @@ these exist once. Added as foundations; most have no second caller yet.
 | `Reco.columnCatalog(tpl, sess)` | one column list | replaced three hand-rolled ones |
 | `fileNames` / `extraNames` / `allNames` in `saveTemplate` | the name sets every prune reads | the prune they replace tested against `t.columns` alone, so anything else naming an added column was silently deleted on save |
 
-Two things deliberately **not** done, recorded so they are not re-attempted
-blind. `manualTags` is still keyed on the session `_id`, so a value typed into an
-added column does not survive a reload; re-keying it onto `_pk || _id` was tried
-and refused, because it still lands on `_id` for a keyless template, it lives on
-the session so Clear Data destroys it, it is serialised inside the 85.6 MiB blob,
-and being per-session it cannot carry a value across *files* — the durable
-`_pk`-keyed store lands with the features that need it. And a "someone else
+One thing deliberately **not** done, recorded so it is not re-attempted blind.
+(The other — re-keying `manualTags` — **has now landed properly**, as the
+`_pk`-keyed store in §5b. Re-keying the session map onto `_pk || _id` was tried
+and refused first, because it still lands on `_id` for a keyless template, it
+lives on the session so Clear Data destroys it, it is serialised inside the
+85.6 MiB blob, and being per-session it cannot carry a value across *files*.
+§5b is the store that answers all four.) A "someone else
 changed this template while you had it open" check was written and removed:
 `AppState.recoTemplates` is read once, at boot, so the comparison only ever saw
 this session's own object and could never fire. The hazard is real — the editor
@@ -182,6 +182,22 @@ deep-clones on open and `saveTemplate` replaces the whole object, so a field a
 colleague set at 10:00 is wiped by a save from a 09:00 clone — and detecting it
 means re-reading the stored template from the share at save time, which makes
 `saveTemplate` async.
+
+| helper (added with §5b) | what it is | why |
+|---|---|---|
+| `Store.mergeWrite(key, mutate, opts)` | read → merge → write, **all inside one `Store._enqueue` job**, debounced 150 ms | `Store.save` is a whole-file `write_file` with no re-read and no mtime check, and `AppState.load()` runs once, at boot. A read taken *outside* the queue sees the pre-write state of a write already in flight, so two bursts 200 ms apart both read the stale object and **the operator loses their own writes** — no second client needed |
+| `Reco.storeKey(tpl, row)` | `row._pk`, or null — never mints | the stricter sibling of `Reco.rowKey`: it refuses the **truthy** string `'||'` that `getRowPK` mints when every key component is blank, which would collapse every blank-key row in every file onto one key |
+| `Reco.dataSetOf(sess, row)` | `sess.dataSetIds[row._dsi]`, or null | which file a row came from. "Add Data" *concatenates* and nothing ever removes a data set, so a session-level answer would make September's typed values appear on October's rows |
+| `Reco._extraRec` / `_extraTyped` / `_extraOverride` | the three readers of the store | one ladder, read by the grid, every export, every report, the Excel view **and the AEG journal loop**, so the screen and the journal cannot disagree |
+| `Reco._setOverride` / `_clearOverride` (added with §5c) | the two writers of a `k:'override'` record, each returning `{ok}` or `{ok:false, reason, message}` | an override is **refused** on a pk-less row, on a key shared by more than one loaded row (it would multiply money into a journal entry) and on a row already posted to the ledger. The revert **deletes** the record: writing the computed value back would freeze it |
+| `Reco.isRowPosted(tpl, sess, row)` (S12) | the ONE answer to "is this number in the general ledger" | there were two, and they disagreed: this read the raw row while `ExcelLink._isPosted` read the enriched one, so a post-entry value typed into an added column made the grid say *open* and the Excel review say *posted*. #26's posted-row refusal **is** this function |
+| `Reco._dupPkCountFor(tpl, sess, pk)` | how many loaded rows share a key, from `ingestData`'s own pass (memoised on the row array, never on `sess`) | a duplicate `_pk` is a tolerated state, and an override keyed on it would be read by every row with that key |
+| `Reco._ovSchema(tpl, sess)` | the grid's **cached** `XlSchema` for override edits | routing an override through `applyEdits` with no `schema` re-runs `XlSchema.build` — including its 2,000-row numeric-kind scan per formula extra — on every keystroke-blur: measured 2.5 ms against 0.1 ms per override at 200k rows |
+| `Reco._extraCarried(tpl, sess, row, name)` (added with §5d) | the record when the value in this cell came from **another** file, else null | carried-ness is **derived** (`rec.ds` against `Reco.dataSetOf`), never stored, so the mark clears by itself — which is why `Reco.setTag` has to pass `{force:true}` on a carried cell, or re-entering the value is a no-op and the mark is unclearable |
+| `Reco._carryColumn(tpl, name)` | the added column with the carry box ticked, or null | the twin of `_overrideColumn`, and the same two questions kept apart: `_extraTyped` answers *scope*, this answers *may this column be carried at all* (`custom`/`dropdown`, persisted, not `_ssSingleUse`) |
+| `Reco._promoteCarryForward(tpl, prevExtras)` | moves legacy `sess.manualTags` values of a newly-carried column into the store, in ONE S13 write | without it the operator ticks the box and gets nothing until the period after next. It leaves an existing record byte-identical, which is what makes a second save promote nothing |
+| `Reco._typedValueList(tpl, sess)` / `_typedCount(tpl)` | the Values panel's rows (scope, carried-ness, dead columns) and the Manage card's count | these records exist nowhere else — no row, no `Cn` row, no `sess` — so one screen has to be able to show and remove them |
+| `Reco._dropExtraValueRec` / `_dropExtraValuesNotIn` | delete one record by key, or every record for keys not in the loaded data | `_dropOverrideRec` is now a one-line delegate to the first: #26's cell revert, #26's panel Revert and #30's Remove are the same deletion, and only the sentence differs |
 
 ---
 
@@ -204,6 +220,303 @@ Control columns: `_pk` (PK columns joined with `||`, or `_auto_<uid>`), `_ver` (
 - Ingesting data warns when rows share a primary key (they collapse to one when reopened from
   history). On a key that contains an **added column**, that warning moved **before** the write and
   became a blocking confirm the operator can refuse — see §14.4 for why it is scoped that way.
+
+### 5b. Typed values of added columns — the `_pk`-keyed store (S10)
+
+**The bug this exists for.** A `custom` or `dropdown` added column's value is not on the row and
+never reaches the CSV. It used to live in `sess.manualTags`, keyed `row._id + '||' + name`
+(`Reco._tagKey`) — and `row._id` is minted fresh by `U.uid()` on **every** load. So typing a
+vendor name onto 400 rows, saving, and reopening the file the next morning gave 400 blanks, with
+the values still in `reco/recoSessions.json` under row ids that no longer existed anywhere, and
+nothing warning anyone. Reproduced before the fix; `tests/e2e/run_store_e2e.mjs` S4 pins it.
+
+**The store.** `AppState.extraValueMaster[tplId][pk][colName]`, persisted as
+`reco/extraValueMaster.json`:
+
+```
+{ k: 'typed' | 'override',   // EXPLICIT, never inferred from the presence of `prev`
+  v: String,                 // always a String
+  typed: String?,            // the raw keystroke when it differed from v
+  prev: String?, src: 'formula'|'lookup'?,   // k:'override' only (#26)
+  ds: String,                // the data set this value was entered against
+  by: String, at: String }   // AppState.currentUser, ISO
+```
+
+- **Nested, never a joined `pk + '||' + col` key.** `getRowPK` already joins the key components
+  with `'||'` and escapes nothing, so a flat key is ambiguous the moment a key *value* contains
+  `'||'`. Nesting fixes only the **second** join; the first is ticket **T-24R2-5**.
+- **`k` is explicit.** A column can be flipped `formula` → `custom` in the type select with
+  nothing cleared, and after that flip `k` is the only thing that says how to read *absence* and
+  which panel owns the record. Absence is the one place the kinds differ: `k:'typed'` + empty
+  **deletes** the record (a tag has no computed base to reveal); `k:'override'` + `{v:''}` is a
+  deliberate blank that only the revert control clears.
+- **It is NOT in `PERSIST_KEYS`, and that is load-bearing.** `AppState.flush` iterates
+  `PERSIST_KEYS` and, for any key whose serialised text changed, calls `Store.save` →
+  `write_file` with the whole file, no re-read and no mtime check. **Membership *is* the blind
+  overwrite** — and once `manualTags` stops being written there is no second copy of these values
+  anywhere (no mirror on `sess`, no `Cn` row in the CSV). It is read in `Store.loadAll` via
+  `readJson` (so it inherits the `readOnlyKeys` latch and the `reco/_corrupt/` quarantine),
+  assigned in `AppState.load`, and written **only** through `Store.mergeWrite`.
+- **Written compact** (`Store.COMPACT_KEYS`): the file is re-read on every merge write, so
+  pretty-printing would roughly triple the round trip. Measured ~135 bytes a record.
+- **The escape hatch, in the loader on day one so it is never a migration.** `loadAll` reads
+  `reco/extraValueMaster.json` and then deep-merges any `reco/extraValues/*.json`, remembering in
+  `Store.extraValueFiles` which file each template's records came from; the **split file wins** on
+  a conflict, and `Reco._extraValueFile` routes that template's writes back to it. When a share
+  outgrows one file, a panel moves a template and nothing has to be converted (**T-S10-3**).
+
+**The read ladder, written once in `Reco._extraOwnValue` and copied surgically to one other
+place.** Order matters at every step:
+
+1. the **override gate first, above the type switch**, so it covers `formula` *and*
+   `master_lookup`;
+2. the type switch, unchanged;
+3. in the dropdown/custom tail: **the row value wins** (which is what leaves the AEG To-Account
+   extra alone with no special case), **then** the stored record, **then** the legacy
+   `sess.manualTags` read.
+
+**The legacy `manualTags` read is permanent.** It is what keeps `run_reports_e2e` passing with no
+edit — that suite seeds `sess.manualTags[...]` directly, which makes it the regression test for
+the whole migration — and it is the only home for a value on a keyless template, a blank-key row,
+or a spreadsheet scratch column. **Writes moved; reads keep the fallback for ever.**
+
+The one other evaluator is the **AEG source-row loop**, which gets the identical three lines plus
+the same gate, deliberately *without* being swapped onto `_rowWithExtras`: it has its own
+To-Account exception and its own `''`-vs-`'#ERR'` divergence from the grid, and rewriting it would
+change posted numbers. That is safe only because `RecoTemplate._exclusiveRoleConflict` forbids an
+override- or carry-enabled column from being any AEG control column — the loop runs **before** the
+keyword filter, so a value read there can decide whether a row posts at all. (The grid is no
+longer a third evaluator: it reads `fullOf()[ac.name]` through `Reco.rowFull`.)
+
+**What the store will NOT take** (`Reco._setExtraTyped` returns false and the value goes to
+`sess.manualTags`, exactly as before): a column that is not a **persisted, non-`_ssSingleUse`**
+entry in `tpl.additionalColumns` (spreadsheet mode can add three shapes, and
+`_ssCleanupSingleUseAfterEntry` deletes two of them — their records would be orphaned on the
+share for ever under a name nothing can show); a row with no usable store key; and a row whose
+data set cannot be named, because a file-scoped record for it could never be read back.
+
+**Scope is per ROW, not per session (S14).** `sess.dataSetIds` holds the data sets whose rows are
+in `sess.data`, in arrival order, and each row carries `_dsi`, a small integer index into it (a
+path string per row would add ~9 MB to `recoSessions.json` at 200k rows). Stamped in
+`ingestData` (pushed — "Add Data" concatenates) and in `loadVersionedFile` (replaced — that load
+replaces `sess.data`). A row with no `_dsi` — one typed in with **+ Row**, or a session written by
+an older build — answers null and takes the legacy branch. `dataSetIds` is **DATA** in
+`Panes.DATA_KEYS`, for the same reason `activeVersionFile` is.
+
+A `k:'typed'` record is then **file-scoped** unless the column has `carryForward === true`, which
+nothing sets yet. So today's behaviour is **one strict improvement and no new behaviour**: the
+value survives reopening its own file and a Clear, and does **not** appear on a row from another
+file. `k:'override'` records are always key-scoped — an override is a decision about the invoice,
+not about the file.
+
+**Also moved with it:** all four backup sites (`backupSession`, `restoreSession` and its confirm
+text, `App.exportBackup`, `App.importBackup`), `RecoTemplate.remove`, and the Excel review badge,
+which split in two — a tag the store serves is `notVersioned` ("kept against this row key in the
+shared values file") rather than `sessionOnly` ("kept in this session"), because for such a column
+the old wording was the opposite of true.
+
+### 5c. The manual override of a computed column (#26)
+
+> *"column with formula and option to override should be there."*
+
+A `formula`, `master` or `master_lookup` added column can be marked **Allow manual override per
+row** in the template's Additional Columns. A person then types their own value into that cell; it
+is stored as a `k:'override'` record in the same `_pk`-keyed store as §5b, with `prev` (what the
+formula or lookup said at the time) and `src` (`'formula'` or `'lookup'`); a **revert** control
+puts the computed value back; and every override is listed under **Manage → Manual Overrides**
+with who, when, what it replaced, what the formula says now, and Revert.
+
+**Read at render time, never stamped into a row, and no `Cn` version row.** `isVersioned` stays
+false: no template column changed, so a `Cn` row would be byte-identical to its predecessor and
+would tell a reader of the CSV that nothing happened while something did. The column keeps
+`role:'computed'` and gains `desc.overridable` — a new role would mean hunting every
+`role !== 'computed'` comparison in the file, and exactly one of them needed changing (the Excel
+review badge, which now says `override`).
+
+**The override applies to lookups as well as formulas**, and a lookup override is listed
+distinctly, because overriding a lookup stops that row following a master every colleague trusts —
+a different decision from disagreeing with arithmetic.
+
+**Four refusals, each one a failure somebody would otherwise meet.** `Reco._setOverride` returns
+`{ok:false, reason, message}` and writes nothing:
+
+| refused | why |
+|---|---|
+| a column nobody ticked the box for | so a workbook cannot smuggle an override into a column the template owner never opened. The **grid cell says so**: a locked computed cell now carries `title="Computed in Reco. To let people type their own value here, turn on 'Allow manual override per row'…"` and `cursor:not-allowed`, where it used to carry no title at all — and since the flag defaults false, that is every template that exists today |
+| a row with no usable key | it goes to `res.rejected` with the existing `noPk` reason, never counted as applied. A record filed under no key could not be found again |
+| **more than one loaded row shares the `_pk`** | three AP lines under `INV-7`, one overridden to 1000, and a key-scoped override makes all three read 1000: the entry posts **3000 instead of 1000 + 30 + 0**. Unlike a correction, where broadcasting to every row with the key is the documented intent, broadcasting an override is a money bug. The count is in the message and the cell renders **locked** |
+| **the row is already posted to the general ledger** | naming the accounting reference, so the answer is "reverse entry AEG-… first" rather than "no". This is a call to S12 |
+
+**Canonicalised on write, but only when it is a number.** `Formula._tokenValue` rejects a comma,
+so `1,234.50` stored verbatim gives `#ERR` from `{Net}*2` while `U.num` reads 1234.5 — the same
+override reading two ways on two surfaces. A `'value'` column therefore stores
+`String(U.num(raw))` (`1,234.50` → `1234.5`, `(500)` → `-500`) with the raw keystroke kept in
+`typed`. Something that is **not** a number is stored **verbatim**: `U.num('abc')` is 0 and a
+silent zero in a column that feeds a journal entry is the class of bug this exists to prevent, and
+refusing it instead would make the kind rule below unreachable. The dependent formula then says
+`#ERR`, which is loud.
+
+**The exported kind does not depend on where in the file the override is.** `XlSchema.build`'s
+numeric-kind scan stops at 2,000 rows, so an override on row 50,000 never entered it: the column
+kept `kind:'value'` and `buildExport` wrote that one cell as forced text inside a numeric column,
+where Excel's SUM silently excludes it and the load-back diff is quiet because the baseline
+recorded the same text. The scan now also walks the sparse store for that column — no walk at all
+for a template with no records.
+
+**The workbook contains the column.** The in-app view filtered on `showExtras`/computed while the
+real export filtered on `d.role !== 'computed'`, so a user was shown an editable input and handed
+a workbook without it. Both `includeComputed` filters and the `showExtras:'inputs'` filter now
+read `|| d.overridable`.
+
+**The revert is a `clear` edit, handled before `const cur = …`** in `applyEdits`, immediately
+after its two guards. `applyEdits` runs its noop check *before* it dispatches on `writeTo`, and
+`XlSchema.currentValue` would by then return **the override**, so both plausible readings of a
+value-based revert fail: passing no value makes `value === ''`, which equals an empty override (so
+an empty override would be **permanent**), and passing the computed value no-ops whenever the
+formula has drifted to equal the override. It is not ridden on `e.force`.
+
+**The Excel view's undo does not latch an override.** Its history recorded `before` as the
+*computed* value when no override existed and replayed it as a **value**, so Ctrl+Z after typing
+250 stored `{v:'90', prev:'250'}`: the cell *looked* right and was frozen at 90 in the grid, the
+reports, the CSV and any posted JV. The history entry now carries `beforeOverride` (the record, or
+null) and a null is turned back into a `clear: true` edit.
+
+**Cost.** An override must not end in `AppState.save()`, which serialises every persist key —
+measured 798–1378 ms / 85.6 MiB at 200k rows — to discover nothing changed: the record is written
+by `Store.mergeWrite` through `Reco._extraValueFlush`, and `applyEdits` skips the trailing save
+when an override was the only thing applied. The grid's two handlers pass the **cached** schema
+(`Reco._ovSchema`), because routing through `applyEdits` with no `schema` re-runs `XlSchema.build`
+per keystroke-blur. Measured at 200,000 rows, best of three: **0.1 ms per override** with the
+cached schema against 2.5 ms without, and **no `recoSessions.json` write at all**.
+
+**The header count is an honest map-key count** — *"N override(s) stored for this column (some keys
+may not be in the loaded data)"*. Counting the overrides on the loaded rows would need a Set over
+every row on every render, and orphans are kept on purpose.
+
+**S12 — one answer to "is this posted".** `Reco.isRowPosted(tpl, sess, row)` reads the row
+property first (that is what `commitEntryFromPreview` writes and what a reversal deletes) and
+falls back to the ladder when the post-entry column is an **added** column, whose value is
+computed or lives in the store. There were two implementations giving opposite answers about the
+same row — this one and `ExcelLink._isPosted`, which read the enriched row — and §5b made the
+divergence reachable in a new way, because a typed value now survives a reload while the row
+property a stamp wrote does not. Every caller was converted: the grid badge, the Excel-view status
+cell, `postedJvAudit` (which opens a Masters pass when the column is an added lookup, so a master
+is indexed once rather than once per row), the posted-JV exception export (which now shows the
+value the decision was made on) and `ExcelLink._isPosted`, which is now a one-line delegate. The
+two-argument call is still accepted, because five sites in `run_reverse_e2e` use it.
+
+**S11 is asked, not duplicated.** The `allowOverride` checkbox calls
+`RecoTemplate._exclusiveRoleConflict(t, name, 'allowOverride')`; the matrix already held that row
+in both directions, and `aeg.inputColumns` joined it with #26 (T-24R2-6), so the AEG editor
+refuses renaming an input column onto an overridable one. The box is **always enabled and refused
+in the handler**, like the primary-key boxes and for the reason that comment gives: the Primary
+Key block is emitted before the Additional Columns editor and ticking a key there does not redraw
+it, so a greyed-out box would stay grey after the user had just ticked one.
+
+Tests: `tests/e2e/run_store_e2e.mjs` sections [12]–[22] (O1–O14), with O1, O2 and O3 as the gates.
+
+### 5d. Carrying a typed value forward to the next file (#30)
+
+Ticket #30 was *"option to preload values of selected custom columns from previous file on loading
+new file"*. There is **no preload step**: the store of §5b is keyed on the row's `_pk` and read at
+render time, so loading a new file costs zero extra reads and zero extra writes. What #30 adds is
+the flag that decides the **scope** of a `k:'typed'` record, the mark that says a value came from
+another file, and the one-time promotion that makes the flag mean something the day it is ticked.
+
+**THE FLAG, OFF BY DEFAULT, PER COLUMN.** `ac.carryForward === true` on a `custom` or `dropdown`
+added column, set by **Carry this value forward to the next file** in the template's Additional
+Columns (`RecoTemplate._carryBox` / `toggleCarry`). Off is every template that exists today, and
+off means **file-scoped**: `Reco._extraTyped` honours the record only for a row whose data set
+(`Reco.dataSetOf`, i.e. `sess.dataSetIds[row._dsi]`) matches `rec.ds`. On means **key-scoped**:
+honoured for that key in any file. `k:'override'` records are always key-scoped, because an
+override is a decision about the invoice and not about the file.
+
+**WHY THE SCOPE IS PER ROW AND NOT PER SESSION, and it was a blocker.** "Add Data" does
+`sess.data = sess.data.concat(mapped);` and nothing ever removes a data set, so September's rows
+are still in `sess.data` when October's render. A session-level test would therefore have shipped
+the cross-file carry this feature promises it does **not** — by default, on every template on the
+share. `row._dsi` (a small integer index into `sess.dataSetIds`; a path string would add ~9 MB to
+`recoSessions.json` at 200k rows) is what makes the test per row. It is stamped **last** in both
+row literals, because `run_panes_e2e`'s T1 diffs `recoSessions.json` byte for byte. A row with no
+`_dsi` — a `+ Row` row, or a session persisted by an older build — answers `null` and is treated as
+out of scope rather than guessed at.
+
+**THE MARK IS DERIVED, NEVER STORED** (`Reco._extraCarried`): `rec.ds` against the row's own data
+set. A stored flag would have to be cleared by every writer that touches the cell, and the one
+that forgot would leave an accent on a value somebody had confirmed. The grid renders a carried
+cell with `td.carry-set`, a `title` naming **who typed it, what, in which file and when**, and a
+`✓` confirm button. **Nothing at all is emitted when a cell is not carried**, which is why the two
+grid-`<tbody>` byte-identity gates (`run_colorder_e2e` T1 and `run_pk_extras_e2e` G1) needed no
+amendment for #30.
+
+**CONFIRMING NEEDS ITS OWN PATH, and that is what the derived mark costs.** `applyEdits` does
+`if (String(value) === String(cur)) { res.noop++; continue; }` and `cur` (`XlSchema.currentValue`)
+reads a tag through the **enriched** row — i.e. the carried value. So re-entering it is a no-op,
+`ds` is never re-stamped, and the mark is **unclearable**. `Reco.setTag` therefore asks
+`Reco._extraCarried` first and passes `{ force: true }` on that one edit, which `applyEdits`
+already honours for "a decision the user made explicitly". It asks **only when the cell is
+carried**, so an ordinary re-type of an ordinary tag still no-ops and still writes nothing to the
+share. `Reco.confirmCarried` is the `✓`: a **dropdown** is why that button exists at all — picking
+the option that is already selected fires no `change` event, so without it a carried dropdown
+could only be confirmed by choosing something else and choosing back.
+
+**`ds` ON WRITE IS THE ROW'S DATA SET, NEVER `Versioning.pathFor(tpl)`.** `pathFor` is *today's*
+day file; a file reopened from history on a later calendar day belongs to its own file, and
+stamping today's path would make the value vanish from its own file's scope on the next repaint.
+`pathFor` is used in `ingestData` only to **name** the data set the upload is going into, which is
+what keeps a value typed after an upload in scope after a reload.
+
+**THE ONE-TIME PROMOTION** (`Reco._promoteCarryForward`, called from `saveTemplate`). Without it
+the operator ticks the box and gets nothing until the period after next: the values on screen were
+typed before the box was ticked, so they are in `sess.manualTags` — keyed on `row._id`, which is
+re-minted on every load — and the store has nothing against the key to carry. The promotion moves
+each legacy value of a column that **gained** the flag into the store in **one** S13 write, and
+deletes the legacy entry for that exact cell (one truth per cell). It leaves a cell that already
+has a record **byte-identical**, because such a record became key-scoped the instant the flag went
+on; that is what makes a second save with nothing changed promote nothing. `prevExtras` is captured
+**inside `saveTemplate`'s `else` block before the swap** — at the `--- THE CRITICAL FIX ---`
+anchor `orig` is out of scope and the stored template already *is* `t` — and the session is read as
+`AppState.recoSessions[t.id]`, never through `activeRecoId`, because the editor is reachable from
+Home.
+
+**S11 IS WHAT MAKES THE JOURNAL SAFE, and it is a blocker and not a nicety.** The AEG extras loop
+reads the store through its own copy of the same ladder, and it runs **before** the keyword filter
+— so a carried value on the keyword column would decide whether a row posts at all, and one on an
+input or `aggregateBy` column (matched by name) would set an account code or change how amounts
+group. `RecoTemplate._exclusiveRoleConflict(t, name, 'carryForward')` refuses that, in both
+editors and both directions. The alternative remedy — leave the AEG loop reading `manualTags` only
+— would have shipped a **permanent divergence** where the grid shows the carried value and the
+journal posts without it.
+
+**DECISION S, followed literally and with its own objection fixed.** The carry box is **disabled
+with its reason** on a template with no primary keys, and **absent** on a computed column (which
+has #26's override box instead). #26 chose "always enabled, refused in the handler" for its box
+because the Primary Key block is emitted *before* this editor and ticking a key there does not
+redraw it, so a greyed box would stay grey. `RecoTemplate.togglePK` now calls
+`RecoTemplate._syncCarryBoxes(t)`, which enables/disables those boxes and swaps their reason **in
+place** — no re-render (which would throw away the focus and scroll of the block the user is in),
+and no element id (decision U allows one only for a bounded name on `Panes.PANE_IDS`), so the
+boxes are found by their class. The handler refuses as well, because a disabled input is a UI
+state and not a rule.
+
+**THE VALUES PANEL** (Manage → **Column Values**, `Reco.openValuesModal`). The typed values of
+added columns are the one kind of record in this app that exists **nowhere else** — not on the
+row, not in a `Cn` row in `reco_data/`, not on `sess` — so there is one screen that lists them with
+who, when, which file and their scope, marks a key that is not in the loaded data and a column
+that no longer exists, and can **Remove** one or **remove every record for keys not in the current
+data** (with a confirm naming the count). The card appears only once the template has a carry
+column or the store holds a typed record for it, so no Manage screen that exists today gains one.
+
+**AND THE CLEAR SAYS WHAT SURVIVES.** `Reco.confirmClearSession` replaced the card's inline
+`confirm('… Manual offsets, corrections, and entries are kept.')`, which did not mention typed
+values at all — and before §5b a Clear silently destroyed them. It now names the count of values
+that are kept (against the row key, in the shared values file) and the ones that cannot be
+(a row with no key, a spreadsheet scratch column), which live only in that session.
+
+Tests: `tests/e2e/run_store_e2e.mjs` sections [23]–[32] (C0–C12), with **C1** (the default flag
+leaves an Add Data file 2 blank), **C2** (confirming a carried value clears the mark, both halves)
+and **C3** (a 50,000-cell fill-down is ONE write: measured 222 ms / 0.0044 ms per cell, 6.6 MB
+written once) as the gates.
 
 ### 5a. Opening a reco: what loads, when, and what the screen says
 

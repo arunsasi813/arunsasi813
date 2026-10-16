@@ -208,7 +208,20 @@ const SNAP = `(function () {
     const s = AppState.recoSessions[AppState.activeRecoId];
     return (t.additionalColumns || []).concat(s.extraColumns || []).map(a => a.name);
   })());
+  /* #26: the cells of a COMPUTED added column, which is the one place in the
+     body whose markup #26 changes (a title and a cursor on a cell that had
+     neither). Named here so T1 can declare that difference and still diff
+     every other byte. */
+  const computedNames = new Set((() => {
+    const t = AppState.recoTemplates.find(x => x.id === AppState.activeRecoId);
+    const s = AppState.recoSessions[AppState.activeRecoId];
+    return (t.additionalColumns || []).concat(s.extraColumns || [])
+      .filter(a => a && (a.type === 'formula' || a.type === 'master' || a.type === 'master_lookup'))
+      .map(a => a.name);
+  })());
   return {
+    computedTd: [].concat.apply([], body.map(tr => [...tr.querySelectorAll('td[data-col]')]
+      .filter(td => computedNames.has(td.dataset.col)).map(td => td.outerHTML))),
     headerCols: ths.map(th => th.dataset.col || th.className),
     tplTh: ths.filter(th => th.dataset.col && !extraNames.has(th.dataset.col)).map(th => th.outerHTML),
     extraTh: ths.filter(th => th.dataset.col && extraNames.has(th.dataset.col)).map(th => th.outerHTML),
@@ -324,8 +337,32 @@ try {
     check(same(snapOld.headerCols, snapNew.headerCols), 'T1: the header column sequence is unchanged', {
       old: snapOld.headerCols.slice(0, 8), now: snapNew.headerCols.slice(0, 8)
     });
-    check(snapOld.tbody === snapNew.tbody, 'T1: EVERY BODY ROW IS BYTE-IDENTICAL (all 12 rows, all 43 cells each)',
-      snapOld.tbody === snapNew.tbody ? undefined : firstDiff(snapOld.tbody, snapNew.tbody));
+    /* #26's ONE declared body difference, normalised out of the NEW build's
+       text before the comparison - and then asserted positively below, in
+       both directions, so this cannot quietly grow into "identical apart from
+       anything I choose to ignore". */
+    const OV_TITLE = / title="Computed in Reco\. To let people type their own value here[^"]*"/g;
+    const OV_CURSOR = / cursor:not-allowed;/g;
+    const nOvTitle = (snapNew.tbody.match(OV_TITLE) || []).length;
+    const nOvCursor = (snapNew.tbody.match(OV_CURSOR) || []).length;
+    const newBody = snapNew.tbody.replace(OV_TITLE, '').replace(OV_CURSOR, '');
+    check(snapOld.tbody === newBody,
+      'T1: EVERY BODY ROW IS BYTE-IDENTICAL (all 12 rows, all 43 cells each) apart from #26\'s one '
+      + 'declared insertion - the locked computed cell\'s title and cursor',
+      snapOld.tbody === newBody ? undefined : firstDiff(snapOld.tbody, newBody));
+    /* THE POSITIVE HALF, in three parts: the normalisation removed something,
+       it removed exactly one title and one cursor per computed-extra cell
+       (12 rows x 1 formula column), and the old build had no title there at
+       all. Without these three the byte check above would mean nothing. */
+    check(nOvTitle === snapNew.computedTd.length && nOvCursor === snapNew.computedTd.length
+          && nOvTitle === 12,
+      'T1: and the normalisation removed EXACTLY one title and one cursor per computed-extra cell',
+      { titles: nOvTitle, cursors: nOvCursor, cells: snapNew.computedTd.length });
+    check(snapNew.computedTd.every(h => /title="Computed in Reco\./.test(h) && /cursor:not-allowed/.test(h))
+          && snapOld.computedTd.every(h => !/title=/.test(h)),
+      'T1: #26\'s DECLARED BODY DIFFERENCE is exactly that - the locked computed cell now says how to '
+      + 'turn typing on, where it used to carry no title at all, on every template that has one',
+      { old: snapOld.computedTd[0], now: snapNew.computedTd[0] });
     check(same(snapOld.tplTh, snapNew.tplTh), 'T1: every file-column <th> is byte-identical',
       same(snapOld.tplTh, snapNew.tplTh) ? undefined : { old: snapOld.tplTh[0], now: snapNew.tplTh[0] });
     check(same(snapOld.bodyCols, snapNew.bodyCols), 'T1: the per-cell data-col sequence is unchanged');
@@ -342,7 +379,8 @@ try {
        takes sess.columnWidths and carries a resize handle, because it can be
        positioned now. Asserted as a difference so it cannot drift further. */
     const changed = !same(snapOld.extraTh, snapNew.extraTh);
-    check(changed, 'T1: the added-column <th>s are the ONLY markup that changed (declared)');
+    check(changed, 'T1: the added-column <th>s are the ONLY HEADER markup that changed (declared; the '
+      + 'other declared difference is #26\'s locked-cell title in the body, above)');
     check(snapNew.extraTh.every(h => /col-draggable/.test(h) && /draggable="true"/.test(h) && /col-resize-handle/.test(h))
        && snapOld.extraTh.every(h => !/col-draggable/.test(h)),
       'T1: and the difference is exactly drag + width + resize handle on the extras', {
