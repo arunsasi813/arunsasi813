@@ -3642,11 +3642,40 @@ const Store = {
   _jrnlSaved: false,       // is there anything in localStorage to keep in step?
   _jrnlTimer: null,
   _jrnlFull: false,
+  /* ---- ROUND 4. TWO INDEXES BESIDE THE MAP.
+
+     _jrnlById is intent id -> tag, and it exists because journalDone(id)
+     WALKED THE WHOLE MAP with no early exit, once per intent, from inside
+     Store._mergeJob's queued write job. That is O(n squared) and it is
+     synchronous: a 50,000-cell fill-down went from ~0.95 s to 20-30 s with
+     the window frozen for the whole of it (measured 10 / 171 / 3,585 /
+     19,305 ms at 1,000 / 5,000 / 20,000 / 50,000 cells), and because the loop
+     runs AFTER the write but still inside the per-path job for
+     reco/extraValueMaster.json, the queue for that shared file was held for
+     all of it by a loop doing no I/O at all. §18.5 says the owed set was put
+     in a Map precisely to stop the first build's quadratic hanging the suite
+     for eleven minutes; the quadratic had moved, not gone. The suite could
+     not see it, because C3b counts the WRITES (still exactly one) and C3e
+     only reports the wall clock - §16.4a's own rule - so section [75] counts
+     the SCANS instead.
+
+     _jrnlGone is tag -> the `at` this window settled it at, and it is what
+     makes the merging persist below safe: without it, a re-read of the disk
+     would resurrect a cell this window has just written to the share. It is
+     only populated while there IS a durable copy to resurrect from, and it is
+     dropped the moment the journal empties, so it cannot grow across a day. */
+  _jrnlById: null,
+  _jrnlGone: null,
   _jrnlMap() {
     if (!Store._jrnlMem) {
       Store._jrnlMem = new Map();
+      Store._jrnlById = new Map();
       // Whatever a previous session left behind is still owed.
-      Store._jrnlRead().forEach(x => { if (x && x.tag) Store._jrnlMem.set(x.tag, x); });
+      Store._jrnlRead().forEach(x => {
+        if (!x || !x.tag) return;
+        Store._jrnlMem.set(x.tag, x);
+        if (x.id) Store._jrnlById.set(x.id, x.tag);
+      });
       Store._jrnlSaved = Store._jrnlMem.size > 0;
     }
     return Store._jrnlMem;
@@ -3658,12 +3687,50 @@ const Store = {
     return Array.isArray(a) ? a : [];
   },
   _jrnlWrite(list) { return Store._localSet(Store._JRNL, list || []); },
+  /* ---- ROUND 4, THE BLOCKER REVIEWER B MEASURED. MERGED, NOT REPLACED.
+     This used to write Array.from(_jrnlMap().values()) straight over the
+     stored list with no re-read - and _jrnlMap() loads localStorage only when
+     _jrnlMem is null, so a window whose map was already live never saw the
+     other window's entries again. TWO WINDOWS OF RECO ON ONE PC share one
+     localStorage origin (§18.7 limitation 3 describes the configuration, and
+     T-S10-11 exists because the team runs it): A typed INV-1 while the folder
+     was down, B typed INV-2, and the journal held INV-2 ALONE. Both windows
+     persist on their way out - pagehide, the beforeunload guard, the hub
+     leave gate - so last writer won every time, the boot offered one value
+     back, and the other was on neither the folder nor the PC with nothing
+     said. §18.7's claim that "the per-cell guard makes that safe rather than
+     destructive" was wrong about WHEN: the cells are keyed per window IN
+     MEMORY, the persist was a whole-list blind write, and the guard runs at
+     replay, long after the loss.
+
+     So it is a read-merge-write, which is what Store.mergeWrite already does
+     for every shared file - this one just happens to be the second copy.
+     NEWER `at` WINS per tag, the same string compare the replay guard uses;
+     a tag this window has SETTLED (_jrnlGone) is not brought back unless the
+     disk holds something newer for it, which is another window still owing
+     that cell. _jrnlMem is deliberately NOT adopted from the union: it means
+     "the cells THIS window owes", and journalDone must go on clearing exactly
+     this window's intents. */
   journalPersist() {
     if (Store._jrnlTimer) { clearTimeout(Store._jrnlTimer); Store._jrnlTimer = null; }
-    const list = Array.from(Store._jrnlMap().values());
+    const mem = Store._jrnlMap();
+    const out = new Map();
+    Store._jrnlRead().forEach(x => {
+      if (!x || !x.tag) return;
+      const settled = Store._jrnlGone ? Store._jrnlGone.get(x.tag) : undefined;
+      if (settled !== undefined && String(x.at || '') <= String(settled)) return;
+      out.set(x.tag, x);
+    });
+    mem.forEach((v, k) => {
+      const d = out.get(k);
+      if (!d || String((v && v.at) || '') >= String((d && d.at) || '')) out.set(k, v);
+    });
+    const list = Array.from(out.values());
     if (!list.length && !Store._jrnlSaved) return true;      // nothing to say
     const ok = Store._jrnlWrite(list);
     Store._jrnlSaved = ok && list.length > 0;
+    // Nothing on the disk any more, so nothing to suppress a re-read of it.
+    if (!list.length) Store._jrnlGone = null;
     /* A FULL localStorage MEANS THE PROMISE IS NOT TRUE, so it is said once.
        Without this the leave gate would offer to keep values that are not
        being kept, which is a worse lie than the silence it replaced. */
@@ -3686,30 +3753,73 @@ const Store = {
     let rec = null;
     try { rec = cell.rec ? JSON.parse(JSON.stringify(cell.rec)) : null; } catch (e) { rec = null; }
     // One truth per cell here too: set() supersedes this cell's earlier intent.
-    Store._jrnlMap().set(tag, { id, tag, base: Store._jrnlBase || '', tpl: String(tplId),
+    const map = Store._jrnlMap();
+    const idx = Store._jrnlById || (Store._jrnlById = new Map());
+    const prev = map.get(tag);
+    if (prev && prev.id) idx.delete(prev.id);      // ROUND 4: the superseded id
+    map.set(tag, { id, tag, base: Store._jrnlBase || '', tpl: String(tplId),
       file: String(file), pk: String(cell.pk), col: String(cell.col), rec: rec,
       at: String((cell.rec && cell.rec.at) || new Date().toISOString()) });
+    idx.set(id, tag);
     if (Store._jrnlSaved) Store._jrnlSchedule();   // keep the durable copy in step
     return id;
   },
   /* CLEARED BY INTENT id AND NOT BY CELL. A write that resolves while a NEWER
      value for the same cell is still buffered (MR-8's window) must not clear
      the newer one - that is the loss back again, quietly. */
+  /* ROUND 4: BY INDEX, so this is O(1) rather than a full scan per intent.
+     The semantics are unchanged - a cell re-typed since this intent went out
+     carries a NEWER id in the map, and `cur.id !== id` is the same refusal
+     the scan made by not finding the tag at all (MR-8's window). */
   journalDone(id) {
     if (!id) return;
     const map = Store._jrnlMap();
-    let tag = null;
-    map.forEach((v, k) => { if (v && v.id === id) tag = k; });
-    if (tag === null) return;
+    const idx = Store._jrnlById || (Store._jrnlById = new Map());
+    if (!idx.has(id)) return;
+    const tag = idx.get(id);
+    idx.delete(id);
+    const cur = map.get(tag);
+    if (!cur || cur.id !== id) return;             // superseded; the newer one stands
     map.delete(tag);
+    /* Settled, so a merging persist (this window's or another's re-read of
+       the disk) must not bring this cell back. Only worth recording while
+       there IS a durable copy it could come back from. */
+    if (Store._jrnlSaved)
+      (Store._jrnlGone || (Store._jrnlGone = new Map())).set(tag, String(cur.at || ''));
     if (Store._jrnlSaved) Store._jrnlSchedule();
   },
   journalFailed() { Store._jrnlSchedule(); },
-  journalClear() {
+  /* ---- ROUND 4. IT TAKES A `keep` NOW, AND IT USED TO SPARE NOTHING.
+     App._replayJournal called this on both its paths, so a journal typed
+     against the shared folder the team has just moved off was DELETED by the
+     boot that was never going to write it anywhere: in the worst case with no
+     sentence at all (the all-other-folder branch returned above the
+     `discarded` toast), and otherwise under a toast telling the operator to
+     "point Reco back at that folder to put them on it" - an instruction the
+     same function had just made impossible. The journal is the only copy; the
+     store keeps one truth per cell and §15.6 says so.
+     `keep` is a Set of tags to leave exactly where they are, in memory and on
+     the disk. Everything else is settled as far as this window is concerned,
+     so it goes into _jrnlGone and a merging persist cannot resurrect it. */
+  journalClear(keep) {
     if (Store._jrnlTimer) { clearTimeout(Store._jrnlTimer); Store._jrnlTimer = null; }
-    Store._jrnlMem = new Map();
-    Store._jrnlSaved = false;
-    Store._jrnlWrite([]);
+    const spare = (keep && typeof keep.has === 'function') ? keep : null;
+    const disk = Store._jrnlRead();
+    const next = new Map();
+    if (spare) {
+      disk.forEach(x => { if (x && x.tag && spare.has(x.tag)) next.set(x.tag, x); });
+      Store._jrnlMap().forEach((v, k) => { if (spare.has(k)) next.set(k, v); });
+    }
+    const gone = new Map();
+    Store._jrnlMap().forEach((v, k) => { if (!next.has(k)) gone.set(k, '\uffff'); });
+    disk.forEach(x => { if (x && x.tag && !next.has(x.tag)) gone.set(x.tag, '\uffff'); });
+    Store._jrnlMem = next;
+    Store._jrnlById = new Map();
+    next.forEach((v, k) => { if (v && v.id) Store._jrnlById.set(v.id, k); });
+    const list = Array.from(next.values());
+    Store._jrnlGone = list.length ? gone : null;
+    Store._jrnlSaved = list.length > 0;
+    Store._jrnlWrite(list);
   },
 
   /* Serialised form of a state key. AppState compares this with the last
@@ -9507,6 +9617,22 @@ const AppState = {
   _saveTimer: null,
   _saveWaiters: [],
 
+  /* ---- ROUND 4, FINDING 3. ONE KEY CAN BE HELD OUT OF A WRITE, and exactly
+     one ever is: `recoTemplates`, while RecoTemplate.saveTemplate is waiting
+     for the shared folder to say what the stored template holds. The swap is
+     synchronous, so until that answer arrives AppState.recoTemplates carries
+     the editor's UN-MERGED clone and any write of the key publishes it over a
+     colleague's field - measured on the team column order, which is the
+     column order of every CSV and every workbook this template exports.
+     Skipping it here leaves _snap alone, so the key still reads as owed
+     (RecoTemplate._tplWriteOwed, AppState.pendingCount) and the write goes
+     out the moment the hold is released. See RecoTemplate._tplHold. */
+  _keyHeld(key) {
+    if (key !== 'recoTemplates') return false;
+    try { return typeof RecoTemplate !== 'undefined' && RecoTemplate._tplHold(); }
+    catch (e) { return false; }
+  },
+
   /* Debounced save. Many UI handlers call this on every change; bursts are
      coalesced and only keys whose content actually changed are written.
      Returns a promise that resolves once the data has reached the disk. */
@@ -9522,6 +9648,22 @@ const AppState = {
     AppState._saveTimer = null;
     const waiters = AppState._saveWaiters.splice(0);
     try {
+      /* ---- ROUND 4. A HELD TEMPLATE WRITE IS WAITED FOR, NOT SKIPPED.
+         `saveTemplate(); await AppState.flush();` is how every caller in the
+         app and the suite lands a save, so a flush that merely skipped the
+         held key published nothing at all and the operator's template edit
+         was gone. Waiting here costs one share round-trip on that one path
+         and then writes the MERGED template, which is the whole point: the
+         un-merged clone never reaches the folder, and nothing is dropped.
+         THE AWAIT IS SAFE WHERE THE COMMENT IN saveTemplate SAYS IT WOULD NOT
+         BE: the hold is taken at the swap, i.e. AFTER the share read has been
+         issued, so the `_tplWriteOwed()` flush on that line never sees a hold
+         and still serialises before its own first await. A save arriving
+         while a hold is up does not come through here at all - it waits on
+         the guard itself (see the share read). */
+      if (AppState._keyHeld('recoTemplates')) {
+        try { await Promise.resolve(RecoTemplate._flagGuard); } catch (e) {}
+      }
       /* DEV ASSERTION (MODULE 4b). The view table and the owned map must hold
          the same template ids. A disagreement means a session was inserted
          into or deleted from one map and not the other, i.e. a pane is about
@@ -9545,6 +9687,7 @@ const AppState = {
         try { text = Store.serialize(key, value); }
         catch (e) { console.error('serialize failed for ' + key, e); return; }
         if (text === AppState._snap[key]) return;
+        if (AppState._keyHeld(key)) return;      // ROUND 4: held, not dropped
         AppState._snap[key] = text;
         Store.save(key, value, text);
       });
@@ -9595,6 +9738,10 @@ const AppState = {
         AppState._keyTimer = null;
         const batch = Array.from(AppState._keyWanted || []);
         AppState._keyWanted = null;
+        /* ROUND 4: the same wait as flush(), for the same reason. */
+        if (batch.indexOf('recoTemplates') !== -1 && AppState._keyHeld('recoTemplates')) {
+          try { await Promise.resolve(RecoTemplate._flagGuard); } catch (e) {}
+        }
         const out = { written: [], skipped: [], failed: [] };
         batch.forEach(key => {
           const value = AppState._persistValue(key);
@@ -9602,6 +9749,7 @@ const AppState = {
           try { text = Store.serialize(key, value); }
           catch (e) { console.error('serialize failed for ' + key, e); out.failed.push(key); return; }
           if (text === AppState._snap[key]) { out.skipped.push(key); return; }
+          if (AppState._keyHeld(key)) { out.skipped.push(key); return; }   // ROUND 4
           AppState._snap[key] = text;
           Store.save(key, value, text);
           out.written.push(key);
@@ -9644,8 +9792,17 @@ const AppState = {
     return Store._takeDisk(mem, next || {});
   },
 
+  /* ROUND 4. AND THE HELD KEY, which is the half the two leave gates were
+     missing: the editor closes and the screen goes home the moment Save is
+     pressed, so for a full share round-trip on EVERY save of an existing
+     template App._pendingLeaveOk() returned true without asking and
+     window.__hubPendingWrites() read 0. Measured with a 2,500 ms folder read:
+     page 'home', pendingCount 0, leaveOk true, no toast said yet - and the
+     operator's description gone from the share and from memory after the
+     window went away in that gap. */
   pendingCount() {
-    return (AppState._saveTimer ? 1 : 0) + Store.pendingCount() + Versioning.pendingCount();
+    return (AppState._saveTimer ? 1 : 0) + (AppState._keyHeld('recoTemplates') ? 1 : 0)
+      + Store.pendingCount() + Versioning.pendingCount();
   },
 
   async load() {
@@ -11080,9 +11237,42 @@ const App = {
     try { list = Store._jrnlRead(); } catch (e) { list = []; }
     if (!list.length) return;
     const base = String(Store._jrnlBase || '');
+    /* ---- ROUND 4. UNKNOWN IS NOT "DIFFERENT". AppState.load() catches a
+       get_folder_info() that throws and leaves _jrnlBase '' (an older
+       launcher does not answer at all, and then every entry carries '' too,
+       which is the single-folder install every user has). But a TRANSIENT
+       failure left this window with '' while the entries carried a real
+       folder - and every one of them then classified as another folder's and
+       went down the branch that deleted the journal in silence. So when this
+       PC cannot say which folder it is pointed at and the journal names one,
+       NOTHING is replayed and NOTHING is cleared: the values stay on this PC
+       and are offered again at the next boot, which is the only answer that
+       cannot write somebody else's folder or destroy the only copy. */
+    if (!base && list.some(x => x && String(x.base || ''))) {
+      App._jrnlReplay.unsure = list.length;
+      U.toast(list.length + ' value(s) kept on this PC were not put back, because Reco could not '
+        + 'tell which shared folder this PC is pointed at and they name one. They are still here '
+        + 'and Reco will offer them again the next time it starts.', 'error');
+      return;
+    }
     const mine = [], theirs = [];
     list.forEach(x => { if (x && x.tag) (String(x.base || '') === base ? mine : theirs).push(x); });
     App._jrnlReplay.discarded = theirs.map(x => x.pk + ' / ' + x.col);
+    /* ---- ROUND 4. THE ENTRIES THIS BOOT IS NOT CONSUMING, and the sentence
+       that names them - both of which used to be lost on the path below.
+       `keep` is what journalClear must spare: everything belonging to another
+       folder. Said from HERE rather than at the tail, because the tail is
+       below an early return that the all-other-folder case takes. */
+    const keep = new Set(theirs.map(x => x.tag));
+    let toldDiscarded = false;
+    const sayDiscarded = () => {
+      if (toldDiscarded || !App._jrnlReplay.discarded.length) return;
+      toldDiscarded = true;
+      U.toast(App._jrnlReplay.discarded.length + ' value(s) kept on this PC were typed against a '
+        + 'DIFFERENT shared folder and were not replayed here: ' + App._jrnlReplay.discarded.join(', ')
+        + '. They are STILL KEPT on this PC \u2014 point Reco back at that folder and they go on '
+        + 'it.', 'error');
+    };
     // One entry per cell, the newest kept: the same cell may have been typed
     // several times while the folder was down.
     const byTag = new Map();
@@ -11092,7 +11282,7 @@ const App = {
     });
     const want = Array.from(byTag.values());
     App._jrnlReplay.pending = want.length;
-    if (!want.length) { Store.journalClear(); return; }
+    if (!want.length) { Store.journalClear(keep); sayDiscarded(); return; }
     const label = x => {
       const tpl = (AppState.recoTemplates || []).find(t => t && t.id === x.tpl);
       return (tpl ? tpl.name : x.tpl) + ' · ' + x.pk + ' / ' + x.col
@@ -11135,7 +11325,7 @@ const App = {
        itself through Reco._extraValueFlush, so a folder that is STILL down
        leaves the value owed and offered again next time, without this run's
        superseded duplicates piling up behind it. */
-    Store.journalClear();
+    Store.journalClear(keep);          // ROUND 4: `mine` only, skips included
     AppState.extraValueMaster = AppState.extraValueMaster || {};
     const outs = await Promise.all(todo.map(x => {
       const apply = map => {
@@ -11169,10 +11359,7 @@ const App = {
     if (skGone.length)
       U.toast(skGone.length + ' value(s) could not be put back because the reconciliation they '
         + 'belong to is not on this shared folder: ' + skGone.map(s => s.cell).join(', ') + '.', 'error');
-    if (App._jrnlReplay.discarded.length)
-      U.toast(App._jrnlReplay.discarded.length + ' value(s) kept on this PC were typed against a '
-        + 'DIFFERENT shared folder and were not replayed here: ' + App._jrnlReplay.discarded.join(', ')
-        + '. Point Reco back at that folder to put them on it.', 'error');
+    sayDiscarded();
   },
 
   async returnToHub() {
@@ -13464,6 +13651,41 @@ defaultTemplate() {
     }).catch(() => null);
   },
 
+  /* ============ ROUND 4, FINDING 3 + reviewer B's save gap. =============
+     THE ONE KEY THIS WINDOW HOLDS BACK WHILE THE FOLDER IS BEING ASKED.
+
+     The swap stays SYNCHRONOUS (every caller reads AppState.recoTemplates on
+     the next line), so from the swap until `_settleShared` answers that array
+     holds the editor's UN-MERGED clone - and ANY write of that key publishes
+     it. Measured both ways round: an owed templates write landed first
+     (§18.7's declared, narrowed hazard) and, worse because nothing declares
+     it, one ordinary `AppState.save()` from a tag, an offset, a group action
+     or a template op reaching its 250 ms timer inside the gap. Either one
+     reverted a colleague's TEAM COLUMN ORDER - the column order of every CSV
+     and every workbook this template exports, for everyone on the folder -
+     under a green "Template saved to database".
+
+     So the key is HELD: AppState.flush() and AppState.saveKeys() skip it
+     while a settle is in flight, and AppState.pendingCount() counts it, which
+     is the other half. Before this, both leave gates and the launcher's
+     pending-write count read ZERO for a full share round-trip on every save
+     of an existing template: the editor had closed, the screen had gone home,
+     and `App._pendingLeaveOk()` waved the operator out of a window whose
+     write had not been decided. The hold is released by whichever outcome
+     happens - `saveAndSay()` publishes the merged template, `_abandonSave`
+     has already put the folder's back - and by `_releaseHoldForExit()` when
+     the window is going away, because an operator's deliberate edit lost on
+     close is worse than the last-writer-wins publish it was before this
+     round. _settleOwed is a COUNT, not a flag: two saves can be in flight. */
+  _settleOwed: 0,
+  _tplHold() { return RecoTemplate._settleOwed > 0; },
+  /* THE WINDOW IS GOING AWAY. pagehide's flush is the last thing that runs,
+     so the hold cannot outlive it: whatever is in memory goes to the folder.
+     That republishes the un-merged clone in the gap, which is last-writer-wins
+     and exactly what this save did before this round - and it is the lesser
+     of the two losses, because the leave gate has already asked. */
+  _releaseHoldForExit() { RecoTemplate._settleOwed = 0; },
+
   /* Is reco/recoTemplates.json owed a write BY THIS SESSION? AppState._snap
      holds the text last loaded or saved for the key, so this is exact -
      unlike pendingCount(), which answers yes for a typed cell value in a
@@ -13524,8 +13746,9 @@ defaultTemplate() {
 
   /* Keep the folder's value for every field this editor did not touch, and
      return what was kept so one question can name all of it. */
-  _mergeShared(t, stored, opened) {
+  _mergeShared(t, stored, opened, both) {
     const said = [];
+    both = both || [];
     if (!t || !stored || !opened) return said;
     const diff = (mine, was, them) => JSON.stringify(mine === undefined ? null : mine)
       === JSON.stringify(was === undefined ? null : was)
@@ -13535,6 +13758,16 @@ defaultTemplate() {
       .filter((f, i, arr) => arr.indexOf(f) === i)
       .forEach(f => {
         if (RecoTemplate._own(RecoTemplate._MERGE_SKIP, f)) return;
+        /* ---- ROUND 4, FINDING 7. BOTH SIDES CHANGED THIS ONE. The editor
+           winning is the settled decision and not a defect; the SILENCE is.
+           `diff` needs mine === was before it records anything, so a field
+           this editor touched never reached the question at all - and the one
+           person who could go and ask the colleague about it is the one person
+           who did not know there was anything to ask. Collected here, named by
+           _askMerged in the same breath as everything it KEPT. No behaviour
+           change: the value saved is the same either way. */
+        if (!RecoTemplate._same(t[f], opened[f]) && !RecoTemplate._same(stored[f], opened[f])
+            && !RecoTemplate._same(t[f], stored[f])) both.push(RecoTemplate._sayField(f));
         if (!diff(t[f], opened[f], stored[f])) return;
         if (stored[f] === undefined) delete t[f];
         else t[f] = JSON.parse(JSON.stringify(stored[f]));
@@ -13569,6 +13802,29 @@ defaultTemplate() {
                 : RecoTemplate._sayField(f)));
         });
     });
+    /* ---- ROUND 4, FINDING 5. AND THE MIRROR OF THE PASS BELOW, which had
+       none: a column `opened` HAS that `stored` NO LONGER DOES is a
+       COLLEAGUE'S REMOVAL, and this editor's stale copy of it used to survive
+       untouched and unmentioned - so a save of one unrelated field from an
+       older clone put the column back on the folder for everyone, with
+       nothing said. It came back BLANK, because the colleague's own record
+       delete had already run, which is how operators learn that removing an
+       added column "does not take" and how the next person ends up typing
+       into something the team decided to retire. A column THIS editor removed
+       is simply not in `t`, so it is not touched here; one the editor removed
+       AND the folder removed needs nothing said either. */
+    /* AN ABSENT ARRAY IS NOT A REMOVAL. A stored template written by a build
+       with no added columns at all has no `additionalColumns` key, and
+       reading that as "the folder removed every one of them" would empty this
+       editor's list. Only a list that IS there can say a column has gone. */
+    if (Array.isArray(stored.additionalColumns)) (opened.additionalColumns || []).forEach(oc => {
+      if (!oc || !oc.name) return;
+      if (RecoTemplate._extraPair(stored.additionalColumns, oc)) return;         // still there
+      const mine = RecoTemplate._extraPair(t.additionalColumns || [], oc);
+      if (!mine) return;                        // this editor removed it too
+      t.additionalColumns = (t.additionalColumns || []).filter(a => a !== mine);
+      said.push('the added column "' + oc.name + '", which somebody else removed');
+    });
     /* A COLUMN THE FOLDER HAS THAT NEITHER THIS EDITOR NOR THE CLONE IT
        OPENED EVER SAW is a colleague's new column, and dropping it is the same
        silent loss as reverting a field - so it is APPENDED and named. A column
@@ -13597,14 +13853,27 @@ defaultTemplate() {
     return said;
   },
 
+  /* JSON identity, with undefined and null read as the same absence - the
+     same rule `diff` above uses, lifted so finding 7's comparison cannot
+     drift away from it. */
+  _same(a, b) {
+    return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+  },
+
   /* ONE QUESTION, naming every field. It is asked rather than announced
      because Cancel has to mean something: the operator may want to go and
      look at what a colleague did before their own edit lands on top of it. */
-  _askMerged(said) {
+  _askMerged(said, both) {
+    both = both || [];
     return confirm('Someone else changed this template on the shared folder while you had it open:'
       + '\n\n' + said.map(s => '  • ' + s).join('\n')
       + '\n\nThose are being kept AS THE FOLDER HAS THEM, because you did not change them in this '
       + 'editor. Everything you did change here is saved.'
+      /* ROUND 4, FINDING 7: and what is being saved OVER somebody. */
+      + (both.length
+          ? '\n\nYou and somebody else both changed ' + both.join(' and ') + ' — yours is '
+            + 'being saved over theirs. Go and ask them if that matters.'
+          : '')
       + '\n\nGo on? (Choose Cancel to abandon this save — nothing more is stored, the folder is '
       + 'left exactly as it is, and the editor closes so you can open it again and make your change '
       + 'on top of theirs.)');
@@ -13646,17 +13915,40 @@ defaultTemplate() {
        about this save matters once row identity has moved under it. */
     const kmoved = RecoTemplate._keyDefMoved(stored, opened);
     if (kmoved) {
+      /* ---- ROUND 4, FINDING 4. THE REFUSAL'S RECOVERY SENTENCE WAS ONLY
+         TRUE OF THE TEMPLATE. _abandonSave refreshes AppState.recoTemplates,
+         _openedWith and the posted index - and nothing re-keys the rows this
+         window already has loaded, whose _pk was minted under the OLD rule.
+         So the operator was told, in so many words, that their window was now
+         correct, and every value they typed afterwards went to the shared
+         folder under a key the folder's rule no longer computes: they read it
+         back fine on their own screen, no colleague ever saw it, and it was
+         gone from their own grid at the next reload. Measured: B typed into
+         Vendor after doing exactly what the sentence said, the record landed
+         under 'D1', and the colleague's upload of the same business row read
+         'D1-X' and showed blank. The round had traded a silent revert of a
+         colleague's key rule for a silent loss of this operator's typing.
+         So the rows are LATCHED (Reco._keyStale) until they are loaded again,
+         which is a refusal rather than a guess: re-minting the keys here
+         would change every loaded row's identity behind the operator's back,
+         and the Load they are being sent to do is the route that does it
+         properly, with the duplicate-key and blank-key questions attached. */
+      Reco._keyStaleMark(tplId);
       RecoTemplate._abandonSave(tplId, stored,
         'Nothing was saved. Someone else changed how this reconciliation identifies its rows while '
         + 'this editor was open — ' + kmoved.join(' and ') + '. Close it and open it again: '
         + 'this window now carries their key and your change can go on top of it. Saving over them '
         + 'would leave the next upload minting row keys under a scheme neither of you chose, and one '
-        + 'day file holding two identities for the same business rows.');
+        + 'day file holding two identities for the same business rows.'
+        + ' AND THE ROWS ON SCREEN ARE STILL KEYED THE OLD WAY: press Load to read them again '
+        + 'under the folder\'s rule before you type anything else into them, or what you type '
+        + 'will be filed under a key nobody else can see.');
       return false;
     }
-    const said = RecoTemplate._mergeShared(t, stored, opened);
+    const both = [];
+    const said = RecoTemplate._mergeShared(t, stored, opened, both);
     if (!said.length) return true;
-    if (!RecoTemplate._askMerged(said)) {
+    if (!RecoTemplate._askMerged(said, both)) {
       RecoTemplate._abandonSave(tplId, stored,
         'Nothing more was saved. The template on the shared folder is untouched and this window now '
         + 'shows it; open the editor again to make your change on top of theirs.');
@@ -13698,10 +13990,21 @@ defaultTemplate() {
        gone - with the whole fix looking like it ran. Written that way once;
        the suite passed on a lucky read/write ordering through the bridge
        queue, which is the worst way for it to be wrong. */
+    /* ROUND 4. AND NOT WHILE A SETTLE IS ALREADY IN FLIGHT. The hold means
+       the only templates write this session owes FOR THIS FILE is its own
+       undecided save, and publishing that before the read is precisely the
+       thing that must not happen - the read would then describe this window's
+       own clone, stored and _openedWith would agree, nothing would merge and
+       the colleague's field would be gone with the whole fix reading green.
+       So the in-flight save is waited for instead, and its write with it;
+       `opened` for THIS save was snapshotted above, before any of that. */
     const share = opened
-      ? (RecoTemplate._tplWriteOwed()
-          ? Promise.resolve(AppState.flush()).catch(() => null)
-          : Promise.resolve()).then(() => RecoTemplate._readSharedTemplate(t.id))
+      ? (RecoTemplate._tplHold()
+          ? Promise.resolve(RecoTemplate._flagGuard).catch(() => null)
+              .then(() => RecoTemplate._tplWritten).catch(() => null)
+          : (RecoTemplate._tplWriteOwed()
+              ? Promise.resolve(AppState.flush()).catch(() => null)
+              : Promise.resolve())).then(() => RecoTemplate._readSharedTemplate(t.id))
       : null;
     if (!t.name?.trim()) { U.toast('Name is required','error'); return; }
     if (!t.columns.length) { U.toast('Define at least one column','error'); return; }
@@ -13856,6 +14159,18 @@ defaultTemplate() {
     // Ensure display columns exist
     if (!t.displayColumns.length) t.displayColumns = t.columns.map(c=>c.name);
 
+    /* ROUND 4. The two things the branch below hands to the settle: the
+       store migrations it staged (findings 1 and 2) and the per-key hold
+       (finding 3). `held` makes the release idempotent, so no outcome can
+       drop the count twice or leave it stuck above zero. */
+    let stageStore = null;
+    let held = false;
+    const hold = () => { if (!held) { held = true; RecoTemplate._settleOwed++; } };
+    const release = () => {
+      if (!held) return;
+      held = false;
+      RecoTemplate._settleOwed = Math.max(0, RecoTemplate._settleOwed - 1);
+    };
     if (RecoTemplate._isNew) {
       t.dataFolder = RecoTemplate._uniqueDataFolder(t.name, t.id);
       AppState.recoTemplates.push(t);
@@ -14069,6 +14384,10 @@ defaultTemplate() {
             + 'stored, the box is not ticked, NOTHING in that column is kept against the row key yet, '
             + 'and you are asked again the next time you save.)')) return;
       }
+      /* ROUND 4, FINDING 3. THE HOLD IS TAKEN HERE, on the line the
+         un-merged clone becomes what any write of this key would publish, and
+         only on the path that is going to ask the folder about it. */
+      if (share) hold();
       if (i!==-1) AppState.recoTemplates[i] = t;
       /* #30, DECISION Q. AFTER the swap, because the promotion reads the
          STORED template's columns, and with prevExtras from BEFORE it. A new
@@ -14082,6 +14401,40 @@ defaultTemplate() {
       /* The question above has already been answered, so nothing here asks
          one: the non-conflicting cells are promoted and the conflicting keys
          are reported. */
+      /* ====== ROUND 4, FINDINGS 1 AND 2. STAGED, NOT RUN. ==================
+         These three WRITE THE SHARED VALUES FILE - _promoteCarryForward and
+         _renameExtraValueCol and _dropExtraValueCols all go out through
+         Reco._extraValueFlush -> Store.mergeWrite - and they used to run here,
+         fifty-five lines BEFORE _settleShared can refuse the save or the
+         operator can cancel it. Measured, on both abandon arms:
+
+           - the REMOVAL arm is a DELETE. B answered YES to "Removing
+             \"Vendor\" (3) also deletes 3 value(s) people have typed into that
+             column ... They go for EVERYONE using this folder and cannot be
+             brought back", the save was then refused for a colleague's key
+             change, and the folder was left with the column back on the
+             template and ZERO of the three records - under a toast that said
+             "Nothing was saved". The confirm's own promise ("If you meant to
+             RENAME the column, cancel and change its name in place instead -
+             that keeps the values") was false, because cancelling the SAVE did
+             not cancel the delete. The same is reachable with NO key change at
+             all: any colleague field change plus Cancel on the merge question.
+           - the RENAME arm is a MOVE, and it orphaned the records: they went
+             to "Supplier" while the folder's template kept "Vendor", so the
+             column read blank for everyone and the three values sat in the
+             file unreachable - after a green "3 value(s) ... now belong to
+             Supplier" one toast before "Nothing was saved".
+
+         This falsified the committed §18.7 limitation 1 ("those records moved
+         with a column that is still on the folder under its old name -
+         nothing is deleted"), in both directions at once.
+
+         THE CONFIRMS STAY WHERE THEY ARE. They are answered before the swap
+         and that is right: what the operator decided does not change. What
+         moves is the WRITING, into a closure the success path invokes - and
+         the toasts with it, because a sentence about records that have not
+         moved yet is a sentence that may never become true. */
+      stageStore = () => {
       const promoted = Reco._promoteCarryForward(t, prevExtras);
       if (promoted.cells) U.toast(promoted.cells + ' value(s) already on screen in '
         + promoted.cols.join(', ') + ' are now kept against the row key and will carry forward',
@@ -14110,6 +14463,7 @@ defaultTemplate() {
       });
       if (droppedWithRecs.length)
         Reco._dropExtraValueCols(t.id, droppedWithRecs.map(x => x.name));
+      };
     }
 
     /* THE SAVE ITSELF WAITS FOR THE SHARE'S ANSWER, on the one path that asks
@@ -14156,10 +14510,18 @@ defaultTemplate() {
         try { RecoTemplate._openedWith = JSON.parse(JSON.stringify(t)); }
         catch (e) { RecoTemplate._openedWith = null; }
       }
+      /* ROUND 4, FINDINGS 1 AND 2. THE STORE MIGRATIONS, now that the
+         folder has agreed. Run BEFORE AppState.save() so the one write that
+         save makes already carries whatever they changed, exactly as it did
+         when they ran above the line. */
+      if (stageStore) { const go = stageStore; stageStore = null; go(); }
       // --- THE CRITICAL FIX ---
       // This triggers the bridge we set up in Module 3/4
       // which flattens the data and sends it to Python.
-      AppState.save();
+      /* ROUND 4. KEPT, so a save that arrives while this one is still in
+         flight can wait for the write instead of publishing its own clone to
+         land it (see the share read above). */
+      RecoTemplate._tplWritten = AppState.save();
       U.toast('Template saved to database','success');
     };
     if (share) {
@@ -14171,7 +14533,13 @@ defaultTemplate() {
            behaviour is what they get, which is what they got before any of
            this existed. */
         .catch(e => { console.error('shared template reconciliation failed', e); return true; })
-        .then(ok => { if (ok !== false) saveAndSay(); });
+        /* RELEASED FIRST, on BOTH outcomes: saveAndSay's own AppState.save()
+           is the write the hold exists to defer, so it must not be skipped by
+           it; and on the abandon path there is nothing of ours left to
+           publish, because _abandonSave has already put the FOLDER'S template
+           into AppState.recoTemplates. */
+        .then(ok => { release(); if (ok !== false) saveAndSay(); },
+              e => { release(); throw e; });
       return RecoTemplate._flagGuard;
     }
     settle();
@@ -16168,7 +16536,10 @@ ssCommitAddCol() {
 ssToggleRowSingleUse(rowId) {
   const sess = AppState.recoSessions[AppState.activeRecoId];
   const row = sess && Reco._rowById(sess, rowId);
-  if (!row) return;
+  if (!row) {                                    // ROUND 4, T-F2-8's sentence
+    U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
+    return;
+  }
   row._ssSingleUse = !row._ssSingleUse;
   AppState.save();
   App.navigate('reco');
@@ -20320,6 +20691,13 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
                  its parts and decision G's frozen value cannot be shown. */
   _mintKeysSync(tpl, sess, rows, from, to, acc) {
     const a = acc || Reco._mintAcc(tpl);
+    /* ROUND 4, FINDING 4. THE LATCH COMES OFF HERE, and only here: this is
+       the one function every route that re-keys a session goes through, so a
+       Load, an Add Data, a restore, a version load and an Excel load-back all
+       clear it without a line of their own. `from` is set only for the
+       chunked pass's later chunks, so the first chunk is what clears it. */
+    if (tpl && tpl.id && from == null && Reco._keyStale[String(tpl.id)])
+      delete Reco._keyStale[String(tpl.id)];
     const pks = (tpl.primaryKeys || []);
     const i0 = from == null ? 0 : from;
     const i1 = to == null ? rows.length : to;
@@ -23918,12 +24296,49 @@ renderRecoTable(tpl, sess) {
     return S;
   },
 
+  /* ============ ROUND 4, FINDING 4. THE ROWS ARE KEYED THE OLD WAY. ======
+     Set by RecoTemplate._settleShared when it REFUSES a save because a
+     colleague changed how this reconciliation identifies its rows
+     (T-24R2-1). The template is put back from the folder there; the rows this
+     window already has loaded cannot be, because their _pk was minted under
+     the rule that has just gone - and every value typed against one of those
+     keys reaches the shared folder under a key the folder's rule no longer
+     computes. The operator reads it back fine, no colleague ever sees it, and
+     it is gone from their own grid at the next reload.
+
+     PER WINDOW AND NEVER ON THE SESSION, so it cannot be serialised into
+     reco/recoSessions.json and handed to a colleague who has nothing wrong.
+     CLEARED BY THE LOAD ITSELF (Reco._mintKeysSync), which is the one place
+     every route that re-keys a session goes through - an upload, Add Data, a
+     restore, a version load, an Excel load-back. */
+  _keyStale: {},
+  _keyStaleMark(tplId) { if (tplId) Reco._keyStale[String(tplId)] = true; },
+  _keyStaleBlock(tpl, what) {
+    if (!tpl || !Reco._keyStale[String(tpl.id)]) return false;
+    U.toast('Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
+      + 'its rows while these rows were loaded, so the keys on screen are the OLD ones \u2014 '
+      + 'anything typed against them is filed where nobody else can see it. Press Load to read '
+      + 'the rows again under the shared folder\'s rule, then try again.', 'error');
+    return true;
+  },
+
   setOverride(rowId, col, val, paneKey) {
     const S = Reco._paneSel(paneKey);
     const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
     const row = Reco._rowById(sess, rowId);
-    if (!row) return;
+    /* ---- ROUND 4, T-F2-8's SENTENCE. `if (!row) return;` meant the operator
+       typed an override, the number on screen went back to what it was, and
+       nothing anywhere said why - so they type it again, or decide the
+       override feature is broken. This is the SECOND of what
+       Reco._extraValueFlush calls "the two doors an OPERATOR types through",
+       and T-F2-8's Fix paragraph names only editCell, manualOffset and
+       unmarkOffset while its last sentence says "the same in its siblings". */
+    if (!row) {
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was overridden. Press Load, then try again.', 'error');
+      return;
+    }
+    if (Reco._keyStaleBlock(tpl, 'overridden')) return;
     return Reco.applyEdits(tpl, sess, [{ row: row, col: col, value: val }],
       { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) })
       .then(res => Reco._afterOverride(res, id, row, col));
@@ -23936,7 +24351,13 @@ renderRecoTable(tpl, sess) {
     const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
     const row = Reco._rowById(sess, rowId);
-    if (!row) return;
+    /* ROUND 4: and this one is a DELETE that did not happen, which leaves the
+       operator believing an override they wanted gone is gone. */
+    if (!row) {
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was reverted. Press Load, then try again.', 'error');
+      return;
+    }
+    if (Reco._keyStaleBlock(tpl, 'reverted')) return;
     return Reco.applyEdits(tpl, sess, [{ row: row, col: col, clear: true }],
       { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) })
       .then(res => Reco._afterOverride(res, id, row, col));
@@ -24206,6 +24627,7 @@ renderRecoTable(tpl, sess) {
     const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
     const row = Reco._rowById(sess, rowId);
+    if (row && Reco._keyStaleBlock(tpl, 'saved')) return;    // ROUND 4, finding 4
     if (row) {
       /* #30, DECISION O. CONFIRMING A CARRIED VALUE NEEDS ITS OWN PATH.
          applyEdits does `if (String(value) === String(cur)) { res.noop++;
@@ -24225,11 +24647,22 @@ renderRecoTable(tpl, sess) {
       setTimeout(() => Reco._repaintRow(row, id), 0);
       return;
     }
-    sess.manualTags = sess.manualTags || {};
-    // No row to hand _tagKey, so the id is the key - which is what _tagKey
-    // spells out for a row too.
-    sess.manualTags[Reco._tagKey({ _id: rowId }, tagName)] = val;
-    AppState.save();
+    /* ---- ROUND 4, AND THIS BRANCH IS GONE. It wrote the typed value into
+       the LEGACY sess.manualTags under the dead _id and AppState.save() put it
+       on the shared folder - the exact store the whole S10 migration was built
+       to escape, keyed on an id U.uid() mints fresh on every load, so the
+       manualTags READ fallback can never find it again. It was not journalled
+       either (the store branch is what journals), so T-S10-9's replay cannot
+       recover it. So of the writers that were still not speaking, this was
+       the one where the edit was LOST rather than merely dropped - and it is
+       the door most typing goes through, because editCell serves FILE columns
+       and setTag serves every ADDED one (the <select> and the <input> the grid
+       renders for them).
+       THE SETTLED DECISION IS UNTOUCHED: the legacy manualTags READ fallback
+       is permanent, and run_reports_e2e still seeds and reads it unedited.
+       That is about records written by older builds; it never needed this
+       WRITE path, which only fires when the row is already gone. */
+    U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
   },
 
   /* #30. The ✓ on a carried cell. A DROPDOWN IS WHY THIS BUTTON EXISTS:
@@ -24243,7 +24676,12 @@ renderRecoTable(tpl, sess) {
     const tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
     const row = Reco._rowById(sess, rowId);
-    if (!row) return;
+    /* ROUND 4: two lines ABOVE its own sentence for the other failure, which
+       is what made the silence here read as deliberate. */
+    if (!row) {
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was confirmed. Press Load, then try again.', 'error');
+      return;
+    }
     const rec = Reco._extraCarried(tpl, sess, row, col);
     if (!rec) { U.toast('Nothing is carried in that cell any more', 'error'); return; }
     return Reco.setTag(rowId, col, rec.v, paneKey);
@@ -28084,9 +28522,21 @@ renderCustomReport(tpl, sess, rpt, idx) {
       const pr = ctx.postedRows;
       h += '<div class="doc-banner" style="margin-bottom:6px;">';
       h += '<b>\ud83e\uddfe ' + pr.length + ' selected row(s) are already posted</b>';
-      h += '<span>' + pr.slice(0, 8).map(p => U.esc(Reco._pkLabel(tpl, p.pk) + ' \u2014 '
-            + (p.ref ? p.ref + (p.via ? ' (' + p.via + ')' : '') : 'no accounting reference was recorded'))).join('; ')
-        + (pr.length > 8 ? '; \u2026and ' + (pr.length - 8) + ' more' : '')
+      /* ---- ROUND 4. EVERY ROW, NOT THE FIRST EIGHT. The ticket's Fix asks
+         the warning to name "the accounting reference of each", and past the
+         cap the operator could see the count but not which rows - so deciding
+         between "Leave them out" and "Post anyway" meant leaving the preview
+         to go and look them up. The first eight stay inline, because that is
+         what reads well; the rest go behind a disclosure, which is the only
+         part that was missing. The data was already in ctx.postedRows. */
+      const sayPosted = p => U.esc(Reco._pkLabel(tpl, p.pk) + ' \u2014 '
+            + (p.ref ? p.ref + (p.via ? ' (' + p.via + ')' : '') : 'no accounting reference was recorded'));
+      h += '<span>' + pr.slice(0, 8).map(sayPosted).join('; ')
+        + (pr.length > 8
+            ? '; <details style="display:inline;"><summary style="display:inline; cursor:pointer;">'
+              + '\u2026and ' + (pr.length - 8) + ' more</summary> '
+              + pr.slice(8).map(sayPosted).join('; ') + '</details>'
+            : '')
         + '. ' + (ctx.postedIncluded ? 'Generating this entry writes a SECOND entry for the same rows. '
                                      : 'They are not in this entry. ')
         + 'To put one back in the '
@@ -35978,6 +36428,14 @@ window.addEventListener('pagehide', () => {
      (see Store's journal block), so this is the moment it has to be on the
      disk; an await here may never run. */
   try { Store.journalPersist(); } catch (e) {}
+  /* ROUND 4. AND THE TEMPLATE HOLD GOES, because this flush is the last one
+     there will be: a template write held back for a folder answer that is
+     never coming would simply be lost, and the operator pressed Save. What it
+     publishes is this editor's clone, i.e. last-writer-wins - the behaviour
+     this save had before the round - and the leave gate has already asked
+     about it by then (AppState.pendingCount counts the hold). */
+  try { if (typeof RecoTemplate !== 'undefined') RecoTemplate._releaseHoldForExit(); }
+  catch (e) {}
   AppState.flush();
 });
 
