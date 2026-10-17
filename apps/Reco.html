@@ -6153,7 +6153,8 @@ const Timeline = {
          nobody can see it is worse than one not saved at all. The group
          branch is not latched: that record is filed against the group's id. */
       const atpl = AppState.recoTemplates.find(x => x && x.id === p.tplId);
-      if (atpl && Reco._keyStaleBlock(atpl, 'attached')) return;
+      if (atpl && Reco._keyStaleBlock(atpl, 'attached', AppState.recoSessions[p.tplId],
+            [Reco._rowByPk(atpl, AppState.recoSessions[p.tplId], p.pk)].filter(Boolean))) return;
       meta.linkedPks = [p.pk];
     } else if (sel.value.startsWith('group:')) {
       meta.linkedGroups = [sel.value.slice(6)];
@@ -6305,7 +6306,8 @@ const Comments = {
          on this branch, because a GROUP-linked comment is filed against the
          group's id and not against a row key. */
       const ctpl = AppState.recoTemplates.find(x => x && x.id === p.tplId);
-      if (ctpl && Reco._keyStaleBlock(ctpl, 'commented')) return;
+      if (ctpl && Reco._keyStaleBlock(ctpl, 'commented', AppState.recoSessions[p.tplId],
+            [Reco._rowByPk(ctpl, AppState.recoSessions[p.tplId], p.pk)].filter(Boolean))) return;
       meta.linkedPks = [p.pk];
     } else if (sel.value.startsWith('group:')) {
       meta.linkedGroups = [sel.value.slice(6)];
@@ -6734,8 +6736,12 @@ const FindReplace = {
       U.toast('No change', 'error');
       return;
     }
+    /* T-S10-20. Find & Replace writes a version row per touched key into the
+       shared day file, keyed off the row on screen - a door the enumeration
+       found and no round had listed. */
+    if (Reco._keyStaleBlock(tpl, 'replaced', sess, [row])) return;
     row[m.col] = newVal;
-    const pk = row._pk || Reco.getRowPK(tpl, row);
+    const pk = Reco.writeVerKey(tpl, sess, row, 'replaced');
     if (pk) {
       try {
         const verLabel = await Versioning.appendChange(tpl, pk, row);
@@ -6762,6 +6768,11 @@ const FindReplace = {
     const cols = FindReplace._columnsToSearch(tpl).filter(c => !c.isExtra);
     if (!cols.length) { U.toast('Pick a standard column or "All standard columns" to replace.', 'error'); return; }
 
+    /* T-S10-20. ASKED BEFORE THE LOOP, because the loop mutates the rows
+       first and writes afterwards: a refusal discovered at the write would
+       leave the screen changed and the shared day file not, which is the
+       "Filled N cells having done nothing" shape F18 was about. */
+    if (Reco._keyStaleBlock(tpl, 'replaced', sess, sess.data)) return;
     let cellChanges = 0;
     const touchedRowIdx = new Set();
     sess.data.forEach((row, ri) => {
@@ -6785,7 +6796,7 @@ const FindReplace = {
     const pkRows = [];
     touchedRowIdx.forEach(ri => {
       const row = sess.data[ri];
-      const pk = row._pk || Reco.getRowPK(tpl, row);
+      const pk = Reco.writeVerKey(tpl, sess, row, 'replaced');   // T-S10-20
       if (pk) pkRows.push({ pk, row });
     });
     try {
@@ -9324,7 +9335,10 @@ const ExcelLink = {
        machine paths share and which must never tell a machine to load
        anything again. The review dialog stays open, as it does for every
        other abort, so the operator's decisions are not thrown away. */
-    if (Reco._keyStaleBlock(tpl, 'loaded back from Excel')) return;
+    /* T-S10-20: and the ROWS the review would write, so a reopened pre-change
+       day file is refused here too and not only a colleague's rule change. */
+    if (Reco._keyStaleBlock(tpl, 'loaded back from Excel', sess,
+          plan.changes.concat(plan.conflicts).map(x => x && x.row).filter(Boolean))) return;
     const picks = plan.changes.filter(x => x.tick).concat(plan.conflicts.filter(x => x.take));
     const kept = plan.conflicts.filter(x => !x.take);
     if (!picks.length && !kept.length) return;
@@ -16202,7 +16216,8 @@ _xlOffsetSelectedRows(rowIds) {
   const sess = AppState.recoSessions[id];
   if (!tpl || !sess) return;
   /* T-S10-16. The Excel view: the offset action's fourth entry point. */
-  if (Reco._keyStaleBlock(tpl, 'offset')) return;
+  if (Reco._keyStaleBlock(tpl, 'offset', sess,
+        rowIds.map(x => Reco._rowById(sess, x)).filter(Boolean))) return;
   const chk = Reco.checkOffsetTolerance(tpl, sess, rowIds);
   if (!chk.ok) { U.toast(chk.msg, 'error'); return; }
   const rid = 'M' + Date.now().toString(36);
@@ -16214,7 +16229,10 @@ _xlOffsetSelectedRows(rowIds) {
     sess.offsets[rowId] = true;
     row._recoId = rid;
     row._manualOffset = true;
-    const pk = Reco.rowKey(tpl, row);
+    /* T-S10-20. THE CHOKEPOINT, not the gesture list: Reco.writeKey is the
+       only way a row becomes a key for a record the folder shares, and the
+       `if (pk)` that was already here makes the refusal all-or-none. */
+    const pk = Reco.writeKey(tpl, sess, row, 'offset');
     if (pk) mm[pk] = { recoId: rid, byUser: true };
     n++;
   });
@@ -16722,7 +16740,7 @@ ssToggleRowSingleUse(rowId) {
   const sess = AppState.recoSessions[AppState.activeRecoId];
   const row = sess && Reco._rowById(sess, rowId);
   if (!row) {                                    // ROUND 4, T-F2-8's sentence
-    U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
+    U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Use Add Data to load the file again, and try again.', 'error');
     return;
   }
   row._ssSingleUse = !row._ssSingleUse;
@@ -17188,6 +17206,17 @@ _ssCommit(fillColumn, moveDir) {
   if (!input) return;
   const raw = input.value;
   const filtered = Reco.applyTableFiltersSort(tpl, sess);
+  /* ---- T-S10-20. SHEET MODE'S OWN TYPING DOOR, measured OPEN by the final
+     verifier with real clicks on these two buttons: "✓ Apply" said NOTHING and
+     put `E2,C1,...,BTN-APPLY` into the shared day CSV under a dead key, and
+     "↓ Fill Column" said a GREEN "Applied to 3 row(s)" and wrote three
+     (choke/logs/p1_before.txt). editCell - the ROW MENU's door for the same
+     file column - has been latched since T-S10-16 with the verb "changed", so
+     this was the same action by another entry point and it was never listed.
+     Asked HERE, all-or-none, so nothing is written and the count in the green
+     toast cannot be about rows the folder will never see. */
+  if (Reco._keyStaleBlock(tpl, fillColumn ? 'filled' : 'changed', sess,
+        fillColumn ? filtered : [filtered[ac.fidx]])) return;
 
   if (fillColumn) {
     let n = 0;
@@ -17204,7 +17233,8 @@ _ssCommit(fillColumn, moveDir) {
         const rk = Reco._ssRowKey(row);
         if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][ac.col];
         row[ac.col] = raw;
-        if (row._pk) pkRows.push({ pk: row._pk, row });
+        const vk = Reco.writeVerKey(tpl, sess, row, 'filled');   // T-S10-20
+        if (vk) pkRows.push({ pk: vk, row });
         n++;
       });
       if (pkRows.length) {
@@ -17225,7 +17255,8 @@ _ssCommit(fillColumn, moveDir) {
     } else {
       delete sess.cellFormulas[rk][ac.col];
       row[ac.col] = raw;
-      if (row._pk) Versioning.queueChange(tpl, row._pk, row).then(v => { if (v) row._ver = v; });
+      const vk = Reco.writeVerKey(tpl, sess, row, 'changed');   // T-S10-20
+      if (vk) Versioning.queueChange(tpl, vk, row).then(v => { if (v) row._ver = v; });
     }
   }
 
@@ -17251,10 +17282,18 @@ _ssClearActive() {
   const filtered = Reco.applyTableFiltersSort(tpl, sess);
   const row = filtered[sess.activeCell.fidx];
   if (!row) return;
+  /* ---- T-S10-20. THE FIFTH SHEET-MODE DOOR, and no round listed it: this
+     round's own static enumeration found it, not a walk of gestures. The `x`
+     button and the Delete key both land here and it wrote `E3,C2,...` into the
+     shared day CSV under the dead key in total silence
+     (choke/logs/p1_before.txt, P1-5). That is the whole argument for a rule at
+     the write rather than a list of names. */
+  if (Reco._keyStaleBlock(tpl, 'cleared', sess, [row])) return;
   const rk = Reco._ssRowKey(row);
   if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][sess.activeCell.col];
   row[sess.activeCell.col] = '';
-  if (row._pk) Versioning.queueChange(tpl, row._pk, row).then(v => { if (v) row._ver = v; });
+  const vk = Reco.writeVerKey(tpl, sess, row, 'cleared');   // T-S10-20
+  if (vk) Versioning.queueChange(tpl, vk, row).then(v => { if (v) row._ver = v; });
   AppState.save();
   App.navigate('reco');
 },
@@ -17519,6 +17558,13 @@ _ssCommitFill(fd) {
   const filtered = Reco.applyTableFiltersSort(tpl, sess);
   const srcRow = filtered[fd.srcFidx];
   if (!srcRow) return;
+  /* ---- T-S10-20. THE FILL-HANDLE DRAG, measured OPEN: a green "Filled 2
+     cells" and reco/extraValueMaster.json gained the dead keys E2 and E3
+     (choke/logs/p1_before.txt, P1-3). It writes BOTH classes - store records
+     for an added column, through Reco.applyEdits, and day-file version rows
+     for a file column - so it is two doors in one gesture, which is why
+     neither showed up on anybody's list of function names. */
+  if (Reco._keyStaleBlock(tpl, 'filled', sess, filtered.slice(minF, maxF + 1))) return;
 
   const srcRowKey  = Reco._ssRowKey(srcRow);
   const srcFormula = ((sess.cellFormulas || {})[srcRowKey] || {})[fd.srcCol];
@@ -17585,7 +17631,8 @@ _ssCommitFill(fd) {
       } else {
         if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][col];
         row[col] = srcVal;
-        if (row._pk) pkRowMap[row._pk] = row;
+        const vk = Reco.writeVerKey(tpl, sess, row, 'filled');   // T-S10-20
+        if (vk) pkRowMap[vk] = row;
       }
       filledCount++;
     }
@@ -18219,7 +18266,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     // ROUND 5, T-S10-18: the same ATTACH action, a second entry point (a
     // multi-file drop onto a row). See Timeline._confirmUpload.
     const btpl = AppState.recoTemplates.find(x => x && x.id === tplId);
-    if (btpl && Reco._keyStaleBlock(btpl, 'attached')) return;
+    const bsess = AppState.recoSessions[tplId];
+    if (btpl && Reco._keyStaleBlock(btpl, 'attached', bsess,
+          [Reco._rowByPk(btpl, bsess, pk)].filter(Boolean))) return;
     U.toast('Uploading ' + files.length + ' files…');
     let ok = 0;
     for (const f of files) {
@@ -18401,7 +18450,8 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       markAsOffset ? 'nothing was marked' : 'nothing was unmarked');
     if (outside) { U.toast(outside.msg, 'error'); return; }
     /* T-S10-16. The same two actions, from the bulk toolbar. One verb each. */
-    if (Reco._keyStaleBlock(tpl, markAsOffset ? 'offset' : 'unmarked')) return;
+    if (Reco._keyStaleBlock(tpl, markAsOffset ? 'offset' : 'unmarked', sess,
+          selectedIds.map(x => Reco._rowById(sess, x)).filter(Boolean))) return;
 
     if (markAsOffset) {
       // Tolerance check on eligible (non-offset) rows
@@ -18416,7 +18466,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
         sess.offsets[rowId] = true;
         row._manualOffset = true;
         row._recoId = rid;
-        const pk = Reco.rowKey(tpl, row);
+        const pk = Reco.writeKey(tpl, sess, row, 'offset');   // T-S10-20
         if (pk) mm[pk] = { recoId: rid, byUser: true };
       });
     } else {
@@ -18440,7 +18490,8 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
        the folder's stays, and the row is offset again at the next load for
        everyone, this operator included. _unmarkBlockedGroups needs no check
        of its own: its modal can only be opened from here. */
-    if (Reco._keyStaleBlock(tpl, 'unmarked')) return;
+    if (Reco._keyStaleBlock(tpl, 'unmarked', sess,
+          (selectedIds || []).map(x => Reco._rowById(sess, x)).filter(Boolean))) return;
 
     selectedIds = (selectedIds||[]).filter(rid => sess.offsets[rid]);
     if (!selectedIds.length) { U.toast('No offset rows in selection', 'error'); return; }
@@ -18484,7 +18535,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
         const newRid = 'M' + Date.now().toString(36) + '_' + Math.floor(Math.random()*1000);
         remaining.forEach(r => {
           r._recoId = newRid;
-          const pk = Reco.rowKey(tpl, r);
+          const pk = Reco.writeKey(tpl, sess, r, 'unmarked');   // T-S10-20
           if (pk) mm[pk] = { recoId: newRid, byUser: true };
         });
         if (rid !== '__nogroup__') Reco._removeRidFromMaster(mm, rid);
@@ -18521,7 +18572,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       delete sess.offsets[r._id];
       delete r._manualOffset;
       delete r._recoId;
-      const pk = Reco.rowKey(tpl, r);
+      /* T-S10-20. A DELETE needs the same question: under a key the folder
+         does not compute this removes nothing the folder holds, and under a
+         key that has DRIFTED it removes the record filed when the key was
+         still right - the unmark's measured harm, by another route. */
+      const pk = Reco.writeKey(tpl, sess, r, 'unmarked');
       if (pk && mm[pk]) delete mm[pk];
     });
   },
@@ -18533,6 +18588,12 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     const tpl = AppState.recoTemplates.find(x => x.id === id);
     const sess = AppState.recoSessions[id];
     const mm = AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
+    /* T-S10-20. The "Unmark Entire Groups" button is the unmark action's
+       third entry point and was not on the list either. Reco._unmarkRows asks
+       per row through Reco.writeKey; this asks once for the whole modal so the
+       operator is not told four times. */
+    const bgRows = [].concat.apply([], (Reco._blockedGroups || []).map(g => g.allInGroup || []));
+    if (Reco._keyStaleBlock(tpl, 'unmarked', sess, bgRows)) return;
     let n = 0;
     (Reco._blockedGroups || []).forEach(g => {
       Reco._unmarkRows(tpl, sess, mm, g.allInGroup);
@@ -24196,7 +24257,7 @@ renderRecoTable(tpl, sess) {
     if (!tpl || !sess) return;
     /* T-S10-16. The selection sum bar: the offset action's third entry
        point, and not one of the function names the ticket lists. */
-    if (Reco._keyStaleBlock(tpl, 'offset')) return;
+    if (Reco._keyStaleBlock(tpl, 'offset', sess, Reco._selRows(sess))) return;
 
     const selectedIds = Object.keys(sess.selectedRows || {}).filter(k => sess.selectedRows[k]);
     if (!selectedIds.length) { U.toast('Select rows first','error'); return; }
@@ -24213,7 +24274,7 @@ renderRecoTable(tpl, sess) {
       sess.offsets[row._id] = true;
       row._recoId = rid;
       row._manualOffset = true;
-      const pk = Reco.rowKey(tpl, row);
+      const pk = Reco.writeKey(tpl, sess, row, 'offset');   // T-S10-20
       if (pk) mm[pk] = { recoId: rid, byUser: true };
       n++;
     });
@@ -24255,6 +24316,37 @@ renderRecoTable(tpl, sess) {
     };
     for (const e of edits) {
       if (!e || !e.row || e.col == null) continue;
+      /* ---- T-S10-20. THE CHOKEPOINT FOR EVERYTHING THAT GOES THROUGH HERE,
+         and that includes the door this round was handed: the IN-APP EXCEL
+         VIEW's own cell edit (Reco._xlOnChange -> Reco._xlApply), which said
+         nothing and put `E3.Vendor = "REAL-KEYS-EXCEL-VIEW"` into
+         reco/extraValueMaster.json while the folder's rule computed E3-X
+         (choke/logs/p1_before.txt, P1-4). Three of this function's writes are
+         pk-keyed shared records - the typed value and the override through
+         Reco._setExtraTyped / Reco._setOverride, and the row's version row in
+         the day file - so ONE question here covers all three for every
+         caller, present and future.
+
+         IT IS REJECTED, NOT DROPPED. Reco._setExtraTyped answers `false` for
+         "the store must not serve this cell" and the caller then writes
+         sess.manualTags instead, so refusing inside it would turn a refusal
+         into a SILENT SESSION-ONLY write - the exact shape of the bug this
+         round exists to stop. res.rejected carries the sentence, and
+         Reco._xlApply and Reco._afterOverride already show it.
+
+         `opts.keyFromStore` is the machine's way of saying its key did not
+         come from a row on screen: Reco.reverseEntry resolves its keys from
+         the POSTED-JV INDEX on the share, so a sentence telling it to clear
+         the screen and load again is addressed to nobody. That is the one
+         allow-listed caller, and it says so at its own call site. */
+      if (!opts.keyFromStore) {
+        const kwhy = Reco._keyWriteUnsafe(tpl, sess, e.row);
+        if (kwhy) {
+          res.rejected.push({ row: e.row, col: e.col, reason: 'keyDead',
+            message: Reco._keyRefusal(opts.keyVerb || 'changed', kwhy) });
+          continue;
+        }
+      }
       let desc = S.byName.get(e.col);
       if (!desc && opts.trusted && colDefs.has(e.col)) {
         desc = { name: e.col, kind: 'text', role: 'tpl', versioned: true, editable: true, writeTo: 'row', editor: 'text' };
@@ -24450,17 +24542,20 @@ renderRecoTable(tpl, sess) {
        wrongly placed one. Same sentence applyCorrection has used for the same
        case since fixer 1 wrote it. */
     if (!row) {
-      U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Use Add Data to load the file again, and try again.', 'error');
       return;
     }
     /* ---- T-S10-16. THE FILE-COLUMN DOOR, and it said nothing at all. Its
        write is the row's version row in the day file, keyed by the same
        frozen _pk, so after the key refusal this window files history under a
-       key the folder's rule no longer computes. applyEdits itself is
-       deliberately NOT the place: the Excel load-back and ingestData share
-       it and must not be told to press Load, which is exactly why applyEdits
-       was not the chokepoint for B4/B6 either. */
-    if (Reco._keyStaleBlock(tpl, 'changed')) return;
+       key the folder's rule no longer computes.
+       T-S10-20: this comment used to say applyEdits was "deliberately NOT the
+       place" because ingestData shares it. It does not - ingestData never
+       calls applyEdits - and that sentence kept the Excel view's typing door
+       open for three rounds. applyEdits DOES ask now, per edit; the question
+       stays here as well because this is where the verb is and where the
+       refusal can be all-or-none before anything is written. */
+    if (Reco._keyStaleBlock(tpl, 'changed', sess, [row])) return;
     Reco.applyEdits(tpl, sess, [{ row, col, value: val }], { source: 'grid', trusted: true });
     /* The grid has never repainted after an edit, so a formula or lookup
        column over the cell that just changed kept showing the old value until
@@ -24569,13 +24664,29 @@ renderRecoTable(tpl, sess) {
      invisible AND a permanent passenger. Measured, all five doors:
      scratchpad/dataloss/close/repro_before.txt.
 
-     THE RULE, so the next writer is covered without being listed: a gesture
-     asks this question when its key comes from a ROW ON SCREEN (Reco.rowKey
-     over a loaded row) and it writes a pk-keyed store the folder shares. One
-     verb per ACTION, and the latch at EVERY entry point of that action - the
-     offset action has four (the row menu, the bulk toolbar, the selection sum
-     bar and the Excel view), the unmark two, the correction and the two
-     typing doors one each.
+     THE RULE WAS RIGHT HERE AND THE CLAIM OF COVERAGE WAS NOT, AND THAT
+     SENTENCE COST A WHOLE ROUND. It said "so the next writer is covered
+     without being listed", and FOUR pre-existing writers that satisfied it
+     were never listed: sheet mode's formula bar, sheet mode's `x`, the
+     sheet-mode fill drag and the in-app Excel view's typing - plus Find &
+     Replace's two doors and the journal post's stamp, which this round's
+     static enumeration found and no human walk ever did. A comment that
+     promises coverage is what stops the next engineer looking.
+
+     SO THE RULE NOW LIVES AT THE WRITE AS WELL AS HERE, and it is the write
+     side that makes it true: Reco.writeKey and Reco.writeVerKey are the only
+     two ways a ROW becomes a KEY for a record the folder shares, and both
+     ask. T-S10-20 and handover 18.11. The question below is kept at the
+     GESTURE because that is where the verb and the whole selection are, so
+     the refusal is one sentence and all-or-none; run_store_e2e [82]
+     enumerates the writers from the source and fails on a write that is
+     neither guarded nor allow-listed with a reason, so the list cannot go
+     quietly out of date again.
+
+     The gesture-level verbs, one per ACTION, at EVERY entry point of that
+     action - the offset action has four (the row menu, the bulk toolbar, the
+     selection sum bar and the Excel view), the unmark three, the group four,
+     the attach two, and the correction and the typing doors one each.
 
      T-S10-18, CLOSED HERE: the group, the comment and the ATTACHMENT doors
      are pk-keyed writes to groupMaster / commentMaster / attachmentMaster -
@@ -24608,9 +24719,234 @@ renderRecoTable(tpl, sess) {
      here as a machine path and HALF of it is not. ExcelLink.apply() is the
      Apply button in the review dialog, with an operator pressing it, and its
      write went into the same pk-keyed shared store under the dead key with
-     nothing said. The latch is at ExcelLink.apply and NOT at Reco.applyEdits,
-     which ingestData and the machine paths share and which must never tell a
-     machine to load anything again. */
+     nothing said. The latch is at ExcelLink.apply.
+     AND ROUND 6 CORRECTED THE REST OF IT. "Reco.applyEdits, which ingestData
+     and the machine paths share" was FALSE and it was being used to excuse an
+     open door: walked, ingestData does not call applyEdits at all, and seven
+     of its eight callers are operator gestures. THE QUESTION IS NOW ASKED IN
+     applyEdits, once per edit, which is what closed the in-app Excel view's
+     typing door; the one caller whose keys really do come from the machine -
+     Reco.reverseEntry, which resolves them from the posted-entry index on the
+     share - says so in code by passing `keyFromStore: true`, instead of a
+     paragraph in a comment standing in for it. */
+  /* ================= T-S10-20. THE WRITE-SIDE CHOKEPOINT =================
+     FOUR ROUNDS LISTED THE GESTURES THAT WRITE AND EACH ROUND FOUND MORE: 3,
+     then +7, then +5, then +4 that a verifier had to find with real mouse
+     clicks, and this round's own enumeration turned up four more nobody had
+     named (sheet mode's `\u00d7`, Find & Replace's two, and the journal post's
+     stamp). The list was never going to close, because a list is not a rule.
+
+     SO THE QUESTION IS ASKED AT THE WRITE. Reco.writeKey and
+     Reco.writeVerKey are the only two ways a ROW becomes a KEY for a record
+     the folder shares, and both of them ask. A gesture that forgets to ask
+     still cannot write, because the key it needs comes from here; the
+     gesture-level Reco._keyStaleBlock is kept on top of that because it is
+     where the VERB and the whole selection are in hand, so the refusal is one
+     sentence and all-or-none rather than a silent per-row drop.
+
+     AND NOT INSIDE Reco.rowKey, which is the function all of them read
+     through. The argument is in handover 18.9 and it still holds: rowKey is a
+     key READER (the renderer's row attribute, every badge, the status /
+     attachment / comment filters, runAutoOffset's restore, the drift check,
+     Groups.resolvePk, the timeline), so refusing there would blank the screen
+     this rule exists to keep honest; it runs once per row per RENDER, which
+     on a 500k-row extract is half a million questions; and it cannot carry a
+     verb. A WRITE-side pair has none of those problems: it runs once per
+     record written, it takes the verb as an argument, and no reader calls it.
+
+     THE QUESTION IS ABOUT THE ROW, NOT THE TEMPLATE, and that is what closes
+     T-S10-19. A template latch can only see "somebody else changed the rule
+     while I had rows loaded"; it is blind to rows that came out of a day file
+     WRITTEN BEFORE such a change, in a window that did nothing wrong - which
+     is six doors and five shared masters, measured. A row is unsafe to write
+     against when its _pk is not what this template's rule computes for it
+     NOW, and that is a per-row question. The latch stays as the FIRST arm
+     because it is one property read and because it gives the better sentence
+     ("somebody else changed..."), so it is now an optimisation and a wording,
+     not the mechanism. */
+
+  /* WHICH KEY EXTRAS THE ROW'S OWN LOADED COLUMNS DECIDE. Measured, because
+     each false positive here refuses ordinary work (choke/logs/p2_rule.txt):
+
+       C4  a key extra that is a master_lookup reads DRIFTED the moment a
+           colleague saves the shared accounts master, and THE RULE DID NOT
+           MOVE - that is handover 14.3's frozen value working as designed,
+           and every surface in the app is deliberately on the frozen key. A
+           guard that fired there would refuse every gesture on every template
+           with a lookup in its key, for the life of the file. So an extra
+           that READS A SHARED MASTER, or that is reached from one that does,
+           is left out, and the template latch is all those templates get.
+           Said in handover 14.3 and in T-S10-19.
+       C1  a template whose key names no extra answers in one property read.
+       C2  an `_added_` row never had a business key to disagree with.
+
+     The walk is the transitive one for the same reason _keyDepNames is: a key
+     FORMULA may be built on an earlier extra, and an earlier LOOKUP makes the
+     whole chain master-driven. */
+  _keyRowColsCache: new WeakMap(),
+  _keyRowCols(tpl) {
+    const kx = Reco._keyExtraSet(tpl);
+    if (!kx) return null;
+    const ac = (tpl && tpl.additionalColumns) || [];
+    const pks = (tpl && tpl.primaryKeys) || [];
+    let e = null;
+    try { e = Reco._keyRowColsCache.get(tpl); } catch (x) { e = null; }
+    if (e && e.ac === ac && e.pks === pks) return e.set;
+    const byName = new Map();
+    ac.forEach(a => { if (a && a.name && !byName.has(a.name)) byName.set(a.name, a); });
+    /* Masters._lookupCfg answers for BOTH lookup shapes - the legacy
+       type:'master' and the unified masterCfg - so one test covers both. A
+       throw is treated as "reads a master", i.e. as the cautious answer. */
+    const readsMaster = a => { try { return !!Masters._lookupCfg(tpl, a); } catch (x) { return true; } };
+    const own = new Set();
+    kx.forEach(name => {
+      const seen = new Set(); const q = [name]; let ok = true;
+      while (q.length) {
+        const n = q.pop();
+        if (seen.has(n)) continue;
+        seen.add(n);
+        const a = byName.get(n);
+        if (!a) continue;                       // a template column: it is on the row
+        if (String(a.type) !== 'formula' || readsMaster(a)) { ok = false; break; }
+        (String(a.formula == null ? '' : a.formula).match(/\{([^}]*)\}/g) || [])
+          .forEach(s => { const r = s.slice(1, -1).trim(); if (byName.has(r)) q.push(r); });
+      }
+      if (ok) own.add(name);
+    });
+    const set = own.size ? own : null;
+    try { Reco._keyRowColsCache.set(tpl, { ac: ac, pks: pks, set: set }); } catch (x) {}
+    return set;
+  },
+
+  /* IS THIS ROW'S _pk STILL WHAT THE TEMPLATE'S RULE COMPUTES FOR IT?
+     Only a POSITIVE disagreement counts. The three "cannot attribute" skips
+     are each a measured false positive, and each one would refuse work:
+       - frozen == null: _pk does not split back into primaryKeys.length parts
+         because a component contains the '||' separator getRowPK joins with
+         and escapes nothing (measured C5). Ingest already asks the operator
+         about that row; we cannot tell drift from an unsplittable key, so we
+         do not claim to.
+       - the recompute THROWS: a key column that is not loaded in this shape.
+       - the recompute is '' or '#ERR': Formula.substituteTokens turns a
+         missing reference into '' SILENTLY (measured C6), so a row reopened
+         from a file with a different column set would otherwise read as
+         drifted on every key it has.
+     SEPARATE FROM Reco.keyDrift on purpose, and the two may disagree. keyDrift
+     answers the SCREEN's question ("is this cell printing a recalculation?")
+     and is right to count the master-lookup and unsplittable cases, because
+     the cell really is not showing the stored key. This answers the WRITE's
+     question ("can I attribute this key's disagreement to the template's own
+     rule having moved?"), which is narrower by construction. */
+  _keyRowDrifted(tpl, sess, row) {
+    const cols = Reco._keyRowCols(tpl);
+    if (!cols || !row) return false;
+    let bad = false;
+    cols.forEach(name => {
+      if (bad) return;
+      const frozen = Reco._keyFrozenPart(tpl, row, name);
+      if (frozen == null) return;
+      let now;
+      try { now = Reco._extraComputedValue(tpl, sess, row, Reco._extraDef(tpl, name)); }
+      catch (e) { return; }
+      const s = now == null ? '' : String(now);
+      if (s === '' || s === '#ERR') return;
+      if (s !== String(frozen)) bad = true;
+    });
+    return bad;
+  },
+
+  /* THE QUESTION, in one place. Returns '' when the write is safe, or the
+     REASON, which is also which sentence to say. The latch is first because
+     it is one property read and because its sentence is the better one. */
+  _keyWriteUnsafe(tpl, sess, row) {
+    if (!tpl || !tpl.id) return '';
+    if (Reco._keyStale[String(tpl.id)]) return 'stale';
+    return Reco._keyRowDrifted(tpl, sess, row) ? 'drifted' : '';
+  },
+  _keyRowsUnsafe(tpl, sess, rows) {
+    if (!tpl || !tpl.id) return '';
+    if (Reco._keyStale[String(tpl.id)]) return 'stale';
+    if (!rows || !rows.length) return '';
+    for (let i = 0; i < rows.length; i++) if (Reco._keyRowDrifted(tpl, sess, rows[i])) return 'drifted';
+    return '';
+  },
+
+  /* THE SENTENCE. Every refusal names ITS OWN VERB and a recovery that
+     WORKS - the one this replaced said "Press Load" and there is no Load
+     (apps/Reco.html's only file input is "Add Data", which CONCATENATES, so
+     the rows this sentence is about would keep their old keys). */
+  _keyRefusal(what, why) {
+    if (why === 'drifted')
+      return 'Nothing was ' + what + '. These rows carry the keys they were SAVED with, and this '
+        + 'reconciliation now works its keys out differently \u2014 so the row on screen is not the row '
+        + 'the shared folder holds, and the same business row may be on screen twice under two '
+        + 'identities. Use Clear Loaded Data and load the extract again. (The rows inside a day file '
+        + 'written before the change keep the keys that file holds; nothing can be filed against '
+        + 'those, under either key.)';
+    return 'Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
+      + 'its rows while these rows were loaded, so the keys on screen are the OLD ones — '
+      + 'anything filed against them goes where nobody else can see it, and anything meant to '
+      + 'change a record on the shared folder cannot reach it. Use Clear Loaded Data and then '
+      + 'load the rows again under the shared folder\'s rule, and try again. (Add Data on its '
+      + 'own ADDS to what is on screen, so those rows would keep the old keys.)';
+  },
+  /* ONE SENTENCE PER GESTURE, not one per row. A bulk offset over 500
+     selected rows asks 500 times and the operator must be told once.
+
+     CLEARED ON A MICROTASK, and that is not a detail. The first build cleared
+     it one TASK later (setTimeout 0) and the suite caught it within the hour:
+     two gestures of the same ACTION one after the other - "create group from
+     selection" then "add selection to a group", or the single attach then the
+     multi-file drop - are separated by an `await` and not by a task, so the
+     SECOND one was refused IN TOTAL SILENCE ([80] R12e and R12k, both red).
+     A silent refusal is the bug this whole cluster is about, arriving by the
+     back door of its own fix. A microtask cannot interrupt the synchronous
+     row loop a bulk gesture is (nothing yields inside a forEach), so the
+     "once per bulk gesture" property is kept and "once per gesture" becomes
+     true as well. Not a clock, for the same reason as before: a number of
+     milliseconds would make the dedupe depend on how fast the machine is. */
+  _keySaid: null,
+  _keySay(tpl, what, why) {
+    const k = String(tpl && tpl.id) + '\u001f' + what + '\u001f' + why;
+    if (Reco._keySaid === k) return true;
+    Reco._keySaid = k;
+    Promise.resolve().then(() => { if (Reco._keySaid === k) Reco._keySaid = null; });
+    U.toast(Reco._keyRefusal(what, why), 'error');
+    return true;
+  },
+
+  /* THE CHOKEPOINT, BUSINESS KEY: the key to file a record against, or null.
+     Every caller already guarded its write with `if (pk)`, which is why this
+     is a drop-in for Reco.rowKey at a write site and why a refusal is
+     all-or-none with no new control flow. */
+  /* THE ROWS A SELECTION IS ABOUT, and THE ROW A STORED KEY NAMES. Both only
+     exist so a gesture-level question can be asked about the rows rather than
+     about the template, in one line, at the call site where the verb lives. */
+  _selRows(sess) {
+    const sel = (sess && sess.selectedRows) || {};
+    return Object.keys(sel).filter(k => sel[k]).map(k => Reco._rowById(sess, k)).filter(Boolean);
+  },
+  _rowByPk(tpl, sess, pk) {
+    if (!tpl || !sess || !pk) return null;
+    return (sess.data || []).find(r => Reco.rowKey(tpl, r) === pk) || null;
+  },
+
+  writeKey(tpl, sess, row, what) {
+    const why = Reco._keyWriteUnsafe(tpl, sess, row);
+    if (why) { Reco._keySay(tpl, what || 'saved', why); return null; }
+    return Reco.rowKey(tpl, row);
+  },
+  /* THE CHOKEPOINT, STORAGE IDENTITY: the key a VERSION ROW in
+     reco_data/<folder>/<MMM-YY>/<DD>.csv goes under, or null. Separate from
+     writeKey because the day file is keyed on row._pk (handover 14.2: every
+     row has a truthy one, '_auto_'/'_added_' included) and not on the
+     business key, so one function cannot return both. */
+  writeVerKey(tpl, sess, row, what) {
+    const why = Reco._keyWriteUnsafe(tpl, sess, row);
+    if (why) { Reco._keySay(tpl, what || 'changed', why); return null; }
+    return (row && row._pk) || null;
+  },
+
   _keyStale: {},
   _keyStaleMark(tplId) { if (tplId) Reco._keyStale[String(tplId)] = true; },
   /* THE LIFT. `minted` is the array of rows the mint has just keyed and which
@@ -24628,8 +24964,23 @@ renderRecoTable(tpl, sess) {
     if (rows[0] !== minted[0] || rows[rows.length - 1] !== minted[minted.length - 1]) return;
     delete Reco._keyStale[String(tpl.id)];
   },
-  _keyStaleBlock(tpl, what) {
-    if (!tpl || !Reco._keyStale[String(tpl.id)]) return false;
+  /* THE GESTURE-LEVEL QUESTION, kept ON TOP of the write-side chokepoint and
+     not instead of it. Here the VERB and the WHOLE SELECTION are in hand, so
+     the refusal is one sentence and ALL-OR-NONE: the operator is told before
+     anything is written, instead of some rows going through behind a count in
+     a green toast that is about rows on screen rather than records filed.
+
+     T-S10-20: `sess` and `rows` are optional, and asking THE ROWS is the new
+     arm. Without them this is the template latch exactly as it was - which is
+     why the eighteen existing call sites did not all have to change at once,
+     and why they are not the mechanism: Reco.writeKey / Reco.writeVerKey ask
+     again AT THE WRITE, so a door that passes no rows is still covered for
+     T-S10-19, with a per-row refusal instead of an all-or-none one. */
+  _keyStaleBlock(tpl, what, sess, rows) {
+    if (!tpl) return false;
+    const why = rows ? Reco._keyRowsUnsafe(tpl, sess, rows)
+                     : (Reco._keyStale[String(tpl.id)] ? 'stale' : '');
+    if (!why) return false;
     /* T-S10-16: the clause after the dash has to cover a DELETE as well as a
        write, because the unmark and the revert are both "a change to a record
        the folder holds" rather than typing. */
@@ -24640,12 +24991,7 @@ renderRecoTable(tpl, sess) {
        control that empties the screen (and it keeps the typed values, the
        offsets and the corrections - its own confirm says so), so the load
        after it re-keys everything and the latch lifts. */
-    U.toast('Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
-      + 'its rows while these rows were loaded, so the keys on screen are the OLD ones \u2014 '
-      + 'anything filed against them goes where nobody else can see it, and anything meant to '
-      + 'change a record on the shared folder cannot reach it. Use Clear Loaded Data and then '
-      + 'load the rows again under the shared folder\'s rule, and try again. (Add Data on its '
-      + 'own ADDS to what is on screen, so those rows would keep the old keys.)', 'error');
+    Reco._keySay(tpl, what, why);
     return true;
   },
 
@@ -24662,10 +25008,10 @@ renderRecoTable(tpl, sess) {
        and T-F2-8's Fix paragraph names only editCell, manualOffset and
        unmarkOffset while its last sentence says "the same in its siblings". */
     if (!row) {
-      U.toast('That row is no longer in this pane\'s data \u2014 nothing was overridden. Press Load, then try again.', 'error');
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was overridden. Use Add Data to load the file again, and try again.', 'error');
       return;
     }
-    if (Reco._keyStaleBlock(tpl, 'overridden')) return;
+    if (Reco._keyStaleBlock(tpl, 'overridden', sess, [row])) return;
     return Reco.applyEdits(tpl, sess, [{ row: row, col: col, value: val }],
       { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) })
       .then(res => Reco._afterOverride(res, id, row, col));
@@ -24681,10 +25027,10 @@ renderRecoTable(tpl, sess) {
     /* ROUND 4: and this one is a DELETE that did not happen, which leaves the
        operator believing an override they wanted gone is gone. */
     if (!row) {
-      U.toast('That row is no longer in this pane\'s data \u2014 nothing was reverted. Press Load, then try again.', 'error');
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was reverted. Use Add Data to load the file again, and try again.', 'error');
       return;
     }
-    if (Reco._keyStaleBlock(tpl, 'reverted')) return;
+    if (Reco._keyStaleBlock(tpl, 'reverted', sess, [row])) return;
     return Reco.applyEdits(tpl, sess, [{ row: row, col: col, clear: true }],
       { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) })
       .then(res => Reco._afterOverride(res, id, row, col));
@@ -24954,7 +25300,7 @@ renderRecoTable(tpl, sess) {
     const id = S.id, tpl = S.tpl, sess = S.sess;
     if (!tpl || !sess) return;
     const row = Reco._rowById(sess, rowId);
-    if (row && Reco._keyStaleBlock(tpl, 'saved')) return;    // ROUND 4, finding 4
+    if (row && Reco._keyStaleBlock(tpl, 'saved', sess, [row])) return;   // ROUND 4 finding 4; rows T-S10-20
     if (row) {
       /* #30, DECISION O. CONFIRMING A CARRIED VALUE NEEDS ITS OWN PATH.
          applyEdits does `if (String(value) === String(cur)) { res.noop++;
@@ -24989,7 +25335,7 @@ renderRecoTable(tpl, sess) {
        is permanent, and run_reports_e2e still seeds and reads it unedited.
        That is about records written by older builds; it never needed this
        WRITE path, which only fires when the row is already gone. */
-    U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
+    U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Use Add Data to load the file again, and try again.', 'error');
   },
 
   /* #30. The ✓ on a carried cell. A DROPDOWN IS WHY THIS BUTTON EXISTS:
@@ -25006,7 +25352,7 @@ renderRecoTable(tpl, sess) {
     /* ROUND 4: two lines ABOVE its own sentence for the other failure, which
        is what made the silence here read as deliberate. */
     if (!row) {
-      U.toast('That row is no longer in this pane\'s data \u2014 nothing was confirmed. Press Load, then try again.', 'error');
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was confirmed. Use Add Data to load the file again, and try again.', 'error');
       return;
     }
     const rec = Reco._extraCarried(tpl, sess, row, col);
@@ -25022,14 +25368,14 @@ renderRecoTable(tpl, sess) {
     // T-F2-8, the same silence as editCell's: a manual offset that cannot find
     // its row did nothing and said nothing.
     if (!row) {
-      U.toast('That row is no longer in this pane\'s data \u2014 nothing was offset. Press Load, then try again.', 'error');
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was offset. Use Add Data to load the file again, and try again.', 'error');
       return;
     }
     /* ---- T-S10-16. THE OFFSET DOOR, measured and not inferred: it wrote
        manualOffsetMaster under the dead key and said NOTHING AT ALL. (The
        ticket could not measure it because its fixture carried no tolerance;
        run_store_e2e's R3g now asserts the door is reachable.) */
-    if (Reco._keyStaleBlock(tpl, 'offset')) return;
+    if (Reco._keyStaleBlock(tpl, 'offset', sess, [row])) return;
     if (sess.offsets[row._id]) { U.toast('Row already offset','error'); return; }
 
     const chk = Reco.checkOffsetTolerance(tpl, sess, [row._id]);
@@ -25039,7 +25385,7 @@ renderRecoTable(tpl, sess) {
     sess.offsets[row._id] = true;
     row._recoId = rid;
     row._manualOffset = true;
-    const pk = Reco.rowKey(tpl, row);
+    const pk = Reco.writeKey(tpl, sess, row, 'offset');   // T-S10-20
     if (pk) {
       AppState.manualOffsetMaster[id] = AppState.manualOffsetMaster[id] || {};
       AppState.manualOffsetMaster[id][pk] = { recoId: rid, byUser: true };
@@ -25054,7 +25400,7 @@ renderRecoTable(tpl, sess) {
     const row = rowId ? Reco._rowById(sess, rowId) : sess.data[rowIdx];
     // T-F2-8, the third of the three row-level writers the ticket names.
     if (!row) {
-      U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Press Load, then try again.', 'error');
+      U.toast('That row is no longer in this pane\'s data \u2014 nothing was changed. Use Add Data to load the file again, and try again.', 'error');
       return;
     }
     Reco.smartUnmark([row._id]);
@@ -25949,7 +26295,7 @@ renderRecoTable(tpl, sess) {
        not compute, under a green "Correction applied". ABOVE the blank-value
        check because nothing can be filed at all until the rows are read
        again. */
-    if (Reco._keyStaleBlock(tpl, 'corrected')) return;
+    if (Reco._keyStaleBlock(tpl, 'corrected', sess, [row])) return;
     /* A CORRECTION WITH NOTHING IN IT IS A SLIP, NOT AN INSTRUCTION.
        FMT.validate passes an empty string, so a blank box used to clear a
        real reference, set _corrected_ so the row left the tab looking done,
@@ -25967,7 +26313,7 @@ renderRecoTable(tpl, sess) {
     const oldVal = row[colName];
     row[colName] = newVal;
     row['_corrected_'+colName] = true;
-    const pk = Reco.rowKey(tpl, row);
+    const pk = Reco.writeKey(tpl, sess, row, 'corrected');   // T-S10-20
     if (pk) {
       // Save to both session corrections and the cross-session correction master
       sess.corrections = sess.corrections || {};
@@ -27657,7 +28003,11 @@ renderCustomReport(tpl, sess, rpt, idx) {
     pkSet.forEach(pk => { const r = rowOf.get(pk); if (r) edits.push({ row: r, col, value: targets.get(pk) }); });
     const stampBefore = new Date(Date.now() - 2000).toISOString();
     const res = await Reco.applyEdits(tpl, sess, edits, {
-      source: 'reverse', scope: 'allStandard', historyFirst: true, trusted: true, pulled,
+      /* T-S10-20: keyFromStore - these keys come from the posted entry's own
+         index on the share (plan.unstamp), not from a row on screen, so the
+         write-side question has nothing to ask and no one to tell. */
+      source: 'reverse', keyFromStore: true,
+      scope: 'allStandard', historyFirst: true, trusted: true, pulled,
       meta: { _src: 'reverse:' + entry.accountingId, _by: AppState.currentUser || '' }
     });
     out.wrote = Object.keys(res.versions || {}).length;
@@ -29152,6 +29502,17 @@ renderCustomReport(tpl, sess, rpt, idx) {
        (scratchpad/money/skB/probe/p8_corrupt_stale.mjs P8a). This is a
        refusal and not a retry on purpose: the latch is set by a PARSE
        failure, which no amount of waiting fixes. */
+    /* ---- T-S10-20. LEDGER-WRITE REFUSAL 5, and the enumeration found it:
+       posting an entry writes a version row per stamped row into the shared
+       day file AND `entry.postedPks` into reco/entryHistory.json, both keyed
+       off the rows on screen. Under dead keys the journal entry is real and
+       its link to the rows is not: no colleague can resolve postedPks, every
+       such row reads as "no GL ref", and the exception list fills with
+       correctly posted rows. Asked HERE, before anything is written, because
+       a refusal discovered at the stamp would leave an entry in the ledger
+       with nothing stamped - which is worse than not posting. */
+    if (Reco._keyStaleBlock(tpl, 'posted', sess,
+          (pending.standardRows || []).concat(pending.sourceRows || []))) return;
     if (Store.readOnlyKeys.entryHistory
         || (Store.readOnlyFiles && Store.readOnlyFiles['reco/entryHistory.json'])) {
       App.closeModal();
@@ -29335,7 +29696,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
       targets.forEach(o => {
         o[aeg.postEntryColumn] = aeg.postEntryValue;
         // Template columns are versioned: record the change so a reload keeps it.
-        if (isStdCol && o._pk) Versioning.queueChange(tpl, o._pk, o).then(v => { if (v) o._ver = v; });
+        /* T-S10-20: the write-side question again, at the write, so a stamp
+           can never reach the day file under a key the folder cannot read. */
+        const vk = isStdCol ? Reco.writeVerKey(tpl, sess, o, 'posted') : null;
+        if (vk) Versioning.queueChange(tpl, vk, o).then(v => { if (v) o._ver = v; });
       });
       // The keys of the rows this entry actually stamped. Without it a posted
       // standard row's only link is its session _id, which is regenerated on
@@ -29744,7 +30108,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
        while the folder's rule computes E1-X. The latch is asked here rather
        than at the prompt, so the operator is not interrupted before they
        have typed a name. */
-    if (Reco._keyStaleBlock(tpl, 'grouped')) return;
+    if (Reco._keyStaleBlock(tpl, 'grouped', sess, Reco._selRows(sess))) return;
     const pks = Reco._selectedPks(paneKey);
     if (!pks.length) { U.toast('Select rows first', 'error'); return; }
     const name = prompt('Group name:');
@@ -29767,7 +30131,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
     if (outside) { U.toast(outside.msg, 'error'); return; }
     // ROUND 5, T-S10-18: the same ACTION, a second entry point. See
     // Reco.createGroupFromSelection for the measurement.
-    if (Reco._keyStaleBlock(tpl, 'grouped')) return;
+    if (Reco._keyStaleBlock(tpl, 'grouped', sess, Reco._selRows(sess))) return;
     const pks = Reco._selectedPks(paneKey);
     if (!pks.length) { U.toast('Select rows first', 'error'); return; }
     const added = Groups.addMembers(tpl.id, gid, pks);
@@ -29791,7 +30155,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
        "Removed 1 member(s) from group" that deleted the E4 membership filed
        while the keys were still right and left a colleague's E4-X one in
        place, so the row is in the group again tomorrow for everybody. */
-    if (Reco._keyStaleBlock(tpl, 'removed from the group')) return;
+    if (Reco._keyStaleBlock(tpl, 'removed from the group', sess, Reco._selRows(sess))) return;
     const pks = Reco._selectedPks(paneKey);
     if (!pks.length) { U.toast('Select rows first', 'error'); return; }
     const removed = Groups.removeMembers(tpl.id, gid, pks);
@@ -29819,6 +30183,17 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
   removeMemberFromGroup(gid, pk) {
     const id = AppState.activeRecoId;
+    /* T-S10-20. The "Groups containing this row" modal opened on a row's key,
+       so this is removeSelectionFromGroup's action by a fourth entry point and
+       it is smartUnmark's shape: under a dead or drifted key it deletes the
+       membership filed while the key was still right and leaves the one a
+       colleague's load reads. The row is looked up so the question can be
+       asked about it; a key with no row left on screen can only be the
+       template latch's business. */
+    const gtpl = AppState.recoTemplates.find(x => x && x.id === id);
+    const gsess = AppState.recoSessions[id];
+    const grow = gtpl && gsess ? (gsess.data || []).find(r => Reco.rowKey(gtpl, r) === pk) : null;
+    if (gtpl && Reco._keyStaleBlock(gtpl, 'removed from the group', gsess, grow ? [grow] : null)) return;
     Groups.removeMembers(id, gid, [pk]);
     App.closeModal();
     App.navigate('reco');

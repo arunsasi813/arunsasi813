@@ -830,9 +830,14 @@ route goes through" until round 5. `_mintKeysSync` has one caller, `Reco.ingestD
 the latch there lifted it for rows the upload had never touched — handover §18.10.)
 **The refusal itself stands, and T-S10-7's general merge must not be allowed to swallow it:** a key change is not a
 field, it decides what every other record is filed under. **T-S10-16 took the latch from three
-doors to every operator gesture that writes under a row key, and round 5 fixed the LIFT, which was
-coming off while the rows it guarded were still dead-keyed; T-S10-18 (also CLOSED) was the group,
-comment and attachment doors.**
+doors to eighteen, and round 5 fixed the LIFT, which was coming off while the rows it guarded were
+still dead-keyed; T-S10-18 (also CLOSED) was the group, comment and attachment doors.
+T-S10-20 (CLOSED) stopped it being a list at all: the question is asked at the WRITE, by the one
+pair of functions through which a row becomes a key for a record the folder holds, and
+`run_store_e2e` [82] enumerates those writers from the source. "Every operator gesture that writes
+under a row key" was claimed after round 2 and after round 3 and was false both times — eight more
+controls were open. T-S10-19 (CLOSED with it) is the same harm from the other direction: a day file
+written before the change, in a window that did nothing wrong.**
 
 **CLOSED, AND AS A REFUSAL RATHER THAN A MERGE.** T-S10-7's general merge would have kept the
 folder's key definition silently, and the share would even have ended with one scheme — but B's
@@ -2412,7 +2417,15 @@ green in all 8. The reviewer's `p1_virt.mjs` / `p1b_line249.mjs` are the mechani
 > `Reco.BUSY_ROWS` it never lifted at all**. Three more doors were open (the Excel load-back's
 > Apply, and T-S10-18's). The gate claims in this ticket are therefore true of what they measure
 > and were **not enough**: see handover **§18.10** and `run_store_e2e` **[79]–[81]**. The counts
-> below are the round-4 ones; the suite is now **638**.
+> below are the round-4 ones; the suite is now **672**.
+>
+> **AND IT WAS NOT ENOUGH A SECOND TIME. See T-S10-20.** The decision below — *"the latch at EVERY
+> entry point of that action"* — is right about the shape and wrong about the method: applied by
+> hand it missed **eight** more controls, four of which a verifier had to find with real mouse
+> clicks and four of which only a static enumeration of the writers ever found. The question is now
+> asked at the **WRITE** (`Reco.writeKey` / `Reco.writeVerKey`) with the gesture-level latch kept on
+> top of it, and `run_store_e2e` **[82]** enumerates the writers from the source so a ninth cannot
+> arrive quietly. Handover **§18.11**.
 
 **Where** `apps/Reco.html` — `Reco._keyStaleBlock` is consulted by `Reco.setTag`,
 `Reco.setOverride` and `Reco.revertOverride`. It is **not** consulted by `Reco.applyCorrection`
@@ -2611,7 +2624,42 @@ against a row key.
 
 ---
 
-## T-S10-19  A day file written before a key change hands its OLD keys back to any window, with no latch anywhere
+## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED** in round 6 — the question is asked of the ROW at the WRITE, not of the template
+
+> **CLOSED. Handover §18.11, gate `run_store_e2e` [84] (R15a-R15j), with [82] enumerating the
+> writers so the next one cannot be missed.** It was also **BIGGER THAN THIS TICKET SAYS**: not
+> one door and one file but **TEN doors, SIX of them in total silence**, reaching **all five**
+> pk-keyed shared masters plus the day file. Measured against `999b936` by
+> `scratchpad/dataloss/choke/probes/p3_r15.mjs` (`logs/p3_before.txt`): `extraValueMaster` gained
+> `K1,K2,K3`, `correctionMaster` `K2`, `manualOffsetMaster` `K3`, `groupMaster` a membership
+> `[K1]`, `commentMaster` a `linkedPks` `[K2]`, and the day file five `Cn` rows under `K1/K2/K3`
+> — from `setTag`, `applyCorrection`, `manualOffset`, `editCell`, `createGroupFromSelection`,
+> `Comments._confirmAdd`, sheet mode's **✓ Apply**, sheet mode's **↓ Fill Column**, sheet mode's
+> **×** and the **fill-handle drag**. The two the earlier walk had not counted are sheet mode's
+> and the drag's, which is the same gap T-S10-20 is about.
+>
+> **The remedy taken is the third of the three below** — *mark the rows and refuse the write* —
+> because it is the only one that does not change a reopened row's identity behind the operator's
+> back or lock a day's work out of the app, and because `Reco.keyDriftCount` already named exactly
+> the affected rows. It is asked **per row at the write** (`Reco.writeKey` / `Reco.writeVerKey`,
+> through `Reco._keyRowDrifted`) and **not** per session, so the healthy copy of the same business
+> row, on the same screen, in the same template, still writes normally — which is R15g, and is the
+> measurement that makes the per-row arm affordable. The template latch stays as the first arm,
+> because it is one property read and because its sentence is the better one.
+>
+> **WHAT IS STILL OPEN, and it is narrower than what was closed.** The per-row arm only fires on
+> a key component the ROW'S OWN LOADED COLUMNS decide — a `formula` whose transitive closure
+> reads no shared master. Where a key extra is a `master_lookup`, a disagreement between the
+> stored key and the recomputed one is §14.3's **frozen value working as designed**: the rule did
+> not move, the day file holds the key and every surface in Reco is deliberately on it, so a guard
+> there would refuse every gesture on every such template for the life of the file (measured,
+> `choke/logs/p2_rule.txt` C4, and gated as **R15i** so the narrowing cannot be quietly widened).
+> The consequence: on a lookup-keyed template, a day file written before the LOOKUP'S OWN CONFIG
+> changed is still writable under its old keys. That needs the key-rule signature to be recorded
+> per row at mint time, which is a schema change and a round of its own. Two further measured
+> non-firings, both deliberate and both for the same reason — the disagreement cannot be
+> attributed to the rule: a component containing the `'||'` separator (C5) and a key formula whose
+> referenced column is not loaded (C6).
 
 **Where** `apps/Reco.html` — `Reco.loadVersionedFile` hydrates each row with `_pk: r._pk` straight
 out of `reco_data/<folder>/<MMM-YY>/<DD>.csv`. The day file is written by the upload that minted
@@ -2634,9 +2682,16 @@ keyed by the folder's rule:
 | `Reco.keyDriftCount(tplId)` | **3** — the drift check already knows about exactly those three rows |
 
 So the answer to "can a row that was on screen before the refusal be written under its dead key by
-any gesture" is **no through any latched gesture while the latch is up** (sections [71], [79], [80]
-measure twelve of them plus the Excel Apply and T-S10-18's four), and **yes by this route**, which
-is not a latch hole: it is what a key change does to the files already on the share.
+any gesture" was given as **no through any latched gesture while the latch is up** (sections [71],
+[79], [80] measure twelve of them plus the Excel Apply and T-S10-18's four), and **yes by this
+route**, which is not a latch hole: it is what a key change does to the files already on the share.
+
+> **THAT SENTENCE WAS DOING LOAD-BEARING WORK NO READER WOULD NOTICE, AND IT WAS FALSE AS A COUNT.**
+> *"any latched gesture"* is true of the eighteen gestures that were latched and says nothing about
+> the ones that were not — and there were **eight** of those, four found with real mouse clicks and
+> four found by enumerating the writers from the source. The question is now asked at the WRITE, so
+> it can be answered without counting gestures at all: **no, through anything, because the key a
+> write needs comes from `Reco.writeKey` / `Reco.writeVerKey` and they ask.** T-S10-20.
 
 **Why it is only a ticket** It is the state **#24's own confirm warns about** when the key is
 changed — *"Rows saved before this change will no longer match their version history, manual
@@ -2670,3 +2725,78 @@ every row-level door and that `reco/extraValueMaster.json` gains nothing under i
 that the rows the recovery minted still write normally, and that `Reco.keyDriftCount` is the premise
 rather than the assertion.
 
+
+---
+
+## T-S10-20  ~~Four live controls still write under a dead row key, because the fix was a list of controls and not a rule~~  **FIXED** in round 6 — the question is asked at the WRITE, and a gate enumerates the writers
+
+> **CLOSED. Handover §18.11. Gates `run_store_e2e` [82] (the static enumeration, G82a–G82h), [83]
+> (R14a–R14i, sheet mode and the Excel view by real clicks) and [84] (R15a–R15j, T-S10-19).**
+> `run_store_e2e` 638 → **672** (two clean readings). Six mutations, each reversing ONE change
+> through `APP_FILE` with `apps/Reco.html` never written: the sheet-mode buttons redden G82a/G82c/
+> R14a/R14b and T-S10-19's walk; the per-row arm reddens only the T-S10-19 assertions and the
+> question counter, and **nothing in [83]**, which is the measurement that separates the two arms;
+> the §14.3 narrowing reddens **R15i only**; the `×` door reddens R14c; the `applyEdits` chokepoint
+> reddens R14e; and **a new button that writes `manualOffsetMaster` without asking reddens G82a and
+> nothing else** — 672 behavioural checks cannot see it and the enumeration can.
+
+**Where** `apps/Reco.html`. **THE DEFECT IS NOT THE FOUR CONTROLS. IT IS THAT THE LIST KEPT
+GROWING** — round 1 latched 3 doors, round 2 added 7 and claimed closed, round 3 added 5 and
+claimed closed, round 4's verifier walked gestures with real mouse clicks and found 4 more still
+open, and this round's own static enumeration found 4 that no human walk had named:
+
+| control | what it said | what reached the share |
+|---|---|---|
+| sheet mode **✓ Apply** (`Reco._ssCommit(false)`) | **nothing at all** | a version row in the shared day CSV: `E2,C1,…,BTN-APPLY,20` |
+| sheet mode **↓ Fill Column** (`Reco._ssCommit(true)`) | green *"Applied to 3 row(s)"* | three version rows under `E1/E2/E3` |
+| the sheet-mode **fill-handle drag** (`Reco._ssCommitFill`) | green *"Filled 2 cells"* | `reco/extraValueMaster.json` gained `E2` and `E3` |
+| the **in-app Excel view's cell edit** (`Reco._xlOnChange` → `_xlApply`) | **nothing at all** | `E3.Vendor = "REAL-KEYS-EXCEL-VIEW"` while the folder's rule computes `E3-X`; the colleague reads blank |
+| sheet mode **×** / Delete (`Reco._ssClearActive`) | **nothing at all** | `E3,C2,…` — **found by the enumeration, not by a walk** |
+| **Find & Replace**, single and bulk (`FindReplace._replaceOne` / `_replaceAll`) | green *"Replaced N cell(s)"* | one version row per touched key — **enumeration** |
+| the **journal post's stamp** (`Reco.commitEntryFromPreview`) | the entry posts green | a version row per stamped row **and `entry.postedPks`** into `reco/entryHistory.json`, so no colleague can resolve the entry to its rows — **enumeration** |
+| **"Unmark Entire Groups"** (`Reco._unmarkBlockedGroups`) | green *"Unmarked N row(s) from blocked groups"* | deletes `manualOffsetMaster` records under dead keys — **enumeration** |
+| the group panel's **single-row remove** (`Reco.removeMemberFromGroup`) | green *"Removed from group"* | `smartUnmark`'s shape: deletes the membership filed while the key was right — **enumeration** |
+
+Reproduced on `999b936` before anything was touched:
+`scratchpad/dataloss/choke/probes/p1_doors.mjs`, port 21420, `logs/p1_before.txt` — five of five
+doors through, three driven by real clicks on the buttons and real keystrokes.
+
+**Why the list could never close** The rule was written down (at `Reco._keyStale`: *a gesture asks
+when its key comes from a ROW ON SCREEN and it writes a pk-keyed store the folder shares*) and then
+**applied by hand, control by control**. The comment even claimed *"so the next writer is covered
+without being listed"*, which is the sentence that stops the next engineer looking. Meanwhile the
+suite had 638 green checks and could not see any of it, because **every assertion named a function
+somebody remembered**.
+
+**Fix, in three parts**
+
+1. **THE CHOKEPOINT.** Enumerated from the code: 58 write sites in 44 functions, funnelling through
+   `Reco.applyEdits` (the store and the override), `Versioning.appendChangesBatch` (the day file)
+   and plain assignment into the five remaining masters. There is no single function — but every
+   one of the 58 does one thing: **a ROW becomes a KEY in order to write.** That step is now a
+   function: `Reco.writeKey(tpl, sess, row, verb)` for a master and
+   `Reco.writeVerKey(tpl, sess, row, verb)` for a day-file version row, both asking
+   `Reco._keyWriteUnsafe`, both saying the refusal with the caller's verb, both returning `null` —
+   which every call site already handled, because the write was already guarded by `if (pk)`.
+   `Reco.applyEdits` asks once per edit and puts the refusal in `res.rejected`.
+   **NOT inside `Reco.rowKey`**: it is a key READER on every render path, it cannot carry a verb
+   and it runs once per row per paint. Gated by **G82g** so it cannot be moved there later.
+   The gesture-level `Reco._keyStaleBlock` is kept on top, because that is where the verb and the
+   whole selection are and so the refusal is one sentence and all-or-none.
+2. **THE RULE IS ABOUT THE ROW** (`Reco._keyRowDrifted`), which is what closes **T-S10-19** as well,
+   with the three measured false positives left out — see that ticket and §18.11's table.
+3. **THE GATE THAT CANNOT GO STALE** — `run_store_e2e` **[82]**: it reads `apps/Reco.html`,
+   enumerates the writers itself and fails on a write that is neither guarded nor allow-listed with
+   a reason, naming the file, the line, the master and what to do. The allow-list is the pressure
+   valve, a **stale** allow-list entry fails too (G82h), and the gate self-tests that it still finds
+   the writes and that the twenty-one known doors are still both found and guarded (G82b/G82c/G82d).
+
+**Failing first** With the gates in and no app change (`APP_FILE=999b936`): **13 of the new
+assertions red, every pre-existing assertion green** (`choke/logs/store_failfirst.txt`). The green
+ones are the premises and the Clear-and-Load controls. **After: 669 passed, 0 failed.**
+
+**One defect the fix introduced, and the suite caught it within the hour.** The refusal is said once
+per gesture rather than once per row; the first build cleared that flag one **task** later, and two
+gestures of the same action in succession are separated by an `await` and not by a task — so the
+second was refused **in total silence** ([80] R12e and R12k, red). It is cleared on a **microtask**
+now. A silent refusal arriving by the back door of its own fix is exactly this cluster's shape.

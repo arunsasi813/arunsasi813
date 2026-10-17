@@ -10288,6 +10288,912 @@ section(81, 'R13 T-S10-7/A7 — THE MERGE QUESTION: WHAT IT SAYS NOTHING ABOUT, 
   await m3.ctx.close();
 }
 
+/* ---- T-S10-20's PORTS AND FIXTURES ----------------------------------------
+   [83] drives sheet mode and the in-app Excel view from the RENDERED DOM, so
+   the fixture has to put real controls on screen: an editable FILE column (so
+   the formula bar writes a day-file version row) and an added `custom` column
+   in displayColumns (so the fill handle has a store column to drag over).
+   [84] reopens a day file written BEFORE the key changed, which is T-S10-19,
+   and needs a tolerance so the offset door is reachable at all. */
+const PORT_R14  = 21430;   // R14 sheet mode's three buttons, the fill drag, the Excel view
+const PORT_R15  = 21431;
+const PORT_R16  = 21433;   // R16 what the per-row question costs, as an operation count   // R15 T-S10-19: a pre-change day file reopened, no latch anywhere
+
+const R14_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_V'; t.name = 'Doors14';
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                         { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount','Vendor'];
+  t.editableColumns = ['Line'];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_V');
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_V';
+  await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'E'+i, Line:'L'+i, Amount:String(i*10) })),
+    ['Doc','Line','Amount']);
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_V;
+  Reco.setTag(sess.data[0]._id, 'Vendor', 'typed-while-keys-were-right');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();
+  return sess.data.map(r => r._pk);
+})`;
+const R14_OPEN = `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_V');
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_V'; App.closeModal();
+  await new Promise(r => setTimeout(r, 250));
+  return (AppState.recoSessions.TPL_V.data || []).map(r => r._pk);
+})`;
+const R14_A_KEY = `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_V');
+    RecoTemplate._editing.additionalColumns.find(a => a.name === 'Ref').formula = 'CONCAT({Doc},"-X")';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+const R14_B_REFUSED = `(async function () {
+  window.__toasts = [];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_V'); RecoTemplate._editing.description = 'B edit';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { stale: !!(Reco._keyStale || {}).TPL_V,
+           pks: (AppState.recoSessions.TPL_V.data || []).map(r => r._pk),
+           said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg) };
+})`;
+const R14_SHEET_ON = `(function () {
+  const s = AppState.recoSessions.TPL_V;
+  if (!s.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  App.navigate('reco');
+  return !!s.spreadsheetMode;
+})`;
+const R14_PICK_CELL = `(function (cell) {
+  window.__toasts = [];
+  AppState.recoSessions.TPL_V.activeCell = cell;
+  App.navigate('reco');
+  return true;
+})`;
+/* Settle EVERY queue the gesture can have put work on: the store's, the
+   version queue's 150 ms burst and AppState's own. Asserting on a toast alone
+   is how a blocker got through review here. */
+const R14_SETTLE = `(async function () {
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();
+  await new Promise(r => setTimeout(r, 300));
+  if (typeof Store.idle === 'function') await Store.idle();
+  const s = AppState.recoSessions.TPL_V;
+  return { said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+           lines: (s.data || []).map(r => r._pk + ':' + r.Line) };
+})`;
+const R14_FILL_DRAG = `(async function () {
+  window.__toasts = [];
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_V');
+  const sess = AppState.recoSessions.TPL_V;
+  if (!sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  App.navigate('reco');
+  await new Promise(r => setTimeout(r, 150));
+  /* The handle's own mouseup handler calls this with the drag it recorded;
+     there is no way to express a 20-pixel drag of a floating handle from the
+     DOM reliably, so the gesture's own commit is called with the rectangle a
+     drag down three rows of "Vendor" produces. Everything downstream - the
+     store write, the day-file write and the toast - is the real path. */
+  Reco._ssCommitFill({ srcCol:'Vendor', curCol:'Vendor', srcFidx:0, curFidx:2 });
+  await new Promise(r => setTimeout(r, 500));
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 300)); if (typeof Store.idle === 'function') await Store.idle();
+  const ac = (tpl.additionalColumns || []).find(a => a.name === 'Vendor');
+  return { said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg),
+           onScreen: (sess.data || []).map(r => r._pk + '="'
+             + String(Reco._extraValueForRow(tpl, sess, r, ac)) + '"') };
+})`;
+const R14_XLVIEW_OPEN = `(async function () {
+  const sess = AppState.recoSessions.TPL_V;
+  if (sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  window.__xvPrev = Reco._xlWorksheet || null;
+  AppState.activeSubSection = 'excel';
+  RecoTemplate.open('TPL_V');
+  const t0 = Date.now();
+  while (Date.now() - t0 < 20000) {
+    if (Reco._xlCtx && Reco._xlCtx.ws && Reco._xlWorksheet !== window.__xvPrev
+        && document.querySelector('#excelViewHost .jss_worksheet')) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  const ws = Reco._xlWorksheet;
+  if (!ws) return { noWorksheet: true };
+  const names = ws.options.columns.map(c => c.name);
+  const x = names.indexOf('Vendor');
+  let y = -1;
+  const n = ws.options.data ? ws.options.data.length : 0;
+  for (let i = 0; i < n; i++) {
+    const row = ws.getRowData ? ws.getRowData(i) : null;
+    if (row && String(row[names.indexOf('Doc')]) === 'E3') { y = i; break; }
+  }
+  if (y < 0) y = 2;
+  window.__toasts = [];
+  return { cols: names, x: x, y: y,
+           hasTd: !!document.querySelector('#excelViewHost td[data-x="' + x + '"][data-y="' + y + '"]') };
+})`;
+const R14_CLEAR_AND_LOAD = `(async function () {
+  window.__toasts = [];
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_V');
+  const sess0 = AppState.recoSessions.TPL_V;
+  if (sess0 && sess0.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  AppState.activeSubSection = 'grid';
+  const real = window.confirm; window.confirm = () => true;
+  try { Reco.confirmClearSession();
+    await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'E'+i, Line:'L'+i, Amount:String(i*10) })),
+      ['Doc','Line','Amount']);
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_V;
+  /* A source value for the control's fill drag: the records typed before the
+     change are filed under E1, and these rows are E1-X. */
+  Reco.setTag(sess.data[0]._id, 'Vendor', 'ok-drag-source');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { pks: sess.data.map(r => r._pk), stale: !!(Reco._keyStale || {}).TPL_V,
+           said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg) };
+})`;
+
+const R15_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_W'; t.name = 'DayFile19';
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                         { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount','Vendor'];
+  t.editableColumns = ['Line'];
+  t.toleranceMode = 'value'; t.toleranceValue = 100000;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_W';
+  await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'K'+i, Line:'L'+i, Amount:String(i*100) })),
+    ['Doc','Line','Amount']);
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return (AppState.recoSessions.TPL_W.data || []).map(r => r._pk);
+})`;
+const R15_A_KEY = `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit('TPL_W');
+    RecoTemplate._editing.additionalColumns.find(a => a.name === 'Ref').formula = 'CONCAT({Doc},"-X")';
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+  } finally { window.confirm = real; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { stale: !!(Reco._keyStale || {}).TPL_W };
+})`;
+const R15_RELOAD = `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  try { Reco.confirmClearSession();
+    await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'K'+i, Line:'L'+i, Amount:String(i*100) })),
+      ['Doc','Line','Amount']);
+  } finally { window.confirm = real; }
+  App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { pks: (AppState.recoSessions.TPL_W.data || []).map(r => r._pk),
+           stale: !!(Reco._keyStale || {}).TPL_W };
+})`;
+const R15_REOPEN = `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  try { const files = await Versioning.listFiles(tpl);
+    const f = files[files.length - 1];
+    await Reco.loadVersionedFile(f.fullPath || f.path, 'TPL_W');
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_W;
+  const dead = (sess.data || []).filter(r => /^K[0-9]+$/.test(String(r._pk)));
+  return { pks: (sess.data || []).map(r => r._pk), stale: !!(Reco._keyStale || {}).TPL_W,
+           dead: dead.map(r => r._pk),
+           keyCell: (sess.data || []).map(r => {
+             try { return String(Reco.keyCellValue(tpl, sess, r, 'Ref')); } catch (e) { return 'threw'; } }),
+           drift: (function () { try { return Reco.keyDriftCount('TPL_W'); } catch (e) { return -1; } })() };
+})`;
+/* The ten doors, at the rows the day file handed back. Six of these are
+   T-S10-19's own measurement; the last four are this round's. */
+const R15_WALK = `(function (which) { return (async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_W');
+  const sess = AppState.recoSessions.TPL_W;
+  const pick = which === 'dead' ? r => /^K[0-9]+$/.test(String(r._pk))
+                                : r => /-X$/.test(String(r._pk));
+  const rows = (sess.data || []).filter(pick);
+  if (rows.length < 3) return { none: true, got: rows.map(r => r._pk) };
+  const tag = which === 'dead' ? 't19-' : 't19-live-';
+  const out = {};
+  const door = async (n, fn) => {
+    window.__toasts = []; let threw = null;
+    try { await fn(); } catch (e) { threw = String(e).slice(0, 140); }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();
+    out[n] = { said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg), threw };
+  };
+  await door('setTag',          () => Reco.setTag(rows[0]._id, 'Vendor', tag + 'typed'));
+  await door('applyCorrection', () => Reco.applyCorrection(null, 'Line', tag + 'corrected', null, rows[1]._id));
+  await door('manualOffset',    () => Reco.manualOffset(null, null, rows[2]._id));
+  await door('editCell',        () => Reco.editCell(null, 'Line', tag + 'edited', null, rows[0]._id));
+  const realPrompt = window.prompt; window.prompt = () => 'G' + (which === 'dead' ? '19' : '19L');
+  try { sess.selectedRows = {}; sess.selectedRows[rows[0]._id] = true;
+        await door('createGroup', () => Reco.createGroupFromSelection(null)); }
+  finally { window.prompt = realPrompt; sess.selectedRows = {}; }
+  await door('comment', () => { Comments.openAddDialog('TPL_W', rows[1]._pk);
+    const ta = document.getElementById('commentText'); if (ta) ta.value = tag + 'comment';
+    Comments._confirmAdd(); });
+  App.closeModal();
+  /* ---- and the four this round closed, at the same rows. The sheet-mode
+     three need the cell the formula bar is pointing at to BE one of them, so
+     the active cell is set by the row's own index in the filtered view. */
+  if (!sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  App.navigate('reco');
+  await new Promise(r => setTimeout(r, 200));
+  const filtered = Reco.applyTableFiltersSort(tpl, sess);
+  const fidxOf = row => filtered.indexOf(row);
+  const setBar = (row, v) => { sess.activeCell = { fidx: fidxOf(row), col: 'Line' };
+    App.navigate('reco');
+    const inp = document.getElementById('formulaInput'); if (inp) inp.value = v; };
+  await door('ssApply',      async () => { setBar(rows[0], tag + 'ssapply'); Reco._ssCommit(false); });
+  await door('ssFillColumn', async () => { setBar(rows[1], tag + 'ssfill');  Reco._ssCommit(true); });
+  await door('ssClear',      async () => { setBar(rows[2], ''); Reco._ssClearActive(); });
+  await door('fillDrag',     async () => {
+    const a = fidxOf(rows[0]), b = fidxOf(rows[2]);
+    Reco._ssCommitFill({ srcCol:'Vendor', curCol:'Vendor', srcFidx:a, curFidx:b });
+    await new Promise(r => setTimeout(r, 400)); });
+  if (sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  await new Promise(r => setTimeout(r, 400)); if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})(); })`;
+const R15_WALK_DEAD = R15_WALK + '("dead")';
+const R15_WALK_LIVE = R15_WALK + '("live")';
+/* THE FALSE POSITIVE, measured here so the narrowing cannot be quietly
+   widened later: a master_lookup key extra whose shared master a colleague
+   edits must stay WRITABLE, because the rule did not move. */
+const R15_LOOKUP_KEY = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_WL'; t.name = 'LookupKey19';
+  t.columns = ['Doc','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'AK', type:'master_lookup',
+    masterCfg: { source:'accounts', matchColumn:'Doc', matchKey:'Reference', returnKey:'Nominal' } }];
+  t.primaryKeys = ['AK']; t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_WL');
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TPL_WL';
+  await Reco.ingestData(tpl, [{ Doc:'ACC1', Amount:'10' }], ['Doc','Amount']);
+  App.closeModal();
+  const sess = AppState.recoSessions.TPL_WL;
+  const row = sess.data[0];
+  const before = String(row._pk);
+  (AppState.aegMaster || []).forEach(r => { if (r && r.Reference === 'ACC1') r.Nominal = '99999'; });
+  let drifted = null; try { drifted = Reco.keyDrift(tpl, sess, row).drifted; } catch (e) { drifted = 'threw'; }
+  window.__toasts = [];
+  /* typeof-guarded so an APP_FILE run against a build WITHOUT the chokepoint
+     reads RED rather than crashing the suite - which is how this measurement
+     was recorded failing first. */
+  const got = typeof Reco.writeKey === 'function' ? Reco.writeKey(tpl, sess, row, 'saved') : null;
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return { pkBefore: before, keyDriftSaysDrifted: drifted,
+           writeKeyReturned: got, writeAllowed: !!got && String(got) === before,
+           said: (window.__toasts || []).map(x => x.kind + ': ' + x.msg) };
+})`;
+
+/* THE GUARD'S COST, AS AN OPERATION COUNT AND NEVER A CLOCK (handover 16.4a).
+   The claim in 18.11 is that a template whose key names no added column pays
+   ONE PROPERTY READ per row - Reco._keyExtraSet returns null and the question
+   is over - and that a formula-keyed one pays one recompute per row, beside a
+   write that is already O(rows). Both are counted here by instrumenting
+   Reco._extraComputedValue, which is the only expensive thing the rule does. */
+const R16_COST = `(async function (hasKeyExtra) {
+  const id = hasKeyExtra ? 'TPL_CK' : 'TPL_CN';
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = id; t.name = 'Cost' + (hasKeyExtra ? 'K' : 'N');
+  t.columns = ['Doc','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = hasKeyExtra
+    ? [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }] : [];
+  t.primaryKeys = hasKeyExtra ? ['Ref'] : ['Doc'];
+  t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === id);
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = id;
+  const N = 2000;
+  const rows = []; for (let i = 0; i < N; i++) rows.push({ Doc:'D'+i, Amount:'1' });
+  await Reco.ingestData(tpl, rows, ['Doc','Amount']);
+  App.closeModal();
+  const sess = AppState.recoSessions[id];
+  sess.selectedRows = {}; sess.data.forEach(r => { sess.selectedRows[r._id] = true; });
+  /* Count ONLY what the rule itself does: the recompute. */
+  const realCompute = Reco._extraComputedValue;
+  let calls = 0;
+  Reco._extraComputedValue = function () { calls++; return realCompute.apply(Reco, arguments); };
+  let guardCalls = 0;
+  const realDrift = Reco._keyRowDrifted;
+  Reco._keyRowDrifted = function () { guardCalls++; return realDrift.apply(Reco, arguments); };
+  try { Reco.offsetSelected(null); } finally {
+    Reco._extraComputedValue = realCompute; Reco._keyRowDrifted = realDrift; }
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  const offs = Object.keys((AppState.manualOffsetMaster[id] || {})).length;
+  return { rows: N, recomputes: calls, questionsAsked: guardCalls, offsetsFiled: offs };
+})`;
+
+/* ============================================================ [82] ====
+   T-S10-20. THE GATE THAT ENUMERATES THE WRITERS ITSELF.
+
+   WHY THIS EXISTS, and it is the only assertion in this file that reads the
+   SOURCE rather than running it. Four rounds closed this cluster by listing
+   the gestures that write under a row key, and every round found more:
+
+       round 1   setTag, setOverride, revertOverride ................ 3
+       round 2   applyCorrection, manualOffset, unmarkOffset, editCell,
+                 offsetSelected, bulkMarkOffset x2,
+                 _xlOffsetSelectedRows ............................. +7, "closed"
+       round 3   the lift was wrong, and ExcelLink.apply, the group, the
+                 comment and the attachment doors were open ......... +5, "closed"
+       round 4   a verifier with REAL MOUSE CLICKS found sheet mode's
+                 "✓ Apply", "↓ Fill Column", the fill-handle drag and the
+                 in-app Excel view's cell edit ..................... +4, open
+       round 5   THIS enumeration found four MORE that no human walk had
+                 named: sheet mode's "×" (Reco._ssClearActive), Find &
+                 Replace's two doors, and the JOURNAL POST's stamp .. +4
+
+   638 green checks could not see any of it, because every one of them names a
+   function somebody remembered. So this one names none: it reads
+   apps/Reco.html, finds every write into a pk-keyed shared master and every
+   day-file append, works out which function each write is in, and FAILS when
+   one of those functions does not consult the guard and is not on the
+   allow-list below with a reason. A new button that writes a master fails the
+   suite on the day it is written instead of three verifier rounds later.
+
+   IT IS STRUCTURAL, SO IT WILL HAVE FALSE POSITIVES AS THE CODE MOVES. That
+   is designed for: the allow-list is the pressure valve, every entry carries a
+   reason a reader can check, and a stale entry that no longer matches anything
+   FAILS TOO (G82h) so the list cannot quietly rot into a rubber stamp. */
+section(82, 'G82 T-S10-20 — THE WRITERS ARE ENUMERATED FROM THE SOURCE, NOT FROM A LIST OF NAMES');
+{
+  const APP = fs.readFileSync(APP_FILE || path.join(REPO, 'apps/Reco.html'), 'utf8');
+  const L = APP.split('\n');
+
+  /* The six pk-keyed shared masters, plus the day file. Every one of these is
+     a whole file every colleague parses, keyed by a row's key. */
+  const MASTERS = ['extraValueMaster', 'correctionMaster', 'manualOffsetMaster',
+                   'groupMaster', 'commentMaster', 'attachmentMaster'];
+
+  /* A guard call is any of these. The write-side pair is the mechanism; the
+     gesture-level pair is the sentence. Either satisfies the gate, because
+     either means the question was asked in that function. */
+  const GUARD = /Reco\.(?:writeKey|writeVerKey|_keyStaleBlock|_keyWriteUnsafe|_keyRowsUnsafe)\s*\(/;
+
+  /* THE ALLOW-LIST. One entry per function that writes a pk-keyed shared
+     record WITHOUT asking, and the reason it is right not to ask. A reader can
+     check every one of these against the code. */
+  const ALLOW = {
+    'Versioning.appendChange':
+      'plumbing, not a door: it forwards one {pk,row} to appendChangesBatch for a caller that has '
+      + 'already been through Reco.writeVerKey. Asking again here would be off the gesture\'s task, '
+      + 'with no verb and no operator to tell.',
+    'Versioning.flushQueue':
+      'the same: it drains Versioning.queueChange\'s 150 ms burst, and every key in it arrived '
+      + 'through a guarded call site. THE DEADLOCK RULE (T-S10-17) also applies - this runs inside '
+      + 'the write path and must not wait on anything.',
+    'Groups.forTemplate':
+      'lazy `{}` for this template\'s bag of groups. It creates no pk-keyed record.',
+    'Attachments.forTemplate': 'the same lazy `{}`; no pk-keyed record.',
+    'Comments.forTemplate':    'the same lazy `{}`; no pk-keyed record.',
+    'Groups.create':
+      'a new group with `members: []`. No row key is involved until addMembers, which IS guarded at '
+      + 'all four of its entry points.',
+    'Groups.remove':
+      'deletes a whole group by its GROUP id. Nothing here is keyed by a row.',
+    'Attachments.updateLinks':
+      'has no caller in the app; its pks are whatever a caller passes, and there is no row and no '
+      + 'verb in scope. If a UI is ever built on it, that UI is the door and the gate will say so.',
+    'Comments.updateLinks': 'the same: no caller, no row, no verb.',
+    'App._replayJournal':
+      'THE OWED-WRITE REPLAY. Its keys come from the journal on disk, which recorded them when they '
+      + 'were the keys the rule computed; re-asking would discard work the operator has already been '
+      + 'told was saved. It also runs INSIDE the flush, where the deadlock rule (T-S10-17) forbids '
+      + 'waiting on anything and a toast would be addressed to nobody.',
+    'App.importBackup':
+      'a RESTORE from a backup file. The keys come out of that file, not from a row on screen, and '
+      + 'refusing them would make a backup unrestorable on exactly the day it is needed.',
+    'Reco.restoreSession': 'the same restore, per session.',
+    'Reco._promoteCarryForward':
+      'runs inside the MINT, against the keys the mint has just computed under the CURRENT rule - '
+      + 'which is the one state in which a key cannot be stale.',
+    'Reco._renameExtraValueCol':
+      're-keys records by COLUMN NAME. The row keys it moves are untouched, so the question has '
+      + 'nothing to be about.',
+    'Reco._setExtraTyped':
+      'the ONE caller is Reco.applyEdits, which asks per edit before it dispatches. The question '
+      + 'cannot move in here: a `false` from this function means "the store must not serve this '
+      + 'cell, use sess.manualTags", so a refusal here would become a SILENT SESSION-ONLY WRITE - '
+      + 'the exact shape of the bug this cluster is about.',
+    'Reco._setOverride':
+      'the same: reached only from Reco.applyEdits, which asks, and its own return value is already '
+      + 'the override\'s refusal channel.',
+    'Reco._dropExtraValueCols':
+      'a DELETE whose keys come from the stored master (the columns being dropped), not from a row.',
+    'Reco._dropExtraValueTpl':   'a DELETE of a whole template\'s records, by template id.',
+    'Reco._dropExtraValueRec':   'a DELETE whose key the values panel read out of the master.',
+    'Reco._dropExtraValuesNotIn':'a DELETE driven by the stored master against the loaded key set.',
+    'Reco.removeCorrection':
+      'handover 18.9\'s documented exception: the key comes from the Correction panel, which read it '
+      + 'out of correctionMaster. It is still the key it always was, and cleaning that record up is '
+      + 'right to let through.',
+    'Reco.removeManualOffset':
+      'the same exception for the offsets panel.',
+    'Reco.reverseEntry':
+      'its one write here is the reversal\'s Comment, whose linkedPks come from the POSTED ENTRY\'S '
+      + 'OWN INDEX on the share (plan.unstamp), not from a row on screen. Its Reco.applyEdits call '
+      + 'passes keyFromStore:true for the same reason, and says so at the call site.'
+  };
+
+  /* ---- the function each line belongs to: Module.method.
+     A method definition is `name(args) {` on its own line at a smaller indent
+     than the body, which is this file's shape throughout; the keyword list
+     keeps `if (…) {` and friends out. Deliberately NOT a brace-matching JS
+     parser: the failure mode of this simpler rule is a MIS-NAMED owner, which
+     shows up as a false positive the allow-list absorbs, rather than a silent
+     miss. */
+  const KW = new Set(['if','for','while','switch','catch','do','else','try','return','typeof',
+                      'new','function','await','forEach','map','filter','then','constructor']);
+  const defs = [], mods = [];
+  L.forEach((l, i) => {
+    const m = /^(\s*)(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*$/.exec(l);
+    if (m && !KW.has(m[2])) defs.push({ line: i + 1, name: m[2], indent: m[1].length });
+    const q = /^const ([A-Za-z_$][\w$]*) = \{/.exec(l);
+    if (q) mods.push({ line: i + 1, name: q[1] });
+  });
+  const modOf = ln => { let b = ''; for (const m of mods) { if (m.line <= ln) b = m.name; else break; } return b; };
+  const ownerOf = (ln, indent) => {
+    for (let i = defs.length - 1; i >= 0; i--) {
+      const d = defs[i];
+      if (d.line < ln && d.indent < indent) return { label: modOf(d.line) + '.' + d.name, line: d.line, indent: d.indent };
+    }
+    return { label: '(top level)', line: 0, indent: -1 };
+  };
+  const nextSibling = o => { for (const d of defs) if (d.line > o.line && d.indent <= o.indent) return d.line; return L.length + 1; };
+
+  /* Comments are stripped before matching, so the prose that DESCRIBES these
+     writes (and this file is full of it) is never counted as one. */
+  const inBlockComment = new Array(L.length).fill(false);
+  { let open = false;
+    L.forEach((l, i) => {
+      let s = l, hadOpen = open;
+      if (open) { const e = s.indexOf('*/'); if (e === -1) { inBlockComment[i] = true; return; } open = false; s = s.slice(e + 2); hadOpen = true; }
+      let k = s.indexOf('/*');
+      while (k !== -1) { const e = s.indexOf('*/', k + 2); if (e === -1) { open = true; break; } s = s.slice(0, k) + ' ' + s.slice(e + 2); k = s.indexOf('/*'); }
+      inBlockComment[i] = hadOpen && /^\s*$/.test(s);
+    });
+  }
+  const codeOf = i => {
+    if (inBlockComment[i]) return '';
+    let l = L[i];
+    if (/^\s*(\/\/|\*|\/\*)/.test(l)) return '';
+    l = l.replace(/\/\/.*$/, '');
+    return l.replace(/'(\\.|[^'\\])*'/g, "''").replace(/"(\\.|[^"\\])*"/g, '""').replace(/`(\\.|[^`\\])*`/g, '``');
+  };
+
+  /* ---- per-function aliases of a master (`const mm = AppState.manualOffsetMaster[id] = …`),
+     because that is how five of the offset writes are spelt. */
+  const aliases = new Map();
+  L.forEach((l, i) => {
+    const s = codeOf(i); if (!s) return;
+    const m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:AppState\.(\w+)\s*\[|Groups\.forTemplate\s*\(|Comments\._map\s*\(|Attachments\._map\s*\()/.exec(s);
+    if (!m) return;
+    const master = m[2] || (/Groups\./.test(s) ? 'groupMaster' : /Comments\./.test(s) ? 'commentMaster' : 'attachmentMaster');
+    if (!MASTERS.includes(master)) return;
+    const o = ownerOf(i + 1, (l.match(/^\s*/) || [''])[0].length);
+    if (!aliases.has(o.line)) aliases.set(o.line, new Map());
+    aliases.get(o.line).set(m[1], master);
+  });
+
+  /* ---- THE ENUMERATION. */
+  const hits = [];
+  L.forEach((l, i) => {
+    const s = codeOf(i); if (!s) return;
+    const ln = i + 1, indent = (l.match(/^\s*/) || [''])[0].length;
+    const o = ownerOf(ln, indent);
+    const add = what => hits.push({ ln, what, o, text: l.trim().slice(0, 105) });
+    for (const M of MASTERS) {
+      if (new RegExp('AppState\\.' + M + '\\s*\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*\\s*=(?!=)').test(s)) return add(M);
+      if (new RegExp('delete\\s+AppState\\.' + M).test(s)) return add(M + ' (delete)');
+    }
+    const al = aliases.get(o.line);
+    if (al) for (const [a, M] of al) {
+      if (new RegExp('(^|[^\\w.$])' + a + '\\s*\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*\\s*=(?!=)').test(s)) return add(M + ' (via ' + a + ')');
+      if (new RegExp('delete\\s+' + a + '\\s*\\[').test(s)) return add(M + ' (delete via ' + a + ')');
+    }
+    if (/Versioning\.(queueChange|appendChange|appendChangesBatch)\s*\(/.test(s)) return add('day file');
+    if (/Reco\._extraValueFlush\s*\(/.test(s)) return add('extraValueMaster');
+    if (/Groups\.(addMembers|removeMembers)\s*\(/.test(s)) return add('groupMaster');
+    if (/Groups\.forTemplate\s*\([^)]*\)\s*\[[^\]]*\]\s*=(?!=)/.test(s)) return add('groupMaster');
+    if (/\b(?:meta|rec|c|a)\.linkedPks\s*=(?!=)/.test(s)) return add('comment/attachment linkedPks');
+    if (/(?:Attachments\.upload|Comments\.create|Attachments\.updateLinks|Comments\.updateLinks)\s*\(/.test(s))
+      return add('comment/attachment linkedPks');
+  });
+
+  const byFn = new Map();
+  for (const h of hits) {
+    if (!byFn.has(h.o.label)) {
+      const end = nextSibling(h.o);
+      let body = '';
+      for (let k = h.o.line - 1; k < end - 1; k++) body += codeOf(k) + '\n';
+      byFn.set(h.o.label, { label: h.o.label, line: h.o.line, guarded: GUARD.test(body), hits: [] });
+    }
+    byFn.get(h.o.label).hits.push(h);
+  }
+  const fns = Array.from(byFn.values()).sort((a, b) => a.line - b.line);
+  const guarded = fns.filter(f => f.guarded);
+  const allowed = fns.filter(f => !f.guarded && ALLOW[f.label]);
+  const naked   = fns.filter(f => !f.guarded && !ALLOW[f.label]);
+
+  note('G82 the enumeration', { writeSites: hits.length, functions: fns.length,
+    guarded: guarded.length, allowListed: allowed.length, unguarded: naked.length });
+  note('G82 guarded', guarded.map(f => f.label + ':' + f.line));
+  note('G82 allow-listed', allowed.map(f => f.label));
+
+  /* THE ASSERTION. When it fails it names the FILE, the LINE, the MASTER and
+     what to do - because a structural failure a reader cannot act on gets
+     commented out. */
+  const report = naked.map(f => f.hits.map(h =>
+    'apps/Reco.html:' + h.ln + '  in ' + f.label + '()  writes ' + h.what + '\n'
+    + '        ' + h.text + '\n'
+    + '        FIX: take the key through Reco.writeKey(tpl, sess, row, \'<verb>\') for a master, or\n'
+    + '             Reco.writeVerKey(tpl, sess, row, \'<verb>\') for a day-file version row, and add\n'
+    + '             Reco._keyStaleBlock(tpl, \'<verb>\', sess, rows) at the gesture so the refusal is\n'
+    + '             one sentence and all-or-none. If this write\'s key comes from a STORED master or\n'
+    + '             from the machine rather than from a row on screen, add ' + f.label + ' to this\n'
+    + '             section\'s ALLOW list WITH THE REASON.').join('\n')).join('\n');
+  check(naked.length === 0,
+    'G82a EVERY WRITE INTO A PK-KEYED SHARED MASTER AND EVERY DAY-FILE APPEND IS INSIDE A FUNCTION '
+    + 'THAT CONSULTS THE GUARD, OR IS ALLOW-LISTED WITH A REASON. ' + hits.length + ' write site(s) '
+    + 'in ' + fns.length + ' function(s) enumerated from the source.'
+    + (naked.length ? '\n' + report : ''),
+    naked.map(f => f.label + '@' + f.line));
+
+  /* ---- THE GATE'S OWN SELF-TESTS. A structural gate that silently stops
+     matching is worse than no gate: it goes green for ever. */
+  check(hits.length >= 55 && fns.length >= 40,
+    'G82b the enumeration still FINDS the writes (>=55 sites in >=40 functions). A regex that stops '
+    + 'matching would make G82a vacuously green for ever, which is exactly how 638 checks missed '
+    + 'four open doors', { writeSites: hits.length, functions: fns.length });
+  const MUST_GUARD = ['Reco.applyCorrection', 'Reco.manualOffset', 'Reco.offsetSelected',
+    'Reco.bulkMarkOffset', 'Reco.smartUnmark', 'Reco._xlOffsetSelectedRows', 'Reco.applyEdits',
+    'Reco._ssCommit', 'Reco._ssClearActive', 'Reco._ssCommitFill', 'Reco.commitEntryFromPreview',
+    'FindReplace._replaceOne', 'FindReplace._replaceAll', 'Reco.createGroupFromSelection',
+    'Reco.removeSelectionFromGroup', 'Timeline._confirmUpload', 'Comments._confirmAdd'];
+  const missing = MUST_GUARD.filter(n => !byFn.has(n) || !byFn.get(n).guarded);
+  check(missing.length === 0,
+    'G82c the seventeen doors this round and the four before it closed are all still FOUND by the '
+    + 'enumeration AND still guarded - so a rename or a refactor that moves one out of the gate\'s '
+    + 'sight is a failure, not a quiet pass', missing);
+  const MASTER_SET = new Set(hits.map(h => h.what.replace(/ \(.*$/, '')));
+  check(MASTERS.concat(['day file']).every(m => MASTER_SET.has(m)),
+    'G82d all six pk-keyed masters AND the day file are represented in the enumeration',
+    Array.from(MASTER_SET));
+  const stale = Object.keys(ALLOW).filter(k => !byFn.has(k));
+  check(stale.length === 0,
+    'G82h NO ALLOW-LIST ENTRY IS STALE. An entry that matches nothing is a reason nobody can check '
+    + 'any more, and a list of those is how a pressure valve becomes a rubber stamp', stale);
+
+  /* ---- and the two properties the guard itself has to have, read from the
+     source so they cannot be satisfied by a comment. */
+  check(/writeKey\(tpl, sess, row, what\)\s*\{[\s\S]{0,400}?_keyWriteUnsafe\(tpl, sess, row\)/.test(APP)
+     && /writeVerKey\(tpl, sess, row, what\)\s*\{[\s\S]{0,400}?_keyWriteUnsafe\(tpl, sess, row\)/.test(APP),
+    'G82e both chokepoint functions ask Reco._keyWriteUnsafe - the rule is in ONE place and neither '
+    + 'of them re-implements it');
+  check(/_keyWriteUnsafe\(tpl, sess, row\)\s*\{[\s\S]{0,500}?_keyRowDrifted\(tpl, sess, row\)/.test(APP),
+    'G82f the question asks the ROW (Reco._keyRowDrifted), not only the template latch - which is '
+    + 'what makes T-S10-19 reachable by it at all');
+  check(!/rowKey\(tpl, row\)\s*\{[\s\S]{0,300}?_keyWriteUnsafe/.test(APP),
+    'G82g the rule is NOT inside Reco.rowKey. rowKey is a key READER on every render path (the row '
+    + 'attribute, every badge, the status/attachment/comment filters, the drift check, '
+    + 'Groups.resolvePk) and a refusal there would blank the screen this rule exists to keep honest '
+    + '- handover 18.9 and 18.11 carry the argument');
+}
+
+/* ============================================================ [83] ====
+   T-S10-20. THE FOUR DOORS A VERIFIER HAD TO FIND WITH A MOUSE.
+   638 green checks could not see these, because no section in this file
+   touched sheet mode or the Excel view's typing after a key refusal. Driven
+   HERE the way they were found: real clicks on the buttons the operator sees
+   and real keystrokes into the cells, then the FILES are read. */
+section(83, 'R14 T-S10-20 — SHEET MODE AND THE EXCEL VIEW, AFTER A KEY CHANGE, BY REAL CLICKS');
+{
+  const V = makeRoot('share-r14');
+  const brV = await startBridge(V.root, PORT_R14); procs.push(brV.proc);
+  const va = await openReco(browser, brV);
+  note('R14 keys minted under the old rule', await va.page.evaluate(R14_SETUP + '()'));
+  const vb = await openReco(browser, brV);
+  await vb.page.evaluate(R14_OPEN + '()');
+  await va.page.evaluate(R14_A_KEY + '()');
+  const vRef = await vb.page.evaluate(R14_B_REFUSED + '()');
+  check(vRef.stale === true && vRef.pks.join() === 'E1,E2,E3',
+    'R14 premise: B\'s save is refused, the latch is up and the three rows on screen still carry '
+    + 'E1/E2/E3 while the folder\'s rule computes E1-X/E2-X/E3-X', vRef);
+
+  const vals = () => (diskJson(V.root, 'reco/extraValueMaster.json') || {}).TPL_V || {};
+  const day  = () => csvRows(verFile(V.root, 'Doors14'));
+  const dayHas = s => day().filter(r => JSON.stringify(r).includes(s));
+  note('R14 the share before any gesture', { keys: Object.keys(vals()), dayRows: day().length });
+
+  /* ---- sheet mode, by clicking the buttons in the formula bar. */
+  await vb.page.evaluate(R14_SHEET_ON + '()');
+  await vb.page.waitForSelector('#formulaInput', { timeout: 20000 });
+  const bar = await vb.page.$$eval('.formula-bar button',
+    bs => bs.map(b => ({ text: b.textContent.trim(), onclick: b.getAttribute('onclick') })));
+  note('R14 the formula-bar buttons an operator sees', bar);
+  check(bar.some(b => /Apply/.test(b.text)) && bar.some(b => /Fill Column/.test(b.text))
+        && bar.some(b => b.text === '×'),
+    'R14 premise: the three sheet-mode write buttons are on screen and this gate presses THEM, not '
+    + 'the functions behind them', bar.map(b => b.text));
+
+  const press = async (label, cell, typed, btnText) => {
+    await vb.page.evaluate(R14_PICK_CELL + '(' + JSON.stringify(cell) + ')');
+    await vb.page.waitForSelector('#formulaInput', { timeout: 20000 });
+    if (typed != null) await vb.page.fill('#formulaInput', typed);
+    for (const b of await vb.page.$$('.formula-bar button'))
+      if ((await b.textContent()).trim() === btnText) { await b.click(); break; }
+    await vb.page.waitForTimeout(400);
+    const out = await vb.page.evaluate(R14_SETTLE + '()');
+    note('R14 ' + label, out);
+    return out;
+  };
+  const sayed = o => (o.said || []).some(s => /error/.test(s) && /identifies its rows/.test(s));
+
+  const ap = await press('"✓ Apply" on a dead-keyed row', { fidx: 1, col: 'Line' }, 'R14-APPLY', '✓ Apply');
+  check(sayed(ap) && dayHas('R14-APPLY').length === 0,
+    'R14a SHEET MODE\'S "✓ Apply" IS REFUSED AND WRITES NO VERSION ROW UNDER A DEAD KEY. Measured '
+    + 'open: it said NOTHING AT ALL and the shared day CSV gained `E2,C1,...,BTN-APPLY,20`. '
+    + 'Reco.editCell - the ROW MENU\'s door for the same file column - has been latched since '
+    + 'T-S10-16 with the verb "changed", so this was the same action by another entry point',
+    { said: ap.said, dayRows: dayHas('R14-APPLY') });
+
+  const fc = await press('"↓ Fill Column" over every row', { fidx: 0, col: 'Line' }, 'R14-FILLCOL', '↓ Fill Column');
+  check(sayed(fc) && dayHas('R14-FILLCOL').length === 0 && !(fc.said || []).some(s => /success/.test(s)),
+    'R14b SHEET MODE\'S "↓ Fill Column" IS REFUSED, writes no version rows, and does NOT also say a '
+    + 'green "Applied to 3 row(s)". Measured open: it said exactly that and wrote three',
+    { said: fc.said, dayRows: dayHas('R14-FILLCOL') });
+
+  const cl = await press('"×" / Delete on a dead-keyed row', { fidx: 2, col: 'Line' }, null, '×');
+  check(sayed(cl) && day().filter(r => r._pk === 'E3' && r.Line === '').length === 0,
+    'R14c SHEET MODE\'S "×" (Reco._ssClearActive) IS REFUSED TOO - the FIFTH sheet-mode door, which '
+    + 'no round listed and which this round\'s own static enumeration found, not a walk of '
+    + 'gestures. It cleared a cell and wrote `E3,C2,...` to the shared day CSV in total silence',
+    { said: cl.said, e3: day().filter(r => r._pk === 'E3') });
+
+  /* ---- the fill-handle DRAG over an added column: a store write and a
+     day-file write in one mouse gesture. */
+  const fd = await vb.page.evaluate(R14_FILL_DRAG + '()');
+  note('R14 the fill-handle drag over the added column "Vendor"', fd);
+  check(sayed(fd) && !Object.keys(vals()).some(k => /^E[23]$/.test(k)),
+    'R14d THE SHEET-MODE FILL-HANDLE DRAG IS REFUSED AND FILES NOTHING UNDER A DEAD KEY. Measured '
+    + 'open: a green "Filled 2 cells" and reco/extraValueMaster.json gained E2 and E3',
+    { said: fd.said, shareKeys: Object.keys(vals()) });
+
+  /* ---- the in-app Excel view's own cell edit, typed into the cell. */
+  const prep = await vb.page.evaluate(R14_XLVIEW_OPEN + '()');
+  note('R14 the Excel-view cell to type into', prep);
+  check(!prep.noWorksheet && prep.hasTd, 'R14 premise: the in-app Excel view really opened', prep);
+  if (!prep.noWorksheet && prep.hasTd) {
+    const sel = '#excelViewHost td[data-x="' + prep.x + '"][data-y="' + prep.y + '"]';
+    await vb.page.click(sel); await vb.page.waitForTimeout(120);
+    await vb.page.dblclick(sel); await vb.page.waitForTimeout(180);
+    await vb.page.keyboard.type('R14-XLVIEW');
+    await vb.page.keyboard.press('Enter');
+    await vb.page.waitForTimeout(700);
+  }
+  const xv = await vb.page.evaluate(R14_SETTLE + '()');
+  note('R14 the in-app Excel view, real keystrokes', xv);
+  const xvKeys = vals();
+  check((xv.said || []).some(s => /error/.test(s) && /identifies its rows/.test(s))
+        && String(((xvKeys['E3'] || {}).Vendor || {}).v || '') !== 'R14-XLVIEW',
+    'R14e THE IN-APP EXCEL VIEW\'S OWN CELL EDIT IS REFUSED AND FILES NOTHING UNDER THE DEAD KEY. '
+    + 'Measured open: silence, and reco/extraValueMaster.json gained E3.Vendor="REAL-KEYS-EXCEL-'
+    + 'VIEW" while the folder\'s rule computes E3-X and the colleague reads blank. '
+    + 'ExcelLink.apply (the load-back) and _xlOffsetSelectedRows (this view\'s offset) were both '
+    + 'latched in round 5; this is the same view\'s TYPING door',
+    { said: xv.said, E3: xvKeys['E3'] });
+
+  check(String(((vals()['E1'] || {}).Vendor || {}).v || '') === 'typed-while-keys-were-right',
+    'R14f (THE FILE) ...and the record filed while the keys were still right is untouched by all '
+    + 'five refusals. A guard that deletes what was already correct is a worse bug than the one '
+    + 'it fixes', vals()['E1']);
+
+  /* ---- THE CONTROL. A latch that never lifts is a worse bug than the one it
+     fixes, so the route the refusal names must make all five work. */
+  const rec = await vb.page.evaluate(R14_CLEAR_AND_LOAD + '()');
+  note('R14 CONTROL after Clear Loaded Data and a load', rec);
+  check(rec.pks.join() === 'E1-X,E2-X,E3-X' && rec.stale === false,
+    'R14g CONTROL premise: the recovery the refusal names re-keys the whole session', rec);
+  await vb.page.evaluate(R14_SHEET_ON + '()');
+  await vb.page.waitForSelector('#formulaInput', { timeout: 20000 });
+  const ok1 = await press('CONTROL "✓ Apply" after the recovery', { fidx: 1, col: 'Line' }, 'R14-OK-APPLY', '✓ Apply');
+  check(!sayed(ok1) && dayHas('R14-OK-APPLY').map(r => r._pk).join() === 'E2-X',
+    'R14h CONTROL: sheet mode\'s "✓ Apply" then works normally and its version row lands under '
+    + 'the FOLDER\'S own key E2-X, with nothing said in error',
+    { said: ok1.said, rows: dayHas('R14-OK-APPLY').map(r => r._pk) });
+  const ok2 = await vb.page.evaluate(R14_FILL_DRAG + '()');
+  note('R14 CONTROL the fill drag after the recovery', ok2);
+  check(!(ok2.said || []).some(s => /identifies its rows/.test(s))
+        && Object.keys(vals()).some(k => /-X$/.test(k)),
+    'R14i CONTROL: the fill-handle drag then works and files under the folder\'s own keys',
+    { said: ok2.said, shareKeys: Object.keys(vals()) });
+  await va.ctx.close(); await vb.ctx.close();
+}
+
+/* ============================================================ [84] ====
+   T-S10-19, AND THE MEASUREMENT BEHIND "THE GUARD ASKS THE ROW".
+   No latch state can ever see this one: the window did nothing wrong. It is
+   the window that MADE the key change, it recovered correctly, and then it
+   pressed Open Existing on today's day file - which hands back the keys that
+   file was WRITTEN with. sess.data becomes K1,K2,K3,K1-X,K2-X,K3-X: the same
+   three business rows on screen TWICE under two identities, with the key cell
+   showing the frozen "K1" so it looks ordinary.
+   So this section also carries the proof that the question is PER ROW: the
+   drifted copy is refused and the healthy copy BESIDE IT on the same screen,
+   in the same template, goes through. */
+section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO LATCH ANYWHERE');
+{
+  const W = makeRoot('share-r15');
+  const brW = await startBridge(W.root, PORT_R15); procs.push(brW.proc);
+  const wa = await openReco(browser, brW);
+  note('R15 keys written into today\'s day file under the OLD rule', await wa.page.evaluate(R15_SETUP + '()'));
+  note('R15 the same window changes the key definition itself', await wa.page.evaluate(R15_A_KEY + '()'));
+  const rl = await wa.page.evaluate(R15_RELOAD + '()');
+  check(rl.stale === false && rl.pks.join() === 'K1-X,K2-X,K3-X',
+    'R15 premise: a COMPLETELY HEALTHY window - it made the change, it cleared and loaded, the new '
+    + 'keys are on screen and there is no latch and no refusal anywhere in its story', rl);
+
+  const re = await wa.page.evaluate(R15_REOPEN + '()');
+  note('R15 after "Open Existing" on today\'s day file', re);
+  check(re.dead.length === 3 && re.stale === false,
+    'R15a premise: the day file handed back three rows under the keys it was WRITTEN with, the '
+    + 'latch is still DOWN because nothing is wrong with this window, and the same three business '
+    + 'rows are now on screen twice under two identities', re);
+  check(re.keyCell.slice(0, 3).join() === 'K1,K2,K3',
+    'R15b premise: the key cell shows the FROZEN value (handover 14.3), so the dead copy looks '
+    + 'exactly as ordinary as the live one', re.keyCell);
+  check(re.drift === 3,
+    'R15c premise: Reco.keyDriftCount already names exactly those three rows - the hook the write-'
+    + 'side question needed existed before this round', re.drift);
+
+  const vals = () => (diskJson(W.root, 'reco/extraValueMaster.json') || {}).TPL_W || {};
+  const corrs = () => (diskJson(W.root, 'reco/correctionMaster.json') || {}).TPL_W || {};
+  const offs = () => (diskJson(W.root, 'reco/manualOffsetMaster.json') || {}).TPL_W || {};
+  const grps = () => diskJson(W.root, 'reco/groupMaster.json') || {};
+  const cmts = () => diskJson(W.root, 'reco/commentMaster.json') || {};
+  const day = () => csvRows(verFile(W.root, 'DayFile19'));
+
+  const walk = await wa.page.evaluate(R15_WALK_DEAD);
+  note('R15 every door fired at a row the day file handed back', walk);
+  const refused = n => ((walk[n] || {}).said || []).some(s => /error/.test(s) && /were SAVED with/.test(s));
+  const DOORS = ['setTag', 'applyCorrection', 'manualOffset', 'editCell', 'createGroup', 'comment',
+                 'ssApply', 'ssFillColumn', 'ssClear', 'fillDrag'];
+  check(DOORS.every(refused),
+    'R15d EVERY DOOR IS REFUSED AT A ROW THE DAY FILE HANDED BACK - the six T-S10-19 measured going '
+    + 'through (four of them in TOTAL SILENCE, two behind a green toast) and the four this round '
+    + 'closed. No latch is involved: the question is asked of the ROW',
+    DOORS.filter(n => !refused(n)).map(n => [n, (walk[n] || {}).said]));
+  check(DOORS.every(n => !((walk[n] || {}).said || []).some(s => /success/.test(s))),
+    'R15e ...and not one of them ALSO says something green. Two of the six said "Correction '
+    + 'applied" and \'Group "G19" created with 1 member(s)\' while filing under a key nobody else '
+    + 'computes', DOORS.filter(n => ((walk[n] || {}).said || []).some(s => /success/.test(s))));
+  note('R15 the shares after the walk',
+    { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()),
+      groupMembers: Object.values(grps().TPL_W || {}).map(g => g.members),
+      commentPks: Object.values(cmts().TPL_W || {}).map(c => c.linkedPks),
+      dayPks: day().map(r => r._pk) });
+  const deadKey = k => /^K[0-9]+$/.test(String(k));
+  check(!Object.keys(vals()).some(deadKey) && !Object.keys(corrs()).some(deadKey)
+        && !Object.keys(offs()).some(deadKey)
+        && !Object.values(grps().TPL_W || {}).some(g => (g.members || []).some(deadKey))
+        && !Object.values(cmts().TPL_W || {}).some(c => (c.linkedPks || []).some(deadKey))
+        && !day().some(r => deadKey(r._pk) && /t19-/.test(JSON.stringify(r))),
+    'R15f (THE FILES) NOTHING REACHED ANY OF THE FIVE SHARED MASTERS OR THE DAY FILE UNDER A KEY '
+    + 'THE FOLDER\'S RULE DOES NOT COMPUTE. T-S10-19 was sized at six doors, five masters plus the '
+    + 'day file, and this reads all six files rather than the toasts',
+    { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()),
+      day: day().map(r => r._pk) });
+
+  /* ---- THE CONTROL, and the measurement behind asking the ROW: the healthy
+     copy of the SAME business row, in the SAME template, on the SAME screen,
+     at the same moment, must still work. A template-level latch cannot do
+     this; it would refuse the operator's whole afternoon. */
+  const live = await wa.page.evaluate(R15_WALK_LIVE);
+  note('R15 the same doors at the LIVE copies beside them', live);
+  check(['setTag', 'applyCorrection', 'manualOffset', 'editCell']
+          .every(n => !((live[n] || {}).said || []).some(s => /error/.test(s))),
+    'R15g CONTROL: THE QUESTION IS PER ROW AND NOT PER TEMPLATE. The healthy copies K1-X/K2-X/K3-X '
+    + 'are on the same screen in the same template at the same moment, and every door works on '
+    + 'them with nothing said. A template-level refusal here would cost the operator the whole '
+    + 'afternoon, which is why the latch is now an optimisation and a better sentence rather than '
+    + 'the mechanism', live);
+  /* AND THE ONE PLACE PER-ROW AND ALL-OR-NONE PULL AGAINST EACH OTHER, said
+     out loud because a reader will meet it: "↓ Fill Column" fills EVERY row in
+     the filtered view, and this screen holds three dead rows, so the gesture
+     is refused AS A WHOLE even when the cell the operator clicked is a healthy
+     one. That is the right answer - a column cannot be filled half way, and
+     F18's lesson is that a control reporting success having done nothing is
+     worse than one that refuses - but it is the cost of the all-or-none arm
+     and it is what Clear Loaded Data is for. */
+  check(((live.ssFillColumn || {}).said || []).some(s => /error/.test(s) && /were SAVED with/.test(s)),
+    'R15j ...EXCEPT "↓ Fill Column", which is refused even from a healthy cell, because it writes '
+    + 'EVERY row in the filtered view and three of them are the dead copies. A bulk gesture is '
+    + 'all-or-none by design; the single-row doors beside it are not',
+    (live.ssFillColumn || {}).said);
+  check(String(((vals()['K1-X'] || {}).Vendor || {}).v || '') === 't19-live-typed'
+        && !!(corrs()['K2-X'] || {}).Line && !!offs()['K3-X'],
+    'R15h (THE FILES) CONTROL: ...and their records land under the FOLDER\'S own keys',
+    { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()) });
+
+  /* ---- AND THE FALSE POSITIVE THAT WOULD HAVE COST MORE THAN THE BUG.
+     Measured in choke/logs/p2_rule.txt before the rule was written. */
+  const lk = await wa.page.evaluate(R15_LOOKUP_KEY + '()');
+  note('R15 a master_lookup key extra after a colleague edits the shared accounts master', lk);
+  check(lk.keyDriftSaysDrifted === true && lk.writeAllowed === true,
+    'R15i THE FALSE POSITIVE IS NOT TAKEN. A key extra that is a master_lookup reads DRIFTED to '
+    + 'Reco.keyDrift the moment a colleague saves the shared accounts master - correctly, because '
+    + 'the cell IS printing a recalculation (handover 14.3) - but THE RULE DID NOT MOVE, every '
+    + 'surface in the app is deliberately on the frozen key, and the day file holds it. A guard '
+    + 'that fired there would refuse every gesture on every template with a lookup in its key for '
+    + 'the life of the file. Reco._keyRowCols leaves those extras out and says so', lk);
+  await wa.ctx.close();
+}
+
+
+/* ============================================================ [85] ==== */
+section(85, 'R16 T-S10-20 — WHAT THE QUESTION COSTS, AS AN OPERATION COUNT');
+{
+  const Q = makeRoot('share-r16');
+  const brQ = await startBridge(Q.root, PORT_R16); procs.push(brQ.proc);
+  const qa = await openReco(browser, brQ);
+  const cn = await qa.page.evaluate(R16_COST + '(false)');
+  note('R16 a template whose key names NO added column, 2,000 rows offset in one gesture', cn);
+  check(cn.offsetsFiled === cn.rows && cn.recomputes === 0,
+    'R16a A TEMPLATE WHOSE KEY NAMES NO ADDED COLUMN PAYS NOTHING. Reco._keyExtraSet returns null, '
+    + 'so the per-row question is one property read and ZERO recomputes for 2,000 rows - which is '
+    + 'every template that existed before #24 and every template keyed on a file column. An '
+    + 'operation count and not a clock (handover 16.4a)', cn);
+  const ck = await qa.page.evaluate(R16_COST + '(true)');
+  note('R16 a template with a FORMULA key extra, 2,000 rows offset in one gesture', ck);
+  /* ONE RECOMPUTE PER QUESTION ASKED, and the questions are counted beside it
+     so the ratio is the measurement rather than a round number. The surplus
+     over `questionsAsked` is the REPAINT after the gesture, which recomputes
+     the key cell of the rows the grid has on screen (~110) and is not the
+     guard's; the bound is set to catch the regression that matters - anything
+     per-row-per-paint or quadratic, which at 2,000 rows is 220,000 or
+     4,000,000, three orders of magnitude outside it. Measured on this tree:
+     4,110 recomputes for 4,000 questions. */
+  check(ck.offsetsFiled === ck.rows
+        && ck.recomputes <= ck.questionsAsked + 500 && ck.recomputes < ck.rows * 3,
+    'R16b A FORMULA-KEYED TEMPLATE PAYS ONE RECOMPUTE PER QUESTION ASKED (plus the grid\'s own '
+    + 'repaint), beside a write that is already O(rows). The question is asked ONCE PER RECORD '
+    + 'WRITTEN, which is the whole reason it is not inside Reco.rowKey - there it would run once '
+    + 'per row per PAINT, i.e. half a million times on a 500k-row extract',
+    Object.assign({ perQuestion: +(ck.recomputes / ck.questionsAsked).toFixed(3) }, ck));
+  check(ck.questionsAsked >= ck.rows,
+    'R16c premise: the question really was asked of every row - so R16b is a measurement and not '
+    + 'an accident of a guard that never ran', ck);
+  await qa.ctx.close();
+}
+
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
   check(allErrors.length === 0, 'U5 no page error across the whole run', allErrors.slice(0, 6));
 
