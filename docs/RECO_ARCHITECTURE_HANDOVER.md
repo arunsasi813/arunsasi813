@@ -2039,6 +2039,31 @@ falling back when the part count does not match `primaryKeys.length` — because
 with `'||'` and escapes nothing. `Reco.keyDrift` paints **⚠ recalculated** on a cell whose
 recomputed value disagrees with the frozen one, so the screen says when it is not showing the key.
 
+#### AND THIS IS WHERE A PER-ROW DRIFT CHECK DIES. Read this before writing one.
+
+**"`row._pk` disagrees with what the rule computes for this row now" is NOT evidence that the rule
+moved.** A frozen `_pk` is *supposed* to disagree with a recompute **whenever the row's own data
+changed**, because that is what freezing a key means — it is the whole point of this section. The
+disagreement has (at least) two causes and the comparison cannot tell them apart:
+
+| the key disagrees because | and the right answer is |
+|---|---|
+| the **template's key rule** changed (a formula edited, a lookup re-pointed) | the row on screen is not the row the folder holds; refuse the write |
+| the **row's own data** changed — a correction, a cell edit, a fill, a replace, a carried value, a column that this month's file does not carry | **nothing is wrong at all**; the frozen key is the key, and it is what every other surface and the day file are on |
+
+Round 6 built that comparison into the write guard (`Reco._keyRowDrifted`) and narrowed it three
+times; round 7 **removed it**, because the narrowings were a list of the shapes somebody had
+thought of and five more were measured in an afternoon — one of them a correction of a key-feeding
+column, which is the Correction tab's whole purpose, bricking the row for every later gesture with
+a sentence that blamed a colleague. §18.12 has all five and `run_store_e2e` **[86]** gates them.
+
+**What CAN be asked honestly** is whether the key was minted by **a different RULE** — and that
+needs the rule's **signature recorded on the row at mint time** (a hash of the key extras'
+definitions, carried through the day file's control columns) and compared signature-to-signature,
+never value-to-value. A signature says nothing whatever about the row's data, which is exactly the
+distinction a value comparison cannot make. That is a schema change and it is filed on
+**T-S10-19**, which round 7 re-opened.
+
 ### 14.4 The mint, and the question asked before anything is written
 
 A key extra may depend on an **earlier, eligible, non-key** extra. `Formula.substituteTokens`
@@ -2047,6 +2072,14 @@ unmaterialised mints `'-1'`, `'-2'`… — thousands of rows sharing one `_pk`, 
 then keeps one row per key, and **a 200,000-row day file reopens as a few dozen rows**. So the
 mint materialises the transitive closure in declaration order, reusing one scratch object, chunked
 with the busy overlay above `BUSY_ROWS`.
+
+**AND THE SAME SHAPE IS WHY A PER-ROW DRIFT CHECK CANNOT BE SAVED BY A "SKIP THE EMPTY ONES" RULE.**
+Round 6's guard skipped a recompute that was *wholly* `''` or `'#ERR'`, and §18.11 described that as
+the C6 non-firing. It is not what happens: `CONCAT({Base},"-",{Line})` minted as `'E1-S1'` when the
+file carried `Base`, reopened from a file whose header does not, recomputes to the **partial**
+`'E1-'` — a positive disagreement — and every gesture on that row was refused. The example in the
+paragraph above is itself the counter-example. Measured and gated at `run_store_e2e` **R17c**;
+§18.12 and **T-S10-21**.
 
 Then, **before `appendUpload` writes anything**, the operator is asked once about whatever is
 wrong with the minted keys — and the question is assembled worst-first:
@@ -2334,8 +2367,19 @@ Named as plainly as the rest, because every one of these is reachable by an oper
   your save is refused (T-24R2-1). Two: you open a day file from Version History that was **written
   before** such a change, which hands those rows back under the keys that file holds — in any
   window, including the one that made the change, with nothing wrong anywhere (**T-S10-19**).
-  **In both cases nothing can be filed against such a row**, and the refusal says which verb did
-  not happen. **This is now a rule and not a list of controls**, which matters because the list was
+  **CASE ONE is refused and CASE TWO IS NOT — and round 7 re-opened the ticket rather than leave
+  the claim standing.** The colleague's-key-change latch covers case one exactly: it is recorded
+  when the definition changes, which is a fact about the template. Case two — the day file written
+  before the change — is invisible to it, and the round-6 fix for it (comparing each row's stored
+  key against a fresh recompute) was removed because that comparison cannot tell *"the rule moved"*
+  from *"this row's own data moved"*, and refused five measured pieces of ordinary work. **So on a
+  reopened day file the dead-keyed copy IS still writable**, the live copy beside it is too, and the
+  advice in (a) below — do not type into the copy from the file; Clear Loaded Data and load the
+  extract again before you work — is the whole of the protection until the key-rule signature is
+  recorded per row at mint time. **T-S10-19 is OPEN with that design on it**, and
+  `run_store_e2e` **R15d/R15e** measure the hole rather than hiding it.
+  For case one: **nothing can be filed against such a row**, and the refusal says which verb did
+  not happen. **This is a rule and not a list of controls**, which matters because the list was
   wrong four rounds running: the question is asked at the WRITE, by the one pair of functions
   through which a row becomes a key for a record the shared folder holds, so a control nobody
   thought of is covered on the day it is written (**T-S10-20, §18.11**). Nothing you had already
@@ -2351,15 +2395,23 @@ Named as plainly as the rest, because every one of these is reachable by an oper
   neither copy looks unusual. The live copy works normally; the one from the file is refused. There
   is no way to repair the rows inside that file — "do not type into that copy" is the whole of the
   advice — so after reading it, Clear Loaded Data and load the extract again before you work.
-  (b) **A control that writes EVERY row on screen is refused as a whole** if any row on screen is
-  in that state — sheet mode's "↓ Fill Column" is the one you will meet — even when the cell you
-  clicked is a healthy one. A column cannot be filled half way, and a control that reports success
-  having written nothing is worse than one that refuses.
-  **One case is deliberately NOT refused, and it is not an oversight:** where a key column is a
-  lookup into a shared master (the accounts master, say), a colleague editing that master does not
-  change how the key is worked out — the key stays what it was, the day file holds it, and every
-  screen in Reco is on it by design (§14.3). Those templates keep the colleague's-key-change
-  refusal and nothing more; §18.11 carries the measurement and T-S10-19 the remaining exposure.
+  (b) **A control that writes EVERY row on screen is refused as a whole, and since round 7 that
+  costs nothing**, because *"this row cannot be written against"* is now a property of the
+  TEMPLATE and not of a row: either the key definition changed while these rows were loaded, in
+  which case every row on screen is in that state, or none is. So sheet mode's "↓ Fill Column" and
+  the Find dialog's "↻ Replace All" refuse the whole view only when the whole view would have been
+  refused row by row anyway, and *"Replaced 0 of 2,000"* is a sentence nobody has to read.
+  **This paragraph used to say the opposite and the correction is the point of it:** while round 6
+  asked the ROW as well, a single row whose own data had moved — one ordinary correction was
+  enough — refused "↓ Fill Column" from a healthy cell, and refused "↻ Replace All" for an entire
+  file, which §15.6 disclosed for Fill Column and never mentioned for Find & Replace. Both are
+  gone with the per-row arm; `run_store_e2e` **R17b** and **R15g** are the gates. §18.12.
+  **And one case that USED to be called a deliberate non-firing is no longer a special case at
+  all:** where a key column is a lookup into a shared master, a colleague editing that master does
+  not change how the key is worked out — the key stays what it was, the day file holds it, and
+  every screen in Reco is on it by design (§14.3). That was the first measured false positive of a
+  per-row value comparison, and with no such comparison in the guard it needs no exception; it is
+  kept as a gate (**R15i**) because it is the cheapest tripwire against one being re-added.
 - **A damaged `reco/extraValues/<tplId>.json` still refuses the write** — rather than rerouting
   it, which is the right trade (a template with two homes loses work when the share recovers).
   Since **T-S10-9** the value typed into that template while the file is broken is no longer lost
@@ -2615,6 +2667,13 @@ have left a buffered intent pointing at the old object.
 >    is seen, would make that enforceable instead of a request.
 
 ### 16.4a MR-3's gate is an operation count, not a clock
+
+> **Round 7 note.** The dead-key guard's own cost gate (`run_store_e2e` **[85]**, R16a–R16c) is
+> built on this section's rule and its reading changed when the per-row arm came out: the question
+> is now `Reco._keyStale[tpl.id]` and nothing else, so a formula-keyed template pays **zero**
+> recomputes on every write path, where round 6 paid 4,110 for 4,000 questions at 2,000 rows. The
+> counter that proves the question was asked at all (`questionsAsked >= rows`) is kept beside it,
+> because a cost of zero is also what a guard that never runs costs. §18.12.
 
 Worth reading before you touch a performance assertion anywhere in this project.
 
@@ -3866,11 +3925,50 @@ before anything is written. At the write it is unforgettable. Both, because eith
 only-at-the-gesture is four rounds of this document, and only-at-the-write gives a silent per-row
 drop behind a green count.
 
-#### THE RULE IS ABOUT THE ROW, AND THAT IS WHAT CLOSES T-S10-19
+#### ~~THE RULE IS ABOUT THE ROW, AND THAT IS WHAT CLOSES T-S10-19~~ — **THIS WAS WRONG, AND IT WAS NOT MERELY TOO WIDE. REMOVED IN ROUND 7 (§18.12, T-S10-21)**
+
+> **READ THIS BEFORE THE REST OF THIS SUBSECTION.** Everything below about the per-row arm is kept
+> because the reasoning is the thing the next person needs — it is the **third** time this trap has
+> been walked into — but the arm itself is **gone** and the conclusion it reaches is **invalid**.
+>
+> **Why it is invalid, and not just over-wide.** The arm asked *"is `row._pk` still what this
+> template's rule computes for this row NOW?"* and treated a disagreement as *"the template's rule
+> moved"*. A frozen `_pk` is **supposed** to disagree with a recompute whenever the **row's own
+> data** changed — that is what freezing a key means (§14.3) — so the inference has a second,
+> ordinary cause that the comparison cannot see. Every feature of this app that EDITS A ROW
+> produces it. The three "measured false positives" in the table below are therefore not a
+> complete narrowing of a sound test; they are the first three members of an open-ended family,
+> and round 7 measured five more in an afternoon:
+>
+> 1. a **correction of a key-feeding column** — handover §14's own worked shape, `CONCAT({Doc})`
+>    over a file column — bricked the row: every later gesture refused with a sentence blaming a
+>    colleague for a change nobody made, and the recovery that sentence names (Clear Loaded Data
+>    and load again) is where the correction was actually lost. It also said **both** *"Nothing was
+>    corrected…"* and a green *"Correction applied"*;
+> 2. the **second edit** of a row whose key-feeding *editable* column was edited;
+> 3. a **partial recompute** — `CONCAT({Base},"-",{Line})` with one component missing from this
+>    month's file recomputes to `'E1-'`, a POSITIVE disagreement, so the documented C6 non-firing
+>    (below) never covered §14.4's own example;
+> 4. a **key formula that reads the clock** (`AGEING`), which the editor refuses on SAVE and
+>    nothing re-checks when stored: not drifted today, drifted tomorrow, for every row;
+> 5. **one bricked row refused "↻ Replace All" for an entire file**, because a control that writes
+>    every row in the view asks about every row.
+>
+> All five are now named gates in `run_store_e2e` **[86]** (R17a, R17a2, R17c, R17d, R17e, R17b), so
+> an arm cannot come back without clearing them — **and clearing them is not enough**: a sixth shape
+> was always going to exist, which is the argument, and the honest test is a **signature**, not a
+> value. See §18.12.
+>
+> **And the design note's own failure direction was backwards too**, further down: it says a
+> mis-named owner *"shows up as a false positive the allow-list absorbs, rather than a silent
+> miss"*. Measured, a mis-named owner is a **SILENT MISS** — the write is credited to a
+> neighbouring function, and the neighbour is usually one of the guarded ones, so the write
+> inherits somebody else's guard call and the gate goes green. Corrected in the code and in §18.12.
 
 A template latch can only see *"somebody else changed the rule while I had rows loaded"*. It is
 structurally blind to **T-S10-19**: rows handed back by a day file **written before** such a change,
-in a window that did nothing wrong. So `Reco._keyWriteUnsafe` asks two things, in this order:
+in a window that did nothing wrong. **Round 6's answer, now removed**, was that
+`Reco._keyWriteUnsafe` asks two things, in this order:
 
 1. **the latch** (`Reco._keyStale[tpl.id]`) — one property read, and the better sentence;
 2. **the row** (`Reco._keyRowDrifted`) — is `row._pk` still what this template's rule works out for
@@ -3932,6 +4030,19 @@ It is structural, so it will have false positives as the code moves. **That is d
   still guarded, and that all six masters plus the day file are represented. A regex that quietly
   stops matching would otherwise make the whole gate green for ever, which is exactly the failure
   mode it exists to prevent.
+
+> **ROUND 7: THE THREE PARAGRAPHS ABOVE WERE TOO CONFIDENT, AND ONE OF THEM WAS BACKWARDS.** An
+> adversarial attack blinded this gate **eleven ways** while all eight assertions stayed green, and
+> two of the eleven are ordinary accidents rather than attacks: `const bag = AppState.xMaster;`
+> without a subscript (which ran the whole 672-check suite with the gate still reporting "58 write
+> site(s)"), and the ordinary spelling `name: function (…) {` instead of `name(…) {`. A write at
+> column 0 made the gate **CRASH**, inside this file's single `try/finally` with no `catch`, so the
+> run died with no tally and [83]/[84]/[85] never executed. The self-tests above did not stop a
+> class going dark either: three previously-closed doors fit **exactly** inside G82b's floor,
+> decoy writes restored the slack without limit, and G82c was a hand-copied list of seventeen names
+> with four guarded writers missing from it. And the **failure direction is wrong**: a mis-named
+> owner is a silent MISS, not an absorbed false positive. All of it is fixed or admitted in
+> §18.12; the numbers and the allow-list in this subsection are round 6's and are superseded there.
 
 **And the behavioural gates the suite was missing.** [83] drives sheet mode's three buttons and the
 in-app Excel view **from the rendered DOM** — real clicks on `✓ Apply`, `↓ Fill Column` and `×`,
@@ -4002,5 +4113,254 @@ a group*, or the single attach then the multi-file drop — are separated by an 
 task, so the **second was refused in total silence**: [80] R12e and R12k went red. It is cleared on
 a **microtask** now, which cannot interrupt the synchronous row loop a bulk gesture is. A silent
 refusal arriving by the back door of its own fix is exactly the shape this cluster is about.
+
+### 18.12 Round 7 — THE PER-ROW ARM COMES OUT, ASK BEFORE YOU MUTATE, DOOR 22, AND AN UN-BLINDED GATE
+
+**If you read one paragraph of this subsection, read this one.** Round 6's write-side chokepoint —
+`Reco.writeKey` / `Reco.writeVerKey`, the row-to-key STEP made into a function and asked at every
+write into a shared pk-keyed store — **is right and it is kept.** It is the first version of this
+fix that is a rule rather than a list of function names, after four rounds of lists. What was built
+**on top** of it was wrong, and an adversarial attack measured it three ways: it found a
+twenty-second door, it blinded the static gate eleven ways, and it provoked false refusals that
+destroy ordinary work. This round removes the wrong part, fixes the order in which every guarded
+write happens, closes the door, and un-blinds the gate.
+
+#### 1. THE PER-ROW DRIFT ARM IS REMOVED, AND THE REASON IS THAT ITS INFERENCE WAS INVALID
+
+`Reco._keyRowDrifted` asked *"is `row._pk` still what this template's rule computes for this row
+NOW?"* and treated a disagreement as *"the template's rule moved"*. **A frozen `_pk` is supposed to
+disagree with a recompute whenever the ROW'S OWN DATA changed** — that is what freezing a key means
+(§14.3) — so ordinary work read as drift. Three rounds in a row narrowed it and declared the
+cluster closed; each narrowing was a list of the shapes somebody had thought of, which is the same
+mistake as a list of function names one level up.
+
+**Five measured false refusals, all on ONE window, with the latch DOWN and nobody else involved.**
+Each is now a separate named gate in `run_store_e2e` **[86]**, and the failing-first run of those
+gates against `5c1fb25` is `scratchpad/dataloss/unbrick/logs/FAILFIRST_store.txt`:
+
+| # | the shape | what round 6 did | gate |
+|---|---|---|---|
+| 1 | **a correction of a key-feeding column** — §14's own worked shape, a key extra `CONCAT({Doc})` over a file column, and the operator corrects `Doc`, which is the Correction tab's whole purpose | said **both** *"Nothing was corrected… this reconciliation now works its keys out differently"* **and** a green *"Correction applied"*; `reco/correctionMaster.json` was never created; the row was left showing the corrected value with `_corrected_Doc` set; and **every later gesture on that row** (correct, offset, edit, group) was refused with a sentence blaming a colleague for a template change that never happened. The recovery it named — Clear Loaded Data and load again — is where the correction actually died | **R17a**, **R17a2** |
+| 2 | **the second edit** of a row whose key-feeding *editable* column was edited. "A template column the template marks editable" and "a key formula over it" are both ordinary settings | the first edit went through in silence and filed its version row under the old key; the second was refused. The row bricked itself on first use | **R17e** |
+| 3 | **a partial recompute.** The C6 skip only covered a recompute that was *wholly* `''` or `'#ERR'`, so §14.4's own `CONCAT({Base},"-",{Line})` with one component missing from this month's file recomputes to `'E1-'` against a minted `'E1-S1'` | a POSITIVE disagreement, so everything on that row was refused — and the documented non-firing was not what happened | **R17c** |
+| 4 | **a key formula that reads the clock**, `CONCAT({Doc},"-",AGEING({Doc}))`, which `RecoTemplate._pkFormulaOk` refuses on SAVE and **nothing re-checks when stored** | not drifted today, drifted tomorrow, for **every row of that template**: the whole reconciliation goes read-only overnight with the colleague-blaming sentence | **R17d** |
+| 5 | **one bricked row refused "↻ Replace All" for an entire file**, because `_replaceAll` asks about every row in the file before its loop | *"Nothing was replaced"* about all three rows, from a real click on the button | **R17b** |
+
+**A sixth shape was always going to exist, and that is the argument.** The arm fires whenever a
+row's own data has moved since its key was minted, and every feature of this app that EDITS A ROW
+does that. Enumerating those features is the list this cluster has failed at four times.
+
+**So `Reco._keyWriteUnsafe` asks the TEMPLATE LATCH only** — *"did the key DEFINITION change while
+these rows were loaded?"* That is a property of the **template**, recorded when the definition
+changes, and it cannot be confused with a row's own data changing. The latch was verified in both
+directions by round 5 (it lifts after Clear-and-Load, stays up after an Add Data onto dead-keyed
+rows, lifts above `BUSY_ROWS`, stays up on a declined load) and nothing here disturbs it. The
+chokepoint's shape is unchanged — `writeKey(tpl, sess, row, verb)` still takes the row, because
+[82] G82e reads that signature and because the signature fix below needs the row.
+
+**`run_store_e2e` [82] G82f is now the INVERSE of what it was**, and deliberately: it asserted that
+the question asks the row; it now asserts that the question is the latch and asks no per-row
+recompute. Re-adding an arm fails G82f until somebody turns that check round *with [86]'s six gates
+green* — which is the bar, and it is that high because three rounds running declared this closed and
+were wrong.
+
+**T-S10-19 LOSES ITS FIX AND IS RE-OPENED**, with the design the chokepoint round had already
+identified written onto it. **Why per-row drift is not a substitute for it**, in one paragraph,
+because this is the thing the next person needs: a *value* comparison answers "does this key still
+come out of today's data?", which is a question about the DATA; what T-S10-19 needs answered is "was
+this key minted by the rule that is in force now?", which is a question about the RULE. Record the
+**rule's signature** on the row at mint time — a hash of the key extras' definitions, written beside
+`_pk` and carried through the day file's control columns — and compare signatures, never values. A
+signature mismatch cannot be caused by a correction, an edit, a fill, a missing column or the clock,
+so it has none of the five shapes above. It is a schema change (a new control column, a migration
+for rows that have none, and a decision about what an absent signature means) and it is a round of
+its own. `run_store_e2e` **[84]** now measures the hole instead of claiming it is shut: all ten
+doors go through at a dead-keyed row and **R15e asserts positively** that records land under both
+identities, so a future fix makes that check fail and gets re-read. **R15j** keeps
+`Reco.keyDriftCount` alive, because it names exactly the rows a signature check has to cover —
+and §18.11's claim that it was the hook that made the drift check a safety control is withdrawn:
+it has **no reader in the app at all**, only this suite, `run_pk_extras` G8 and these documents.
+
+#### 2. MUTATE-THEN-ASK IS A BUG WHATEVER THE GUARD ASKS
+
+`Reco.applyCorrection` wrote `row[colName] = newVal` and **then** asked for the key, so a refusal
+left the row mutated, the screen saying the correction happened, `_corrected_<col>` set,
+`reco/recoSessions.json` on the share carrying the changed value through `AppState.save()`, and **no
+record anywhere** — behind two toasts, one green and one red. Find & Replace had the same order.
+
+**ASK FIRST, MUTATE AFTER, at all eleven sites where a write-side guard can refuse.** The ask is
+`Reco._keyAsk(tpl, sess, row, verb)`, which exists because `Reco.writeKey` answers `null` for **two**
+different things — *refused* and *this template has no business key at all* (`Reco.rowKey` answers
+`null` on a keyless template, which is most of them) — so a caller that must not mutate on a refusal
+cannot read the answer off the key. The eleven: `Reco.applyCorrection`, `FindReplace._replaceOne`,
+`FindReplace._replaceAll`, `Reco._xlOffsetSelectedRows`, `Reco.bulkMarkOffset`,
+`Reco.offsetSelected`, `Reco.manualOffset`, `Reco._ssCommit` (both arms), `Reco._ssClearActive`,
+`Reco._unmarkRows` and `Reco.commitEntryFromPreview`'s stamp.
+
+**`_replaceAll` is now plan → ask → mutate**, all-or-none: the replacements are computed without
+touching a row, every touched row goes through `Reco.writeVerKey`, and only then is a single cell
+written.
+
+**The gate is the ORDER, read out of the source** — `[82]` **G82m** — because after the per-row arm
+came out the order is only *safe* at runtime because the gesture asked the same question a hundred
+lines earlier, and an order that is safe by accident is the shape that came back three rounds
+running. G82m names each site's own ask (not "any guard call in the function": the first version
+matched the gesture-level `_keyStaleBlock` at the top of the function and stayed green when the
+mutation was moved back above its ask — mutant `m21_mutate_first`) and requires it to be the nearest
+ask above **every** occurrence of that mutation, within fourteen lines. The behavioural half is
+**[87] R18a/R18a2/R18b**, which assert the row is **UNCHANGED** after a refusal — `row[col]` is what
+it was, no `_corrected_` flag appeared, `sess.corrections` is empty, exactly one toast and it is red
+— and that `reco/recoSessions.json` **on the share** does not carry the refused value.
+
+**`_replaceAll`'s all-or-none: decided, and the decision is that there is nothing left to decide.**
+The attack asked for per-row-skip-and-say-how-many or an honest disclosure. With the per-row arm
+gone, *unsafe* is a property of the template, so every row in the view answers the same way: a
+per-row skip could only ever skip all of them or none, and *"Replaced 0 of 2,000"* is a worse
+sentence than one refusal. **All-or-none is kept and §15.6 is corrected**, because what §15.6
+disclosed was the per-row cost — which no longer exists — and it never mentioned Find & Replace at
+all.
+
+**One defect this round's own fix introduced, caught by the suite within the hour.** The journal
+post's stamp is over a `Map`, so `targets.some(...)` threw; and a bare `return` there would have
+skipped the pending Special JV clear, the modal close and the single-use cleanup — the journal entry
+is already written by that point, so abandoning the rest of the commit is worse than an unstamped
+row, which the exception list exists to show. The ask now runs over `Array.from(targets.values())`
+and guards the stamp block alone.
+
+#### 3. DOOR TWENTY-TWO, AND THE SIX-MASTER LIST WAS NOT THE SET OF SHARED STORES
+
+`Reco.openSpecialJv`'s completion callback wrote `primaryKeys` / `sentPks` — row keys taken straight
+off the rows on screen — into `AppState.pendingSpecialJV`, which is in `AppState.PERSIST_KEYS`: a
+**whole-file** write of `reco/pendingSpecialJV.json` that every colleague parses at boot. With the
+latch UP, in a window that had just been refused a template save, it said only `success: Special JV
+"TCHX" completed` and the share gained `sentPks ["E1","E2"]` while the folder's own rule computed
+`E1-X`/`E2-X`. The consequence is the double post this whole cluster exists to stop: no colleague's
+row matches the pending entry, so the rows whose JV has already been raised look **un-sent to
+everybody**, including to the operator after a correct Clear-and-load, and can be sent and posted
+again. Measured: `scratchpad/dataloss/unbrick/logs/repro_a3.txt`.
+
+**Closed in two places.** The question is asked **at the gesture, before `SpecialJV.open`** — being
+told after the operator has keyed a JV in another application is being told too late — and the keys
+are then minted **through `Reco.writeVerKey`** in the callback, all-or-none, because the latch can go
+up while the JV page is open. `writeVerKey` is the right half of the pair: this store is keyed on the
+row's storage identity `_pk`, the same identity the day file and `SpecialJV.matchesRows` use, and
+every row has a truthy one (§14.2) — so a `null` answer there means *refused* and nothing else. Gate:
+**[87] R18c**, which asserts the JV page never opened, nothing green was said, and the file on the
+share gained nothing.
+
+**THE SIX-MASTER LIST WAS WRONG BECAUSE ITS EXCLUSIONS WERE NEVER WRITTEN DOWN.** [82] now carries a
+`STORES` table that answers for **every** `PERSIST_KEYS` member and every `reco/*.json` the app
+writes, **including the ones that hold no row keys and why** — and **G82j** / **G82k** read
+`PERSIST_KEYS` and the `reco/*.json` literals out of the source, so a new shared store fails this
+section until somebody answers for it. **G82l** fails on any entry whose reasoning is missing.
+
+| store | holds row keys? | why / what covers it |
+|---|---|---|
+| `recoSessions` | **yes** — every row's `_pk`, and `sess.corrections` keyed by business key | it is the session serialised, so no gesture writes a key *into* it; what has to be true is that a refused gesture leaves the rows alone, which is G82m and [87] R18a2 |
+| `extraValueMaster` | **yes** — `[tpl][pk][col]` | enumerated |
+| `correctionMaster` | **yes** — `[tpl][pk][col]` | enumerated |
+| `manualOffsetMaster` | **yes** — `[tpl][pk]` | enumerated |
+| `groupMaster` | **yes** — `members` is a list of row keys | enumerated |
+| `commentMaster` | **yes** — `linkedPks` | enumerated |
+| `attachmentMaster` | **yes** — `linkedPks` | enumerated |
+| `pendingSpecialJV` | **yes** — `primaryKeys` / `sentPks` / `inputData[]._pk` | **DOOR 22**, enumerated as of this round |
+| `entryHistory` | **yes** — `entry.postedPks` | enumerated, and asked at the gesture in `commitEntryFromPreview` |
+| `reco/reversals.log.{csv,json}` | **yes** — `unstamped` / `skipped` / `sessionOnly` | allow-listed with a reason: an **append-only audit log the app never reads back**, whose keys came from the posted-entry index on the share. A log recording a different key from the one acted on would be a worse log |
+| `reco_excel/<folder>/_links/<id>.json` | **yes, in `key` identity mode** — `rebased` / `dismissed` are keyed `<row key>|<column>` | allow-listed with a reason: the keys come out of the **workbook the operator exported**, the records are that one export's baseline bookkeeping read only by its own review dialog, and the gesture that writes them (`ExcelLink.apply`) is latched |
+| `recoTemplates` | no | keyed by TEMPLATE id; it holds the column and formula definitions — **including the key rule**, which is why saving it is what raises the latch |
+| `aegTemplates` | no | keyed by journal-template id; column mappings and posting rules |
+| `aegMaster` | no | the accounts master: ACCOUNT rows with their own Reference |
+| `aegSettings` | no | folder-wide settings |
+| `customMasters` | no | operator-defined lookup tables keyed by their own first column |
+| `docNumberMaster` | no | DOCUMENT numbers mapped to an `accountingId` — checked against the code, not assumed |
+| `reco/_corrupt/*.json` | no | a verbatim copy of a file that would not parse; nothing is keyed and nothing is read back |
+| `reco/extraValues/*.json` | no | **not a separate store** — the split-file form of `extraValueMaster` (S11), written only through the enumerated `Reco._extraValueFlush` |
+
+#### 4. THE STATIC GATE, UN-BLINDED — AND WHAT A TEXT GATE CANNOT DO
+
+The gate is a **detector, not a safety mechanism**: the safety mechanism is the chokepoint, which a
+gesture cannot get a key without going through. It ranks below everything above. But it was blind
+**eleven** ways with all eight assertions green, and two of those are ordinary accidents rather than
+attacks. Every shape is now graded in one second against 44 mutant files
+(`scratchpad/dataloss/unbrick/logs/G82_MUTATION.txt`): **44 RED, and the shipped tree the only
+green**.
+
+| blind shape | outcome |
+|---|---|
+| `const bag = AppState.xMaster;` — the master taken WITHOUT a subscript. Ran the full suite at 672/0 with the gate still printing "58 write site(s)" | **FIXED** — the alias map matches `AppState.<master>` with or without a subscript |
+| `name: function (…) {` and `name: (…) => {` instead of `name(…) {` — the write credited to the previous method, which is guarded. **An ordinary spelling, not an attack** | **FIXED** — four definition shapes are recognised |
+| a `/* comment */` at the START of a write line — `codeOf` dropped the whole line, code and all. **Also an ordinary accident** | **FIXED** — comments are stripped from the line instead of the line being dropped |
+| a write at **column 0** inside a method — the gate **CRASHED** (`codeOf(-1)` threw) inside the suite's single `try/finally` with no `catch`, so the run died with no tally and [83]/[84]/[85] never executed | **FIXED twice** — a write with no owner gets an empty body and fails G82a **by name**, and the whole section is wrapped so a defect in the detector is a red check (**G82z**) that names itself rather than taking the suite down |
+| a `function foo()` declaration at the end of the file, credited to a method **10,708 lines** above it | **FIXED** — declarations are recognised, bodies end where their **braces** close, and **G82n** fails when a write is credited to a function with an implausible body (that is what a mis-attribution looks like from outside) |
+| `AppState[nm][id][pk] = …` with a computed master name | **FIXED** — any `AppState[<expr>][…] =` is a site |
+| `const MAP = { off: AppState.xMaster }; MAP.off[id][pk] = …` | **FIXED** — object-literal aliases are read |
+| `const V = Versioning; V.queueChange(…)` | **FIXED** — module aliases are read |
+| the write inside `new Function('…')`, spread over three lines so no single line names the master | **FIXED, and more bluntly than asked** — a text gate cannot read a constructed function body, so **every** `new Function` / `eval` is a site that must be guarded or allow-listed with a reason. There are three in the tree and all three are the formula engine |
+| a new unguarded door **NAMED** `removeManualOffset`, so the allow-list matched it; and an allow-listed function **gaining** writes for ever, because the list is per FUNCTION | **FIXED** — every allow-list entry carries its **write-site census** (`sites` + the stores it writes) and **G82i** fails on any drift |
+| `if (false) { Reco.writeKey(...) }` satisfying the GUARD text test | **PARTLY FIXED, honestly** — `if (false)` / `if (0)` / `if (!1)` blocks are stripped from the body before the test, because that is the measured shape. A guard call behind any **other** false condition, on a different row, or after an early return, still counts. **Only a parse plus a control-flow walk can answer that: T-S10-22.** |
+| the four self-tests not preventing a class going dark: three closed doors fitted **exactly** inside G82b's floor; decoys restored the slack without limit; G82c was a hand-copied list of seventeen with four guarded writers missing | **FIXED** — **G82b**'s floor is raised to the current reading, **G82d** is now a floor **per store** so a decoy in one cannot cover a loss in another, **G82c** lists **all 22** guarded writers, and **G82q** fails if a writer becomes guarded without being added to that list, so the list cannot silently fall behind the code either |
+| the design note saying a mis-named owner "surfaces as a false positive the allow-list absorbs, rather than a silent miss" | **FIXED IN THE PROSE TOO** — measured, it is a **silent miss**: the write inherits a neighbouring function's guard call. The note in [82] now says so, and §18.11's copy is marked |
+
+**What a text gate cannot do, said plainly and ticketed as T-S10-22 rather than papered over:**
+reachability (above); and a **master passed as a parameter** — `Reco._unmarkRows` receives the
+offset master as an argument and writes through it, and the alias is declared in the CALLER, so the
+enumeration sees the caller and not the helper. That one helper is pinned **by name** in G82m, which
+is a list of names and is admitted as one. A real JS parse is the honest answer to both. A gate that
+**crashes** and a gate defeated by `name: function (){` were not design limits; they were defects,
+and they are fixed.
+
+#### The numbers
+
+**Failing first.** The six new behavioural gates and five of the static ones are RED against
+`5c1fb25`'s app through `APP_FILE`, GREEN against the tree:
+**`678 passed, 16 failed` → `694 passed, 0 failed`**
+(`scratchpad/dataloss/unbrick/logs/FAILFIRST_store.txt` and `logs/store_run2.txt`). The sixteen are
+G82a, G82c, G82e, G82f, G82m, R15d, R15e, R15g, R16b, R17a, R17a2, R17b, R17c, R17d, R17e and R18c.
+
+**Every suite, one at a time, with the seven-glob sweep on the line after each run inside the runner
+script** (`scratchpad/dataloss/unbrick/net2.sh`, `netdefault.sh`, `netstore.sh`): pytest 75 (1
+skipped) · jv_core_unit 250 · e2e 73 · autoload 41 · xllink 65 · xlview 94 · reports 107 ·
+grid_scale 100 · colorder 147 · pk_extras 170 · **store 694** (baseline 672) · correction 163 ·
+panes 304 · reverse 256 · specialjv 123 · jv_engine 79 · jv_gen 107 · jv_wizard 119. **0 failed
+everywhere.** All four byte-identity gates untouched and green (colorder T1 `76dffed`, pk_extras G1
+`3047f82`, correction `d9957fc`, panes `5f61d76`).
+
+**The +22, accounted for, so the total cannot hide the removal:** [82] 8 → 16 (**+8**); [86] new
+(**+9**); [87] new (**+5**); [84] stays at **11 checks** and [85] at **3**, so the two sections that
+lost assertions do not show it in a count — which is why the five are named here.
+
+**THE FIVE ASSERTIONS THAT WENT**, each one a thing the per-row arm itself guaranteed and nothing
+else can:
+
+| removed | what it asserted | what replaces it |
+|---|---|---|
+| **R15d** | every one of the ten doors is REFUSED at a row the day file handed back | a new **R15d** asserting they go THROUGH, naming T-S10-19 as open |
+| **R15e** | ...and not one of them also says something green | a new **R15e** asserting POSITIVELY that records land under both identities on the share, so a future fix makes it fail |
+| **R15f** | nothing reached any of the five shared masters or the day file under a dead key | a new **R15f**: the healthy copies still work (the ordinary path is not what broke) |
+| **R15g** | the CONTROL that the question is per ROW and not per template — the arm's own justification | a new **R15g**: "↓ Fill Column" fills the whole filtered view again |
+| **R15j** | "↓ Fill Column" is refused even from a healthy cell — the arm's disclosed cost | folded into the new R15g, and **§15.6 is corrected** |
+
+**R15h and R15i are KEPT unchanged** (the control's records land under the folder's keys; a
+`master_lookup`-keyed template is writable), and a new **R15j** keeps `Reco.keyDriftCount` alive for
+the signature round. **Two assertions were INVERTED rather than removed**, deliberately and with the
+same IDs, so that re-adding the arm fails them: **G82f** (asked the ROW → asks the LATCH only) and
+**R16b** (one recompute per question → **zero**).
+
+**`git diff --numstat tests/e2e/run_store_e2e.mjs` against `5c1fb25` reads `1077 227`.** The 227
+removed lines are the whole of the old [82] (replaced in place, 8 checks → 16), the five assertions
+above and the three R16 texts. No assertion was loosened to pass: every removal is an assertion
+about the arm that no longer exists, and every one is named here.
+
+**Mutation evidence.** 44 mutant files graded through the real [82], each one copy-with-one-change
+loaded by path so `apps/Reco.html` is never written: the attack's own 22, the same shapes rebuilt on
+this tree (18), plus three of this round's own — `m20_rearm` (a per-row arm put back) reddens
+**G82f**; `m21_mutate_first` (applyCorrection's mutation moved back above its ask) reddens
+**G82m**; `m23_sscommit_order` (sheet mode's single-cell ask moved below its mutation) reddens
+**G82m**; `m22_new_persist_key` (a new `PERSIST_KEYS` member nobody answered for) reddens **G82j**.
+44 RED, 1 green, and the green one is the tree.
+
+**No test was weakened and no baseline moved.** `git diff --numstat tests/e2e/run_store_e2e.mjs`
+against `5c1fb25` is additive except for the six replaced R15 assertions and the three rewritten
+R16 ones, each named above with its reason; the four byte-identity gates are untouched.
 
 

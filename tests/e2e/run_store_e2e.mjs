@@ -10297,7 +10297,9 @@ section(81, 'R13 T-S10-7/A7 — THE MERGE QUESTION: WHAT IT SAYS NOTHING ABOUT, 
    and needs a tolerance so the offset door is reachable at all. */
 const PORT_R14  = 21430;   // R14 sheet mode's three buttons, the fill drag, the Excel view
 const PORT_R15  = 21431;
-const PORT_R16  = 21433;   // R16 what the per-row question costs, as an operation count   // R15 T-S10-19: a pre-change day file reopened, no latch anywhere
+const PORT_R16  = 21433;
+const PORT_R17  = 21434;   // R17 the five shapes the per-row drift arm refused
+const PORT_R18  = 21435;   // R18 ask-first-mutate-after, and door 22   // R16 what the per-row question costs, as an operation count   // R15 T-S10-19: a pre-change day file reopened, no latch anywhere
 
 const R14_SETUP = `(async function () {
   RecoTemplate.create();
@@ -10591,11 +10593,15 @@ const R15_LOOKUP_KEY = `(async function () {
 })`;
 
 /* THE GUARD'S COST, AS AN OPERATION COUNT AND NEVER A CLOCK (handover 16.4a).
-   The claim in 18.11 is that a template whose key names no added column pays
-   ONE PROPERTY READ per row - Reco._keyExtraSet returns null and the question
-   is over - and that a formula-keyed one pays one recompute per row, beside a
-   write that is already O(rows). Both are counted here by instrumenting
-   Reco._extraComputedValue, which is the only expensive thing the rule does. */
+   T-S10-21 made this measurement much simpler and much stronger. The question
+   is now the TEMPLATE LATCH ALONE - one property read, `Reco._keyStale[id]` -
+   so a FORMULA-KEYED template costs exactly what a keyless one costs, and the
+   answer is ZERO RECOMPUTES whatever the key is. The previous build paid one
+   recompute per question (4,110 recomputes for 4,000 questions at 2,000 rows),
+   which was defensible but was the price of an arm whose answer was wrong.
+   Still counted by instrumenting Reco._extraComputedValue, which was the only
+   expensive thing the old rule did, and Reco._keyWriteUnsafe, so the ratio is
+   a measurement and not a guard that never ran. */
 const R16_COST = `(async function (hasKeyExtra) {
   const id = hasKeyExtra ? 'TPL_CK' : 'TPL_CN';
   RecoTemplate.create();
@@ -10622,17 +10628,17 @@ const R16_COST = `(async function (hasKeyExtra) {
   let calls = 0;
   Reco._extraComputedValue = function () { calls++; return realCompute.apply(Reco, arguments); };
   let guardCalls = 0;
-  const realDrift = Reco._keyRowDrifted;
-  Reco._keyRowDrifted = function () { guardCalls++; return realDrift.apply(Reco, arguments); };
+  const realAsk = Reco._keyWriteUnsafe;
+  Reco._keyWriteUnsafe = function () { guardCalls++; return realAsk.apply(Reco, arguments); };
   try { Reco.offsetSelected(null); } finally {
-    Reco._extraComputedValue = realCompute; Reco._keyRowDrifted = realDrift; }
+    Reco._extraComputedValue = realCompute; Reco._keyWriteUnsafe = realAsk; }
   await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
   const offs = Object.keys((AppState.manualOffsetMaster[id] || {})).length;
   return { rows: N, recomputes: calls, questionsAsked: guardCalls, offsetsFiled: offs };
 })`;
 
 /* ============================================================ [82] ====
-   T-S10-20. THE GATE THAT ENUMERATES THE WRITERS ITSELF.
+   T-S10-20 / T-S10-21. THE GATE THAT ENUMERATES THE WRITERS ITSELF.
 
    WHY THIS EXISTS, and it is the only assertion in this file that reads the
    SOURCE rather than running it. Four rounds closed this cluster by listing
@@ -10650,157 +10656,354 @@ const R16_COST = `(async function (hasKeyExtra) {
        round 5   THIS enumeration found four MORE that no human walk had
                  named: sheet mode's "×" (Reco._ssClearActive), Find &
                  Replace's two doors, and the JOURNAL POST's stamp .. +4
+       round 6   an adversarial attack found a TWENTY-SECOND door the
+                 enumeration could not see at all, because
+                 `pendingSpecialJV` was not one of the six masters it
+                 knew about, and ELEVEN ways to blind it ........... +1 door
 
    638 green checks could not see any of it, because every one of them names a
    function somebody remembered. So this one names none: it reads
-   apps/Reco.html, finds every write into a pk-keyed shared master and every
+   apps/Reco.html, finds every write into a shared pk-keyed store and every
    day-file append, works out which function each write is in, and FAILS when
    one of those functions does not consult the guard and is not on the
-   allow-list below with a reason. A new button that writes a master fails the
-   suite on the day it is written instead of three verifier rounds later.
+   allow-list below with a reason.
 
-   IT IS STRUCTURAL, SO IT WILL HAVE FALSE POSITIVES AS THE CODE MOVES. That
-   is designed for: the allow-list is the pressure valve, every entry carries a
-   reason a reader can check, and a stale entry that no longer matches anything
-   FAILS TOO (G82h) so the list cannot quietly rot into a rubber stamp. */
-section(82, 'G82 T-S10-20 — THE WRITERS ARE ENUMERATED FROM THE SOURCE, NOT FROM A LIST OF NAMES');
-{
+   AND THE DESIGN NOTE THAT USED TO BE HERE HAD THE FAILURE DIRECTION
+   BACKWARDS, which is worth more than the code change: it said the simpler
+   owner rule's failure mode is "a MIS-NAMED owner, which shows up as a false
+   positive the allow-list absorbs, rather than a silent miss". MEASURED, A
+   MIS-NAMED OWNER IS A SILENT MISS. The write is credited to a NEIGHBOURING
+   function, and that neighbour is usually one of the twenty-two guarded ones,
+   so the write inherits somebody else's guard call and the gate goes green -
+   G82c included, because the neighbour is still "found and guarded". Three of
+   the eleven blind shapes were exactly that, and one of them is not an attack
+   at all but the ordinary spelling `name: function (…) {`. A wrong design note
+   is how the next person trusts the wrong thing, so it is corrected here and
+   the rules that caused it are fixed: FOUR definition shapes are recognised
+   instead of one, a function's body ends where its BRACES close rather than
+   where the indentation next dips, and G82n fails when a write is credited to
+   a function whose computed body is implausibly large - which is what a
+   mis-attribution looks like from the outside.
+
+   IT IS A DETECTOR, NOT A SAFETY MECHANISM. The safety mechanism is
+   Reco.writeKey / Reco.writeVerKey, which a gesture cannot get a key without
+   going through. This finds the write a future author spells in a way the
+   chokepoint does not cover. It will have false positives as the code moves:
+   the allow-list is the pressure valve, every entry carries a reason a reader
+   can check, a stale entry that no longer matches anything FAILS TOO (G82h),
+   and an allow-listed function that GAINS a write or writes a different store
+   FAILS (G82i) - because the allow-list is per function and was therefore a
+   licence to add writes for ever.
+
+   WHAT A TEXT GATE CANNOT DO, said plainly rather than papered over, and
+   ticketed as T-S10-22:
+     * REACHABILITY. GUARD is a text test over the function body, so a guard
+       call that cannot run still satisfies it. `if (false) { … }` blocks are
+       now stripped out, because that was the measured shape, but a guard call
+       behind any other condition, on a different row, or after an early
+       return, still counts. Only a parse plus a control-flow walk can answer
+       that.
+     * A MASTER PASSED AS A PARAMETER. Reco._unmarkRows receives the offset
+       master as an argument and writes through it; the alias is declared in
+       the CALLER, so the enumeration sees the caller and not the helper. That
+       one helper is pinned by name in G82m instead, which is a list of names
+       and is admitted as such.
+     * A BRACE INSIDE A REGEX LITERAL would unbalance the body-end finder. That
+       direction is safe: the body comes out too SHORT, a guard call falls
+       outside it, and the gate fails loudly.
+   A real JS parse is the honest answer to the first two. It is a round of its
+   own and it is filed; a gate that CRASHES and a gate defeated by
+   `name: function (){` were not design limits, they were defects, and those
+   are fixed here. */
+section(82, 'G82 T-S10-20/21 — THE WRITERS ARE ENUMERATED FROM THE SOURCE, NOT FROM A LIST OF NAMES');
+try {
   const APP = fs.readFileSync(APP_FILE || path.join(REPO, 'apps/Reco.html'), 'utf8');
   const L = APP.split('\n');
 
-  /* The six pk-keyed shared masters, plus the day file. Every one of these is
-     a whole file every colleague parses, keyed by a row's key. */
+  /* ---- THE SHARED STORES, ENUMERATED WITH A REASON PER ENTRY INCLUDING THE
+     EXCLUSIONS. The previous version of this gate knew six masters plus the
+     day file and called that "the write sites". It was not: door 22 wrote row
+     keys into `pendingSpecialJV`, which is in AppState.PERSIST_KEYS - a
+     whole-file write of reco/pendingSpecialJV.json that every colleague parses
+     at boot - and the gate could not see it, because the store was not in the
+     list and the list's exclusions were never written down. A list whose
+     exclusions are unexplained is how that happened, so every store the app
+     writes is below, including the ones that do NOT hold row keys and why.
+     G82j and G82k make the list complete FROM THE SOURCE: a new PERSIST_KEY,
+     or a new reco/*.json, fails this section until it is answered for here. */
+  const STORES = {
+    /* ---------- holds row keys ---------- */
+    recoSessions: { keys: true, how: 'every row of sess.data carries _pk, and sess.corrections is '
+      + 'keyed by the business key', covered: 'no gesture writes a key INTO it - it is the session '
+      + 'itself, serialised. What has to be true is that a refused gesture leaves the rows alone, '
+      + 'because AppState.save() publishes the whole file: that is [87] R18a2 and T-S10-21\'s '
+      + 'ask-first-mutate-after order (G82m)' },
+    extraValueMaster:  { keys: true, how: '[tplId][pk][col]', covered: 'enumerated' },
+    correctionMaster:  { keys: true, how: '[tplId][pk][col]', covered: 'enumerated' },
+    manualOffsetMaster:{ keys: true, how: '[tplId][pk]',      covered: 'enumerated' },
+    groupMaster:       { keys: true, how: 'group.members is a list of row keys', covered: 'enumerated' },
+    commentMaster:     { keys: true, how: 'comment.linkedPks', covered: 'enumerated' },
+    attachmentMaster:  { keys: true, how: 'attachment.linkedPks', covered: 'enumerated' },
+    pendingSpecialJV:  { keys: true, how: 'DOOR 22: primaryKeys / sentPks / inputData[]._pk, the '
+      + 'identity the pending badge, SpecialJV.matchesRows and the entry generator all match rows '
+      + 'on', covered: 'enumerated' },
+    entryHistory:      { keys: true, how: 'entry.postedPks - the keys of the rows an entry stamped',
+      covered: 'enumerated (postedPks) and asked at the gesture in Reco.commitEntryFromPreview' },
+    'reco/reversals.log': { keys: true, how: 'unstamped / skipped / sessionOnly are lists of the '
+      + 'keys a reversal acted on', covered: 'ALLOW-LISTED WITH A REASON: it is an append-only '
+      + 'audit log that the app never reads back, and the keys in it came from the posted-entry '
+      + 'index on the share (Reco.reverseEntry passes keyFromStore). A log that recorded a '
+      + 'different key from the one acted on would be a worse log' },
+    'reco_excel/<folder>/_links/<id>.json': { keys: true, how: 'in `key` identity mode the '
+      + 'rebased / dismissed maps are keyed `<row key>|<column>`', covered: 'ALLOW-LISTED WITH A '
+      + 'REASON: the keys come out of the WORKBOOK the operator exported, not from a row minted on '
+      + 'screen; the records are that one export\'s own baseline bookkeeping, read only by that '
+      + 'export\'s review dialog; and the gesture that writes them, ExcelLink.apply, is latched '
+      + '(round 5, [80] R12)' },
+    /* ---------- does NOT hold row keys, and why ---------- */
+    recoTemplates: { keys: false, why: 'keyed by TEMPLATE id. It holds the column and formula '
+      + 'definitions - including the key rule itself, which is why saving it is what RAISES the '
+      + 'latch - and no row key appears in it' },
+    aegTemplates:  { keys: false, why: 'keyed by journal-template id; its contents are column '
+      + 'mappings and posting rules' },
+    aegMaster:     { keys: false, why: 'the accounts master: an array of ACCOUNT rows with their '
+      + 'own Reference, nothing to do with a reconciliation row' },
+    aegSettings:   { keys: false, why: 'folder-wide settings (tolerances, flags, folder names)' },
+    customMasters: { keys: false, why: 'operator-defined lookup tables, keyed by their own first '
+      + 'column; a reconciliation row key never appears as a key or a value' },
+    docNumberMaster: { keys: false, why: 'DOCUMENT numbers mapped to an accountingId. Checked '
+      + 'against the code: the keys are the document numbers the journal minted, not row keys' },
+    'reco/_corrupt/*.json': { keys: false, why: 'a verbatim copy of a file that would not parse, '
+      + 'kept before anything can overwrite it. Nothing is keyed; nothing is read back' },
+    'reco/extraValues/*.json': { keys: false, why: 'NOT A SEPARATE STORE - it is the split-file '
+      + 'form of extraValueMaster (S11\'s escape hatch), written only through '
+      + 'Reco._extraValueFlush, which is enumerated above' }
+  };
+
+  /* The stores whose writes this section enumerates line by line. */
   const MASTERS = ['extraValueMaster', 'correctionMaster', 'manualOffsetMaster',
                    'groupMaster', 'commentMaster', 'attachmentMaster'];
 
   /* A guard call is any of these. The write-side pair is the mechanism; the
-     gesture-level pair is the sentence. Either satisfies the gate, because
-     either means the question was asked in that function. */
-  const GUARD = /Reco\.(?:writeKey|writeVerKey|_keyStaleBlock|_keyWriteUnsafe|_keyRowsUnsafe)\s*\(/;
+     gesture-level pair is the sentence; Reco._keyAsk is T-S10-21's ASK, which
+     exists so a gesture can ask BEFORE it mutates (Reco.writeKey answers null
+     both for "refused" and for "this template has no business key", so a
+     caller cannot tell them apart from the key alone). */
+  const GUARD = /Reco\.(?:writeKey|writeVerKey|_keyStaleBlock|_keyWriteUnsafe|_keyRowsUnsafe|_keyAsk)\s*\(/;
 
-  /* THE ALLOW-LIST. One entry per function that writes a pk-keyed shared
-     record WITHOUT asking, and the reason it is right not to ask. A reader can
-     check every one of these against the code. */
+  /* THE ALLOW-LIST. One entry per function that writes a shared pk-keyed
+     record WITHOUT asking, the reason it is right not to ask, and - new, after
+     the attack - THE NUMBER OF WRITE SITES AND THE STORES IT WRITES. The
+     reason is for a reader; the census is for G82i, because the list is per
+     FUNCTION and was therefore a standing licence for an allow-listed function
+     to gain any number of new writes into any store for ever, and because the
+     list is matched on the Module.method STRING, so a brand-new door that
+     happens to be NAMED `removeManualOffset` was allow-listed by choosing a
+     name. Both shapes are measured and both now fail. */
   const ALLOW = {
-    'Versioning.appendChange':
-      'plumbing, not a door: it forwards one {pk,row} to appendChangesBatch for a caller that has '
-      + 'already been through Reco.writeVerKey. Asking again here would be off the gesture\'s task, '
-      + 'with no verb and no operator to tell.',
-    'Versioning.flushQueue':
-      'the same: it drains Versioning.queueChange\'s 150 ms burst, and every key in it arrived '
-      + 'through a guarded call site. THE DEADLOCK RULE (T-S10-17) also applies - this runs inside '
-      + 'the write path and must not wait on anything.',
-    'Groups.forTemplate':
-      'lazy `{}` for this template\'s bag of groups. It creates no pk-keyed record.',
-    'Attachments.forTemplate': 'the same lazy `{}`; no pk-keyed record.',
-    'Comments.forTemplate':    'the same lazy `{}`; no pk-keyed record.',
-    'Groups.create':
-      'a new group with `members: []`. No row key is involved until addMembers, which IS guarded at '
-      + 'all four of its entry points.',
-    'Groups.remove':
-      'deletes a whole group by its GROUP id. Nothing here is keyed by a row.',
-    'Attachments.updateLinks':
-      'has no caller in the app; its pks are whatever a caller passes, and there is no row and no '
-      + 'verb in scope. If a UI is ever built on it, that UI is the door and the gate will say so.',
-    'Comments.updateLinks': 'the same: no caller, no row, no verb.',
-    'App._replayJournal':
-      'THE OWED-WRITE REPLAY. Its keys come from the journal on disk, which recorded them when they '
-      + 'were the keys the rule computed; re-asking would discard work the operator has already been '
-      + 'told was saved. It also runs INSIDE the flush, where the deadlock rule (T-S10-17) forbids '
-      + 'waiting on anything and a toast would be addressed to nobody.',
-    'App.importBackup':
-      'a RESTORE from a backup file. The keys come out of that file, not from a row on screen, and '
-      + 'refusing them would make a backup unrestorable on exactly the day it is needed.',
-    'Reco.restoreSession': 'the same restore, per session.',
-    'Reco._promoteCarryForward':
-      'runs inside the MINT, against the keys the mint has just computed under the CURRENT rule - '
-      + 'which is the one state in which a key cannot be stale.',
-    'Reco._renameExtraValueCol':
-      're-keys records by COLUMN NAME. The row keys it moves are untouched, so the question has '
-      + 'nothing to be about.',
-    'Reco._setExtraTyped':
-      'the ONE caller is Reco.applyEdits, which asks per edit before it dispatches. The question '
+    'Formula._compile': { sites: 1, writes: 'code built from a string',
+      reason: 'the formula engine compiling a user formula. A text gate cannot read what a '
+      + 'constructed function body does, so every new Function/eval is a site that must be '
+      + 'answered for; this one builds an arithmetic expression over the row\'s own cells and '
+      + 'touches no store.' },
+    'Formula.evaluate': { sites: 1, writes: 'code built from a string',
+      reason: 'the same engine, the un-compiled path.' },
+    'JVCore': { sites: 1, writes: 'code built from a string',
+      reason: 'the JV engine island being loaded at boot (MODULE 2d). It is the engine\'s own '
+      + 'source read out of a <script type="text/plain"> island in this same file, not data.' },
+    'Versioning.appendChange': { sites: 1, writes: 'day file',
+      reason: 'plumbing, not a door: it forwards one {pk,row} to appendChangesBatch for a caller '
+      + 'that has already been through Reco.writeVerKey. Asking again here would be off the '
+      + 'gesture\'s task, with no verb and no operator to tell.' },
+    'Versioning.flushQueue': { sites: 1, writes: 'day file',
+      reason: 'the same: it drains Versioning.queueChange\'s 150 ms burst, and every key in it '
+      + 'arrived through a guarded call site. THE DEADLOCK RULE (T-S10-17) also applies - this '
+      + 'runs inside the write path and must not wait on anything.' },
+    'Groups.forTemplate': { sites: 1, writes: 'groupMaster',
+      reason: 'lazy `{}` for this template\'s bag of groups. It creates no pk-keyed record.' },
+    'Attachments.forTemplate': { sites: 1, writes: 'attachmentMaster',
+      reason: 'the same lazy `{}`; no pk-keyed record.' },
+    'Comments.forTemplate': { sites: 1, writes: 'commentMaster',
+      reason: 'the same lazy `{}`; no pk-keyed record.' },
+    'Groups.create': { sites: 1, writes: 'groupMaster',
+      reason: 'a new group with `members: []`. No row key is involved until addMembers, which IS '
+      + 'guarded at all four of its entry points.' },
+    'Groups.remove': { sites: 1, writes: 'groupMaster',
+      reason: 'deletes a whole group by its GROUP id. Nothing here is keyed by a row.' },
+    'Attachments.updateLinks': { sites: 1, writes: 'comment/attachment linkedPks',
+      reason: 'has no caller in the app; its pks are whatever a caller passes, and there is no row '
+      + 'and no verb in scope. If a UI is ever built on it, that UI is the door and the gate will '
+      + 'say so.' },
+    'Comments.updateLinks': { sites: 1, writes: 'comment/attachment linkedPks',
+      reason: 'the same: no caller, no row, no verb.' },
+    'App._replayJournal': { sites: 1, writes: 'extraValueMaster',
+      reason: 'THE OWED-WRITE REPLAY. Its keys come from the journal on disk, which recorded them '
+      + 'when they were the keys the rule computed; re-asking would discard work the operator has '
+      + 'already been told was saved. It also runs INSIDE the flush, where the deadlock rule '
+      + '(T-S10-17) forbids waiting on anything and a toast would be addressed to nobody. The '
+      + 'confirm lists every entry as "<template> - <pk> / <col> = <value>", so the KEY is named; '
+      + 'what it does not say is that the key may no longer be the one this reconciliation '
+      + 'computes. Ticketed as part of T-S10-19.' },
+    'App.importBackup': { sites: 1, writes: 'extraValueMaster',
+      reason: 'a RESTORE from a backup file. The keys come out of that file, not from a row on '
+      + 'screen, and refusing them would make a backup unrestorable on exactly the day it is '
+      + 'needed - the same restore assigns AppState.recoTemplates, so the key RULE comes back '
+      + 'beside the records and the two are consistent again.' },
+    'Reco.restoreSession': { sites: 3, writes: 'correctionMaster+extraValueMaster+manualOffsetMaster',
+      reason: 'the same restore, per session.' },
+    'Reco._promoteCarryForward': { sites: 1, writes: 'extraValueMaster',
+      reason: 'runs inside the MINT, against the keys the mint has just computed under the CURRENT '
+      + 'rule - which is the one state in which a key cannot be stale.' },
+    'Reco._renameExtraValueCol': { sites: 1, writes: 'extraValueMaster',
+      reason: 're-keys records by COLUMN NAME. The row keys it moves are untouched, so the question '
+      + 'has nothing to be about.' },
+    'Reco._setExtraTyped': { sites: 1, writes: 'extraValueMaster',
+      reason: 'reached from Reco.applyEdits, which asks per edit before it dispatches. The question '
       + 'cannot move in here: a `false` from this function means "the store must not serve this '
       + 'cell, use sess.manualTags", so a refusal here would become a SILENT SESSION-ONLY WRITE - '
-      + 'the exact shape of the bug this cluster is about.',
-    'Reco._setOverride':
-      'the same: reached only from Reco.applyEdits, which asks, and its own return value is already '
-      + 'the override\'s refusal channel.',
-    'Reco._dropExtraValueCols':
-      'a DELETE whose keys come from the stored master (the columns being dropped), not from a row.',
-    'Reco._dropExtraValueTpl':   'a DELETE of a whole template\'s records, by template id.',
-    'Reco._dropExtraValueRec':   'a DELETE whose key the values panel read out of the master.',
-    'Reco._dropExtraValuesNotIn':'a DELETE driven by the stored master against the loaded key set.',
-    'Reco.removeCorrection':
-      'handover 18.9\'s documented exception: the key comes from the Correction panel, which read it '
-      + 'out of correctionMaster. It is still the key it always was, and cleaning that record up is '
-      + 'right to let through.',
-    'Reco.removeManualOffset':
-      'the same exception for the offsets panel.',
-    'Reco.reverseEntry':
-      'its one write here is the reversal\'s Comment, whose linkedPks come from the POSTED ENTRY\'S '
-      + 'OWN INDEX on the share (plan.unstamp), not from a row on screen. Its Reco.applyEdits call '
-      + 'passes keyFromStore:true for the same reason, and says so at the call site.'
+      + 'the exact shape of the bug this cluster is about. The claim that applyEdits is its ONLY '
+      + 'caller is no longer ungated: a call to it from anywhere else is enumerated as a write in '
+      + 'the CALLER, which is how the attack\'s m12 is caught.' },
+    'Reco._setOverride': { sites: 1, writes: 'extraValueMaster',
+      reason: 'the same: reached from Reco.applyEdits, which asks, and its own return value is '
+      + 'already the override\'s refusal channel. Its callers are enumerated too.' },
+    'Reco._dropExtraValueCols': { sites: 1, writes: 'extraValueMaster',
+      reason: 'a DELETE whose keys come from the stored master (the columns being dropped), not '
+      + 'from a row.' },
+    'Reco._dropExtraValueTpl': { sites: 1, writes: 'extraValueMaster',
+      reason: 'a DELETE of a whole template\'s records, by template id.' },
+    'Reco._dropExtraValueRec': { sites: 1, writes: 'extraValueMaster',
+      reason: 'a DELETE whose key the values panel read out of the master.' },
+    'Reco._dropExtraValuesNotIn': { sites: 1, writes: 'extraValueMaster',
+      reason: 'a DELETE driven by the stored master against the loaded key set.' },
+    'Reco.removeCorrection': { sites: 2, writes: 'correctionMaster',
+      reason: 'handover 18.9\'s documented exception: the key comes from the Correction panel, '
+      + 'which read it out of correctionMaster. It is still the key it always was, and cleaning '
+      + 'that record up is right to let through.' },
+    'Reco.removeManualOffset': { sites: 1, writes: 'manualOffsetMaster',
+      reason: 'the same exception for the offsets panel.' },
+    'Reco.reverseEntry': { sites: 3, writes: 'comment/attachment linkedPks+pendingSpecialJV',
+      reason: 'the reversal\'s own Comment, whose linkedPks come from the POSTED ENTRY\'S OWN INDEX '
+      + 'on the share (plan.unstamp), and the pending Special JVs it puts BACK, read out of the '
+      + 'entry it is reversing. Neither key comes from a row on screen; its Reco.applyEdits call '
+      + 'passes keyFromStore:true for the same reason and says so at the call site.' },
+    'Reco._removePendingJv': { sites: 1, writes: 'pendingSpecialJV',
+      reason: 'removes one pending JV by its JV id - a filter over the list, with no row key read '
+      + 'or written. The keys inside the entry it drops were asked for when the entry was made '
+      + '(door 22, Reco.openSpecialJv).' }
   };
 
-  /* ---- the function each line belongs to: Module.method.
-     A method definition is `name(args) {` on its own line at a smaller indent
-     than the body, which is this file's shape throughout; the keyword list
-     keeps `if (…) {` and friends out. Deliberately NOT a brace-matching JS
-     parser: the failure mode of this simpler rule is a MIS-NAMED owner, which
-     shows up as a false positive the allow-list absorbs, rather than a silent
-     miss. */
+  /* ---- codeOf: comments and string literals removed, THE LINE KEPT. The old
+     version returned '' for any line whose first non-space characters were
+     `//`, `*` or `/*`, so `/* file it *​/ AppState.manualOffsetMaster[id][pk] = …`
+     was invisible - the comment was at the start, so the code went with it.
+     That is an ordinary accident, not an attack. */
+  const code = new Array(L.length).fill('');
+  /* the same lines with comments out and STRING LITERALS IN. G82m reads a
+     VERB out of the source ('corrected', 'offset'), and `code` has blanked it. */
+  const bare = new Array(L.length).fill('');
+  { let open = false;
+    for (let i = 0; i < L.length; i++) {
+      let s = L[i], out = '';
+      while (s.length) {
+        if (open) { const e = s.indexOf('*/'); if (e === -1) { s = ''; break; } open = false; s = s.slice(e + 2); continue; }
+        const b = s.indexOf('/*');
+        const ln = s.indexOf('//');
+        if (b !== -1 && (ln === -1 || b < ln)) { out += s.slice(0, b) + ' '; s = s.slice(b + 2); open = true; continue; }
+        if (ln !== -1) { out += s.slice(0, ln); s = ''; break; }
+        out += s; s = '';
+      }
+      bare[i] = out;
+      code[i] = out.replace(/'(\\.|[^'\\])*'/g, "''").replace(/"(\\.|[^"\\])*"/g, '""')
+                   .replace(/`(\\.|[^`\\])*`/g, '``');
+    }
+  }
+  const codeOf = i => (i < 0 || i >= code.length) ? '' : code[i];
+
+  /* ---- the function each line belongs to: Module.method. FOUR shapes, not
+     one. The old rule matched only the method shorthand `name(args) {`, so the
+     SAME door declared `name: function (args) {` or `name: (args) => {` was
+     credited to the previous method in the module - which was guarded - and
+     went green; and a plain `function name(args) {` at the end of the file was
+     credited to a method 10,708 lines above it. A `function` DECLARATION or a
+     top-level IIFE keeps its bare name, because it is not a member of the
+     object literal above it; a method takes its module's. (This file opens
+     `const Reco = {` and then declares members at indent 0, so indent alone
+     cannot tell those two apart.) */
   const KW = new Set(['if','for','while','switch','catch','do','else','try','return','typeof',
-                      'new','function','await','forEach','map','filter','then','constructor']);
+                      'new','await','forEach','map','filter','then','constructor']);
   const defs = [], mods = [];
   L.forEach((l, i) => {
-    const m = /^(\s*)(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*$/.exec(l);
-    if (m && !KW.has(m[2])) defs.push({ line: i + 1, name: m[2], indent: m[1].length });
-    const q = /^const ([A-Za-z_$][\w$]*) = \{/.exec(l);
+    const s = codeOf(i);
+    let kind = 'method';
+    let m = /^(\s*)(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*$/.exec(s);                   // name(a) {
+    if (!m) { m = /^(\s*)(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{\s*$/.exec(s);  // function name(a) {
+              if (m) kind = 'decl'; }
+    if (!m) m = /^(\s*)([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?function\s*[A-Za-z_$]*\s*\([^)]*\)\s*\{\s*$/.exec(s); // name: function (a) {
+    if (!m) m = /^(\s*)([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{\s*$/.exec(s); // name: (a) => {
+    /* a TOP-LEVEL module IIFE only: `const JVCore = (function () {`. A local
+       `const setCell = (row, col) => {` INSIDE a method is not a def - the
+       guard lives in the method that owns it, and crediting the write to the
+       helper would make the guard test ask the wrong function. */
+    if (!m) { const t = /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(?(?:async\s+)?(?:function\s*\*?\s*\([^)]*\)|\([^)]*\)\s*=>)\s*\{\s*$/.exec(s);
+              if (t) { m = ['', '', t[1]]; kind = 'decl'; } }
+    if (m && !KW.has(m[2])) defs.push({ line: i + 1, name: m[2], indent: m[1].length, kind });
+    const q = /^const ([A-Za-z_$][\w$]*) = \{/.exec(s);
     if (q) mods.push({ line: i + 1, name: q[1] });
   });
   const modOf = ln => { let b = ''; for (const m of mods) { if (m.line <= ln) b = m.name; else break; } return b; };
   const ownerOf = (ln, indent) => {
     for (let i = defs.length - 1; i >= 0; i--) {
       const d = defs[i];
-      if (d.line < ln && d.indent < indent) return { label: modOf(d.line) + '.' + d.name, line: d.line, indent: d.indent };
+      if (d.line < ln && d.indent < indent)
+        return { label: (d.kind === 'decl' ? d.name : modOf(d.line) + '.' + d.name), line: d.line, indent: d.indent };
     }
     return { label: '(top level)', line: 0, indent: -1 };
   };
   const nextSibling = o => { for (const d of defs) if (d.line > o.line && d.indent <= o.indent) return d.line; return L.length + 1; };
-
-  /* Comments are stripped before matching, so the prose that DESCRIBES these
-     writes (and this file is full of it) is never counted as one. */
-  const inBlockComment = new Array(L.length).fill(false);
-  { let open = false;
-    L.forEach((l, i) => {
-      let s = l, hadOpen = open;
-      if (open) { const e = s.indexOf('*/'); if (e === -1) { inBlockComment[i] = true; return; } open = false; s = s.slice(e + 2); hadOpen = true; }
-      let k = s.indexOf('/*');
-      while (k !== -1) { const e = s.indexOf('*/', k + 2); if (e === -1) { open = true; break; } s = s.slice(0, k) + ' ' + s.slice(e + 2); k = s.indexOf('/*'); }
-      inBlockComment[i] = hadOpen && /^\s*$/.test(s);
-    });
-  }
-  const codeOf = i => {
-    if (inBlockComment[i]) return '';
-    let l = L[i];
-    if (/^\s*(\/\/|\*|\/\*)/.test(l)) return '';
-    l = l.replace(/\/\/.*$/, '');
-    return l.replace(/'(\\.|[^'\\])*'/g, "''").replace(/"(\\.|[^"\\])*"/g, '""').replace(/`(\\.|[^`\\])*`/g, '``');
+  /* WHERE THE BODY ENDS, by matching braces over the comment- and
+     string-stripped source. The indent rule alone computed a 10,708-line body
+     for one function in the shipped tree, and a body that large contains the
+     TEXT of somebody else's guard call - a SILENT MISS, which is the failure
+     direction the old note had backwards. This is not a JS parse: a brace
+     inside a regex literal would unbalance it, and that direction is safe -
+     the body comes out too SHORT, the guard call falls outside it, and the
+     gate fails LOUDLY instead of passing. The indent sibling is the ceiling. */
+  const braceEnd = o => {
+    let depth = 0, started = false;
+    for (let k = o.line - 1; k < code.length; k++) {
+      for (const ch of code[k]) {
+        if (ch === '{') { depth++; started = true; }
+        else if (ch === '}') { depth--; if (started && depth <= 0) return k + 2; }
+      }
+      if (k - o.line > 4000) break;
+    }
+    return L.length + 1;
   };
 
-  /* ---- per-function aliases of a master (`const mm = AppState.manualOffsetMaster[id] = …`),
-     because that is how five of the offset writes are spelt. */
+  /* ---- per-function aliases of a store. FOUR spellings, because all four are
+     how a person actually writes it and three of them were invisible:
+       const mm = AppState.manualOffsetMaster[id] = …    (the one it was built for)
+       const bag = AppState.manualOffsetMaster;          (no subscript - BLIND; this one
+                                                          ran the whole suite 672/0)
+       const MAP = { off: AppState.manualOffsetMaster }; (a bag - BLIND)
+       const V = Versioning;                             (the day file - BLIND) */
   const aliases = new Map();
+  const verAlias = new Map();
   L.forEach((l, i) => {
     const s = codeOf(i); if (!s) return;
-    const m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:AppState\.(\w+)\s*\[|Groups\.forTemplate\s*\(|Comments\._map\s*\(|Attachments\._map\s*\()/.exec(s);
-    if (!m) return;
-    const master = m[2] || (/Groups\./.test(s) ? 'groupMaster' : /Comments\./.test(s) ? 'commentMaster' : 'attachmentMaster');
-    if (!MASTERS.includes(master)) return;
-    const o = ownerOf(i + 1, (l.match(/^\s*/) || [''])[0].length);
-    if (!aliases.has(o.line)) aliases.set(o.line, new Map());
-    aliases.get(o.line).set(m[1], master);
+    const indent = (l.match(/^\s*/) || [''])[0].length;
+    const o = ownerOf(i + 1, indent);
+    const put = (a, m) => { if (!aliases.has(o.line)) aliases.set(o.line, new Map()); aliases.get(o.line).set(a, m); };
+    let m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*AppState\.(\w+)\b/.exec(s);
+    if (m && MASTERS.includes(m[2])) put(m[1], m[2]);
+    m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:Groups\.forTemplate|Comments\._map|Attachments\._map)\s*\(/.exec(s);
+    if (m) put(m[1], /Groups\./.test(s) ? 'groupMaster' : /Comments\./.test(s) ? 'commentMaster' : 'attachmentMaster');
+    m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\{(.*)\}/.exec(s);
+    if (m) { const bag = m[1]; let r; const re = /([A-Za-z_$][\w$]*)\s*:\s*AppState\.(\w+)\b/g;
+      while ((r = re.exec(m[2]))) if (MASTERS.includes(r[2])) put(bag + '.' + r[1], r[2]); }
+    m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*Versioning\s*[;,]/.exec(s);
+    if (m) { if (!verAlias.has(o.line)) verAlias.set(o.line, new Set()); verAlias.get(o.line).add(m[1]); }
   });
 
   /* ---- THE ENUMERATION. */
@@ -10814,27 +11017,78 @@ section(82, 'G82 T-S10-20 — THE WRITERS ARE ENUMERATED FROM THE SOURCE, NOT FR
       if (new RegExp('AppState\\.' + M + '\\s*\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*\\s*=(?!=)').test(s)) return add(M);
       if (new RegExp('delete\\s+AppState\\.' + M).test(s)) return add(M + ' (delete)');
     }
+    /* a store reached through a COMPUTED name: AppState[nm][id][pk] = … */
+    if (/AppState\s*\[[^\]]+\]\s*\[[^\]]*\](\s*\[[^\]]*\])*\s*=(?!=)/.test(s)) return add('computed store name');
+    /* CODE BUILT FROM A STRING. A text gate cannot read what a constructed
+       function body does - codeOf blanks string literals, which is right for
+       prose and wrong for this - and reading only the same line missed the
+       attack's own shape, whose string was spread over three lines. So EVERY
+       new Function / eval is a site that must be guarded or allow-listed with
+       a reason, whatever the string happens to say. */
+    if (/\b(?:new\s+Function|eval)\s*\(/.test(s)) return add('code built from a string');
     const al = aliases.get(o.line);
     if (al) for (const [a, M] of al) {
-      if (new RegExp('(^|[^\\w.$])' + a + '\\s*\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*\\s*=(?!=)').test(s)) return add(M + ' (via ' + a + ')');
-      if (new RegExp('delete\\s+' + a + '\\s*\\[').test(s)) return add(M + ' (delete via ' + a + ')');
+      const A = a.replace(/[.$]/g, '\\$&');
+      if (new RegExp('(^|[^\\w.$])' + A + '\\s*\\[[^\\]]*\\](\\s*\\[[^\\]]*\\])*\\s*=(?!=)').test(s)) return add(M + ' (via ' + a + ')');
+      if (new RegExp('delete\\s+' + A + '\\s*\\[').test(s)) return add(M + ' (delete via ' + a + ')');
     }
     if (/Versioning\.(queueChange|appendChange|appendChangesBatch)\s*\(/.test(s)) return add('day file');
+    const va = verAlias.get(o.line);
+    if (va) for (const a of va)
+      if (new RegExp('(^|[^\\w.$])' + a + '\\.(queueChange|appendChange|appendChangesBatch)\\s*\\(').test(s))
+        return add('day file (via ' + a + ')');
     if (/Reco\._extraValueFlush\s*\(/.test(s)) return add('extraValueMaster');
+    /* the two allow-listed SETTERS are a write when anybody ELSE calls them.
+       The allow-list's reason is "the ONE caller is Reco.applyEdits, which
+       asks", and nothing gated that claim - a new door calling the setter
+       directly was blind. */
+    if (/Reco\._setExtraTyped\s*\(/.test(s)) return add('extraValueMaster (via _setExtraTyped)');
+    if (/Reco\._setOverride\s*\(/.test(s)) return add('extraValueMaster (via _setOverride)');
     if (/Groups\.(addMembers|removeMembers)\s*\(/.test(s)) return add('groupMaster');
     if (/Groups\.forTemplate\s*\([^)]*\)\s*\[[^\]]*\]\s*=(?!=)/.test(s)) return add('groupMaster');
     if (/\b(?:meta|rec|c|a)\.linkedPks\s*=(?!=)/.test(s)) return add('comment/attachment linkedPks');
     if (/(?:Attachments\.upload|Comments\.create|Attachments\.updateLinks|Comments\.updateLinks)\s*\(/.test(s))
       return add('comment/attachment linkedPks');
+    /* DOOR 22's store, which the six-master list did not contain at all. */
+    if (/AppState\.pendingSpecialJV\s*\[[^\]]*\]\s*(\[[^\]]*\]\s*)*=(?!=)/.test(s)
+        || /AppState\.pendingSpecialJV\s*\[[^\]]*\]\s*\.push\s*\(/.test(s)) return add('pendingSpecialJV');
+    /* a row-key list inside the shared ledger file. */
+    if (/\b(?:entry|e|rec)\.postedPks\s*=(?!=)/.test(s)) return add('entryHistory.postedPks');
   });
+
+  /* ---- the body of a function, with DEAD BRANCHES removed. GUARD is a text
+     test, so `if (false) { Reco.writeKey(...) }` beside an unguarded write
+     satisfied it. This strips an `if (false)` / `if (0)` block out of the body
+     before the test; any OTHER unreachable guard call still counts, which is
+     the reachability limit admitted in this section's note. */
+  const bodyOf = (o) => {
+    if (!o.line) return '';                 // a write at column 0 has no owner and no body
+    const end = Math.min(nextSibling(o), braceEnd(o));
+    let out = '', skipDepth = -1;
+    for (let k = o.line - 1; k < end - 1 && k < code.length; k++) {
+      const s = codeOf(k);
+      if (skipDepth >= 0) {
+        for (const ch of s) { if (ch === '{') skipDepth++; else if (ch === '}') skipDepth--; }
+        if (skipDepth < 0) skipDepth = -1;
+        continue;
+      }
+      if (/\bif\s*\(\s*(?:false|0|!1|true\s*===\s*false)\s*\)/.test(s)) {
+        skipDepth = 0;
+        for (const ch of s.slice(s.search(/\bif\s*\(/))) { if (ch === '{') skipDepth++; else if (ch === '}') skipDepth--; }
+        if (skipDepth <= 0) skipDepth = -1;
+        continue;
+      }
+      out += s + '\n';
+    }
+    return out;
+  };
 
   const byFn = new Map();
   for (const h of hits) {
     if (!byFn.has(h.o.label)) {
-      const end = nextSibling(h.o);
-      let body = '';
-      for (let k = h.o.line - 1; k < end - 1; k++) body += codeOf(k) + '\n';
-      byFn.set(h.o.label, { label: h.o.label, line: h.o.line, guarded: GUARD.test(body), hits: [] });
+      const body = bodyOf(h.o);
+      byFn.set(h.o.label, { label: h.o.label, line: h.o.line, guarded: GUARD.test(body),
+                            bodyLines: body ? body.split('\n').length - 1 : 0, hits: [] });
     }
     byFn.get(h.o.label).hits.push(h);
   }
@@ -10848,20 +11102,22 @@ section(82, 'G82 T-S10-20 — THE WRITERS ARE ENUMERATED FROM THE SOURCE, NOT FR
   note('G82 guarded', guarded.map(f => f.label + ':' + f.line));
   note('G82 allow-listed', allowed.map(f => f.label));
 
-  /* THE ASSERTION. When it fails it names the FILE, the LINE, the MASTER and
+  /* THE ASSERTION. When it fails it names the FILE, the LINE, the STORE and
      what to do - because a structural failure a reader cannot act on gets
      commented out. */
   const report = naked.map(f => f.hits.map(h =>
     'apps/Reco.html:' + h.ln + '  in ' + f.label + '()  writes ' + h.what + '\n'
     + '        ' + h.text + '\n'
     + '        FIX: take the key through Reco.writeKey(tpl, sess, row, \'<verb>\') for a master, or\n'
-    + '             Reco.writeVerKey(tpl, sess, row, \'<verb>\') for a day-file version row, and add\n'
-    + '             Reco._keyStaleBlock(tpl, \'<verb>\', sess, rows) at the gesture so the refusal is\n'
-    + '             one sentence and all-or-none. If this write\'s key comes from a STORED master or\n'
-    + '             from the machine rather than from a row on screen, add ' + f.label + ' to this\n'
-    + '             section\'s ALLOW list WITH THE REASON.').join('\n')).join('\n');
+    + '             Reco.writeVerKey(tpl, sess, row, \'<verb>\') for a day-file version row or any\n'
+    + '             store keyed on row._pk, and add Reco._keyAsk(tpl, sess, row, \'<verb>\') BEFORE\n'
+    + '             the row is changed, plus Reco._keyStaleBlock(tpl, \'<verb>\', sess, rows) at the\n'
+    + '             gesture so the refusal is one sentence and all-or-none. If this write\'s key\n'
+    + '             comes from a STORED master or from the machine rather than from a row on\n'
+    + '             screen, add ' + f.label + ' to this section\'s ALLOW list WITH THE REASON\n'
+    + '             and its write-site census.').join('\n')).join('\n');
   check(naked.length === 0,
-    'G82a EVERY WRITE INTO A PK-KEYED SHARED MASTER AND EVERY DAY-FILE APPEND IS INSIDE A FUNCTION '
+    'G82a EVERY WRITE INTO A SHARED PK-KEYED STORE AND EVERY DAY-FILE APPEND IS INSIDE A FUNCTION '
     + 'THAT CONSULTS THE GUARD, OR IS ALLOW-LISTED WITH A REASON. ' + hits.length + ' write site(s) '
     + 'in ' + fns.length + ' function(s) enumerated from the source.'
     + (naked.length ? '\n' + report : ''),
@@ -10869,43 +11125,219 @@ section(82, 'G82 T-S10-20 — THE WRITERS ARE ENUMERATED FROM THE SOURCE, NOT FR
 
   /* ---- THE GATE'S OWN SELF-TESTS. A structural gate that silently stops
      matching is worse than no gate: it goes green for ever. */
-  check(hits.length >= 55 && fns.length >= 40,
-    'G82b the enumeration still FINDS the writes (>=55 sites in >=40 functions). A regex that stops '
+  check(hits.length >= 65 && fns.length >= 46,
+    'G82b the enumeration still FINDS the writes (>=65 sites in >=46 functions). A regex that stops '
     + 'matching would make G82a vacuously green for ever, which is exactly how 638 checks missed '
     + 'four open doors', { writeSites: hits.length, functions: fns.length });
-  const MUST_GUARD = ['Reco.applyCorrection', 'Reco.manualOffset', 'Reco.offsetSelected',
-    'Reco.bulkMarkOffset', 'Reco.smartUnmark', 'Reco._xlOffsetSelectedRows', 'Reco.applyEdits',
-    'Reco._ssCommit', 'Reco._ssClearActive', 'Reco._ssCommitFill', 'Reco.commitEntryFromPreview',
-    'FindReplace._replaceOne', 'FindReplace._replaceAll', 'Reco.createGroupFromSelection',
-    'Reco.removeSelectionFromGroup', 'Timeline._confirmUpload', 'Comments._confirmAdd'];
+  /* G82c IS THE REGRESSION LIST, and it is now EVERY guarded writer rather
+     than a hand-copied seventeen. The attack reopened three doors earlier
+     rounds had closed and the suite stayed green at 8/8, partly because four
+     of the then-21 guarded writers were missing from this list. The list is
+     generated-by-eye from the enumeration's own output and checked by G82q
+     below, which fails if the set of guarded writers grows without the list
+     growing - so the list cannot silently fall behind the code either. */
+  const MUST_GUARD = ['Timeline._confirmUpload', 'Comments._confirmAdd', 'FindReplace._replaceOne',
+    'FindReplace._replaceAll', 'Reco._xlOffsetSelectedRows', 'Reco._ssCommit',
+    'Reco._ssClearActive', 'Reco._ssCommitFill', 'Reco._bulkUploadToRow', 'Reco.bulkMarkOffset',
+    'Reco.smartUnmark', 'Reco._unmarkBlockedGroups', 'Reco.offsetSelected', 'Reco.applyEdits',
+    'Reco.manualOffset', 'Reco.applyCorrection', 'Reco.openSpecialJv',
+    'Reco.commitEntryFromPreview', 'Reco.createGroupFromSelection', 'Reco.addSelectionToGroup',
+    'Reco.removeSelectionFromGroup', 'Reco.removeMemberFromGroup'];
   const missing = MUST_GUARD.filter(n => !byFn.has(n) || !byFn.get(n).guarded);
   check(missing.length === 0,
-    'G82c the seventeen doors this round and the four before it closed are all still FOUND by the '
-    + 'enumeration AND still guarded - so a rename or a refactor that moves one out of the gate\'s '
-    + 'sight is a failure, not a quiet pass', missing);
-  const MASTER_SET = new Set(hits.map(h => h.what.replace(/ \(.*$/, '')));
-  check(MASTERS.concat(['day file']).every(m => MASTER_SET.has(m)),
-    'G82d all six pk-keyed masters AND the day file are represented in the enumeration',
-    Array.from(MASTER_SET));
+    'G82c ALL ' + MUST_GUARD.length + ' DOORS CLOSED BY ROUNDS 1-6 ARE STILL FOUND BY THE '
+    + 'ENUMERATION AND STILL GUARDED - so a rename, a refactor or a quietly removed guard is a '
+    + 'failure and not a quiet pass. Three previously-closed doors were reopened at the old '
+    + 'gate\'s counter floor with 8/8 green', missing);
+  const extraGuarded = guarded.map(f => f.label).filter(n => MUST_GUARD.indexOf(n) < 0);
+  check(extraGuarded.length === 0,
+    'G82q ...AND THE LIST IS COMPLETE. A writer that becomes guarded without being added to '
+    + 'G82c\'s list could later be un-guarded with nothing failing. Add it to MUST_GUARD',
+    extraGuarded);
+  /* PER-STORE FLOORS, not one global one. The attack blinded four real writers
+     and kept the global counters above their floor by adding two decoy writes
+     inside an already-guarded function: 56 sites / 40 functions, 8/8 green. A
+     decoy in one store can no longer cover a loss in another. */
+  const FLOOR = { 'day file': 11, groupMaster: 7, attachmentMaster: 1, commentMaster: 1,
+    'comment/attachment linkedPks': 8, extraValueMaster: 13, manualOffsetMaster: 13,
+    correctionMaster: 6, pendingSpecialJV: 7, 'entryHistory.postedPks': 1,
+    'code built from a string': 3 };
+  const perStore = {};
+  hits.forEach(h => { const m = h.what.replace(/ \(.*$/, ''); perStore[m] = (perStore[m] || 0) + 1; });
+  const low = Object.keys(FLOOR).filter(m => (perStore[m] || 0) < FLOOR[m]);
+  check(low.length === 0,
+    'G82d EVERY STORE IS STILL REPRESENTED AT ITS OWN FLOOR. One global floor was not a floor at '
+    + 'all: decoy writes restored the slack, so any number of real writers could be blinded',
+    { low: low.map(m => m + '=' + (perStore[m] || 0) + ' (floor ' + FLOOR[m] + ')'), perStore });
   const stale = Object.keys(ALLOW).filter(k => !byFn.has(k));
   check(stale.length === 0,
     'G82h NO ALLOW-LIST ENTRY IS STALE. An entry that matches nothing is a reason nobody can check '
     + 'any more, and a list of those is how a pressure valve becomes a rubber stamp', stale);
+  const drift = [];
+  Object.keys(ALLOW).forEach(k => {
+    const f = byFn.get(k); if (!f) return;
+    const got = Array.from(new Set(f.hits.map(h => h.what.replace(/ \(.*$/, '')))).sort().join('+');
+    if (f.hits.length !== ALLOW[k].sites || got !== ALLOW[k].writes)
+      drift.push(k + ': ' + f.hits.length + ' site(s) [' + got + '], recorded '
+        + ALLOW[k].sites + ' [' + ALLOW[k].writes + ']');
+  });
+  check(drift.length === 0,
+    'G82i AN ALLOW-LISTED FUNCTION WRITES EXACTLY WHAT ITS ENTRY RECORDS. The allow-list is per '
+    + 'FUNCTION, so it used to be a standing licence to add any number of new writes into any '
+    + 'store for ever (measured: a new correctionMaster write bolted inside Reco.removeManualOffset '
+    + 'went green), and because it is matched on the Module.method STRING a brand-new unguarded '
+    + 'door NAMED removeManualOffset was allow-listed by choosing a name (also measured). Both now '
+    + 'fail here', drift);
+  const big = fns.filter(f => f.bodyLines > 1200);
+  check(big.length === 0,
+    'G82n NO WRITE IS CREDITED TO A FUNCTION WITH AN IMPLAUSIBLE BODY. A mis-named owner is a '
+    + 'SILENT MISS - the write inherits a neighbour\'s guard call - and the shipped tree already '
+    + 'had a function whose gate-computed body was 10,708 lines, to the end of the file. That is '
+    + 'what a mis-attribution looks like from outside, so it is a failure now',
+    big.map(f => f.label + '=' + f.bodyLines + ' lines'));
 
-  /* ---- and the two properties the guard itself has to have, read from the
-     source so they cannot be satisfied by a comment. */
+  /* ---- THE SHARED-STORE LIST IS COMPLETE, FROM THE SOURCE. */
+  const pkArr = /PERSIST_KEYS:\s*\[([^\]]*)\]/.exec(APP);
+  const persist = pkArr ? (pkArr[1].match(/'([^']+)'/g) || []).map(s => s.slice(1, -1)) : [];
+  note('G82 AppState.PERSIST_KEYS read from the source', persist);
+  const unlisted = persist.filter(k => !STORES[k]);
+  check(persist.length >= 12 && unlisted.length === 0,
+    'G82j EVERY MEMBER OF AppState.PERSIST_KEYS IS ANSWERED FOR IN THIS SECTION\'S STORES TABLE, '
+    + 'with a reason, INCLUDING the ones that do not hold row keys. A new PERSIST_KEY is a new '
+    + 'whole-file shared write and fails here until somebody says whether it holds row keys - '
+    + 'which is exactly what nobody had done for pendingSpecialJV (door 22)',
+    { count: persist.length, unlisted });
+  const jsonLits = Array.from(new Set((APP.match(/'reco\/[A-Za-z_][\w.]*\.json'/g) || [])
+    .map(s => s.slice(1, -1))));
+  const known = k => !!STORES[k.replace(/^reco\//, '').replace(/\.json$/, '')]
+                  || !!STORES[k.replace(/\.json$/, '')];
+  const unknownJson = jsonLits.filter(k => !known(k));
+  note('G82 reco/*.json literals in the source', jsonLits);
+  check(unknownJson.length === 0,
+    'G82k EVERY reco/*.json THE APP NAMES IN SOURCE IS IN THE STORES TABLE TOO. The key-to-file '
+    + 'rule is `reco/<key>.json`, so G82j covers the persisted keys; this catches the ledger files '
+    + 'and the logs that are written by name and are in no key list at all', unknownJson);
+  const unexplained = Object.keys(STORES).filter(k => {
+    const s = STORES[k];
+    return s.keys ? !(s.how && s.covered) : !s.why;
+  });
+  check(unexplained.length === 0,
+    'G82l EVERY ENTRY IN THE STORES TABLE CARRIES ITS REASONING - what the row keys in it are and '
+    + 'what covers them, or why it holds none. A list whose exclusions are unexplained is how the '
+    + 'six-master list came to be read as "the set of shared pk-keyed stores" for four rounds',
+    unexplained);
+  const keyed = Object.keys(STORES).filter(k => STORES[k].keys);
+  const enumerated = new Set(hits.map(h => h.what.replace(/ \(.*$/, '').replace(/\..*$/, '')));
+  const uncovered = keyed.filter(k => STORES[k].covered === 'enumerated'
+    && !enumerated.has(k) && !enumerated.has(k.replace(/\..*$/, '')));
+  check(uncovered.length === 0,
+    'G82m EVERY STORE THE TABLE SAYS IS "enumerated" REALLY IS FOUND BY THE ENUMERATION ABOVE. '
+    + 'Without this, moving a store out of the regexes\' sight would leave the table claiming a '
+    + 'coverage that had quietly stopped existing', { uncovered, enumerated: Array.from(enumerated) });
+
+  /* ---- and the properties the guard itself has to have, read from the source
+     so they cannot be satisfied by a comment. */
   check(/writeKey\(tpl, sess, row, what\)\s*\{[\s\S]{0,400}?_keyWriteUnsafe\(tpl, sess, row\)/.test(APP)
-     && /writeVerKey\(tpl, sess, row, what\)\s*\{[\s\S]{0,400}?_keyWriteUnsafe\(tpl, sess, row\)/.test(APP),
-    'G82e both chokepoint functions ask Reco._keyWriteUnsafe - the rule is in ONE place and neither '
-    + 'of them re-implements it');
-  check(/_keyWriteUnsafe\(tpl, sess, row\)\s*\{[\s\S]{0,500}?_keyRowDrifted\(tpl, sess, row\)/.test(APP),
-    'G82f the question asks the ROW (Reco._keyRowDrifted), not only the template latch - which is '
-    + 'what makes T-S10-19 reachable by it at all');
+     && /writeVerKey\(tpl, sess, row, what\)\s*\{[\s\S]{0,400}?_keyWriteUnsafe\(tpl, sess, row\)/.test(APP)
+     && /_keyAsk\(tpl, sess, row, what\)\s*\{[\s\S]{0,300}?_keyWriteUnsafe\(tpl, sess, row\)/.test(APP),
+    'G82e ALL THREE CHOKEPOINT FUNCTIONS ASK Reco._keyWriteUnsafe - the rule is in ONE place and '
+    + 'none of them re-implements it');
+  /* T-S10-21 TURNED THIS CHECK ROUND, and that is the point of it. The old
+     G82f asserted that the question asks the ROW (Reco._keyRowDrifted) "which
+     is what makes T-S10-19 reachable by it at all". The per-row arm is gone
+     because its inference was invalid - a frozen _pk is SUPPOSED to disagree
+     with a recompute when the ROW'S OWN DATA changed (handover 14.3), so
+     ordinary work read as drift and five measured gestures were refused. This
+     now asserts the OPPOSITE: the question is the template latch and asks no
+     per-row recompute. Re-adding a per-row arm has to meet [86]'s five named
+     gates first, and will fail here until this check is deliberately turned
+     round again with those five green. */
+  const askBody = /_keyWriteUnsafe\(tpl, sess, row\)\s*\{([\s\S]{0,400}?)\n  \},/.exec(APP);
+  check(!!askBody && !/_keyRowDrifted|_extraComputedValue|_keyFrozenPart|_keyRowCols/.test(askBody[1])
+        && /_keyStale\[String\(tpl\.id\)\]/.test(askBody[1]),
+    'G82f THE QUESTION IS THE TEMPLATE LATCH AND NOTHING ELSE (T-S10-21). It asks "did the key '
+    + 'DEFINITION change while these rows were loaded?", which is a property of the TEMPLATE and '
+    + 'cannot be confused with a row\'s own data changing. A per-row recompute here refused five '
+    + 'measured pieces of ordinary work - see [86], which gates all five, and handover 18.11',
+    askBody && askBody[1]);
   check(!/rowKey\(tpl, row\)\s*\{[\s\S]{0,300}?_keyWriteUnsafe/.test(APP),
     'G82g the rule is NOT inside Reco.rowKey. rowKey is a key READER on every render path (the row '
     + 'attribute, every badge, the status/attachment/comment filters, the drift check, '
     + 'Groups.resolvePk) and a refusal there would blank the screen this rule exists to keep honest '
     + '- handover 18.9 and 18.11 carry the argument');
+
+  /* ---- ASK FIRST, MUTATE AFTER (T-S10-21), read from the source. The
+     behavioural gate is [87]; this is the one that pins the ORDER, because
+     after the per-row arm came out the order is only SAFE because the gesture
+     asked the same question a hundred lines earlier - and an order that is
+     safe by accident is the shape that came back three rounds running.
+     ADMITTED: this is a list of function names, which is what the rest of this
+     section exists to avoid. It is the only way a text gate can read an order,
+     and it is why [87] asserts the row is UNCHANGED after a refusal from the
+     outside, by reading the row and the share. */
+  /* EACH SITE NAMES ITS OWN ASK, not "any guard call in this function". The
+     first version of this check matched GUARD, and GUARD also matches the
+     gesture-level Reco._keyStaleBlock at the TOP of the function - so putting
+     Reco.applyCorrection's mutation back above its ask stayed green, because
+     a guard call a hundred lines earlier satisfied it. Mutation-tested: that
+     is m21_mutate_first, and it now fails. The ask must be the nearest one
+     ABOVE every occurrence of the mutation and within WINDOW lines of it, so
+     a mutation cannot be moved out from under the ask that covers it. */
+  const WINDOW = 14;
+  const ORDER = [
+    ['Reco.applyCorrection',       /_keyAsk\(tpl, sess, row, 'corrected'\)/,  /^\s*row\[colName\]\s*=/],
+    ['FindReplace._replaceOne',    /_keyAsk\(tpl, sess, row, 'replaced'\)/,   /^\s*row\[m\.col\]\s*=/],
+    ['FindReplace._replaceAll',    /writeVerKey\(tpl, sess, p\.row, 'replaced'\)/, /p\.row\[c\.col\]\s*=/],
+    ['Reco._xlOffsetSelectedRows', /_keyAsk\(tpl, sess, row, 'offset'\)/,     /^\s*sess\.offsets\[rowId\]\s*=\s*true/],
+    ['Reco.bulkMarkOffset',        /_keyAsk\(tpl, sess, row, 'offset'\)/,     /^\s*sess\.offsets\[rowId\]\s*=\s*true/],
+    ['Reco.offsetSelected',        /_keyAsk\(tpl, sess, row, 'offset'\)/,     /^\s*sess\.offsets\[row\._id\]\s*=\s*true/],
+    ['Reco.manualOffset',          /_keyAsk\(tpl, sess, row, 'offset'\)/,     /^\s*sess\.offsets\[row\._id\]\s*=\s*true/],
+    ['Reco._ssCommit',             /_keyAsk\(tpl, sess, row, '(?:filled|changed)'\)/, /^\s*row\[ac\.col\]\s*=\s*raw/],
+    ['Reco._ssClearActive',        /_keyAsk\(tpl, sess, row, 'cleared'\)/,    /^\s*row\[sess\.activeCell\.col\]\s*=\s*''/],
+    ['Reco._unmarkRows',           /_keyAsk\(tpl, sess, r, 'unmarked'\)/,     /^\s*delete sess\.offsets\[r\._id\]/],
+    ['Reco.commitEntryFromPreview',/_keyAsk\(tpl, sess, o, 'posted'\)/,       /o\[aeg\.postEntryColumn\]\s*=\s*aeg\.postEntryValue/]
+  ];
+  const badOrder = [];
+  ORDER.forEach(([label, ask, mut]) => {
+    const d = defs.filter(x => (x.kind === 'decl' ? x.name : modOf(x.line) + '.' + x.name) === label);
+    if (!d.length) { badOrder.push(label + ': NOT FOUND'); return; }
+    const o = { label, line: d[0].line, indent: d[0].indent };
+    const end = Math.min(nextSibling(o), braceEnd(o));
+    const asks = [], muts = [];
+    for (let k = o.line - 1; k < end - 1 && k < code.length; k++) {
+      const s = bare[k] || '';
+      if (ask.test(s)) asks.push(k + 1);
+      if (mut.test(s)) muts.push(k + 1);
+    }
+    if (!muts.length) { badOrder.push(label + ': the mutation this check pins is no longer there'); return; }
+    if (!asks.length) { badOrder.push(label + ': mutates at ' + muts[0] + ' and never asks'); return; }
+    muts.forEach(m => {
+      const above = asks.filter(a => a < m);
+      if (!above.length) badOrder.push(label + ': MUTATES AT ' + m + ' WITH NO ASK ABOVE IT');
+      else if (m - above[above.length - 1] > WINDOW)
+        badOrder.push(label + ': mutates at ' + m + ' and its nearest ask is '
+          + (m - above[above.length - 1]) + ' lines above, past the ' + WINDOW + '-line window');
+    });
+  });
+  check(badOrder.length === 0,
+    'G82m ASK FIRST, MUTATE AFTER, at all ' + ORDER.length + ' sites where a write-side guard can '
+    + 'refuse. Reco.applyCorrection used to write `row[colName] = newVal` and THEN ask, so a '
+    + 'refusal left the row changed on screen, `_corrected_<col>` set, the changed value published '
+    + 'in reco/recoSessions.json by AppState.save(), and NO record of the correction anywhere - '
+    + 'behind two toasts, one red and one green. Find & Replace had the same order',
+    badOrder);
+} catch (e) {
+  /* A GATE THAT CAN TAKE THE SUITE DOWN IS WORSE THAN ONE THAT MISSES. The
+     previous version crashed on a write at column 0 - ownerOf answered
+     {line:0}, the body loop started at k=-1 and codeOf(-1) threw - and it sat
+     inside this file's single try/finally with no catch, so the run died with
+     NO TALLY and sections [83], [84] and [85] never executed. The crash is
+     fixed (a write with no owner gets an empty body and fails G82a by name),
+     and this catch is the second line: a defect in the detector is now a RED
+     CHECK that names itself. */
+  check(false, 'G82z THE GATE ITSELF THREW, which is a defect in the gate and not a finding about '
+    + 'the app. It is caught here so the rest of the suite still runs and still tallies: '
+    + String((e && e.stack) || e).slice(0, 900));
 }
 
 /* ============================================================ [83] ====
@@ -11081,79 +11513,110 @@ section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO
   const cmts = () => diskJson(W.root, 'reco/commentMaster.json') || {};
   const day = () => csvRows(verFile(W.root, 'DayFile19'));
 
+  /* ---- T-S10-21 RE-OPENED T-S10-19, AND THIS SECTION NOW MEASURES THE HOLE
+     INSTEAD OF CLAIMING IT IS SHUT. The per-row drift arm that closed it is
+     gone because its inference was invalid: a frozen _pk is SUPPOSED to
+     disagree with a recompute whenever the ROW'S OWN DATA changed (handover
+     14.3), so ordinary work read as drift and five measured gestures were
+     refused - a correction of a key-feeding column bricked the row for every
+     later gesture, and the recovery the refusal named is where the correction
+     died ([86] gates all five).
+
+     SO THESE TEN DOORS GO THROUGH AGAIN at a row a day file handed back, and
+     they are asserted GOING THROUGH, named as T-S10-19's open hole, so that
+     no reader can take 694 green checks as "this is closed". FIVE of the
+     assertions that used to live here are gone with the arm, each named in
+     the round's report and each one a thing the arm itself guaranteed: the
+     old R15d (every door refused), R15e (and not one of them also says
+     something green), R15f (nothing reached any shared master under a dead
+     key), R15g (the CONTROL that the question is per ROW and not per
+     template) and R15j ("Fill Column" refused even from a healthy cell).
+     R15h and R15i are KEPT unchanged - the ordinary path still files under
+     the folder's keys, and the master_lookup template is still writable. The
+     five that replace them measure the same screen and say what really
+     happens on it. The section's count is unchanged at 11, which is why the
+     round's report names the five rather than leaving the total to cover
+     them.
+
+     WHAT CLOSES IT, and it is a schema change rather than a cleverer
+     comparison: record the KEY RULE'S SIGNATURE on the row at mint time - a
+     hash of the key extras' definitions, written beside _pk and carried
+     through the day file's control columns - and compare SIGNATURES, never
+     values. A signature says "a DIFFERENT RULE made this key" and says
+     nothing whatever about the row's data, which is exactly the distinction
+     the per-row arm could not make and the reason it kept refusing ordinary
+     work. T-S10-19 carries that design. */
   const walk = await wa.page.evaluate(R15_WALK_DEAD);
   note('R15 every door fired at a row the day file handed back', walk);
   const refused = n => ((walk[n] || {}).said || []).some(s => /error/.test(s) && /were SAVED with/.test(s));
+  const latched = n => ((walk[n] || {}).said || []).some(s => /error/.test(s) && /identifies its rows/.test(s));
   const DOORS = ['setTag', 'applyCorrection', 'manualOffset', 'editCell', 'createGroup', 'comment',
                  'ssApply', 'ssFillColumn', 'ssClear', 'fillDrag'];
-  check(DOORS.every(refused),
-    'R15d EVERY DOOR IS REFUSED AT A ROW THE DAY FILE HANDED BACK - the six T-S10-19 measured going '
-    + 'through (four of them in TOTAL SILENCE, two behind a green toast) and the four this round '
-    + 'closed. No latch is involved: the question is asked of the ROW',
-    DOORS.filter(n => !refused(n)).map(n => [n, (walk[n] || {}).said]));
-  check(DOORS.every(n => !((walk[n] || {}).said || []).some(s => /success/.test(s))),
-    'R15e ...and not one of them ALSO says something green. Two of the six said "Correction '
-    + 'applied" and \'Group "G19" created with 1 member(s)\' while filing under a key nobody else '
-    + 'computes', DOORS.filter(n => ((walk[n] || {}).said || []).some(s => /success/.test(s))));
+  check(DOORS.every(n => !refused(n) && !latched(n)),
+    'R15d T-S10-19 IS OPEN AGAIN AND THIS IS THE MEASUREMENT OF IT. All ten doors go through at a '
+    + 'row the day file handed back under the key that file holds, in a window whose latch is '
+    + 'correctly DOWN because nothing happened to it. The arm that refused them also refused five '
+    + 'measured pieces of ordinary work ([86]) because it could not tell "the rule moved" from '
+    + '"this row\'s own data moved". THE FIX IS THE KEY-RULE SIGNATURE RECORDED PER ROW AT MINT '
+    + 'TIME - a schema change and a round of its own, filed on T-S10-19. Do not re-add a per-row '
+    + 'value comparison: [86] is the bar it has to clear first',
+    DOORS.filter(n => refused(n) || latched(n)).map(n => [n, (walk[n] || {}).said]));
+
   note('R15 the shares after the walk',
     { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()),
       groupMembers: Object.values(grps().TPL_W || {}).map(g => g.members),
       commentPks: Object.values(cmts().TPL_W || {}).map(c => c.linkedPks),
       dayPks: day().map(r => r._pk) });
   const deadKey = k => /^K[0-9]+$/.test(String(k));
-  check(!Object.keys(vals()).some(deadKey) && !Object.keys(corrs()).some(deadKey)
-        && !Object.keys(offs()).some(deadKey)
-        && !Object.values(grps().TPL_W || {}).some(g => (g.members || []).some(deadKey))
-        && !Object.values(cmts().TPL_W || {}).some(c => (c.linkedPks || []).some(deadKey))
-        && !day().some(r => deadKey(r._pk) && /t19-/.test(JSON.stringify(r))),
-    'R15f (THE FILES) NOTHING REACHED ANY OF THE FIVE SHARED MASTERS OR THE DAY FILE UNDER A KEY '
-    + 'THE FOLDER\'S RULE DOES NOT COMPUTE. T-S10-19 was sized at six doors, five masters plus the '
-    + 'day file, and this reads all six files rather than the toasts',
+  check(Object.keys(vals()).some(deadKey) || Object.keys(corrs()).some(deadKey)
+        || Object.keys(offs()).some(deadKey),
+    'R15e (THE FILES) AND THIS IS THE SIZE OF THE HOLE, read from the files and not from a toast: '
+    + 'records land under the keys the ROWS carry, so the same business row now has records under '
+    + 'two identities on the shared folder - the dead K1/K2/K3 from the day file and the live '
+    + 'K1-X/K2-X/K3-X beside them. Six doors did this in total silence before T-S10-20; they are '
+    + 'no longer silent, because the write still goes through the chokepoint and a latch would '
+    + 'catch the version of this that a COLLEAGUE causes. What is missing is the per-row '
+    + 'signature. Asserted POSITIVELY so a future fix makes this check fail and gets re-read',
     { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()),
       day: day().map(r => r._pk) });
 
-  /* ---- THE CONTROL, and the measurement behind asking the ROW: the healthy
-     copy of the SAME business row, in the SAME template, on the SAME screen,
-     at the same moment, must still work. A template-level latch cannot do
-     this; it would refuse the operator's whole afternoon. */
+  /* ---- THE CONTROL: the ordinary path is not what broke. */
   const live = await wa.page.evaluate(R15_WALK_LIVE);
   note('R15 the same doors at the LIVE copies beside them', live);
   check(['setTag', 'applyCorrection', 'manualOffset', 'editCell']
           .every(n => !((live[n] || {}).said || []).some(s => /error/.test(s))),
-    'R15g CONTROL: THE QUESTION IS PER ROW AND NOT PER TEMPLATE. The healthy copies K1-X/K2-X/K3-X '
-    + 'are on the same screen in the same template at the same moment, and every door works on '
-    + 'them with nothing said. A template-level refusal here would cost the operator the whole '
-    + 'afternoon, which is why the latch is now an optimisation and a better sentence rather than '
-    + 'the mechanism', live);
-  /* AND THE ONE PLACE PER-ROW AND ALL-OR-NONE PULL AGAINST EACH OTHER, said
-     out loud because a reader will meet it: "↓ Fill Column" fills EVERY row in
-     the filtered view, and this screen holds three dead rows, so the gesture
-     is refused AS A WHOLE even when the cell the operator clicked is a healthy
-     one. That is the right answer - a column cannot be filled half way, and
-     F18's lesson is that a control reporting success having done nothing is
-     worse than one that refuses - but it is the cost of the all-or-none arm
-     and it is what Clear Loaded Data is for. */
-  check(((live.ssFillColumn || {}).said || []).some(s => /error/.test(s) && /were SAVED with/.test(s)),
-    'R15j ...EXCEPT "↓ Fill Column", which is refused even from a healthy cell, because it writes '
-    + 'EVERY row in the filtered view and three of them are the dead copies. A bulk gesture is '
-    + 'all-or-none by design; the single-row doors beside it are not',
-    (live.ssFillColumn || {}).said);
+    'R15f CONTROL: every door works on the healthy copies K1-X/K2-X/K3-X on the same screen, with '
+    + 'nothing said in error', live);
+  check(((live.ssFillColumn || {}).said || []).some(s => /success/.test(s))
+        && !((live.ssFillColumn || {}).said || []).some(s => /were SAVED with/.test(s)),
+    'R15g "↓ Fill Column" FILLS THE WHOLE FILTERED VIEW AGAIN. With the per-row arm it was refused '
+    + 'AS A WHOLE from a healthy cell whenever any row on screen was "drifted", which handover '
+    + '15.6 disclosed as the cost of the all-or-none arm. That cost is gone with the arm, and 15.6 '
+    + 'is corrected to say so rather than leaving a reader expecting a refusal that no longer '
+    + 'happens', (live.ssFillColumn || {}).said);
   check(String(((vals()['K1-X'] || {}).Vendor || {}).v || '') === 't19-live-typed'
         && !!(corrs()['K2-X'] || {}).Line && !!offs()['K3-X'],
     'R15h (THE FILES) CONTROL: ...and their records land under the FOLDER\'S own keys',
     { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()) });
 
-  /* ---- AND THE FALSE POSITIVE THAT WOULD HAVE COST MORE THAN THE BUG.
-     Measured in choke/logs/p2_rule.txt before the rule was written. */
+  /* ---- AND THE FALSE POSITIVE THAT COST MORE THAN THE BUG, kept as a gate
+     because re-adding a per-row value comparison would break it first. */
   const lk = await wa.page.evaluate(R15_LOOKUP_KEY + '()');
   note('R15 a master_lookup key extra after a colleague edits the shared accounts master', lk);
   check(lk.keyDriftSaysDrifted === true && lk.writeAllowed === true,
-    'R15i THE FALSE POSITIVE IS NOT TAKEN. A key extra that is a master_lookup reads DRIFTED to '
-    + 'Reco.keyDrift the moment a colleague saves the shared accounts master - correctly, because '
-    + 'the cell IS printing a recalculation (handover 14.3) - but THE RULE DID NOT MOVE, every '
-    + 'surface in the app is deliberately on the frozen key, and the day file holds it. A guard '
-    + 'that fired there would refuse every gesture on every template with a lookup in its key for '
-    + 'the life of the file. Reco._keyRowCols leaves those extras out and says so', lk);
+    'R15i A TEMPLATE WHOSE KEY IS A master_lookup IS FULLY WRITABLE while Reco.keyDrift says its '
+    + 'key cell is printing a recalculation - correctly, because it is (handover 14.3) - and the '
+    + 'rule did NOT move. Every surface in the app is deliberately on the frozen key and the day '
+    + 'file holds it. This was the first measured false positive of a per-row value comparison '
+    + '(choke/logs/p2_rule.txt C4) and it is kept here as the cheapest tripwire against one being '
+    + 're-added', lk);
+  const dc = await wa.page.evaluate(`(function () {
+    try { return Reco.keyDriftCount('TPL_W'); } catch (e) { return -1; } })()`);
+  check(dc >= 3,
+    'R15j Reco.keyDriftCount STILL NAMES THE ROWS A SIGNATURE CHECK WOULD HAVE TO COVER. It has no '
+    + 'reader in the app - only this suite, run_pk_extras G8 and the documents - so it is not a '
+    + 'safety control and 18.11 no longer claims it is one; it is the hook the T-S10-19 fix needs, '
+    + 'and it is gated so it does not get tidied away before that round happens', dc);
   await wa.ctx.close();
 }
 
@@ -11167,32 +11630,426 @@ section(85, 'R16 T-S10-20 — WHAT THE QUESTION COSTS, AS AN OPERATION COUNT');
   const cn = await qa.page.evaluate(R16_COST + '(false)');
   note('R16 a template whose key names NO added column, 2,000 rows offset in one gesture', cn);
   check(cn.offsetsFiled === cn.rows && cn.recomputes === 0,
-    'R16a A TEMPLATE WHOSE KEY NAMES NO ADDED COLUMN PAYS NOTHING. Reco._keyExtraSet returns null, '
-    + 'so the per-row question is one property read and ZERO recomputes for 2,000 rows - which is '
-    + 'every template that existed before #24 and every template keyed on a file column. An '
-    + 'operation count and not a clock (handover 16.4a)', cn);
+    'R16a A TEMPLATE WHOSE KEY NAMES NO ADDED COLUMN PAYS NOTHING - zero recomputes for 2,000 '
+    + 'rows. An operation count and not a clock (handover 16.4a)', cn);
   const ck = await qa.page.evaluate(R16_COST + '(true)');
   note('R16 a template with a FORMULA key extra, 2,000 rows offset in one gesture', ck);
-  /* ONE RECOMPUTE PER QUESTION ASKED, and the questions are counted beside it
-     so the ratio is the measurement rather than a round number. The surplus
-     over `questionsAsked` is the REPAINT after the gesture, which recomputes
-     the key cell of the rows the grid has on screen (~110) and is not the
-     guard's; the bound is set to catch the regression that matters - anything
-     per-row-per-paint or quadratic, which at 2,000 rows is 220,000 or
-     4,000,000, three orders of magnitude outside it. Measured on this tree:
-     4,110 recomputes for 4,000 questions. */
-  check(ck.offsetsFiled === ck.rows
-        && ck.recomputes <= ck.questionsAsked + 500 && ck.recomputes < ck.rows * 3,
-    'R16b A FORMULA-KEYED TEMPLATE PAYS ONE RECOMPUTE PER QUESTION ASKED (plus the grid\'s own '
-    + 'repaint), beside a write that is already O(rows). The question is asked ONCE PER RECORD '
-    + 'WRITTEN, which is the whole reason it is not inside Reco.rowKey - there it would run once '
-    + 'per row per PAINT, i.e. half a million times on a 500k-row extract',
+  /* T-S10-21: AND A FORMULA-KEYED TEMPLATE NOW PAYS THE SAME NOTHING. The
+     question is Reco._keyStale[tpl.id] and nothing else, so the key's shape
+     cannot change what it costs. The surplus counted here is the grid's own
+     REPAINT after the gesture (~110 key cells on screen), which is not the
+     guard's and happens whether the guard exists or not; the bound catches the
+     regression that matters - anything per-row or quadratic, which at 2,000
+     rows is 2,000 or 4,000,000. */
+  check(ck.offsetsFiled === ck.rows && ck.recomputes < 500,
+    'R16b A FORMULA-KEYED TEMPLATE PAYS THE SAME NOTHING. The question is the template latch - one '
+    + 'property read - so no recompute happens on any write path at any key shape. The previous '
+    + 'build paid one recompute per question (4,110 for 4,000 questions here), which was the price '
+    + 'of a per-row arm whose answer was wrong (T-S10-21)',
     Object.assign({ perQuestion: +(ck.recomputes / ck.questionsAsked).toFixed(3) }, ck));
   check(ck.questionsAsked >= ck.rows,
     'R16c premise: the question really was asked of every row - so R16b is a measurement and not '
     + 'an accident of a guard that never ran', ck);
   await qa.ctx.close();
 }
+
+/* ============================================================ [86] ====
+   T-S10-21. THE FIVE MEASURED FALSE REFUSALS THE PER-ROW DRIFT ARM CAUSED.
+
+   A REMOVAL STILL NEEDS A GATE. Reco._keyRowDrifted asked "is row._pk still
+   what this template's rule computes for this row NOW?" and read a
+   disagreement as "the template's rule has moved". That inference is invalid:
+   a frozen _pk is SUPPOSED to disagree with a recompute whenever the ROW'S OWN
+   DATA changed (handover 14.3), which is what freezing a key means - so
+   ordinary work read as drift. Three rounds narrowed it and declared it
+   closed, each narrowing being a list of the shapes somebody had thought of.
+
+   SO EACH OF THE FIVE SHAPES IS A SEPARATE NAMED CHECK, driven through the
+   app's own gestures and asserted on the FILES and the VALUES. Nothing here
+   calls into the guard, so these run against a build with the arm and read
+   RED: against 5c1fb25 the five read
+     R17a  "Nothing was corrected… the keys they were SAVED with" AND a green
+           "Correction applied", reco/correctionMaster.json never created
+     R17a2 correct / offset / edit / group all refused on that row afterwards
+     R17e  the second edit of the row refused, nothing in the day file
+     R17c  the partial recompute refused
+     R17d  not drifted today, drifted tomorrow, the correction refused
+     R17b  one corrected row refused "↻ Replace All" for all three rows
+   (scratchpad/dataloss/unbrick/logs/FAILFIRST_v1.txt). ANYBODY RE-ADDING A
+   PER-ROW ARM HAS TO MAKE ALL SIX GREEN FIRST, and then argue why a seventh
+   shape cannot exist - which is the argument nobody has made, because the arm
+   fires whenever a row's own data has moved since its key was minted, and
+   every feature of this app that EDITS A ROW does that. */
+section(86, 'R17 T-S10-21 — THE FIVE SHAPES THE PER-ROW DRIFT ARM REFUSED, EACH ONE A NAMED GATE');
+{
+  const Y = makeRoot('share-r17');
+  const brY = await startBridge(Y.root, PORT_R17); procs.push(brY.proc);
+  const ya = await openReco(browser, brY);
+
+  const SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
+  const MK = (id, name, extras, pks, cols, editable, rows, rowCols) => `(async function () {
+    RecoTemplate.create(); const t = RecoTemplate._editing;
+    t.id = ${JSON.stringify(id)}; t.name = ${JSON.stringify(name)};
+    t.columns = ${JSON.stringify(cols)}.map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+    t.additionalColumns = ${JSON.stringify(extras)};
+    t.primaryKeys = ${JSON.stringify(pks)}; t.valueColumn = 'Amount';
+    t.displayColumns = ${JSON.stringify(cols)}; t.editableColumns = ${JSON.stringify(editable)};
+    t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+    const real = window.confirm; window.confirm = () => true;
+    try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+    const tpl = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(id)});
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = ${JSON.stringify(id)};
+    await Reco.ingestData(tpl, ${JSON.stringify(rows)}, ${JSON.stringify(rowCols)});
+    App.closeModal(); ${SETTLE}
+    const s = AppState.recoSessions[${JSON.stringify(id)}];
+    return { keys: s.data.map(r => r._pk), latch: !!(Reco._keyStale || {})[${JSON.stringify(id)}] };
+  })`;
+  const REFUSED = /identifies its rows|were SAVED with/;
+  const dayAll = () => { const out = [];
+    const walkDir = d => { let es = [];
+      try { es = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+      for (const e of es) { const p = path.join(d, e.name);
+        if (e.isDirectory()) walkDir(p); else if (/\.csv$/.test(e.name)) out.push(fs.readFileSync(p, 'utf8')); } };
+    walkDir(path.join(Y.root, 'reco_data')); return out.join('\n'); };
+
+  /* ---- SHAPE 1: AN ORDINARY CORRECTION OF A KEY-FEEDING COLUMN.
+     Handover 14's own worked shape - a key extra CONCAT({Doc}) over a FILE
+     column - and the operator corrects Doc, which is the Correction tab's
+     whole purpose. */
+  const s1 = await ya.page.evaluate(MK('T1', 'Corr1',
+    [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }], ['Ref'],
+    ['Doc','Line','Amount'], ['Doc','Line'],
+    [1,2,3].map(i => ({ Doc:'E'+i, Line:'L'+i, Amount:String(i*10) })), ['Doc','Line','Amount']) + '()');
+  note('R17a premise', s1);
+  check(s1.keys.join() === 'E1,E2,E3' && s1.latch === false,
+    'R17a premise: three rows keyed E1/E2/E3 on handover 14\'s worked shape, latch DOWN, one '
+    + 'window, nothing changed by anybody', s1);
+  const c1 = await ya.page.evaluate(`(async function () {
+    window.__toasts = [];
+    const s = AppState.recoSessions.T1;
+    Reco.applyCorrection(0, 'Doc', 'E1C', null, s.data[0]._id);
+    ${SETTLE}
+    const out = { said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70)),
+                  rowDoc: s.data[0].Doc, corrected: !!s.data[0]._corrected_Doc,
+                  sessCorr: Object.keys(s.corrections || {}) };
+    const gest = {}; const row = s.data[0];
+    const run = async (n, fn) => { window.__toasts = [];
+      try { await fn(); } catch (e) { gest[n + '_threw'] = String(e.message || e); }
+      ${SETTLE}
+      gest[n] = (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70)); };
+    await run('correct_line',  () => Reco.applyCorrection(0, 'Line', 'L9', null, row._id));
+    await run('manual_offset', () => Reco.manualOffset(0, null, row._id));
+    await run('edit_cell',     () => Reco.editCell(0, 'Line', 'L7', null, row._id));
+    await run('group', () => { s.selectedRows = {}; s.selectedRows[row._id] = true;
+      const rp = window.prompt; window.prompt = () => 'G1';
+      try { Reco.createGroupFromSelection(); } finally { window.prompt = rp; } });
+    out.gestures = gest; out.latch = !!(Reco._keyStale || {}).T1;
+    return out; })()`);
+  note('R17a the correction, and every later gesture on that row', c1);
+  const cm1 = diskJson(Y.root, 'reco/correctionMaster.json');
+  note('R17a reco/correctionMaster.json', cm1);
+  check(c1.said.some(s => /success: Correction applied/.test(s))
+        && !c1.said.some(s => REFUSED.test(s))
+        && !!(cm1 && cm1.T1 && cm1.T1.E1 && cm1.T1.E1.Doc),
+    'R17a AN ORDINARY CORRECTION OF A KEY-FEEDING COLUMN GOES THROUGH and reaches '
+    + 'reco/correctionMaster.json under the frozen key E1, with ONE toast and no refusal. With the '
+    + 'per-row arm it said BOTH "Nothing was corrected…" and a green "Correction applied", the '
+    + 'master was never created, and the row was left changed on screen',
+    { said: c1.said, master: cm1 });
+  const bricked = Object.keys(c1.gestures).filter(k => (c1.gestures[k] || []).join(' ').match(REFUSED));
+  check(bricked.length === 0,
+    'R17a2 AND THE ROW IS NOT BRICKED. Correcting another column, the manual offset, a cell edit '
+    + 'and Create Group from Selection all work on the corrected row. With the per-row arm all '
+    + 'four were refused with a sentence that blames a colleague for a template change that never '
+    + 'happened, and the recovery it named - Clear Loaded Data and load again - is where the '
+    + 'correction was actually lost', { bricked, gestures: c1.gestures });
+
+  /* ---- SHAPE 2: THE SECOND EDIT OF A ROW WHOSE KEY-FEEDING EDITABLE COLUMN
+     WAS EDITED. "A template column the template marks editable" and "a key
+     formula over it" are both ordinary settings. */
+  await ya.page.evaluate(MK('T2', 'Edit2',
+    [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }], ['Ref'],
+    ['Doc','Line','Amount'], ['Doc','Line'],
+    [1,2].map(i => ({ Doc:'D'+i, Line:'L'+i, Amount:String(i*10) })), ['Doc','Line','Amount']) + '()');
+  const e2 = await ya.page.evaluate(`(async function () {
+    const s = AppState.recoSessions.T2; const row = s.data[0]; const out = {};
+    window.__toasts = []; Reco.editCell(0, 'Doc', 'D1X', null, row._id); ${SETTLE}
+    out.said1 = (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70));
+    window.__toasts = []; Reco.editCell(0, 'Line', 'L1X', null, row._id); ${SETTLE}
+    out.said2 = (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70));
+    out.doc = row.Doc; out.line = row.Line; return out; })()`);
+  note('R17e the first and the second edit of a key-feeding editable column', e2);
+  const day2 = dayAll();
+  check(!e2.said2.some(s => REFUSED.test(s)) && e2.line === 'L1X' && /L1X/.test(day2),
+    'R17e THE SECOND EDIT OF THAT ROW GOES THROUGH and its version row reaches the shared day '
+    + 'file. With the per-row arm the row bricked itself on its FIRST use: the first edit went '
+    + 'through in silence and the second was refused',
+    { said: e2.said2, line: e2.line, inDayFile: /L1X/.test(day2) });
+
+  /* ---- SHAPE 3: A PARTIAL RECOMPUTE IS A POSITIVE DISAGREEMENT. The old C6
+     skip only covered a recompute that was WHOLLY '' or '#ERR', so handover
+     14.4's own CONCAT({Base},"-",{Line}) with one component missing from this
+     month's file recomputed to 'E1-' against a minted 'E1-S1'. */
+  const s3 = await ya.page.evaluate(MK('T3', 'Partial3',
+    [{ name:'Ref', type:'formula', formula:'CONCAT({Doc},"-",{Sub})' }], ['Ref'],
+    ['Doc','Sub','Amount'], ['Sub'],
+    [{ Doc:'E1', Sub:'S1', Amount:'10' }, { Doc:'E2', Sub:'S2', Amount:'20' }],
+    ['Doc','Sub','Amount']) + '()');
+  check(s3.keys[0] === 'E1-S1', 'R17c premise: the key really is the two-component formula', s3);
+  const p3 = await ya.page.evaluate(`(async function () {
+    const s = AppState.recoSessions.T3; const row = s.data[0]; const minted = row._pk;
+    /* the row comes back WITHOUT that column - a day file, or an extract whose
+       header does not carry it (handover 14.4's own hazard) */
+    delete row.Sub;
+    window.__toasts = [];
+    Reco.applyCorrection(0, 'Amount', '99', null, row._id); ${SETTLE}
+    return { minted, said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70)),
+             amount: row.Amount }; })()`);
+  note('R17c the partial recompute', p3);
+  const cm3 = diskJson(Y.root, 'reco/correctionMaster.json');
+  check(!p3.said.some(s => REFUSED.test(s)) && p3.said.some(s => /success/.test(s))
+        && !!(cm3 && cm3.T3 && cm3.T3['E1-S1']),
+    'R17c A MULTI-COMPONENT KEY FORMULA WITH ONE COMPONENT MISSING FROM THIS FILE\'S SHAPE is not '
+    + 'a refusal. The recompute is the partial "E1-" against the minted "E1-S1" - a POSITIVE '
+    + 'disagreement, which the documented C6 non-firing did not cover and never did; handover '
+    + '14.4\'s own example is exactly this shape',
+    { said: p3.said, master: cm3 && cm3.T3 });
+
+  /* ---- SHAPE 4: A KEY FORMULA THAT READS THE CLOCK. Pushed straight into
+     AppState.recoTemplates because that is the shape: RecoTemplate._pkFormulaOk
+     refuses such a formula on SAVE, so this is "a template saved by an older
+     build" - and nothing re-checks a stored one. */
+  const s4 = await ya.page.evaluate(`(async function () {
+    const t = { id:'T4', name:'Clock4',
+      columns: ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' })),
+      additionalColumns: [{ name:'Ref', type:'formula', formula:'CONCAT({Doc},"-",AGEING({Doc}))' }],
+      primaryKeys: ['Ref'], valueColumn: 'Amount', displayColumns: ['Doc','Line','Amount'],
+      editableColumns: ['Line'], toleranceMode: 'value', toleranceValue: 1e12 };
+    AppState.recoTemplates.push(t); AppState.activeRecoId = 'T4';
+    const tpl = AppState.recoTemplates.find(x => x.id === 'T4');
+    await Reco.ingestData(tpl, [{ Doc:'2026-01-01', Line:'L1', Amount:'10' }], ['Doc','Line','Amount']);
+    App.closeModal(); ${SETTLE}
+    return { keys: (AppState.recoSessions.T4.data || []).map(r => r._pk) }; })()`);
+  note('R17d premise: a stored key formula that reads the clock', s4);
+  check(/^2026-01-01-/.test(String(s4.keys[0])),
+    'R17d premise: the row really is keyed on the clock-reading formula', s4);
+  const k4 = await ya.page.evaluate(`(async function () {
+    const s = AppState.recoSessions.T4; const row = s.data[0]; const out = { pk: row._pk };
+    window.__toasts = []; Reco.applyCorrection(0, 'Line', 'L9', null, row._id); ${SETTLE}
+    out.today = (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70));
+    const RealDate = Date, D = 86400000;
+    function FakeDate(...a) { if (!a.length) return new RealDate(RealDate.now() + D); return new RealDate(...a); }
+    FakeDate.now = () => RealDate.now() + D; FakeDate.parse = RealDate.parse; FakeDate.UTC = RealDate.UTC;
+    FakeDate.prototype = RealDate.prototype;
+    window.Date = FakeDate;
+    try { window.__toasts = []; Reco.applyCorrection(0, 'Amount', '99', null, row._id); ${SETTLE}
+          out.tomorrow = (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70)); }
+    finally { window.Date = RealDate; }
+    return out; })()`);
+  note('R17d today, and with the page\'s clock moved on a day', k4);
+  check(!k4.today.some(s => REFUSED.test(s)) && !k4.tomorrow.some(s => REFUSED.test(s))
+        && k4.tomorrow.some(s => /success/.test(s)),
+    'R17d A STORED KEY FORMULA THAT READS THE CLOCK IS NOT A TIME BOMB. The same gesture works '
+    + 'today and still works with the page\'s clock moved on a day. With the per-row arm the row '
+    + 'was not drifted today and WAS drifted tomorrow, for every row of that template, so the '
+    + 'whole reconciliation went read-only overnight with a sentence blaming a colleague', k4);
+
+  /* ---- SHAPE 5: ONE BRICKED ROW REFUSED FIND & REPLACE FOR THE WHOLE FILE.
+     A real click on "↻ Replace All", with one row whose key-feeding column was
+     corrected. */
+  await ya.page.evaluate(MK('T5', 'Repl5',
+    [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }], ['Ref'],
+    ['Doc','Line','Amount'], ['Doc','Line'],
+    [1,2,3].map(i => ({ Doc:'Z'+i, Line:'Q'+i, Amount:String(i*10) })), ['Doc','Line','Amount']) + '()');
+  const r5 = await ya.page.evaluate(`(async function () {
+    const s = AppState.recoSessions.T5;
+    Reco.applyCorrection(0, 'Doc', 'Z1C', null, s.data[0]._id); ${SETTLE}
+    FindReplace.open(null);
+    await new Promise(r => setTimeout(r, 150));
+    const f = document.getElementById('frFind'), rp = document.getElementById('frReplace');
+    if (f) f.value = 'Q'; if (rp) rp.value = 'W';
+    window.__toasts = [];
+    const btns = Array.from(document.querySelectorAll('button')).filter(b => /Replace All/.test(b.textContent));
+    if (btns.length) btns[btns.length - 1].click();
+    await new Promise(r => setTimeout(r, 500)); ${SETTLE}
+    const out = { clicked: btns.length > 0,
+      said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 90)),
+      lines: s.data.map(r => r.Line) };
+    App.closeModal(); return out; })()`);
+  note('R17b a real click on "↻ Replace All" with one corrected row on screen', r5);
+  const day5 = dayAll();
+  check(r5.clicked && !r5.said.some(s => REFUSED.test(s))
+        && r5.lines.join() === 'W1,W2,W3' && /W1/.test(day5) && /W3/.test(day5),
+    'R17b ONE CORRECTED ROW NO LONGER REFUSES FIND & REPLACE FOR THE WHOLE FILE. Every row is '
+    + 'replaced and every version row reaches the shared day file. _replaceAll asks about every '
+    + 'row in the file before its loop, so with the per-row arm a single bricked row made a real '
+    + 'click on "↻ Replace All" say "Nothing was replaced" about all three - a cost handover 15.6 '
+    + 'disclosed for sheet mode\'s Fill Column and never mentioned for this control',
+    { said: r5.said, lines: r5.lines, inDayFile: { w1: /W1/.test(day5), w3: /W3/.test(day5) } });
+  await ya.ctx.close();
+}
+
+
+/* ============================================================ [87] ====
+   T-S10-21. MUTATE-THEN-ASK IS A BUG WHATEVER THE GUARD ASKS, AND DOOR 22.
+
+   Reco.applyCorrection wrote `row[colName] = newVal` and THEN asked for the
+   key, so a refusal left the row mutated, the screen saying the correction
+   happened, `_corrected_<col>` set, reco/recoSessions.json on the share
+   carrying the changed value through AppState.save(), and NO record anywhere -
+   two toasts, one green and one red. Find & Replace had the same order.
+
+   THE ORDER IS THE BUG, not the question, so the fix is the order and the gate
+   is the ORDER: [82] G82m reads it out of the source at all eleven sites,
+   because after the per-row arm came out the order happens to be SAFE at
+   runtime - the gesture asked the same question a hundred lines earlier - and
+   an order that is safe by accident is exactly what came back three rounds
+   running. THESE checks are the behavioural half: they assert THE ROW IS
+   UNCHANGED after a refusal, on screen and on the share, rather than merely
+   that the master is empty.
+
+   AND DOOR 22. Reco.openSpecialJv's completion callback wrote primaryKeys /
+   sentPks - row keys taken straight off the rows on screen - into
+   AppState.pendingSpecialJV, a PERSIST_KEYS whole-file write of
+   reco/pendingSpecialJV.json that every colleague parses at boot. With the
+   latch UP it said only `success: Special JV "TCHX" completed` and the share
+   gained ["E1","E2"] while the folder's own rule computed E1-X/E2-X, so the
+   rows whose JV had already been raised looked un-sent to everybody and could
+   be sent and posted again. That is the double post this cluster exists to
+   stop, and [82] could not see it because pendingSpecialJV was not one of the
+   six masters it enumerated. */
+section(87, 'R18 T-S10-21 — ASK FIRST, MUTATE AFTER; AND DOOR 22, THE SPECIAL JV');
+{
+  const Z = makeRoot('share-r18');
+  const brZ = await startBridge(Z.root, PORT_R18); procs.push(brZ.proc);
+  const za = await openReco(browser, brZ);
+  const SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
+
+  await za.page.evaluate(`(async function () {
+    RecoTemplate.create(); const t = RecoTemplate._editing;
+    t.id = 'TZ'; t.name = 'AskFirst';
+    t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+    t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }];
+    t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc','Line','Amount']; t.editableColumns = ['Doc','Line'];
+    t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+    const real = window.confirm; window.confirm = () => true;
+    try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TZ');
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TZ';
+    await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'E'+i, Line:'L'+i, Amount:String(i*10) })),
+      ['Doc','Line','Amount']);
+    App.closeModal(); ${SETTLE} return true; })()`);
+  /* B has the rows loaded; A changes the key rule under it, which is the only
+     way the latch goes up and therefore the only way a refusal happens now. */
+  const zb = await openReco(browser, brZ);
+  await zb.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TZ');
+    RecoTemplate.open(tpl.id); AppState.activeRecoId = 'TZ'; App.closeModal();
+    await new Promise(r => setTimeout(r, 250)); return true; })()`);
+  await za.page.evaluate(`(async function () {
+    const real = window.confirm; window.confirm = () => true;
+    try { RecoTemplate.edit('TZ');
+      RecoTemplate._editing.additionalColumns.find(a => a.name === 'Ref').formula = 'CONCAT({Doc},"-X")';
+      RecoTemplate.saveTemplate();
+      if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    } finally { window.confirm = real; }
+    await AppState.flush(); return true; })()`);
+  const up = await zb.page.evaluate(`(async function () {
+    window.__toasts = [];
+    const real = window.confirm; window.confirm = () => true;
+    try { RecoTemplate.edit('TZ'); RecoTemplate._editing.description = 'B';
+      RecoTemplate.saveTemplate();
+      if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    } finally { window.confirm = real; }
+    await AppState.flush();
+    const s = AppState.recoSessions.TZ;
+    return { latch: !!(Reco._keyStale || {}).TZ, docs: s.data.map(r => r.Doc) }; })()`);
+  note('R18 premise: B refused, the latch is UP, the rows are still E1/E2/E3', up);
+  check(up.latch === true && up.docs.join() === 'E1,E2,E3',
+    'R18 premise: the template latch is UP in B and its rows carry the old keys', up);
+
+  const m1 = await zb.page.evaluate(`(async function () {
+    const s = AppState.recoSessions.TZ; const row = s.data[1];
+    const before = { doc: row.Doc, line: row.Line,
+                     flags: Object.keys(row).filter(k => /^_corrected_/.test(k)) };
+    window.__toasts = [];
+    Reco.applyCorrection(1, 'Doc', 'SHOULD-NOT-LAND', null, row._id); ${SETTLE}
+    return { before, after: { doc: row.Doc, line: row.Line,
+               flags: Object.keys(row).filter(k => /^_corrected_/.test(k)) },
+             said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70)),
+             sessCorr: Object.keys(s.corrections || {}) }; })()`);
+  note('R18a a refused correction', m1);
+  check(m1.after.doc === m1.before.doc && m1.after.flags.join() === m1.before.flags.join()
+        && !m1.sessCorr.length && m1.said.length === 1 && /^error/.test(m1.said[0]),
+    'R18a A REFUSED CORRECTION LEAVES THE ROW UNCHANGED - row[col] is exactly what it was, no '
+    + '_corrected_<col> flag appeared, sess.corrections is empty - and says EXACTLY ONE toast, in '
+    + 'red. The old order mutated first and said both "Nothing was corrected…" and a green '
+    + '"Correction applied"', m1);
+  const sessFile = diskJson(Z.root, 'reco/recoSessions.json');
+  const tzRows = ((sessFile || {}).TZ || {}).data || [];
+  check(!JSON.stringify(tzRows).includes('SHOULD-NOT-LAND'),
+    'R18a2 (THE FILE) ...and reco/recoSessions.json ON THE SHARE does not carry the refused value. '
+    + 'This is the half a toast cannot show: the old order mutated the row and AppState.save() '
+    + 'publishes the WHOLE session file, so the changed value reached the shared folder with no '
+    + 'correction record anywhere to explain it', tzRows.map(r => r.Doc));
+
+  const m2 = await zb.page.evaluate(`(async function () {
+    const s = AppState.recoSessions.TZ;
+    const before = s.data.map(r => r.Line);
+    FindReplace.open(null); await new Promise(r => setTimeout(r, 150));
+    const f = document.getElementById('frFind'), rp = document.getElementById('frReplace');
+    if (f) f.value = 'L'; if (rp) rp.value = 'NOPE';
+    window.__toasts = [];
+    const btns = Array.from(document.querySelectorAll('button')).filter(b => /Replace All/.test(b.textContent));
+    if (btns.length) btns[btns.length - 1].click();
+    await new Promise(r => setTimeout(r, 400)); ${SETTLE}
+    const out = { clicked: btns.length > 0, before, after: s.data.map(r => r.Line),
+      said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 70)) };
+    App.closeModal(); return out; })()`);
+  note('R18b a refused "↻ Replace All", by a real click', m2);
+  check(m2.clicked && m2.after.join() === m2.before.join()
+        && !m2.said.some(s => /success/.test(s)),
+    'R18b A REFUSED "↻ Replace All" LEAVES EVERY ROW UNCHANGED and says nothing green. The old '
+    + 'loop rewrote every matching cell and asked per row afterwards, so the view was rewritten on '
+    + 'screen and in the session file with not one version row in the day file', m2);
+
+  const jv = await zb.page.evaluate(`(async function () {
+    window.__toasts = [];
+    const s = AppState.recoSessions.TZ; const rows = s.data.slice(0, 2);
+    SpecialJV.registry = SpecialJV.registry || {};
+    SpecialJV.registry.TCHX = { ref:'TCHX', name:'Test JV', inputColumns:[{name:'Doc'},{name:'Amount'}] };
+    const realOpen = SpecialJV.open; let opened = false;
+    /* SpecialJV.open launches a SEPARATE HTML application in a window, so its
+       RETURN is the one thing a test has to stand in for; everything the
+       callback then does is the app's own code, unmodified. */
+    SpecialJV.open = function (ref, payload, done) { opened = true;
+      done({ type:'jv', ref:ref, jvId:'JV_TZ', lines:[{ account:'1', dr:'10', cr:'0' }],
+             primaryKeys: payload.map(p => p._pk), inputData: payload, meta:null }); };
+    Reco._pendingEntry = { tplId:'TZ', jvBuckets:{ TCHX: rows }, jvCompleted:[], aegTpl:null };
+    try { Reco.openSpecialJv('TCHX'); } catch (e) { window.__jvErr = String(e.message || e); }
+    finally { SpecialJV.open = realOpen; }
+    ${SETTLE}
+    return { jvPageOpened: opened, err: window.__jvErr || null,
+             said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 140)),
+             pending: JSON.parse(JSON.stringify(AppState.pendingSpecialJV || {})) }; })()`);
+  note('R18c the Special JV send with the latch UP', jv);
+  const pend = diskJson(Z.root, 'reco/pendingSpecialJV.json');
+  note('R18c reco/pendingSpecialJV.json on the share', pend);
+  check(jv.jvPageOpened === false && jv.said.some(s => /identifies its rows/.test(s))
+        && !jv.said.some(s => /success/.test(s))
+        && !(pend && pend.TZ && pend.TZ.length),
+    'R18c DOOR 22 IS CLOSED. The send is refused BEFORE the JV page opens - being told after the '
+    + 'operator has keyed a JV in another application is being told too late - nothing green is '
+    + 'said, and reco/pendingSpecialJV.json gains nothing. It used to say only `Special JV "TCHX" '
+    + 'completed` while the share gained sentPks ["E1","E2"] under a rule that computes E1-X/E2-X, '
+    + 'so those rows read as un-sent to every colleague and could be posted twice',
+    { jvPageOpened: jv.jvPageOpened, said: jv.said, share: pend });
+  await za.ctx.close(); await zb.ctx.close();
+}
+
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
   check(allErrors.length === 0, 'U5 no page error across the whole run', allErrors.slice(0, 6));

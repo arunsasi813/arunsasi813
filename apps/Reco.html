@@ -6739,7 +6739,11 @@ const FindReplace = {
     /* T-S10-20. Find & Replace writes a version row per touched key into the
        shared day file, keyed off the row on screen - a door the enumeration
        found and no round had listed. */
+    /* T-S10-21. ASK FIRST, MUTATE AFTER: the cell used to be rewritten and
+       the key asked afterwards, so a refusal left the grid showing the
+       replacement and the shared day file holding none of it. */
     if (Reco._keyStaleBlock(tpl, 'replaced', sess, [row])) return;
+    if (Reco._keyAsk(tpl, sess, row, 'replaced')) return;
     row[m.col] = newVal;
     const pk = Reco.writeVerKey(tpl, sess, row, 'replaced');
     if (pk) {
@@ -6768,14 +6772,26 @@ const FindReplace = {
     const cols = FindReplace._columnsToSearch(tpl).filter(c => !c.isExtra);
     if (!cols.length) { U.toast('Pick a standard column or "All standard columns" to replace.', 'error'); return; }
 
-    /* T-S10-20. ASKED BEFORE THE LOOP, because the loop mutates the rows
-       first and writes afterwards: a refusal discovered at the write would
-       leave the screen changed and the shared day file not, which is the
-       "Filled N cells having done nothing" shape F18 was about. */
+    /* T-S10-20 / T-S10-21. PLAN, ASK, THEN MUTATE - in that order, and
+       all-or-none. The loop used to rewrite every matching cell and ask the
+       key afterwards, row by row: one refusal left the whole view rewritten
+       on screen and in reco/recoSessions.json with not one version row in the
+       shared day file (measured, repro_a2.txt A2-2). Nothing is written to a
+       row until every row this gesture touches has been allowed.
+
+       WHY IT IS STILL ALL-OR-NONE AND NOT PER-ROW-SKIP. The attack asked for
+       one or the other, disclosed. Since T-S10-21 removed the per-row arm,
+       "unsafe" is a property of the TEMPLATE (its key definition changed while
+       these rows were loaded) and not of a row, so every row in the view
+       answers the same way: a per-row skip could only ever skip all of them or
+       none, and "Replaced 0 of 2,000" would be a worse sentence than one
+       refusal. Handover 15.6 says this, and says the same correction for sheet
+       mode's "Fill Column", whose disclosure described the per-row cost that
+       no longer exists. */
     if (Reco._keyStaleBlock(tpl, 'replaced', sess, sess.data)) return;
-    let cellChanges = 0;
-    const touchedRowIdx = new Set();
-    sess.data.forEach((row, ri) => {
+    const plan = [];
+    sess.data.forEach(row => {
+      const ch = [];
       cols.forEach(c => {
         const oldVal = row[c.name] == null ? '' : String(row[c.name]);
         if (!oldVal) return;
@@ -6784,21 +6800,26 @@ const FindReplace = {
         rx.lastIndex = 0;
         const newVal = oldVal.replace(rx, FindReplace._replacement());
         if (newVal === oldVal) return;
-        row[c.name] = newVal;
-        cellChanges++;
-        touchedRowIdx.add(ri);
+        ch.push({ col: c.name, newVal });
       });
+      if (ch.length) plan.push({ row, ch });
     });
 
-    if (!cellChanges) { U.toast('Nothing matched', 'error'); return; }
+    if (!plan.length) { U.toast('Nothing matched', 'error'); return; }
 
-    // Batch-write one Cn per touched PK
+    // ASK: every touched row, through the chokepoint, before a single cell moves.
     const pkRows = [];
-    touchedRowIdx.forEach(ri => {
-      const row = sess.data[ri];
-      const pk = Reco.writeVerKey(tpl, sess, row, 'replaced');   // T-S10-20
-      if (pk) pkRows.push({ pk, row });
-    });
+    for (const p of plan) {
+      const pk = Reco.writeVerKey(tpl, sess, p.row, 'replaced');   // T-S10-20
+      if (!pk) return;                 // refused (or keyless): nothing is mutated
+      pkRows.push({ pk, row: p.row });
+    }
+    // MUTATE: only now. `plan.length` is the touched-row count by construction
+    // (one entry per row with at least one change), so nothing has to look a
+    // row's index up - which on a 200,000-row file would be quadratic for a
+    // number that only goes into a toast.
+    let cellChanges = 0;
+    plan.forEach(p => p.ch.forEach(c => { p.row[c.col] = c.newVal; cellChanges++; }));
     try {
       const versions = await Versioning.appendChangesBatch(tpl, pkRows);
       // Stamp _ver on each touched row
@@ -6807,7 +6828,7 @@ const FindReplace = {
 
     AppState.save();
     FindReplace._runSearch();
-    U.toast('Replaced '+cellChanges+' cell(s) across '+touchedRowIdx.size+' row(s)', 'success');
+    U.toast('Replaced '+cellChanges+' cell(s) across '+plan.length+' row(s)', 'success');
   }
 };
 
@@ -16226,12 +16247,14 @@ _xlOffsetSelectedRows(rowIds) {
   rowIds.forEach(rowId => {
     const row = Reco._rowById(sess, rowId);
     if (!row || sess.offsets[rowId]) return;
+    /* T-S10-20. THE CHOKEPOINT, not the gesture list: Reco.writeKey is the
+       only way a row becomes a key for a record the folder shares.
+       T-S10-21: ASKED BEFORE THE ROW IS TOUCHED, so a refusal cannot leave the
+       row marked offset on screen with nothing filed on the share. */
+    if (Reco._keyAsk(tpl, sess, row, 'offset')) return;
     sess.offsets[rowId] = true;
     row._recoId = rid;
     row._manualOffset = true;
-    /* T-S10-20. THE CHOKEPOINT, not the gesture list: Reco.writeKey is the
-       only way a row becomes a key for a record the folder shares, and the
-       `if (pk)` that was already here makes the refusal all-or-none. */
     const pk = Reco.writeKey(tpl, sess, row, 'offset');
     if (pk) mm[pk] = { recoId: rid, byUser: true };
     n++;
@@ -17229,6 +17252,10 @@ _ssCommit(fillColumn, moveDir) {
       });
     } else {
       const pkRows = [];
+      /* T-S10-21: ASK EVERY ROW FIRST, all-or-none, then fill. The loop used
+         to write the cell and ask afterwards, so a refusal would have left the
+         whole column rewritten on screen with nothing in the day file. */
+      if (filtered.some(row => Reco._keyAsk(tpl, sess, row, 'filled'))) return;
       filtered.forEach(row => {
         const rk = Reco._ssRowKey(row);
         if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][ac.col];
@@ -17253,6 +17280,7 @@ _ssCommit(fillColumn, moveDir) {
     if (raw.startsWith('=')) {
       sess.cellFormulas[rk][ac.col] = raw;
     } else {
+      if (Reco._keyAsk(tpl, sess, row, 'changed')) return;   // T-S10-21
       delete sess.cellFormulas[rk][ac.col];
       row[ac.col] = raw;
       const vk = Reco.writeVerKey(tpl, sess, row, 'changed');   // T-S10-20
@@ -17289,6 +17317,7 @@ _ssClearActive() {
      (choke/logs/p1_before.txt, P1-5). That is the whole argument for a rule at
      the write rather than a list of names. */
   if (Reco._keyStaleBlock(tpl, 'cleared', sess, [row])) return;
+  if (Reco._keyAsk(tpl, sess, row, 'cleared')) return;   // T-S10-21
   const rk = Reco._ssRowKey(row);
   if (sess.cellFormulas[rk]) delete sess.cellFormulas[rk][sess.activeCell.col];
   row[sess.activeCell.col] = '';
@@ -18463,6 +18492,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
       selectedIds.forEach(rowId => {
         const row = Reco._rowById(sess, rowId);
         if (!row || sess.offsets[rowId]) return; // skip already offset
+        if (Reco._keyAsk(tpl, sess, row, 'offset')) return;   // T-S10-21
         sess.offsets[rowId] = true;
         row._manualOffset = true;
         row._recoId = rid;
@@ -18568,6 +18598,11 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
   },
 
   _unmarkRows(tpl, sess, mm, rows) {
+    /* T-S10-21: ASK EVERY ROW FIRST. An unmark is a DELETE of a record the
+       folder holds, so a refusal that has already taken the mark off the row
+       on screen is the same loss in the other direction. All-or-none, because
+       an unmark of half a tolerance group is not a thing. */
+    if (rows.some(r => Reco._keyAsk(tpl, sess, r, 'unmarked'))) return;
     rows.forEach(r => {
       delete sess.offsets[r._id];
       delete r._manualOffset;
@@ -24271,6 +24306,7 @@ renderRecoTable(tpl, sess) {
     selectedIds.forEach(rowId => {
       const row = Reco._rowById(sess, rowId);
       if (!row || sess.offsets[row._id]) return;
+      if (Reco._keyAsk(tpl, sess, row, 'offset')) return;   // T-S10-21
       sess.offsets[row._id] = true;
       row._recoId = rid;
       row._manualOffset = true;
@@ -24765,124 +24801,111 @@ renderRecoTable(tpl, sess) {
      ("somebody else changed..."), so it is now an optimisation and a wording,
      not the mechanism. */
 
-  /* WHICH KEY EXTRAS THE ROW'S OWN LOADED COLUMNS DECIDE. Measured, because
-     each false positive here refuses ordinary work (choke/logs/p2_rule.txt):
+  /* ===== T-S10-21. WHY THERE IS NO PER-ROW DRIFT ARM HERE ANY MORE =====
+     ROUND 6 ASKED THE ROW AS WELL AS THE TEMPLATE: Reco._keyRowDrifted asked
+     "is row._pk still what this template's rule computes for this row NOW?"
+     and read a disagreement as "the template's rule has moved". IT IS REMOVED
+     BECAUSE THAT INFERENCE IS INVALID, not because it was too wide. A frozen
+     _pk is SUPPOSED to disagree with a recompute whenever the ROW'S OWN DATA
+     changed - that is what freezing a key means (handover 14.3) - so the
+     disagreement cannot be attributed to the TEMPLATE. Three rounds in a row
+     narrowed it and declared it closed; each narrowing was a new list of the
+     shapes somebody had thought of, which is the same mistake as a list of
+     function names one level up.
 
-       C4  a key extra that is a master_lookup reads DRIFTED the moment a
-           colleague saves the shared accounts master, and THE RULE DID NOT
-           MOVE - that is handover 14.3's frozen value working as designed,
-           and every surface in the app is deliberately on the frozen key. A
-           guard that fired there would refuse every gesture on every template
-           with a lookup in its key, for the life of the file. So an extra
-           that READS A SHARED MASTER, or that is reached from one that does,
-           is left out, and the template latch is all those templates get.
-           Said in handover 14.3 and in T-S10-19.
-       C1  a template whose key names no extra answers in one property read.
-       C2  an `_added_` row never had a business key to disagree with.
+     FIVE MEASURED FALSE REFUSALS, all on one window, with the latch DOWN and
+     nobody else involved. Each is now a named gate in run_store_e2e [86]:
 
-     The walk is the transitive one for the same reason _keyDepNames is: a key
-     FORMULA may be built on an earlier extra, and an earlier LOOKUP makes the
-     whole chain master-driven. */
-  _keyRowColsCache: new WeakMap(),
-  _keyRowCols(tpl) {
-    const kx = Reco._keyExtraSet(tpl);
-    if (!kx) return null;
-    const ac = (tpl && tpl.additionalColumns) || [];
-    const pks = (tpl && tpl.primaryKeys) || [];
-    let e = null;
-    try { e = Reco._keyRowColsCache.get(tpl); } catch (x) { e = null; }
-    if (e && e.ac === ac && e.pks === pks) return e.set;
-    const byName = new Map();
-    ac.forEach(a => { if (a && a.name && !byName.has(a.name)) byName.set(a.name, a); });
-    /* Masters._lookupCfg answers for BOTH lookup shapes - the legacy
-       type:'master' and the unified masterCfg - so one test covers both. A
-       throw is treated as "reads a master", i.e. as the cautious answer. */
-    const readsMaster = a => { try { return !!Masters._lookupCfg(tpl, a); } catch (x) { return true; } };
-    const own = new Set();
-    kx.forEach(name => {
-      const seen = new Set(); const q = [name]; let ok = true;
-      while (q.length) {
-        const n = q.pop();
-        if (seen.has(n)) continue;
-        seen.add(n);
-        const a = byName.get(n);
-        if (!a) continue;                       // a template column: it is on the row
-        if (String(a.type) !== 'formula' || readsMaster(a)) { ok = false; break; }
-        (String(a.formula == null ? '' : a.formula).match(/\{([^}]*)\}/g) || [])
-          .forEach(s => { const r = s.slice(1, -1).trim(); if (byName.has(r)) q.push(r); });
-      }
-      if (ok) own.add(name);
-    });
-    const set = own.size ? own : null;
-    try { Reco._keyRowColsCache.set(tpl, { ac: ac, pks: pks, set: set }); } catch (x) {}
-    return set;
-  },
+       1  A CORRECTION BRICKED THE ROW. On handover 14's own worked shape - a
+          key extra CONCAT({Doc}) over a file column - correcting Doc, which is
+          the Correction tab's whole purpose, made the row disagree with its
+          own key INSIDE the gesture. Every later gesture on that row was then
+          refused with a sentence that blames a colleague for a template change
+          that never happened, and the recovery that sentence names (Clear
+          Loaded Data and load again) is where the correction died.   [R17a]
+       2  THE SECOND EDIT of a row whose key-feeding EDITABLE column was
+          edited. Both "a template column the template marks editable" and "a
+          key formula over it" are ordinary settings; the row bricked itself on
+          first use.                                                   [R17e]
+       3  A PARTIAL RECOMPUTE IS A POSITIVE DISAGREEMENT. The C6 skip only
+          covered a recompute that was WHOLLY '' or '#ERR', so handover 14.4's
+          own CONCAT({Base},"-",{Line}) with one component missing from this
+          month's file recomputed to 'E1-' against a minted 'E1-S1' and refused
+          everything.                                                  [R17c]
+       4  A KEY FORMULA THAT READS THE CLOCK WAS A TIME BOMB.
+          CONCAT({Doc},"-",AGEING({Doc})), which a template saved by an older
+          build still has, was not drifted today and was drifted tomorrow, for
+          every row of that template. RecoTemplate._pkFormulaOk refuses such a
+          formula on SAVE; nothing re-checks a stored one.              [R17d]
+       5  ONE BRICKED ROW REFUSED FIND & REPLACE FOR THE WHOLE FILE, because a
+          control that writes every row in the view asks about every row.
+                                                                       [R17b]
+     A SIXTH SHAPE WAS ALWAYS GOING TO EXIST, and that is the point: the arm
+     fires whenever a row's own data has moved since its key was minted, and
+     every feature of this app that EDITS A ROW does that. Enumerating those
+     features is the list this cluster has failed at four times.
 
-  /* IS THIS ROW'S _pk STILL WHAT THE TEMPLATE'S RULE COMPUTES FOR IT?
-     Only a POSITIVE disagreement counts. The three "cannot attribute" skips
-     are each a measured false positive, and each one would refuse work:
-       - frozen == null: _pk does not split back into primaryKeys.length parts
-         because a component contains the '||' separator getRowPK joins with
-         and escapes nothing (measured C5). Ingest already asks the operator
-         about that row; we cannot tell drift from an unsplittable key, so we
-         do not claim to.
-       - the recompute THROWS: a key column that is not loaded in this shape.
-       - the recompute is '' or '#ERR': Formula.substituteTokens turns a
-         missing reference into '' SILENTLY (measured C6), so a row reopened
-         from a file with a different column set would otherwise read as
-         drifted on every key it has.
-     SEPARATE FROM Reco.keyDrift on purpose, and the two may disagree. keyDrift
-     answers the SCREEN's question ("is this cell printing a recalculation?")
-     and is right to count the master-lookup and unsplittable cases, because
-     the cell really is not showing the stored key. This answers the WRITE's
-     question ("can I attribute this key's disagreement to the template's own
-     rule having moved?"), which is narrower by construction. */
-  _keyRowDrifted(tpl, sess, row) {
-    const cols = Reco._keyRowCols(tpl);
-    if (!cols || !row) return false;
-    let bad = false;
-    cols.forEach(name => {
-      if (bad) return;
-      const frozen = Reco._keyFrozenPart(tpl, row, name);
-      if (frozen == null) return;
-      let now;
-      try { now = Reco._extraComputedValue(tpl, sess, row, Reco._extraDef(tpl, name)); }
-      catch (e) { return; }
-      const s = now == null ? '' : String(now);
-      if (s === '' || s === '#ERR') return;
-      if (s !== String(frozen)) bad = true;
-    });
-    return bad;
-  },
+     WHAT IS LEFT IS THE TEMPLATE LATCH, and it is a different question with a
+     sound answer: "did the key DEFINITION change while these rows were
+     loaded?" That is a property of the TEMPLATE, recorded when the definition
+     changes, and it cannot be confused with a row's own data changing. It was
+     verified in both directions by an earlier round - it lifts after
+     Clear-and-Load, stays up after an Add Data onto dead-keyed rows, lifts
+     above BUSY_ROWS, stays up on a declined load (scratchpad/dataloss/lift).
+
+     AND T-S10-19 IS RE-OPENED BY THIS, not quietly dropped. A day file written
+     BEFORE a key change hands back rows under the keys that file holds, in a
+     window whose latch is correctly down because nothing happened to it. The
+     latch cannot see that and NOTHING HERE CAN: the only honest way to know
+     whether a row's key was minted under the rule in force now is to RECORD
+     THE RULE'S SIGNATURE ON THE ROW AT MINT TIME (a hash of the key extras'
+     definitions, written beside _pk and carried through the day file's control
+     columns) and compare signatures - never values. A signature comparison
+     says "a different RULE made this key" and says nothing about the row's
+     data, which is exactly the distinction the per-row arm could not make.
+     That is a schema change and a round of its own; T-S10-19 carries the
+     design. Reco.keyDriftCount already names the rows a future signature check
+     would have to cover, and [84] measures the hole rather than hiding it. */
 
   /* THE QUESTION, in one place. Returns '' when the write is safe, or the
-     REASON, which is also which sentence to say. The latch is first because
-     it is one property read and because its sentence is the better one. */
+     REASON, which is also which sentence to say. `sess` and `row` are kept in
+     the signature because the CHOKEPOINT's shape must not change when the
+     answer narrows - every caller passes them, run_store_e2e [82] G82e reads
+     them, and a future signature check (T-S10-19) needs the row. */
   _keyWriteUnsafe(tpl, sess, row) {
     if (!tpl || !tpl.id) return '';
-    if (Reco._keyStale[String(tpl.id)]) return 'stale';
-    return Reco._keyRowDrifted(tpl, sess, row) ? 'drifted' : '';
+    return Reco._keyStale[String(tpl.id)] ? 'stale' : '';
   },
   _keyRowsUnsafe(tpl, sess, rows) {
     if (!tpl || !tpl.id) return '';
-    if (Reco._keyStale[String(tpl.id)]) return 'stale';
-    if (!rows || !rows.length) return '';
-    for (let i = 0; i < rows.length; i++) if (Reco._keyRowDrifted(tpl, sess, rows[i])) return 'drifted';
-    return '';
+    return Reco._keyStale[String(tpl.id)] ? 'stale' : '';
+  },
+
+  /* THE ASK, SEPARATE FROM THE KEY, so a gesture can ASK FIRST and MUTATE
+     AFTER. T-S10-21: Reco.writeKey answers `null` for TWO different things -
+     "refused" and "this template has no business key at all" (Reco.rowKey
+     answers null on a keyless template, which is most of them) - so a caller
+     that must not mutate on a refusal cannot read the answer off it. This
+     answers only "is this write refused?", and says the one sentence when it
+     is. Returns TRUE when the caller must stop. */
+  _keyAsk(tpl, sess, row, what) {
+    const why = Reco._keyWriteUnsafe(tpl, sess, row);
+    if (!why) return false;
+    Reco._keySay(tpl, what || 'saved', why);
+    return true;
   },
 
   /* THE SENTENCE. Every refusal names ITS OWN VERB and a recovery that
      WORKS - the one this replaced said "Press Load" and there is no Load
      (apps/Reco.html's only file input is "Add Data", which CONCATENATES, so
      the rows this sentence is about would keep their old keys). */
+  /* T-S10-21: THERE IS ONE SENTENCE AGAIN. The second one, "These rows carry
+     the keys they were SAVED with", belonged to the per-row drift arm, which
+     is gone because its inference was invalid - see the design note above. It
+     is not kept as a dead branch: a refusal sentence nothing can produce is a
+     promise of a safety control that does not exist, and the next reader would
+     trust it. */
   _keyRefusal(what, why) {
-    if (why === 'drifted')
-      return 'Nothing was ' + what + '. These rows carry the keys they were SAVED with, and this '
-        + 'reconciliation now works its keys out differently \u2014 so the row on screen is not the row '
-        + 'the shared folder holds, and the same business row may be on screen twice under two '
-        + 'identities. Use Clear Loaded Data and load the extract again. (The rows inside a day file '
-        + 'written before the change keep the keys that file holds; nothing can be filed against '
-        + 'those, under either key.)';
     return 'Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
       + 'its rows while these rows were loaded, so the keys on screen are the OLD ones — '
       + 'anything filed against them goes where nobody else can see it, and anything meant to '
@@ -25382,6 +25405,7 @@ renderRecoTable(tpl, sess) {
     if (!chk.ok) { U.toast(chk.msg, 'error'); return; }
 
     const rid = 'M'+Date.now().toString(36);
+    if (Reco._keyAsk(tpl, sess, row, 'offset')) return;   // T-S10-21
     sess.offsets[row._id] = true;
     row._recoId = rid;
     row._manualOffset = true;
@@ -26311,6 +26335,17 @@ renderRecoTable(tpl, sess) {
       return;
     }
     const oldVal = row[colName];
+    /* ---- T-S10-21. ASK FIRST, MUTATE AFTER. This used to write
+       `row[colName] = newVal` and THEN ask Reco.writeKey, so a refusal left
+       the row changed on screen, `_corrected_<col>` set, AppState.save()
+       putting the changed value into reco/recoSessions.json on the share, and
+       NO correction record anywhere - behind two toasts, one red and one
+       green. Measured: scratchpad/dataloss/unbrick/logs/repro_a1.txt.
+       The order is the bug whatever the question is, so it is fixed here
+       rather than in the question: nothing about this row may change until
+       the write has been allowed. Gated by [87] R18a, which asserts the ROW IS
+       UNCHANGED after a refusal - not merely that the master is empty. */
+    if (Reco._keyAsk(tpl, sess, row, 'corrected')) return;
     row[colName] = newVal;
     row['_corrected_'+colName] = true;
     const pk = Reco.writeKey(tpl, sess, row, 'corrected');   // T-S10-20
@@ -29358,6 +29393,16 @@ renderCustomReport(tpl, sess, rpt, idx) {
     const rows = ctx.jvBuckets[ref] || [];
     if (!rows.length) { U.toast('No rows to send','error'); return; }
 
+    /* ---- T-S10-21, DOOR 22. ASKED BEFORE THE JV PAGE OPENS. The completion
+       callback below records these rows' keys in a SHARED file, so the key
+       question belongs here, where the operator has not yet done any work in
+       the other application: being told after they have keyed a JV is being
+       told too late. The verb names the gesture, so the refusal reads as
+       "Nothing was sent to the Special JV." */
+    const jvTpl  = AppState.recoTemplates.find(x => x.id === ctx.tplId);
+    const jvSess = AppState.recoSessions[ctx.tplId];
+    if (Reco._keyStaleBlock(jvTpl, 'sent to the Special JV', jvSess, rows)) return;
+
     // Payload = only the mapping's inputColumns (+ _pk/_id). Names are matched
     // exactly first, then ignoring case/spaces so "TxnType" feeds "Txn Type".
     const payload = rows.map(r => {
@@ -29376,11 +29421,38 @@ renderCustomReport(tpl, sess, rpt, idx) {
 
     SpecialJV.open(ref, payload, (result) => {
       // result = {type, ref, jvId, lines, primaryKeys, inputData, meta?}
+      /* ---- T-S10-21, DOOR 22. THE KEYS GO THROUGH THE CHOKEPOINT.
+         reco/pendingSpecialJV.json is in AppState.PERSIST_KEYS - a whole-file
+         write every colleague parses at boot - and `sentPks` is the identity
+         the grid's pending badge, SpecialJV.matchesRows and the entry
+         generator all match rows on. Under a key the folder does not compute,
+         the rows whose JV has already been raised read as un-sent to everyone
+         and can be sent and posted a second time. It had no question of any
+         kind on it, and section [82] could not see it because
+         pendingSpecialJV was not one of the six masters it enumerated.
+         Reco.writeVerKey is the right half of the pair: this store is keyed on
+         the row's STORAGE identity `_pk`, the same identity the day file uses,
+         and every row has a truthy one (handover 14.2) - so a null answer here
+         means REFUSED and nothing else. All-or-none: a part-recorded JV would
+         be worse than one that is not recorded, and the operator is told
+         once. */
+      const rTpl  = AppState.recoTemplates.find(x => x.id === tplId);
+      const rSess = AppState.recoSessions[tplId];
+      const sentPks = [];
+      let keyRefused = false;
+      rows.forEach(r => {
+        const vk = Reco.writeVerKey(rTpl, rSess, r, 'recorded against the Special JV');
+        if (vk) sentPks.push(String(vk)); else keyRefused = true;
+      });
+      if (keyRefused) {
+        console.warn('SpecialJV ' + ref + ' not recorded: the key rule moved while it was open');
+        rerender();
+        return;
+      }
       AppState.pendingSpecialJV[tplId] = AppState.pendingSpecialJV[tplId] || [];
       // A JV may only report rows Reco actually handed it. Anything else is a
       // bug in the JV page: it is dropped here, before it can mark a row as
       // posted, and kept in claimedNotSent so the user is told.
-      const sentPks = rows.map(r => r._pk).filter(Boolean).map(String);
       const sentSet = new Set(sentPks);
       const claimed = Array.isArray(result.primaryKeys) ? result.primaryKeys.filter(k => k != null).map(String) : null;
       const consumed = claimed ? claimed.filter(pk => sentSet.has(pk)) : sentPks.slice();
@@ -29693,7 +29765,23 @@ renderCustomReport(tpl, sess, rpt, idx) {
         const v = src[aeg.postEntryColumn];
         prev[String(o._pk)] = v == null ? '' : String(v);
       });
-      targets.forEach(o => {
+      /* T-S10-21: ASK FIRST. The stamp is the row's own data, so a refusal
+         after it was written would leave the grid showing Posted with no
+         journal record keyed to it. The gesture-level question is already
+         above (_keyStaleBlock over standardRows + sourceRows), which is why
+         this cannot fire today; the ORDER is fixed anyway, because an order
+         that is only safe because of a question a hundred lines earlier is
+         the shape this cluster has come back as three times.
+
+         AND IT SKIPS THE STAMP, NOT THE COMMIT. A bare `return` here would
+         skip the pending Special JV clear, the modal close and the single-use
+         cleanup below - the journal entry is already written by this point, so
+         abandoning the rest of the commit is a worse outcome than an unstamped
+         row, which the exception list is there to show. `targets` is a MAP, so
+         the question is asked over its values. */
+      const stampRows = Array.from(targets.values());
+      const stampOk = !stampRows.some(o => Reco._keyAsk(tpl, sess, o, 'posted'));
+      if (stampOk) stampRows.forEach(o => {
         o[aeg.postEntryColumn] = aeg.postEntryValue;
         // Template columns are versioned: record the change so a reload keeps it.
         /* T-S10-20: the write-side question again, at the write, so a stamp
@@ -29705,7 +29793,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
       // standard row's only link is its session _id, which is regenerated on
       // the next load — every such row then reads as "no GL ref" and the
       // exception list fills with correctly posted rows.
-      entry.postedPks = Array.from(targets.values()).map(o => o._pk).filter(Boolean).map(String);
+      entry.postedPks = stampOk ? stampRows.map(o => o._pk).filter(Boolean).map(String) : [];
       /* Keyed exactly like postedPks. Absent on every entry already on the
          share, so a reader must treat absent as "the value before the entry
          was not recorded" and leave such a cell alone, not clear it.
