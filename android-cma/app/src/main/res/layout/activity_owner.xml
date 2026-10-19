@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/admin_title"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="@color/ink"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/stats"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textColor="@color/text"
+            android:text="Loading…" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/paper"
+            android:layout_marginVertical="20dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Backend (optional)"
+            android:textStyle="bold"
+            android:textColor="@color/ink"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/baseUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Base URL (blank = store on this phone only)"
+            android:inputType="textUri"
+            android:layout_marginBottom="10dp" />
+
+        <EditText
+            android:id="@+id/apiKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="API key / token (optional)"
+            android:inputType="text"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/saveBackend"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Save backend"
+            android:backgroundTint="@color/emerald"
+            android:textColor="@color/white" />
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">CMA Revision</string>
+    <string name="login_title">Sign in</string>
+    <string name="hint_username">Username</string>
+    <string name="hint_password">Password</string>
+    <string name="action_signin">Sign in</string>
+    <string name="action_signin_offline">Use offline</string>
+    <string name="admin_title">Admin</string>
+    <string name="admin_pin_hint">Admin PIN</string>
+    <string name="admin_unlock">Unlock</string>
+</resources>
