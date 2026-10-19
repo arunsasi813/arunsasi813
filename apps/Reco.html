@@ -87,6 +87,8 @@ THEMES['default'] = {
   .badge.exch { background: var(--badge-violet-bg, #ede9fe); color: var(--badge-violet, #5b21b6); }
   .badge.offset { background: var(--badge-green-bg, #dcfce7); color: var(--badge-green, #166534); }
   .badge.open { background: var(--badge-amber-bg, #fef3c7); color: var(--badge-amber, #92400e); }
+  /* ROUND 8 / A4: a row whose key was minted under a rule that is not in force. */
+  .badge.oldrule { background: var(--badge-rose-bg, #ffe4e6); color: var(--badge-rose, #9f1239); }
   .row { display: flex; gap: 12px; flex-wrap: wrap; }
   .row > * { flex: 1; min-width: 180px; }
   .progress { display: flex; gap: 4px; margin: 4px 0 14px; }
@@ -4961,6 +4963,10 @@ const Versioning = {
       const p = Papa.parse(txt, { header: true, skipEmptyLines: true });
       const rows = p.data || [];
       Versioning._noteMaxCn(fullPath, rows);
+      /* ROUND 8 / B1: remember the header this file actually has, so an
+         append never has to ask for it again. Papa's meta.fields IS the
+         header row. */
+      try { Versioning._hdrCache[fullPath] = (p.meta && p.meta.fields) || null; } catch (e) {}
       return rows;
     } catch(e) {
       console.error('Versioning.readFile', e);
@@ -4976,8 +4982,34 @@ const Versioning = {
     // _src/_by are always in the header, even when empty: a later Excel-link
     // write would otherwise widen the file, and that rewrite can lose a
     // colleague's concurrent append.
-    const seen = new Set(['_pk', '_ver', '_ts', '_src', '_by']);
-    const out = ['_pk', '_ver', '_ts', '_src', '_by'];
+    /* T-S10-19: _pksig IS A FIXED CONTROL COLUMN TOO, FOR THE REASON
+       DIRECTLY ABOVE - and the sweep two lines down is why it has to be.
+       That sweep pulls every key present in ANY row into the header, so a
+       per-row signature would land in the CSV by ACCIDENT and the header's
+       WIDTH would then vary between writes: a batch of rows minted before
+       this build, or an append of an '_auto_'-keyed row, would write a
+       narrower file and the next write would widen it again. Every widening
+       is a whole-file rewrite inside append_csv_rows (`header + missing`,
+       main.py:683) - the rewrite this comment already says can lose a
+       colleague's concurrent append.
+       AND NOT UNCONDITIONALLY. Reco.keyRuleSig is null when the key names no
+       added column, so no template that existed before #24 gains a column at
+       all. That is a design property and not test-fitting: a key with no
+       added column carries no definition that can change without the
+       primaryKeys list changing with it, which is the loud case (T-S10-25
+       carries the remainder). It is also what keeps #24's migration the
+       no-op run_pk_extras G1 pins byte-for-byte, and what keeps run_e2e,
+       run_autoload, run_colorder [13] and run_reverse - which all assert
+       this header verbatim - measuring something.
+       THE COST, SAID OUT LOUD: for a template whose key DOES name an added
+       column, the first write of the day by an updated build into a day file
+       that predates it takes that one widening rewrite. It happens once per
+       file, and it is the migration. */
+    const sig = (function () { try { return Reco.keyRuleSig(tpl); } catch (e) { return null; } })();
+    const ctl = sig ? ['_pk', '_ver', '_ts', '_src', '_by', '_pksig']
+                    : ['_pk', '_ver', '_ts', '_src', '_by'];
+    const seen = new Set(ctl);
+    const out = ctl.slice();
     (tpl ? tpl.columns.map(c => c.name) : []).forEach(n => { if (!seen.has(n)) { seen.add(n); out.push(n); } });
     rows.forEach(r => Object.keys(r || {}).forEach(k => { if (!seen.has(k)) { seen.add(k); out.push(k); } }));
     return out;
@@ -5006,11 +5038,71 @@ const Versioning = {
 
   /* Append records. Uses the launcher's append_csv_rows (no rewrite of the
      growing file) when available, else read + rewrite. Call inside _withLock. */
+  /* ROUND 8 / B1. THE HEADER THIS DAY FILE ALREADY HAS, or null when it has
+     none (the file does not exist, or there is no bridge to ask). Memoised per
+     path for the life of the window, and free on the appendChangesBatch path
+     because Versioning._maxCn has already read the file. */
+  _hdrCache: {},
+  async _headerOf(path) {
+    if (Object.prototype.hasOwnProperty.call(Versioning._hdrCache, path))
+      return Versioning._hdrCache[path];
+    let hdr = null;
+    try {
+      const api = Store._hasApi() ? window.pywebview.api : null;
+      if (api && typeof api.read_file === 'function') {
+        const txt = await api.read_file(path);
+        const line = String(txt == null ? '' : txt).split(/\r?\n/)[0];
+        if (line) { const p = Papa.parse(line); hdr = (p.data && p.data[0]) || null; }
+      }
+    } catch (e) { hdr = null; }
+    Versioning._hdrCache[path] = hdr;
+    return hdr;
+  },
   async _appendRows(path, tpl, recs) {
     if (!recs.length) return;
     const api = Store._hasApi() ? window.pywebview.api : null;
     if (api && typeof api.append_csv_rows === 'function') {
-      await api.append_csv_rows(path, Versioning._fields(recs, tpl), recs);
+      let fields = Versioning._fields(recs, tpl);
+      /* ROUND 8 / B1. DO NOT WIDEN A DAY FILE THIS BUILD DID NOT CREATE.
+         MEASURED, two separate processes on one folder (two windows are two
+         processes; LauncherAPI._writing is a per-path lock INSIDE one): a
+         120,000-row day file in the pre-_pksig format, this build appending
+         one row carrying the signature, a colleague appending one row 0.00 /
+         0.15 / 0.40 s later. In THREE of those four timings both writers
+         reported success, the header widened, and the COLLEAGUE'S ROW WAS NOT
+         IN THE FILE - 120,001 rows where 120,002 were written. At 0.80 s, past
+         the end of the 672 ms rewrite, both survived: the loss window is
+         exactly the length of the whole-file rewrite append_csv_rows performs
+         in its `header + missing` branch (main.py:683).
+         Versioning._fields's own comment has warned about that rewrite since
+         _src/_by were pinned into the header to avoid it; adding a sixth
+         control column is what finally made it happen, and it would have
+         happened once per template PER DAY for as long as one colleague is on
+         an older build, because today's day file belongs to whichever build
+         writes it first (handover T-S10-12 calls a mixed fleet the normal
+         state).
+         SO: when the file already exists and its header has no _pksig, the
+         column is not asked for AND it is taken off the records - both,
+         because append_csv_rows unions `fields` with every key present in any
+         row, so leaving it on a record would widen the file anyway. Those rows
+         land UNSIGNED, which the migration already accepts and does not widen
+         one inch: an unsigned row is not refused. The cost is confined to day
+         files an un-upgraded build opened first, and once the fleet is
+         uniform there is none at all - every day file is created by a build
+         that writes the column in its first write, where no rewrite exists.
+         A file that does NOT exist is left alone to be created with the full
+         header, which is the no-rewrite path. */
+      if (fields.indexOf('_pksig') !== -1) {
+        const hdr = await Versioning._headerOf(path);
+        if (hdr && hdr.length && hdr.indexOf('_pksig') === -1) {
+          fields = fields.filter(f => f !== '_pksig');
+          recs.forEach(r => { if (r && '_pksig' in r) delete r._pksig; });
+        }
+      }
+      await api.append_csv_rows(path, fields, recs);
+      /* The file certainly has this header now, whether it was created or
+         appended to. Remembering it keeps the read above to one per path. */
+      try { if (!Versioning._hdrCache[path]) Versioning._hdrCache[path] = fields.slice(); } catch (e) {}
       return;
     }
     const existing = await Versioning.readFile(path, true);
@@ -5033,6 +5125,12 @@ const Versioning = {
       if (!r._pk) r._pk = pk;
       const rec = { _pk: pk, _ver: 'upload', _ts: stamp };
       tpl.columns.forEach(c => { rec[c.name] = r[c.name] != null ? r[c.name] : ''; });
+      /* T-S10-19: the signature the mint froze onto the row, carried as a
+         CONTROL field and not as a template column - like _pk and _ver. THIS
+         is the write that puts it in the day file in the first place, so
+         without this line there is nothing for a reopened row to bring back
+         and a suite that only tested the mint would still go green. */
+      if (r._pksig) rec._pksig = String(r._pksig);
       return rec;
     });
     await Versioning._withLock(path, () => Versioning._appendRows(path, tpl, recs));
@@ -5065,6 +5163,12 @@ const Versioning = {
         const verLabel = 'C' + n;
         const rec = { _pk: pk, _ver: verLabel, _ts: stamp };
         tpl.columns.forEach(c => { const v = latestByPk[pk][c.name]; rec[c.name] = v != null ? v : ''; });
+        /* T-S10-19: a signature is not a template column, so an append drops
+           it unless it is taught. A Cn row that lost the signature its own
+           upload row carries would reopen UNPROTECTED and read as a
+           pre-change row - the migration's own escape hatch turned into a
+           hole, reachable by one edit. */
+        if (latestByPk[pk]._pksig) rec._pksig = String(latestByPk[pk]._pksig);
         // Audit fields such as _src (excel:<exportId>) and _by. Rows reopened
         // from history only copy tpl.columns, so these never reach the data.
         if (meta) Object.keys(meta).forEach(k => { if (k[0] === '_' && !(k in rec)) rec[k] = meta[k] == null ? '' : meta[k]; });
@@ -5144,15 +5248,49 @@ const Versioning = {
 
   /* Reduce a versioned-row list to "active" rows: highest Cn per PK, else
      upload row. On a tie the row written later wins. */
+  /* ROUND 8 / B3. A VERSION ROW THAT LOST ITS SIGNATURE INHERITS IT FROM
+     ANOTHER VERSION OF THE SAME KEY, and that is exact rather than a guess.
+     MEASURED on one shared folder with two windows, this build and the real
+     55171d8 build: the older build opens a day file this one wrote, says
+     nothing in error, and appends an ordinary cell edit as a Cn row with an
+     EMPTY _pksig - it cannot write a column it does not know about. Because
+     this function keeps the LATEST version per key, that one edit laundered a
+     protected row into an unprotected one: after a genuine key-rule change the
+     untouched rows were refused (correct) and the edited row went through IN
+     TOTAL SILENCE, with the typed value landing on the share under the dead
+     key. For as long as one colleague has not upgraded - the normal state -
+     the fix would have protected only rows nobody on the old build had
+     touched, and the most ordinary gesture there is would have removed that
+     protection.
+     WHY INHERITING IS EXACT AND NOT A WIDENING OF THE MIGRATION: a row's _pk
+     is what FILES it, so the versions of one _pk in one file are versions of
+     one row, and no build can change a key without changing the _pk the
+     version is filed under. The newest version that carries a signature is
+     therefore the right answer for every version of that key. A _pk whose
+     every version is unsigned stays unsigned and stays writable, which is the
+     migration, untouched.
+     THE COST IS ZERO WHERE THERE IS NO SIGNATURE: the second pass runs only
+     when some row in the file had one, so every file on every share today, and
+     every keyless template, walks exactly what it walked before. */
   collapseToActive(versionedRows) {
     const byPk = new Map();
+    const sigByPk = new Map();
     Versioning.lastDroppedNoPk = 0;
     versionedRows.forEach(r => {
       const pk = r._pk;
       if (!pk) { Versioning.lastDroppedNoPk++; return; }
       const cur = byPk.get(pk);
       const score = Versioning._verScore(r._ver);
+      if (r._pksig) {
+        const s = sigByPk.get(pk);
+        if (!s || score >= s.score) sigByPk.set(pk, { score: score, sig: String(r._pksig) });
+      }
       if (!cur || score >= Versioning._verScore(cur._ver)) byPk.set(pk, r);
+    });
+    if (sigByPk.size) byPk.forEach((r, pk) => {
+      if (r._pksig) return;
+      const s = sigByPk.get(pk);
+      if (s) r._pksig = s.sig;
     });
     return Array.from(byPk.values());
   },
@@ -13820,6 +13958,114 @@ defaultTemplate() {
     });
     return out;
   },
+  /* ---- T-S10-19 / ROUND 8. THE KEY RULE AS THE KEY ENGINE READS IT.
+
+     THIS IS A PROJECTION OF _keyDefOf ABOVE AND NOT A SECOND DEFINITION OF
+     IT: same primaryKeys, same Reco._keyDepNames closure, same walk over
+     additionalColumns - and then each closure column reduced to the fields
+     that decide what value comes out of it, and nothing else. One definition
+     of "the key rule" was the right instinct and the shared walk keeps it;
+     one definition of "which BYTES of it matter" was the mistake.
+
+     WHY THE SIGNATURE MAY NOT HASH _keyDefOf ITSELF, which is what round 8
+     first shipped and what two reviewers measured broken from the files.
+     _keyDefOf keeps the whole stored column object, so the hash carried
+     display and ownership flags the key engine never reads, and FOUR edits an
+     operator can make through the editor's own handlers moved it while the
+     rule went on computing BYTE-IDENTICAL keys:
+       RecoTemplate.toggleOverride  on a key HELPER - "Allow manual override
+                                    per row"
+       RecoTemplate.toggleCarry     on a key helper - "Carry this value
+                                    forward"
+       _setExtraType away and back  a MIS-CLICK on the type dropdown, clicked
+                                    straight back: type and formula end up
+                                    byte-identical and three dropdown
+                                    defaults are left behind FOR EVER, with
+                                    no control in the editor that removes
+                                    them
+       a formatting-only edit       'CONCAT({Doc})' -> 'CONCAT( {Doc} )'
+     Every row minted before was then refused at every door with its key
+     exactly what the folder's rule computes. That is round 6's harm with a
+     different cause, and it is the thing this round was told not to rebuild.
+
+     THE ASYMMETRY IS THE WHOLE POINT, and it is why _keyDefOf is LEFT COARSE
+     for the template latch and for T-24R2-1's confirm: over-approximating is
+     CHEAP IN A WARNING and RUINOUS IN A REFUSAL. "The latch's set and the
+     signature's set are the same set by construction" was offered as the
+     defence for sharing _keyDefOf and is the defect instead.
+
+     WHAT IS IN, PER TYPE, read off Reco._extraOwnValue's ladder:
+       every type        the name and the NORMALISED type - the switch reads it
+       formula           the formula text
+       master            masterRefColumn / masterValueColumn, the two fields
+                         Masters._lookupCfg resolves for the legacy shape
+       master_lookup     masterCfg's source / matchColumn / matchKey /
+                         returnKey, the four Masters._lookupCfg resolves - and
+                         that function is already the ONE place that says what
+                         a lookup's rule is, so this cannot drift from it
+       dropdown, custom  carryForward, because Reco._extraTyped reads it as
+                         the SCOPE test and it therefore decides WHICH typed
+                         record becomes the value
+     WHAT IS OUT, AND WHY LEAVING IT OUT CANNOT MISS A RULE CHANGE:
+       allowOverride     never read where the value is READ. Reco._extraOverride
+                         honours a stored override record whether the box is
+                         ticked or not; the box gates the WRITE, at
+                         Reco._setOverride. So ticking it cannot change what
+                         the rule computes for any row.
+       the option list, optionsSource, optionsMasterCfg
+                         a picker constrains what an operator may CHOOSE,
+                         which is data, and `row[ac.name] != null` wins over
+                         all of it in _extraOwnValue's tail.
+       _cid, label, _ssSingleUse, every display flag
+                         not on the value path at all.
+       carryForward on a COMPUTED column
+                         _extraOwnValue returns _extraComputedBase for
+                         formula / master / master_lookup and never reaches
+                         _extraTyped, so the flag is unread there. That is why
+                         `carry` is recorded for the typed types ONLY and not
+                         for all of them: recording it everywhere is exactly
+                         the over-approximation that caused A1(2).
+
+     AND THE CLOSURE'S DECLARATION ORDER IS IN, which _keyDefOf's name-keyed
+     `defs` object cannot carry: Reco._keyScratch materialises the closure in
+     DECLARATION order, so moving one closure column past another genuinely
+     changes what the key comes out as. Reordering anything OUTSIDE the
+     closure leaves this list identical, which is the property round 8's
+     own measurement relies on. */
+  _keyRuleDefOf(tpl) {
+    const out = { pk: (tpl ? (tpl.primaryKeys || []) : []).slice(), order: [], defs: {} };
+    if (!tpl) return out;
+    let dep = null;
+    try { dep = Reco._keyDepNames(tpl); } catch (e) { dep = null; }
+    if (!dep) return out;
+    (tpl.additionalColumns || []).forEach(a => {
+      if (!a || !a.name || !dep.has(a.name)) return;
+      const n = String(a.name);
+      /* The FIRST declaration wins, exactly as _keyDepNames' own `byName`
+         map does, so two columns sharing a name cannot make the two walks
+         disagree about which one the rule reads. */
+      if (Object.prototype.hasOwnProperty.call(out.defs, n)) return;
+      const type = String(a.type || 'custom');
+      const d = { type: type };
+      if (type === 'formula') {
+        d.formula = Reco._keyCanonFormula(a.formula);
+      } else if (type === 'master') {
+        d.ref = String(a.masterRefColumn == null ? '' : a.masterRefColumn);
+        d.val = String(a.masterValueColumn == null ? '' : a.masterValueColumn);
+      } else if (type === 'master_lookup') {
+        const c = a.masterCfg || {};
+        d.source = String(c.source == null ? '' : c.source);
+        d.matchColumn = String(c.matchColumn == null ? '' : c.matchColumn);
+        d.matchKey = String(c.matchKey == null ? '' : c.matchKey);
+        d.returnKey = String(c.returnKey == null ? '' : c.returnKey);
+      } else {
+        d.carry = (a.carryForward === true);
+      }
+      out.defs[n] = d;
+      out.order.push(n);
+    });
+    return out;
+  },
   _keyDefMoved(stored, opened) {
     if (!stored || !opened) return null;
     const was = RecoTemplate._keyDefOf(opened), now = RecoTemplate._keyDefOf(stored);
@@ -18339,6 +18585,20 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     sess.data = active.map(r => {
       const row = { _id: U.uid(), _pk: r._pk, _ver: r._ver };
       tpl.columns.forEach(c => row[c.name] = r[c.name] != null ? r[c.name] : '');
+      /* T-S10-19, AND THIS LINE IS THE WHOLE TICKET. The comment on
+         Versioning.appendChangesBatch's record build says it out loud: "Rows
+         reopened from history only copy tpl.columns, so these never reach the
+         data." T-S10-19 IS the reopened-day-file path, so without this the
+         signature is minted, written to the share and then thrown away on the
+         way back in - the fix would protect nothing while a mint-side test
+         went green. TEST THE ROUND TRIP, NOT THE MINT.
+         Set only when the file carries one, so a row from a file written
+         before this build gets no property at all rather than an empty one:
+         '' has to mean "this row has no signature", which is not refused,
+         and a row with no _pksig key is byte-identical to what this line
+         built before. _dsi still goes LAST, for the byte-order reason
+         ingestData's does. */
+      if (r._pksig) row._pksig = String(r._pksig);
       row._dsi = 0;
       return row;
     });
@@ -20738,14 +20998,19 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     if (!ac || !ac.length) return null;
     let e = null;
     try { e = Reco._keyExtraCache.get(tpl); } catch (x) { e = null; }
-    if (e && e.pks === pks && e.ac === ac) return e.set;
+    /* ROUND 8 / A5: tpl.columns is read two lines down and was not in the
+       cache key either - the same gap, the same reachable in-place push, one
+       line of reasoning. Identity catches a replace, length catches a push. */
+    if (e && e.pks === pks && e.ac === ac
+        && e.cols === tpl.columns && e.ncols === ((tpl.columns || []).length)) return e.set;
     const tplCols = new Set((tpl.columns || []).map(c => c && c.name));
     const names = new Set();
     ac.forEach(a => {
       if (a && a.name && !tplCols.has(a.name) && pks.indexOf(a.name) !== -1) names.add(a.name);
     });
     const set = names.size ? names : null;
-    try { Reco._keyExtraCache.set(tpl, { pks: pks, ac: ac, set: set }); } catch (x) {}
+    try { Reco._keyExtraCache.set(tpl, { pks: pks, ac: ac, cols: tpl.columns,
+                                        ncols: ((tpl.columns || []).length), set: set }); } catch (x) {}
     return set;
   },
 
@@ -20938,6 +21203,223 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     return scratch;
   },
 
+  /* ---- T-S10-19. THE KEY RULE'S SIGNATURE, RECORDED ON THE ROW AT MINT TIME
+     =======================================================================
+     THE QUESTION THIS ANSWERS IS ABOUT THE RULE AND NOT ABOUT THE DATA, and
+     that distinction is the whole of this round. Round 6 asked "is row._pk
+     still what the rule computes for this row NOW?", which is a question
+     about the DATA: a frozen _pk is SUPPOSED to disagree with a recompute
+     whenever the ROW'S OWN DATA changed (handover 14.3), so ordinary work
+     read as drift and five measured pieces of it were refused ([86]). This
+     asks "was this key minted by the rule that is in force NOW?" A signature
+     cannot be moved by a correction, a cell edit, a fill, a replace, a
+     carried value, a column this month's file does not carry, or the clock,
+     because not one of those is in it.
+
+     WHAT IS IN IT: RecoTemplate._keyDefOf(tpl) and nothing else - the
+     primaryKeys list plus the DEFINITION of every column in the key's
+     dependency closure (Reco._keyDepNames). THERE IS DELIBERATELY NO SECOND
+     DEFINITION OF "THE KEY RULE" IN THIS FILE. _keyDefOf is what T-24R2-1's
+     refusal and the definition-change confirm already compare, so "a change
+     that raises the latch" and "a change that moves the signature" are the
+     same set of changes BY CONSTRUCTION. Two definitions of this would drift
+     apart and the one that drifted would be the one nobody ran.
+
+     THE MASTER'S ROWS ARE NOT IN IT, AND THAT IS THE DESIGN RATHER THAN AN
+     OMISSION. A master_lookup key extra's CONFIG (source, matchColumn,
+     matchKey, returnKey, and the legacy masterRefColumn/masterValueColumn
+     pair) is inside _keyDefOf, so RE-POINTING a lookup moves the signature.
+     The accounts master's DATA is not: a colleague adding a nominal code
+     changes what the key WOULD compute without changing the rule that minted
+     it, the day file holds the minted key, and every surface in Reco is
+     deliberately on it (handover 14.3). Hashing the master's rows would make
+     this a value comparison in disguise - round 6 by another route - and
+     would refuse every gesture on every lookup-keyed template the first time
+     anybody edited the master. [84] R15i is the gate on that.
+
+     NULL WHEN THE KEY NAMES NO ADDED COLUMN, which is every template that
+     existed before #24. Versioning._fields reads this same answer, so the
+     day-file header's WIDTH is a property of the TEMPLATE and never of which
+     rows a particular write happens to carry. The shape this leaves open - a
+     template-column key whose primaryKeys LIST is edited, with a day file
+     written before the edit - is measured and ticketed as T-S10-25 rather
+     than left unsaid.
+
+     VERSIONED '<ver>:<hash>', AND COMPARED ONLY WITHIN A VERSION. The hash's
+     INPUT is a format. A future round that changed what is hashed would make
+     every row minted by this build read as "a different rule" and take those
+     reconciliations read-only, which is the outcome the migration decision
+     below exists to avoid. So a signature whose version this build does not
+     recognise is treated as ABSENT - not refused - and a format change
+     degrades to "those rows are unprotected" instead of "the app is
+     read-only". Bumping KEYSIG_VER is a migration and has to be written down
+     as one.
+
+     64-bit FNV-1a in two lanes, 16 hex digits. XlSchema.fnv1a is 32 bits,
+     which is enough for a workbook-staleness hint and not for this: a
+     collision here is a row that is NOT refused. */
+  KEYSIG_VER: '1',
+  /* Canonical text: object keys in SORTED order, arrays in theirs. Stable
+     across builds and across the JSON round trip through
+     reco/recoTemplates.json, which plain JSON.stringify is NOT - it emits
+     properties in insertion order, so two colleagues' builds holding the same
+     definition with its fields in a different order would hash differently
+     and refuse each other's rows. A mixed fleet on one folder is a live
+     problem (T-S10-12), so this is not a theoretical tidiness. */
+  _keySigCanon(v) {
+    if (v === null || v === undefined) return 'n';
+    if (Array.isArray(v)) return '[' + v.map(Reco._keySigCanon).join(',') + ']';
+    if (typeof v === 'object') {
+      return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
+        .map(k => JSON.stringify(k) + ':' + Reco._keySigCanon(v[k])).join(',') + '}';
+    }
+    return JSON.stringify(v);
+  },
+  /* ROUND 8 CORRECTED LANE 2, AND THE COMMENT ABOVE IS WHY IT HAD TO BE.
+     Lane 2 was advanced with (c >>> 8) & 0xff, which is ZERO for every
+     character below U+0100 - so for ASCII input it folded nothing but zero
+     bytes and was a function of the LENGTH alone. _keySigHash of
+     'aaaaaaaaaaaaaaaaaaaa' and 'zzzzzzzzzzzzzzzzzzzz' both began 9f769824.
+     The discriminating width was the 32 bits this comment rejects, and a
+     birthday search over 20-character key formulas found a full collision in
+     154,453 tries. Lane 2 now folds the SAME byte against a different offset
+     basis and a different prime (FNV-1a's 32-bit pair is the only one that is
+     standard, so the second lane uses the 64-bit prime reduced into 32 bits),
+     and mixes the INDEX in so that a transposition moves it too. Two
+     independent lanes, 64 discriminating bits. */
+  /* ROUND 8 / A1(4). WHITESPACE OUTSIDE A STRING LITERAL IS LAYOUT, NOT RULE.
+     Reformatting a key formula - 'CONCAT({Doc})' to 'CONCAT( {Doc} )' - was
+     measured moving the signature while the rule went on computing identical
+     keys, which refuses every row minted before it. So the formula text is
+     canonicalised before it is hashed.
+
+     STRING LITERALS ARE KEPT BYTE FOR BYTE, which is the whole difficulty: in
+     CONCAT({Doc}," - ",{Line}) the spaces inside the quotes ARE the rule and
+     collapsing them would hash two DIFFERENT rules the same and leave a dead
+     key unrefused - the exact harm T-S10-19 exists to stop. A space outside a
+     literal survives only where it separates two identifier-or-number
+     characters, which is the one place removing it would weld two tokens into
+     one ('A B' is not 'AB').
+
+     IT USES Formula._compile's OWN LITERAL PATTERN, at the one place that
+     already decides what counts as a string in a formula - that regex is how
+     a {Token} inside quotes is told from one outside - so this cannot drift
+     from the language the evaluator parses.
+
+     AND IT BAILS OUT, IN THE SAFE DIRECTION, whenever that pattern cannot
+     model the text: a backtick could open a template literal the pattern does
+     not know, and an odd quote left over after the scan means an unterminated
+     literal. Both hash the formula RAW. The cost of bailing out is the status
+     quo - a formatting-only edit of that one formula moves the signature,
+     under saveTemplate's own confirm - and the cost of guessing would be a
+     dead key that is NOT refused. Only one of those two is allowed to be
+     wrong. */
+  _keyCanonFormula(s) {
+    const f = String(s == null ? '' : s);
+    if (f.indexOf('`') !== -1) return f;
+    const LIT = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
+    const isId = ch => !!ch && /[A-Za-z0-9_$]/.test(ch);
+    const squeeze = seg => {
+      const t = String(seg).replace(/\s+/g, ' ');
+      let o = '';
+      for (let i = 0; i < t.length; i++) {
+        const ch = t.charAt(i);
+        if (ch !== ' ') { o += ch; continue; }
+        if (isId(o.charAt(o.length - 1)) && isId(t.charAt(i + 1))) o += ' ';
+      }
+      return o;
+    };
+    let out = '', at = 0, m;
+    LIT.lastIndex = 0;
+    while ((m = LIT.exec(f)) !== null) {
+      if (!m[0].length) break;
+      out += squeeze(f.slice(at, m.index)) + m[0];
+      at = m.index + m[0].length;
+    }
+    const tail = f.slice(at);
+    // An unterminated literal: the tail still holds a quote the scan did not pair.
+    if (tail.indexOf('"') !== -1 || tail.indexOf("'") !== -1) return f;
+    return out + squeeze(tail);
+  },
+  _keySigHash(s) {
+    let h1 = 0x811c9dc5, h2 = 0x84222325;
+    const t = String(s == null ? '' : s);
+    for (let i = 0; i < t.length; i++) {
+      const c = t.charCodeAt(i);
+      h1 = Math.imul((h1 ^ (c & 0xff)) >>> 0, 16777619) >>> 0;
+      h2 = Math.imul((h2 ^ ((c ^ (i & 0xff)) & 0xff)) >>> 0, 2166136261) >>> 0;
+      h2 = (h2 ^ ((c >>> 8) & 0xff)) >>> 0;
+    }
+    const hex = n => ('0000000' + (n >>> 0).toString(16)).slice(-8);
+    return hex(h2) + hex(h1);
+  },
+  /* Cached against the template object AND the two arrays it reads, by
+     IDENTITY - exactly as Reco._keyExtraSet is, and for the same reason:
+     saveTemplate replaces both (the prune builds a new primaryKeys array and
+     the editor deep-clones additionalColumns), so a stale signature cannot
+     outlive an edit. _keySigComputed is incremented on a real computation
+     only, so [85] can measure what the write-side question costs as an
+     OPERATION COUNT and never as a clock (handover 16.4a). */
+  _keySigCache: new WeakMap(),
+  _keySigComputed: 0,
+  keyRuleSig(tpl) {
+    if (!tpl || !Reco._keyExtraSet(tpl)) return null;
+    let e = null;
+    try { e = Reco._keySigCache.get(tpl); } catch (x) { e = null; }
+    /* ROUND 8 / A5: tpl.columns IS AN INPUT TO THE HASH and was not in the
+       cache key. Reco._keyExtraSet reads it to decide which primaryKeys name
+       an ADDED column, so the answer depends on it - and Reco.addCorrectionCol
+       pushes into it IN PLACE, which no identity test can see. MEASURED: the
+       Correction tab's "add a format rule" typed with the key extra's own name
+       left the cached signature answering "writable" while a fresh clone of
+       the same template answered null, and the SAME rows flipped to refused -
+       retroactively, with the file-older-than-the-rule sentence - at the next
+       unrelated template save, when the cache happened to be evicted. So the
+       LENGTH goes in beside the identity: a replace moves the identity, a push
+       moves the length, and the two together cover every mutation that is
+       reachable. (The clash itself is refused at source now - see
+       Reco.addCorrectionCol - and this is the belt beside that brace, because
+       a wrong answer here is a refusal of every row in the reconciliation.) */
+    if (e && e.pks === tpl.primaryKeys && e.ac === tpl.additionalColumns
+        && e.cols === tpl.columns && e.ncols === ((tpl.columns || []).length)) return e.sig;
+    let sig = null;
+    try {
+      Reco._keySigComputed++;
+      /* ROUND 8: _keyRuleDefOf, NOT _keyDefOf. See the long note on
+         RecoTemplate._keyRuleDefOf: hashing the stored object refused four
+         gestures that compute byte-identical keys. The latch and T-24R2-1's
+         confirm keep the coarse _keyDefOf they want. */
+      sig = Reco.KEYSIG_VER + ':' + Reco._keySigHash(Reco._keySigCanon(RecoTemplate._keyRuleDefOf(tpl)));
+    } catch (x) { sig = null; }
+    try { Reco._keySigCache.set(tpl, { pks: tpl.primaryKeys, ac: tpl.additionalColumns,
+                                      cols: tpl.columns, ncols: ((tpl.columns || []).length),
+                                      sig: sig }); } catch (x) {}
+    return sig;
+  },
+  /* WAS THIS ROW'S KEY MINTED BY A DIFFERENT RULE? NOT "does this key still
+     come out of today's data" - see the block above.
+
+     FALSE WHEN THE ROW CARRIES NO SIGNATURE, AND THAT IS THE MIGRATION, TAKEN
+     DELIBERATELY: every row on every share today has none, and refusing them
+     would make the app read-only on the day this ships. So this protects only
+     rows minted after it, which is honest and is why it is a round of its
+     own. An EMPTY string counts as none too - Papa gives '' for a column that
+     is present and empty, which is every pre-change row in a day file this
+     build has since widened.
+
+     A null keyRuleSig against a row that HAS a v1 signature is a refusal, and
+     correctly: the template's key named an added column when that row was
+     minted and does not now, which is the primaryKeys prune and is a rule
+     move of the largest kind. */
+  _keySigMoved(tpl, row) {
+    const got = row && row._pksig;
+    if (!got) return false;
+    const s = String(got);
+    const i = s.indexOf(':');
+    if (i < 0 || s.slice(0, i) !== Reco.KEYSIG_VER) return false;
+    return s !== Reco.keyRuleSig(tpl);
+  },
+
   _mintAcc(tpl) {
     const pks = (tpl.primaryKeys || []);
     const kx = Reco._keyExtraSet(tpl);
@@ -20945,7 +21427,12 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
                 allBlank: 0, badBlank: 0, ambig: 0, keyed: 0, dupRows: 0,
                 keys: new Set(), dupKeys: new Set(), keysCapped: false,
                 multi: pks.length > 1, pkIsExtra: pks.map(k => !!(kx && kx.has(k))),
-                ctx: {}, scratch: {}, upto: Reco._keyClosureUpto(tpl) };
+                ctx: {}, scratch: {}, upto: Reco._keyClosureUpto(tpl),
+                /* T-S10-19: ONCE PER MINT PASS, not once per row. The
+                   chunked mint shares one accumulator across chunks, so
+                   500,000 rows pay one canonical-JSON walk and one hash
+                   between them. */
+                sig: Reco.keyRuleSig(tpl) };
     pks.forEach(k => { a.empty[k] = 0; a.errs[k] = 0; a.pipes[k] = 0; });
     return a;
   },
@@ -21040,6 +21527,12 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
         }
       }
       row._pk = key || ('_auto_' + U.uid());
+      /* T-S10-19. THE RULE'S SIGNATURE, FROZEN BESIDE THE KEY IT MINTED.
+         Only on a row that got a BUSINESS key: an '_auto_' row's identity
+         is a throwaway uid that no rule computes, so no rule change can
+         detach it from anything and refusing it later would be a false
+         refusal. That is the same line _keyFrozenPart draws. */
+      if (key !== '' && a.sig) row._pksig = a.sig;
       a.minted++;
     }
     a.rows = rows.length;
@@ -22638,6 +23131,23 @@ _renderOneRow(tpl, sess, row, descs, idxMap, filteredIdx) {
     if (row._ssAdded)      statusHtml += ' <span class="badge ss-added" title="Added row">✚</span>';
     if (row._ssPersistent) statusHtml += ' <span class="badge ss-persist" title="Persistent (in versioned CSV)">💾</span>';
     if (row._ssSingleUse)  statusHtml += ' <span class="badge ss-single" title="Single-use — removed after next entry">⏱</span>';
+  /* ROUND 8 / A4. "THIS ROW CANNOT BE WRITTEN" HAS TO BE VISIBLE BEFORE THE
+     GESTURE, the way an overridable cell already refuses typing in the cell
+     rather than after it. A4 measured the same business key on screen TWICE -
+     one copy refused and one writable - with both <tr>s carrying the same
+     class, no title and no badge, and Reco.keyDriftCount reading ZERO because
+     it counts VALUE drift and nothing had drifted. It goes on the ROW and not
+     on the key cell: the key extra is often not in displayColumns at all (it
+     was not in A4's own fixture), so a key-cell badge would be invisible
+     exactly where this was measured missing.
+     The guard is row._pksig FIRST, so this costs one property read per row for
+     every template that has no signature - which is every template that
+     existed before this round - and no byte of the <tbody> run_colorder T1
+     diffs can move for any of them. */
+    if (row._pksig && Reco._keySigMoved(tpl, row))
+      statusHtml += ' <span class="badge oldrule" title="The key on this row was minted under a '
+        + 'different row-key rule from the one in force now, so nothing can be filed against it. '
+        + 'Clear Loaded Data and load the extract again to work on re-keyed rows.">\u2298 older rule</span>';
   const rowPkForBadges = Reco.rowKey(tpl, row);
   if (tpl.groupsEnabled) {
     const memberships = rowPkForBadges ? Groups.groupsForPk(tpl.id, rowPkForBadges) : [];
@@ -24872,13 +25382,82 @@ renderRecoTable(tpl, sess) {
      the signature because the CHOKEPOINT's shape must not change when the
      answer narrows - every caller passes them, run_store_e2e [82] G82e reads
      them, and a future signature check (T-S10-19) needs the row. */
+  /* T-S10-19'S ARM, AND WHY IT IS NOT ROUND 6'S. The template latch stays
+     FIRST, unchanged and verified in both directions by round 5: it is one
+     property read and its sentence is the better one when it applies. The
+     second arm compares the ROW'S SIGNATURE against the TEMPLATE'S - a
+     question about the RULE. It is not a recompute: nothing here reads a
+     cell, calls _extraComputedValue or splits _pk, so none of [86]'s five
+     measured false refusals can reach it. If you find yourself comparing a
+     key to a recompute on this line, you have rebuilt round 6 - read
+     handover 14.3 and 18.12 and stop. */
   _keyWriteUnsafe(tpl, sess, row) {
     if (!tpl || !tpl.id) return '';
-    return Reco._keyStale[String(tpl.id)] ? 'stale' : '';
+    if (Reco._keyStale[String(tpl.id)]) return 'stale';
+    return Reco._keySigMoved(tpl, row) ? Reco._keyOldRuleWhy(sess, row) : '';
   },
+  /* ROUND 8 / A3. WHICH 'oldrule' SENTENCE, FROM A FACT THE CODE ALREADY HAS.
+     The one sentence round 8 first shipped said two things that are false in
+     the commonest case - that the row came back from a saved day file, and
+     that "nobody has changed anything" - and it was MEASURED saying them to
+     an operator whose own template save, ten seconds earlier, had moved the
+     signature under rows Reco.ingestData had minted in that same window and
+     no file had ever handed back. Round 7 deleted the previous second
+     sentence for exactly this: it blamed a colleague for a template change
+     that had never happened. Blaming a FILE instead is the same mistake with
+     a different object.
+     THE DISCRIMINATOR IS THE ROW'S OWN DATA SET ID, which already exists and
+     is already exact: Reco.ingestData stamps an upload with a '#u<n>' suffix
+     (sess.dataSetIds.push(dsPath + '#u' + n)) and Reco.loadVersionedFile does
+     not (sess.dataSetIds = [fullPath]). Null - a '+ Row' row, or a session
+     older than S14 - answers "cannot tell", and that sentence then claims
+     NEITHER. Never say "nobody changed anything" in a branch the operator's
+     own save can reach. */
+  _keyOldRuleWhy(sess, row) {
+    let ds = null;
+    try { ds = Reco.dataSetOf(sess, row); } catch (e) { ds = null; }
+    if (ds == null) return 'oldrule';
+    return String(ds).indexOf('#u') === -1 ? 'oldrulefile' : 'oldrulemine';
+  },
+  /* ROUND 8 / A4. HOW MANY ROWS ON SCREEN CANNOT BE WRITTEN, so a
+     Clear-and-load decision can be made on a number rather than on a refusal.
+     Reco.keyDriftCount is deliberately NOT reused: it counts VALUE drift,
+     which is a different question with a different answer (it read ZERO on a
+     screen where every one of three rows was refused). Costs nothing when the
+     template has no signature at all, which is every template that existed
+     before this round. */
+  keyOldRuleCount(tpl, sess) {
+    if (!tpl || !Reco.keyRuleSig(tpl)) return 0;
+    let n = 0;
+    ((sess && sess.data) || []).forEach(r => { if (Reco._keySigMoved(tpl, r)) n++; });
+    return n;
+  },
+  /* ALL-OR-NONE, and the cost is disclosed rather than designed away. One
+     row from a pre-change day file refuses a control that writes EVERY row
+     on screen (sheet mode's Fill Column, Find & Replace's Replace All),
+     because a reopened day file genuinely puts writable and unwritable rows
+     on one screen. "Replaced 0 of 2,000" and a silent per-row skip are both
+     worse than one sentence. Handover 15.6(b) says so to the operator, and
+     [84] R15g measures it. This is NOT round 6's cost: there the trigger was
+     a row whose own DATA had moved - one ordinary correction - and here it is
+     a file older than the rule, which is the state the operator is being
+     told to get out of. */
   _keyRowsUnsafe(tpl, sess, rows) {
     if (!tpl || !tpl.id) return '';
-    return Reco._keyStale[String(tpl.id)] ? 'stale' : '';
+    if (Reco._keyStale[String(tpl.id)]) return 'stale';
+    const bad = (rows || []).filter(r => Reco._keySigMoved(tpl, r));
+    if (!bad.length) return '';
+    /* ROUND 8: WHEN THE SCREEN IS MIXED, SAY THE FILE'S SENTENCE. A reopened
+       day file genuinely puts rows from two rules on one screen, and the ones
+       that came back from the file are the ones with no recovery - so theirs
+       is the sentence that has to be said, not whichever happens to be first. */
+    let why = '';
+    for (let i = 0; i < bad.length; i++) {
+      const w = Reco._keyOldRuleWhy(sess, bad[i]);
+      if (w === 'oldrulefile') return w;
+      if (!why) why = w;
+    }
+    return why;
   },
 
   /* THE ASK, SEPARATE FROM THE KEY, so a gesture can ASK FIRST and MUTATE
@@ -24905,7 +25484,48 @@ renderRecoTable(tpl, sess) {
      is not kept as a dead branch: a refusal sentence nothing can produce is a
      promise of a safety control that does not exist, and the next reader would
      trust it. */
+  /* T-S10-19: THERE ARE TWO SENTENCES AGAIN, and the second one is not the
+     one round 7 deleted. That one said "These rows carry the keys they were
+     SAVED with" on behalf of the per-row drift arm and, because the arm
+     fired on ordinary work, it blamed a colleague for a template change that
+     had never happened. This one is produced only by a SIGNATURE mismatch,
+     so what it says is true every time it is said: the file is older than
+     the rule, and nobody did anything while these rows were open. Saying the
+     latch's sentence here would be the round-6 mistake in prose. */
+  /* ROUND 8 REWROTE THESE THREE, AND WHAT CHANGED IS WHAT THEY CLAIM.
+     GONE: "Nobody has changed anything while you had these rows open" - the
+     operator's own save reaches this branch (A3, measured). GONE: "written
+     before this reconciliation's row-key rule was changed" - a backup restore
+     puts an OLDER rule back under a NEWER file, so the direction is not
+     knowable here and 'a DIFFERENT rule' is true either way (A7). GONE, for a
+     reopened file: "Use Clear Loaded Data and then load the extract again" as
+     the whole of the advice - A2 measured that loop closing with nothing
+     filed, because last week's rows only come back out of last week's file
+     and reopening it brings the old keys back every time. The file branch now
+     names the recovery that EXISTS (that day's extract, re-keyed into today's
+     file) and says the blast radius out loud, which handover 15.6 repeats. */
   _keyRefusal(what, why) {
+    const CORE = ' \u2014 anything filed against it goes where nobody else can see it, and '
+      + 'anything meant to change a record on the shared folder cannot reach it.';
+    if (why === 'oldrulemine')
+      return 'Nothing was ' + what + '. This reconciliation\'s row-key rule was changed AFTER '
+        + 'these rows were loaded, so the key on this row was minted under a DIFFERENT row-key '
+        + 'rule from the one in force now' + CORE + ' Use Clear Loaded Data and then load the '
+        + 'extract again: the rows come back re-keyed under the rule in force now. (Add Data on '
+        + 'its own ADDS to what is on screen, so those rows would keep the old keys.)';
+    if (why === 'oldrulefile')
+      return 'Nothing was ' + what + '. This row came back from a saved day file and its key was '
+        + 'minted under a DIFFERENT row-key rule from the one in force now' + CORE + ' Opening '
+        + 'that day file again will keep bringing the old keys back \u2014 nothing re-keys a '
+        + 'saved file. To record this against the row, use Clear Loaded Data and then load that '
+        + 'day\'s EXTRACT again: those rows come back re-keyed under the rule in force now, into '
+        + 'today\'s file. Every day file this reconciliation wrote under the previous rule is '
+        + 'read-only in the same way.';
+    if (why === 'oldrule')
+      return 'Nothing was ' + what + '. The key on this row was minted under a DIFFERENT row-key '
+        + 'rule from the one in force now' + CORE + ' Use Clear Loaded Data and then load the '
+        + 'extract again: rows that come back from a saved day file keep their old keys however '
+        + 'often that file is reopened, so only rows you load now are re-keyed.';
     return 'Nothing was ' + what + '. Somebody else changed how this reconciliation identifies '
       + 'its rows while these rows were loaded, so the keys on screen are the OLD ones — '
       + 'anything filed against them goes where nobody else can see it, and anything meant to '
@@ -26287,6 +26907,22 @@ renderRecoTable(tpl, sess) {
     const fmt = prompt('Format pattern (e.g. DDDDD, N-A@D):');
     if (!fmt) return;
     const existing = tpl.columns.find(c => c.name === name);
+    /* ROUND 8 / A5. REFUSE A NAME AN ADDED COLUMN ALREADY ANSWERS TO.
+       RecoTemplate.saveTemplate already refuses that clash ('"Ref" is both a
+       file column and an added column'), so pushing one here left the
+       template UNSAVABLE with no control that undoes it - and when the name
+       was a KEY extra's, Reco._keyExtraSet stopped seeing a key extra at all,
+       Reco.keyRuleSig went null, and every row of the reconciliation was
+       refused with a sentence about a day file nobody had opened. Measured.
+       A format rule is for a column of the FILE; an added column's value is
+       computed or typed and has no format to correct. */
+    if (!existing && (tpl.additionalColumns || []).some(a => a && a.name === name)) {
+      U.toast('"' + name + '" is an added column on this reconciliation, not a column of the '
+            + 'file, so it cannot take a format rule \u2014 nothing was added. A format rule '
+            + 'corrects what the extract contains; an added column is worked out or typed. '
+            + '(Adding it would also make this template unsavable: a name cannot be both.)', 'error');
+      return;
+    }
     if (existing) {
       existing.formats = existing.formats || [];
       existing.formats.push(fmt);

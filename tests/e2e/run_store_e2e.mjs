@@ -10630,11 +10630,443 @@ const R16_COST = `(async function (hasKeyExtra) {
   let guardCalls = 0;
   const realAsk = Reco._keyWriteUnsafe;
   Reco._keyWriteUnsafe = function () { guardCalls++; return realAsk.apply(Reco, arguments); };
+  const sigBefore = Reco._keySigComputed || 0;
   try { Reco.offsetSelected(null); } finally {
     Reco._extraComputedValue = realCompute; Reco._keyWriteUnsafe = realAsk; }
+  const sigAfter = Reco._keySigComputed || 0;
   await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
   const offs = Object.keys((AppState.manualOffsetMaster[id] || {})).length;
-  return { rows: N, recomputes: calls, questionsAsked: guardCalls, offsetsFiled: offs };
+  /* T-S10-19's arm, counted the same way and for the same reason: the cost of
+     a safety control has to be a number somebody can check. */
+  return { rows: N, recomputes: calls, questionsAsked: guardCalls, offsetsFiled: offs,
+           sigComputed: sigAfter - sigBefore,
+           sigOnFirstRow: (sess.data[0] || {})._pksig };
+})`;
+
+/* ---- T-S10-19'S PORTS AND FIXTURES ----------------------------------------
+   [88] is the ROUND TRIP: mint -> day file -> reopen -> refuse. Its fixtures
+   return the signature at every hop - on the row, on the template, in the CSV,
+   on the reopened row - so a check can read a VALUE rather than a toast. The
+   template id, columns and extras are [84]'s exactly, so R15_WALK walks the
+   same ten doors over the same screen in both sections. */
+const PORT_R19  = 21482;   // R19 the key-rule signature, and the round trip
+const PORT_R19B = 21483;   // R19l the OLDER build, on a file this build wrote
+
+const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
+/* The signature as the APP answers it, typeof-guarded so an APP_FILE run
+   against a build that has no signature reads RED rather than crashing the
+   suite - which is how [88] was recorded failing first. */
+const R19_SIGOF = `(function (tpl) { try { return typeof Reco.keyRuleSig === 'function'
+    ? Reco.keyRuleSig(tpl) : '(this build has no Reco.keyRuleSig)'; } catch (e) { return 'threw'; } })`;
+const R19_MK = (id, name, extras, pks, cols, editable, rows) => `(async function () {
+  RecoTemplate.create(); const t = RecoTemplate._editing;
+  t.id = ${JSON.stringify(id)}; t.name = ${JSON.stringify(name)};
+  t.columns = ${JSON.stringify(cols)}.map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = ${JSON.stringify(extras)};
+  t.primaryKeys = ${JSON.stringify(pks)}; t.valueColumn = 'Amount';
+  t.displayColumns = ${JSON.stringify(cols)}.concat(
+    ${JSON.stringify(extras)}.filter(a => a.type === 'custom').map(a => a.name));
+  t.editableColumns = ${JSON.stringify(editable)};
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(id)});
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = ${JSON.stringify(id)};
+  await Reco.ingestData(tpl, ${JSON.stringify(rows)}, ${JSON.stringify(cols)});
+  App.closeModal(); ${R19_SETTLE}
+  const s = AppState.recoSessions[${JSON.stringify(id)}];
+  return { keys: s.data.map(r => r._pk), sigs: s.data.map(r => r._pksig),
+           tplSig: ${R19_SIGOF}(tpl), folder: tpl.dataFolder,
+           latch: !!(Reco._keyStale || {})[${JSON.stringify(id)}] };
+})`;
+const R19_A_KEY = (id, extra, formula) => `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.edit(${JSON.stringify(id)});
+    RecoTemplate._editing.additionalColumns.find(a => a.name === ${JSON.stringify(extra)})
+      .formula = ${JSON.stringify(formula)};
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+  } finally { window.confirm = real; }
+  ${R19_SETTLE}
+  const tpl = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(id)});
+  return { latch: !!(Reco._keyStale || {})[${JSON.stringify(id)}], tplSig: ${R19_SIGOF}(tpl) };
+})`;
+const R19_RELOAD = (id, rows) => `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  const tpl = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(id)});
+  try { Reco.confirmClearSession();
+    await Reco.ingestData(tpl, ${JSON.stringify(rows)}, Object.keys(${JSON.stringify(rows)}[0]));
+  } finally { window.confirm = real; }
+  App.closeModal(); ${R19_SETTLE}
+  const s = AppState.recoSessions[${JSON.stringify(id)}];
+  return { keys: s.data.map(r => r._pk), sigs: s.data.map(r => r._pksig),
+           tplSig: ${R19_SIGOF}(tpl), latch: !!(Reco._keyStale || {})[${JSON.stringify(id)}] };
+})`;
+const R19_REOPEN = (id) => `(async function () {
+  const real = window.confirm; window.confirm = () => true;
+  const tpl = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(id)});
+  try { const files = await Versioning.listFiles(tpl);
+    const f = files[files.length - 1];
+    await Reco.loadVersionedFile(f.fullPath || f.path, ${JSON.stringify(id)});
+  } finally { window.confirm = real; }
+  App.closeModal();
+  const s = AppState.recoSessions[${JSON.stringify(id)}];
+  const dead = (s.data || []).filter(r => /^K[0-9]+$/.test(String(r._pk)));
+  const live = (s.data || []).filter(r => /-X$/.test(String(r._pk)));
+  return { keys: (s.data || []).map(r => r._pk), latch: !!(Reco._keyStale || {})[${JSON.stringify(id)}],
+           dead: dead.map(r => r._pk), deadSigs: dead.map(r => r._pksig),
+           liveSigs: live.map(r => r._pksig), tplSig: ${R19_SIGOF}(tpl) };
+})`;
+/* QUESTION (b)'s pair, in ONE fixture so both arms run against the same
+   template and the same day file: the CONFIG moves, then the MASTER'S DATA
+   moves, and the measurement is what each one does to the reopened row. */
+const R19_LOOKUP = (id) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  RecoTemplate.create(); const t = RecoTemplate._editing;
+  t.id = I; t.name = 'Look' + I;
+  t.columns = ['Doc','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'AK', type:'master_lookup',
+    masterCfg: { source:'accounts', matchColumn:'Doc', matchKey:'Reference', returnKey:'Nominal' } },
+    { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['AK']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Amount','Vendor'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  let tpl = AppState.recoTemplates.find(x => x.id === I);
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+  await Reco.ingestData(tpl, [{ Doc:'ACC1', Amount:'10' }, { Doc:'ACC2', Amount:'20' }], ['Doc','Amount']);
+  App.closeModal(); ${R19_SETTLE}
+  let s = AppState.recoSessions[I];
+  const mintedSig = s.data[0]._pksig;
+  const repoint = async (to) => { window.confirm = () => true;
+    try { RecoTemplate.edit(I);
+      RecoTemplate._editing.additionalColumns.find(a => a.name === 'AK').masterCfg.returnKey = to;
+      RecoTemplate.saveTemplate();
+      if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    } finally { window.confirm = real; }
+    ${R19_SETTLE}
+    return AppState.recoTemplates.find(x => x.id === I); };
+  const reopen = async () => { window.confirm = () => true;
+    try { Reco.confirmClearSession();
+      const files = await Versioning.listFiles(tpl);
+      const f = files[files.length - 1];
+      await Reco.loadVersionedFile(f.fullPath || f.path, I);
+    } finally { window.confirm = real; }
+    App.closeModal(); ${R19_SETTLE}
+    return AppState.recoSessions[I]; };
+  const tryWrite = async (sess, pk, tag) => {
+    const row = (sess.data || []).find(r => String(r._pk) === String(pk));
+    window.__toasts = [];
+    if (row) Reco.setTag(row._id, 'Vendor', tag);
+    ${R19_SETTLE}
+    const bag = ((AppState.extraValueMaster || {})[I] || {})[pk] || {};
+    return { present: !!row, sigOnRow: row && row._pksig,
+             refused: (window.__toasts || []).some(x => /error/.test(x.kind)),
+             said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 80)),
+             filed: String((bag.Vendor || {}).v || '') === tag }; };
+  /* ARM 1: the CONFIG is re-pointed. There is no formula text to change - a
+     lookup has none - which is exactly what question (b) asks about. */
+  tpl = await repoint('SubNominal');
+  const sigAfterCfg = ${R19_SIGOF}(tpl);
+  s = await reopen();
+  const a1 = await tryWrite(s, '12345', 'lk-after-config');
+  /* ARM 2: the config is put back, and the MASTER'S OWN ROWS are edited. */
+  tpl = await repoint('Nominal');
+  const sigBack = ${R19_SIGOF}(tpl);
+  s = await reopen();
+  (AppState.aegMaster || []).forEach(r => { if (r && r.Reference === 'ACC1') r.Nominal = '99999'; });
+  let drifted = null;
+  try { drifted = Reco.keyDrift(tpl, s, (s.data || []).find(r => String(r._pk) === '12345')).drifted; }
+  catch (e) { drifted = 'threw'; }
+  const a2 = await tryWrite(s, '12345', 'lk-after-master-data');
+  return { sigMintedPresent: !!mintedSig, mintedSig: mintedSig, sigAfterCfg: sigAfterCfg,
+           sigBack: sigBack, cfgMovedTheSig: sigAfterCfg !== mintedSig,
+           dataMovedTheSig: sigBack !== mintedSig, keyDriftSaysDrifted: drifted,
+           afterCfgChange: a1, afterDataChange: a2 };
+})`;
+/* QUESTION (a): a key that names NO added column. Nothing is stamped and the
+   header does not widen - AND the shape that leaves open is measured in the
+   same fixture rather than argued about: primaryKeys ['Doc'] -> ['Doc','Line']
+   with a day file written before it. The cost arm is here too, so question
+   (a) is answered with a number and not only with a reason. */
+const R19_PLAINKEY = (id) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  RecoTemplate.create(); const t = RecoTemplate._editing;
+  t.id = I; t.name = 'Plain' + I;
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount','Vendor'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  let tpl = AppState.recoTemplates.find(x => x.id === I);
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+  await Reco.ingestData(tpl, [1,2,3].map(i => ({ Doc:'P'+i, Line:'L'+i, Amount:String(i) })),
+    ['Doc','Line','Amount']);
+  App.closeModal(); ${R19_SETTLE}
+  let s = AppState.recoSessions[I];
+  const out = { tplSig: ${R19_SIGOF}(tpl), sigs: s.data.map(r => r._pksig), folder: tpl.dataFolder };
+  /* THE COST, AS AN OPERATION COUNT: 2,000 guarded writes on a template whose
+     key DOES name an added column, counting the signature computations they
+     cost. */
+  RecoTemplate.create(); const t2 = RecoTemplate._editing;
+  t2.id = I + '_C'; t2.name = 'Cost' + I;
+  t2.columns = ['Doc','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t2.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }];
+  t2.primaryKeys = ['Ref']; t2.valueColumn = 'Amount'; t2.displayColumns = ['Doc','Amount'];
+  t2.toleranceMode = 'value'; t2.toleranceValue = 1e12;
+  window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const ctpl = AppState.recoTemplates.find(x => x.id === I + '_C');
+  RecoTemplate.open(ctpl.id); AppState.activeRecoId = I + '_C';
+  const big = []; for (let i = 0; i < 2000; i++) big.push({ Doc:'D'+i, Amount:'1' });
+  await Reco.ingestData(ctpl, big, ['Doc','Amount']);
+  App.closeModal(); ${R19_SETTLE}
+  const cs = AppState.recoSessions[I + '_C'];
+  cs.selectedRows = {}; cs.data.forEach(r => { cs.selectedRows[r._id] = true; });
+  const before = Reco._keySigComputed || 0;
+  Reco.offsetSelected(null);
+  ${R19_SETTLE}
+  out.sigComputedOver2000Writes = (Reco._keySigComputed || 0) - before;
+  out.sigComputedTotal = (Reco._keySigComputed || 0);
+  out.costTplSigOnRow = (cs.data[0] || {})._pksig;
+  out.offsetsFiled = Object.keys((AppState.manualOffsetMaster[I + '_C'] || {})).length;
+  /* AND THE SHAPE QUESTION (a) LEAVES OPEN, MEASURED: the primaryKeys LIST
+     itself moves on a template-column key, and the day file written before
+     the edit comes back writable because there is no signature to compare.
+     T-S10-25. */
+  RecoTemplate.open(I); AppState.activeRecoId = I;
+  window.confirm = () => true;
+  try { RecoTemplate.edit(I);
+    RecoTemplate._editing.primaryKeys = ['Doc','Line'];
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    Reco.confirmClearSession();
+    tpl = AppState.recoTemplates.find(x => x.id === I);
+    const files = await Versioning.listFiles(tpl);
+    const f = files[files.length - 1];
+    await Reco.loadVersionedFile(f.fullPath || f.path, I);
+  } finally { window.confirm = real; }
+  App.closeModal(); ${R19_SETTLE}
+  s = AppState.recoSessions[I];
+  const row = (s.data || []).find(r => String(r._pk) === 'P1');
+  window.__toasts = [];
+  if (row) Reco.setTag(row._id, 'Vendor', 'plain-after-pklist-change');
+  ${R19_SETTLE}
+  const bag = ((AppState.extraValueMaster || {})[I] || {})['P1'] || {};
+  out.pkListNow = (AppState.recoTemplates.find(x => x.id === I) || {}).primaryKeys;
+  out.reopenedKeys = (s.data || []).map(r => r._pk);
+  out.latchAfter = !!(Reco._keyStale || {})[I];
+  out.stillWritableAfterPkListChange = String((bag.Vendor || {}).v || '') === 'plain-after-pklist-change';
+  out.saidThen = (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 80));
+  return out;
+})`;
+/* BACK-COMPAT, DIRECTION ONE: a day file with NO _pksig column at all, built
+   by hand through the bridge so it is genuinely a pre-change file and not this
+   build's own output with a column deleted. */
+const R19_PRECHANGE = (id) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  RecoTemplate.create(); const t = RecoTemplate._editing;
+  t.id = I; t.name = 'Pre' + I;
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                         { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount','Vendor'];
+  /* EDITABLE, or Reco.editCell no-ops and the widening rewrite below is never
+     provoked - which is exactly how R19k2 first read, vacuously. */
+  t.editableColumns = ['Line'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === I);
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+  const d = new Date();
+  const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]
+    + '-' + String(d.getFullYear()).slice(-2);
+  const rel = 'reco_data/' + tpl.dataFolder + '/' + mon + '/'
+    + String(d.getDate()).padStart(2, '0') + '.csv';
+  const csv = '_pk,_ver,_ts,_src,_by,Doc,Line,Amount\\r\\n'
+    + 'Q1,upload,2026-01-01T00:00:00.000Z,,,Q1,L1,10\\r\\n'
+    + 'Q2,upload,2026-01-01T00:00:00.000Z,,,Q2,L2,20\\r\\n';
+  await window.pywebview.api.write_file(rel, csv);
+  Versioning._cnCache = {};
+  await Reco.loadVersionedFile(rel, I);
+  App.closeModal(); ${R19_SETTLE}
+  const s = AppState.recoSessions[I];
+  const row = (s.data || []).find(r => String(r._pk) === 'Q1');
+  window.__toasts = [];
+  if (row) Reco.setTag(row._id, 'Vendor', 'pre-change-typed');
+  ${R19_SETTLE}
+  const bag = ((AppState.extraValueMaster || {})[I] || {})['Q1'] || {};
+  const back = await window.pywebview.api.read_file(rel);
+  /* THE ONE WIDENING REWRITE, MEASURED. A typed value goes to
+     extraValueMaster, not to the day file, so the header above is untouched by
+     it. An edit to a TEMPLATE column appends a Cn row, and append_csv_rows
+     then rewrites the whole file once with the union header. */
+  window.__toasts = [];
+  if (row) Reco.editCell(null, 'Line', 'PRE-CHANGE-EDIT', null, row._id);
+  ${R19_SETTLE}
+  const back2 = await window.pywebview.api.read_file(rel);
+  const lines2 = String(back2).split(/\\r?\\n/).filter(Boolean);
+  return { head: String(back).split(/\\r?\\n/)[0],
+           headAfterCn: lines2[0], linesAfterCn: lines2.length,
+           cnRowsAfter: lines2.filter(l => /^Q1,C\\d+,/.test(l)).length,
+           preChangeRowsStillThere: lines2.filter(l => /^Q[12],upload,/.test(l)).length,
+           preChangeRowsHaveBlankSig: lines2.filter(l => /^Q[12],upload,/.test(l))
+             .every(l => l.split(',').length === lines2[0].split(',').length
+                         && l.split(',')[lines2[0].split(',').indexOf('_pksig')] === ''),
+           saidOnEdit: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 80)),
+           reopenedKeys: (s.data || []).map(r => r._pk),
+           reopenedSigs: (s.data || []).map(r => r._pksig),
+           tplSig: ${R19_SIGOF}(tpl),
+           refused: (window.__toasts || []).some(x => /error/.test(x.kind)),
+           said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 80)),
+           filed: String((bag.Vendor || {}).v || '') === 'pre-change-typed' };
+})`;
+/* BACK-COMPAT, DIRECTION TWO, run ON THE OLD BUILD: open the day file this
+   build wrote, then edit a cell so the old build APPENDS to a file whose
+   header carries a column it knows nothing about. */
+const R19_OLDBUILD = (id) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  const tpl = AppState.recoTemplates.find(x => x.id === I);
+  if (!tpl) return { noTemplate: true, said: [] };
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+  const files = await Versioning.listFiles(tpl);
+  window.__toasts = [];
+  const f = files[files.length - 1];
+  await Reco.loadVersionedFile(f.fullPath || f.path, I);
+  App.closeModal();
+  const s = AppState.recoSessions[I];
+  const row = (s.data || [])[0];
+  if (row) Reco.editCell(null, 'Line', 'OLD-BUILD-EDIT', null, row._id);
+  ${R19_SETTLE}
+  return { loaded: (s.data || []).length, keys: (s.data || []).map(r => r._pk),
+           hasSigProperty: (s.data || []).some(r => r._pksig !== undefined),
+           said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 90)) };
+})`;
+/* THE WRITE DOORS, AT THE DEAD-KEYED ROWS AND AT THE LIVE ONES BESIDE THEM,
+   AND THEN THE CAUSAL HALF: the same door at the same dead-keyed row with its
+   _pksig DELETED. [84] walks all ten doors and asserts the OUTCOME; this
+   asserts the MECHANISM, and the deletion also measures the migration (a row
+   with no signature is not refused) on a live screen rather than in a
+   fixture of its own. Each arm reads the SHARE back, not a toast. */
+const R19_WALK = (id) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  const tpl = AppState.recoTemplates.find(x => x.id === I);
+  const sess = AppState.recoSessions[I];
+  const vals = pk => (((AppState.extraValueMaster || {})[I] || {})[pk] || {});
+  const corrs = pk => (((AppState.correctionMaster || {})[I] || {})[pk] || {});
+  const offs = pk => (((AppState.manualOffsetMaster || {})[I] || {})[pk]);
+  const pickRows = which => (sess.data || []).filter(
+    which === 'dead' ? r => /^K[0-9]+$/.test(String(r._pk)) : r => /-X$/.test(String(r._pk)));
+  const arm = async (rows, tag) => {
+    const out = {};
+    const run = async (nm, fn, filed) => {
+      window.__toasts = []; let threw = null;
+      try { await fn(); } catch (e) { threw = String(e).slice(0, 140); }
+      ${R19_SETTLE}
+      out[nm] = { refused: (window.__toasts || []).some(x => /error/.test(x.kind)),
+                  /* ROUND 8 RAISED THIS FROM 240. The refusal sentence is longer
+                     than 240 characters, so every assertion about its TAIL -
+                     including R19f's existing clause that it must not say
+                     "Nobody has changed anything", which sat past the cut -
+                     was being made against a string that had been truncated
+                     before the words it was looking for. */
+                  said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 1200)),
+                  threw: threw, filed: filed() }; };
+    await run('setTag', () => Reco.setTag(rows[0]._id, 'Vendor', tag + 'typed'),
+      () => String((vals(rows[0]._pk).Vendor || {}).v || '') === tag + 'typed');
+    await run('correct', () => Reco.applyCorrection(null, 'Line', tag + 'corrected', null, rows[1]._id),
+      () => !!corrs(rows[1]._pk).Line);
+    await run('offset', () => Reco.manualOffset(null, null, rows[2]._id),
+      () => !!offs(rows[2]._pk));
+    return out; };
+  const dead = await arm(pickRows('dead'), 't19-');
+  const live = await arm(pickRows('live'), 't19-live-');
+  /* THE CAUSAL HALF. Nothing about the row changes except the signature, so a
+     different answer can only have come from the signature. */
+  const d0 = pickRows('dead')[0];
+  const keep = d0._pksig; delete d0._pksig;
+  let blanked = {};
+  try { blanked = await arm([d0, pickRows('dead')[1], pickRows('dead')[2]], 't19-nosig-'); }
+  finally { d0._pksig = keep; }
+  /* THE ALL-OR-NONE COST: the formula bar points at a HEALTHY row and "Fill
+     Column" writes the whole filtered view, which still holds the dead ones. */
+  if (!sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  App.navigate('reco');
+  await new Promise(r => setTimeout(r, 200));
+  const filtered = Reco.applyTableFiltersSort(tpl, sess);
+  const healthy = pickRows('live')[0];
+  sess.activeCell = { fidx: filtered.indexOf(healthy), col: 'Line' };
+  App.navigate('reco');
+  const inp = document.getElementById('formulaInput'); if (inp) inp.value = 't19-fill-all';
+  window.__toasts = [];
+  Reco._ssCommit(true);
+  ${R19_SETTLE}
+  const fill = { refused: (window.__toasts || []).some(x => /error/.test(x.kind)),
+                 said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 1200)) };
+  if (sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+  ${R19_SETTLE}
+  return { dead: dead, live: live, sigBlanked: blanked, fillColumnFromHealthyCell: fill,
+           latch: !!(Reco._keyStale || {})[I] };
+})`;
+/* R19m: a save OUTSIDE the key rule must not move the signature.
+   R19n: an unknown signature version is treated as absent. */
+const R19_NOTKEY = (id) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  RecoTemplate.create(); const t = RecoTemplate._editing;
+  t.id = I; t.name = 'Unrelated' + I;
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                         { name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount','Vendor'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  let tpl = AppState.recoTemplates.find(x => x.id === I);
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+  await Reco.ingestData(tpl, [{ Doc:'U1', Line:'L1', Amount:'1' }], ['Doc','Line','Amount']);
+  App.closeModal(); ${R19_SETTLE}
+  const sigBefore = ${R19_SIGOF}(tpl);
+  /* Everything OUTSIDE the key rule, in ONE save: the name, the tolerance, an
+     editable column, and a brand-new added column the key does not read. */
+  window.confirm = () => true;
+  try { RecoTemplate.edit(I);
+    RecoTemplate._editing.name = 'Unrelated' + I + ' renamed';
+    RecoTemplate._editing.toleranceValue = 777;
+    RecoTemplate._editing.editableColumns = ['Line'];
+    RecoTemplate._editing.additionalColumns.push({ name:'Note', type:'custom' });
+    RecoTemplate.saveTemplate();
+    if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+  } finally { window.confirm = real; }
+  ${R19_SETTLE}
+  tpl = AppState.recoTemplates.find(x => x.id === I);
+  const sigAfter = ${R19_SIGOF}(tpl);
+  const s = AppState.recoSessions[I];
+  const row = (s.data || [])[0];
+  window.__toasts = [];
+  if (row) Reco.setTag(row._id, 'Vendor', 'after-unrelated-save');
+  ${R19_SETTLE}
+  const bag = ((AppState.extraValueMaster || {})[I] || {})['U1'] || {};
+  const probe = (sig) => { if (!row) return 'no row';
+    const keep = row._pksig; row._pksig = sig;
+    let out = null;
+    try { out = typeof Reco._keySigMoved === 'function' ? Reco._keySigMoved(tpl, row)
+                                                        : 'no _keySigMoved in this build'; }
+    catch (e) { out = 'threw'; }
+    row._pksig = keep; return out; };
+  return { sigBefore: sigBefore, sigAfterUnrelatedSave: sigAfter,
+           refusedAfterUnrelatedSave: (window.__toasts || []).some(x => /error/.test(x.kind)),
+           filedAfterUnrelatedSave: String((bag.Vendor || {}).v || '') === 'after-unrelated-save',
+           said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 80)),
+           unknownVersionRefused: probe('9:0123456789abcdef'),
+           sameVersionDifferentHashRefused: probe('1:0000000000000000'),
+           noSigRefused: probe(''), absentRefused: probe(undefined) };
 })`;
 
 /* ============================================================ [82] ====
@@ -11252,13 +11684,33 @@ try {
      per-row recompute. Re-adding a per-row arm has to meet [86]'s five named
      gates first, and will fail here until this check is deliberately turned
      round again with those five green. */
+  /* ROUND 8 DID NOT TURN THIS CHECK ROUND, AND THAT IS WORTH SAYING OUT LOUD
+     BECAUSE THE INSTRUCTION ANTICIPATED THAT IT MIGHT HAVE TO BE. The thing
+     G82f forbids is a per-row RECOMPUTE - _keyRowDrifted,
+     _extraComputedValue, _keyFrozenPart, _keyRowCols - which is round 6's arm
+     and the shape five measured false refusals came out of. T-S10-19's arm is
+     a SIGNATURE COMPARISON: Reco._keySigMoved reads row._pksig and the
+     template's Reco.keyRuleSig and touches no cell, no formula engine and no
+     split of _pk. So the forbidding half passes UNCHANGED and the latch half
+     passes unchanged, and no bar had to be lowered to let the fix in.
+     WHAT IS ADDED is the third clause, and it is added for the same reason the
+     other two exist: without it, DELETING the signature arm would leave this
+     check green, and a safety control whose removal nothing notices is the
+     shape this whole section is about. The clause is positive and it names the
+     function, so re-adding a recompute still fails here and taking the
+     signature out now fails here too. */
   const askBody = /_keyWriteUnsafe\(tpl, sess, row\)\s*\{([\s\S]{0,400}?)\n  \},/.exec(APP);
   check(!!askBody && !/_keyRowDrifted|_extraComputedValue|_keyFrozenPart|_keyRowCols/.test(askBody[1])
-        && /_keyStale\[String\(tpl\.id\)\]/.test(askBody[1]),
-    'G82f THE QUESTION IS THE TEMPLATE LATCH AND NOTHING ELSE (T-S10-21). It asks "did the key '
-    + 'DEFINITION change while these rows were loaded?", which is a property of the TEMPLATE and '
-    + 'cannot be confused with a row\'s own data changing. A per-row recompute here refused five '
-    + 'measured pieces of ordinary work - see [86], which gates all five, and handover 18.11',
+        && /_keyStale\[String\(tpl\.id\)\]/.test(askBody[1])
+        && /_keySigMoved\(tpl, row\)/.test(askBody[1]),
+    'G82f THE QUESTION IS THE TEMPLATE LATCH AND THE ROW\'S KEY-RULE SIGNATURE, AND NOTHING ELSE. '
+    + 'The latch asks "did the key DEFINITION change while these rows were loaded?", which is a '
+    + 'property of the TEMPLATE. The signature asks "was this key minted by the rule in force '
+    + 'now?", which is a property of the RULE. Neither can be confused with a row\'s own data '
+    + 'changing - and a per-row RECOMPUTE, which can, is still forbidden here by name because it '
+    + 'refused five measured pieces of ordinary work ([86] gates all five, handover 18.12). The '
+    + 'signature clause is asserted POSITIVELY so that removing T-S10-19\'s arm reddens this check '
+    + 'instead of passing in silence',
     askBody && askBody[1]);
   check(!/rowKey\(tpl, row\)\s*\{[\s\S]{0,300}?_keyWriteUnsafe/.test(APP),
     'G82g the rule is NOT inside Reco.rowKey. rowKey is a key READER on every render path (the row '
@@ -11479,8 +11931,11 @@ section(83, 'R14 T-S10-20 — SHEET MODE AND THE EXCEL VIEW, AFTER A KEY CHANGE,
    three business rows on screen TWICE under two identities, with the key cell
    showing the frozen "K1" so it looks ordinary.
    So this section also carries the proof that the question is PER ROW: the
-   drifted copy is refused and the healthy copy BESIDE IT on the same screen,
-   in the same template, goes through. */
+   copy the file handed back is refused and the healthy copy BESIDE IT on the
+   same screen, in the same template, goes through. ROUND 8 CLOSED IT with the
+   key-rule signature; R15d, R15e and R15g are rewritten to the new behaviour
+   and the rewrite is set out above each of them. [88] carries the round trip,
+   the mechanism and both back-compat directions. */
 section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO LATCH ANYWHERE');
 {
   const W = makeRoot('share-r15');
@@ -11513,8 +11968,36 @@ section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO
   const cmts = () => diskJson(W.root, 'reco/commentMaster.json') || {};
   const day = () => csvRows(verFile(W.root, 'DayFile19'));
 
-  /* ---- T-S10-21 RE-OPENED T-S10-19, AND THIS SECTION NOW MEASURES THE HOLE
-     INSTEAD OF CLAIMING IT IS SHUT. The per-row drift arm that closed it is
+  /* ---- ROUND 8 CLOSED T-S10-19, AND R15d / R15e / R15g ARE REWRITTEN TO
+     THE NEW BEHAVIOUR RATHER THAN MOVED OR DROPPED. The three they replace
+     were put here by round 7 asserting POSITIVELY that the hole was open -
+     all ten doors going through, and records landing under both identities on
+     the share - with the words "so a future fix makes R15e fail and gets
+     re-read". This is that future fix and this is the re-reading.
+
+       R15d  all ten doors GO THROUGH  ->  all ten doors are REFUSED, with the
+             FILE-older-than-the-rule sentence and nothing green beside it
+       R15e  records land under BOTH identities (positive)  ->  nothing
+             reaches any of the five pk-keyed shared masters OR the day file
+             under a dead key, read from the files
+       R15g  "Fill Column" fills the whole filtered view again  ->  it is
+             refused AS A WHOLE from a healthy cell, because the view really
+             does hold rows that cannot be written. THAT IS A DISCLOSED COST
+             AND NOT ROUND 6'S COST: round 6 refused the view because one
+             row's own DATA had moved, which [86] R17b still keeps measured;
+             this refuses it because three rows came out of a file older than
+             the rule, which is the state the sentence tells the operator to
+             get out of. Handover 15.6(b) is corrected with it.
+
+     R15h and R15i are KEPT UNCHANGED - the live copies' records still land
+     under the folder's own keys, and a master_lookup-keyed template whose
+     MASTER DATA a colleague edits is still fully writable, which is the
+     cheapest tripwire against a value comparison coming back. R15j is kept.
+     [88] carries the ROUND TRIP and the mechanism; this section carries the
+     outcome at all ten doors.
+
+     WHAT WAS WRONG WITH THE ROUND BEFORE IT, kept here because this is the
+     third time the trap has been walked into. The per-row drift arm that closed it is
      gone because its inference was invalid: a frozen _pk is SUPPOSED to
      disagree with a recompute whenever the ROW'S OWN DATA changed (handover
      14.3), so ordinary work read as drift and five measured gestures were
@@ -11522,45 +12005,60 @@ section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO
      later gesture, and the recovery the refusal named is where the correction
      died ([86] gates all five).
 
-     SO THESE TEN DOORS GO THROUGH AGAIN at a row a day file handed back, and
-     they are asserted GOING THROUGH, named as T-S10-19's open hole, so that
-     no reader can take 694 green checks as "this is closed". FIVE of the
-     assertions that used to live here are gone with the arm, each named in
-     the round's report and each one a thing the arm itself guaranteed: the
-     old R15d (every door refused), R15e (and not one of them also says
-     something green), R15f (nothing reached any shared master under a dead
-     key), R15g (the CONTROL that the question is per ROW and not per
-     template) and R15j ("Fill Column" refused even from a healthy cell).
-     R15h and R15i are KEPT unchanged - the ordinary path still files under
-     the folder's keys, and the master_lookup template is still writable. The
-     five that replace them measure the same screen and say what really
-     happens on it. The section's count is unchanged at 11, which is why the
-     round's report names the five rather than leaving the total to cover
-     them.
+     Round 6's arm asked, per row at the write, "is row._pk still what this
+     template's rule computes for this row NOW?" and read a disagreement as
+     "the rule moved". THAT INFERENCE IS INVALID: a frozen _pk is SUPPOSED to
+     disagree with a recompute whenever the ROW'S OWN DATA changed (handover
+     14.3), so ordinary work read as drift - five measured pieces of it,
+     including a correction of a key-feeding column, which is the Correction
+     tab's whole purpose, and which bricked the row for every later gesture
+     with a sentence that blamed a colleague. [86] gates all five and they
+     MUST stay green: they are the measurement that tells a signature from a
+     recompute.
 
-     WHAT CLOSES IT, and it is a schema change rather than a cleverer
-     comparison: record the KEY RULE'S SIGNATURE on the row at mint time - a
-     hash of the key extras' definitions, written beside _pk and carried
-     through the day file's control columns - and compare SIGNATURES, never
-     values. A signature says "a DIFFERENT RULE made this key" and says
+     WHAT CLOSES IT IS A SCHEMA CHANGE AND NOT A CLEVERER COMPARISON: the KEY
+     RULE'S SIGNATURE, recorded on the row at mint time - a hash of
+     RecoTemplate._keyDefOf, written beside _pk and carried through the day
+     file's control columns - compared SIGNATURE to SIGNATURE and never value
+     to value. A signature says "a DIFFERENT RULE made this key" and says
      nothing whatever about the row's data, which is exactly the distinction
-     the per-row arm could not make and the reason it kept refusing ordinary
-     work. T-S10-19 carries that design. */
+     the per-row arm could not make. A ROW WITH NO SIGNATURE IS NOT REFUSED,
+     deliberately: every row on every share before this round has none and
+     refusing them would make the app read-only on the day it shipped, so
+     this protects only rows minted after it. [88] measures the round trip,
+     both back-compat directions and the three open questions. */
   const walk = await wa.page.evaluate(R15_WALK_DEAD);
   note('R15 every door fired at a row the day file handed back', walk);
-  const refused = n => ((walk[n] || {}).said || []).some(s => /error/.test(s) && /were SAVED with/.test(s));
+  /* ROUND 8 REWROTE THE SENTENCE AND THEREFORE THIS MATCHER, AND THAT IS A
+     CORRECTION OF A FALSE CLAIM AND NOT A WEAKENING. The sentence used to say
+     the file was "older than the rule"; it cannot know that direction (a
+     backup restore puts an OLDER rule back under a NEWER day file, skA A7) and
+     it used to add "Nobody has changed anything while you had these rows
+     open", which the operator's own template save reaches (skA A3, measured on
+     rows Reco.ingestData minted in that window). All three branches now say
+     "minted under a DIFFERENT row-key rule", which is true in every one of
+     them, so the matcher keys on that. It is NARROWER than before, not wider:
+     it still requires an error toast, and the two false claims are asserted
+     ABSENT at R19f. */
+  const SIGSAID = /DIFFERENT row-key rule/;
+  const refused = n => ((walk[n] || {}).said || []).some(s => /error/.test(s) && SIGSAID.test(s));
   const latched = n => ((walk[n] || {}).said || []).some(s => /error/.test(s) && /identifies its rows/.test(s));
   const DOORS = ['setTag', 'applyCorrection', 'manualOffset', 'editCell', 'createGroup', 'comment',
                  'ssApply', 'ssFillColumn', 'ssClear', 'fillDrag'];
-  check(DOORS.every(n => !refused(n) && !latched(n)),
-    'R15d T-S10-19 IS OPEN AGAIN AND THIS IS THE MEASUREMENT OF IT. All ten doors go through at a '
-    + 'row the day file handed back under the key that file holds, in a window whose latch is '
-    + 'correctly DOWN because nothing happened to it. The arm that refused them also refused five '
-    + 'measured pieces of ordinary work ([86]) because it could not tell "the rule moved" from '
-    + '"this row\'s own data moved". THE FIX IS THE KEY-RULE SIGNATURE RECORDED PER ROW AT MINT '
-    + 'TIME - a schema change and a round of its own, filed on T-S10-19. Do not re-add a per-row '
-    + 'value comparison: [86] is the bar it has to clear first',
-    DOORS.filter(n => refused(n) || latched(n)).map(n => [n, (walk[n] || {}).said]));
+  const greenOf = n => ((walk[n] || {}).said || []).some(s => /success/.test(s));
+  check(DOORS.every(n => refused(n) && !greenOf(n) && !latched(n)),
+    'R15d T-S10-19 IS CLOSED AND THIS IS THE MEASUREMENT OF IT. ALL TEN DOORS ARE REFUSED at a row '
+    + 'the day file handed back under the key that file holds, in a window whose latch is correctly '
+    + 'DOWN because nothing happened to it - and not one of them ALSO says something green. On '
+    + '55171d8 every one of the ten went through: five in total silence (the typed value, the '
+    + 'offset, the cell edit, sheet mode\'s Apply and its clear) and five saying only a green toast. '
+    + 'THIS IS THE REWRITE OF THE ASSERTION ROUND 7 PUT HERE, which asserted the opposite on '
+    + 'purpose and said "so a future fix makes R15e fail and gets re-read". The refusal is driven '
+    + 'by the ROW\'S KEY-RULE SIGNATURE and never by a recompute: [86]\'s six gates are the bar and '
+    + 'they are green, and [88] R19e proves the cause by deleting the signature on the same row and '
+    + 'watching the same door go through again',
+    DOORS.map(n => [n, refused(n) ? 'REFUSED' : 'WENT THROUGH', greenOf(n) ? 'ALSO SAID GREEN' : '',
+                    (walk[n] || {}).said]));
 
   note('R15 the shares after the walk',
     { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()),
@@ -11568,17 +12066,25 @@ section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO
       commentPks: Object.values(cmts().TPL_W || {}).map(c => c.linkedPks),
       dayPks: day().map(r => r._pk) });
   const deadKey = k => /^K[0-9]+$/.test(String(k));
-  check(Object.keys(vals()).some(deadKey) || Object.keys(corrs()).some(deadKey)
-        || Object.keys(offs()).some(deadKey),
-    'R15e (THE FILES) AND THIS IS THE SIZE OF THE HOLE, read from the files and not from a toast: '
-    + 'records land under the keys the ROWS carry, so the same business row now has records under '
-    + 'two identities on the shared folder - the dead K1/K2/K3 from the day file and the live '
-    + 'K1-X/K2-X/K3-X beside them. Six doors did this in total silence before T-S10-20; they are '
-    + 'no longer silent, because the write still goes through the chokepoint and a latch would '
-    + 'catch the version of this that a COLLEAGUE causes. What is missing is the per-row '
-    + 'signature. Asserted POSITIVELY so a future fix makes this check fail and gets re-read',
+  check(!Object.keys(vals()).some(deadKey) && !Object.keys(corrs()).some(deadKey)
+        && !Object.keys(offs()).some(deadKey)
+        && !Object.values(grps().TPL_W || {}).some(g => (g.members || []).some(deadKey))
+        && !Object.values(cmts().TPL_W || {}).some(c => (c.linkedPks || []).some(deadKey))
+        && !day().some(r => deadKey(r._pk) && /^C\d+$/.test(String(r._ver))
+                            && /^t19-/.test(String(r.Line || ''))),
+    'R15e (THE FILES) AND NOTHING REACHED ANY OF THE FIVE pk-KEYED SHARED MASTERS OR THE DAY FILE '
+    + 'UNDER A DEAD KEY, read from the files on the share and not from a toast. THIS IS THE REWRITE '
+    + 'OF THE ASSERTION ROUND 7 MADE POSITIVELY so that a future fix would make it fail: it '
+    + 'measured extraValueMaster gaining K1/K2/K3, correctionMaster K2, manualOffsetMaster K3, '
+    + 'groupMaster a membership [K1], commentMaster a linkedPks [K2] and the day file five Cn rows '
+    + 'under K1/K2/K3 - the same business row with records under two identities on one shared '
+    + 'folder. The dead-key test is per STORE and per VERB rather than "the file is empty", because '
+    + 'the K1/K2/K3 records this fixture\'s FIRST upload filed were filed legitimately, before the '
+    + 'rule moved, and deleting them is not this round\'s business',
     { vals: Object.keys(vals()), corr: Object.keys(corrs()), off: Object.keys(offs()),
-      day: day().map(r => r._pk) });
+      groups: Object.values(grps().TPL_W || {}).map(g => g.members),
+      comments: Object.values(cmts().TPL_W || {}).map(c => c.linkedPks),
+      deadDayRows: day().filter(r => deadKey(r._pk)).map(r => [r._pk, r._ver, r.Line]) });
 
   /* ---- THE CONTROL: the ordinary path is not what broke. */
   const live = await wa.page.evaluate(R15_WALK_LIVE);
@@ -11587,13 +12093,20 @@ section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO
           .every(n => !((live[n] || {}).said || []).some(s => /error/.test(s))),
     'R15f CONTROL: every door works on the healthy copies K1-X/K2-X/K3-X on the same screen, with '
     + 'nothing said in error', live);
-  check(((live.ssFillColumn || {}).said || []).some(s => /success/.test(s))
-        && !((live.ssFillColumn || {}).said || []).some(s => /were SAVED with/.test(s)),
-    'R15g "↓ Fill Column" FILLS THE WHOLE FILTERED VIEW AGAIN. With the per-row arm it was refused '
-    + 'AS A WHOLE from a healthy cell whenever any row on screen was "drifted", which handover '
-    + '15.6 disclosed as the cost of the all-or-none arm. That cost is gone with the arm, and 15.6 '
-    + 'is corrected to say so rather than leaving a reader expecting a refusal that no longer '
-    + 'happens', (live.ssFillColumn || {}).said);
+  check(((live.ssFillColumn || {}).said || []).some(s => /error/.test(s) && /DIFFERENT row-key rule/.test(s))
+        && !((live.ssFillColumn || {}).said || []).some(s => /success/.test(s)),
+    'R15g "↓ Fill Column" IS REFUSED AS A WHOLE FROM A HEALTHY CELL, and that is a DISCLOSED '
+    + 'COST rather than a defect. It writes EVERY row in the filtered view, and after a reopen this '
+    + 'view really does hold three rows whose keys were minted under a different rule. THIS IS THE '
+    + 'REWRITE of round 7\'s assertion that it fills the view again, and the difference from round '
+    + '6\'s version of the same refusal is the whole point: round 6 refused the view because ONE '
+    + 'ROW\'S OWN DATA had moved - one ordinary correction was enough, and [86] R17b keeps that '
+    + 'measured and green - where this refuses it because rows on screen carry keys a DIFFERENT '
+    + 'rule minted, '
+    + 'which is the state the sentence is telling the operator to get out of. "Replaced 0 of 2,000" '
+    + 'and a silent per-row skip are both worse than one sentence. Handover 15.6(b) is corrected '
+    + 'with this check, and [88] R19h measures it from the other side',
+    (live.ssFillColumn || {}).said);
   check(String(((vals()['K1-X'] || {}).Vendor || {}).v || '') === 't19-live-typed'
         && !!(corrs()['K2-X'] || {}).Line && !!offs()['K3-X'],
     'R15h (THE FILES) CONTROL: ...and their records land under the FOLDER\'S own keys',
@@ -11647,6 +12160,16 @@ section(85, 'R16 T-S10-20 — WHAT THE QUESTION COSTS, AS AN OPERATION COUNT');
     + 'build paid one recompute per question (4,110 for 4,000 questions here), which was the price '
     + 'of a per-row arm whose answer was wrong (T-S10-21)',
     Object.assign({ perQuestion: +(ck.recomputes / ck.questionsAsked).toFixed(3) }, ck));
+  check(/^1:[0-9a-f]{16}$/.test(String(ck.sigOnFirstRow)) && cn.sigOnFirstRow === undefined
+        && (ck.sigComputed === undefined ? 99 : ck.sigComputed) <= 2,
+    'R16d AND THE SIGNATURE ARM IS AN OPERATION COUNT TOO (T-S10-19, handover 16.4a). The second '
+    + 'arm added to the question is a WeakMap get plus two identity compares: Reco.keyRuleSig is '
+    + 'cached against the template object and against the identity of primaryKeys and '
+    + 'additionalColumns, both of which saveTemplate replaces, so the canonical-JSON walk and the '
+    + 'hash happen ONCE per mint pass and not per row and not per write. This is how many times '
+    + 'they happened across the 2,000 guarded writes above. Not a clock: a wall-clock gate on a '
+    + 'sub-microsecond operation is the mistake 16.4a is about',
+    { sigComputed: ck.sigComputed, rows: ck.rows, questionsAsked: ck.questionsAsked });
   check(ck.questionsAsked >= ck.rows,
     'R16c premise: the question really was asked of every row - so R16b is a measurement and not '
     + 'an accident of a guard that never ran', ck);
@@ -12048,6 +12571,793 @@ section(87, 'R18 T-S10-21 — ASK FIRST, MUTATE AFTER; AND DOOR 22, THE SPECIAL 
     + 'so those rows read as un-sent to every colleague and could be posted twice',
     { jvPageOpened: jv.jvPageOpened, said: jv.said, share: pend });
   await za.ctx.close(); await zb.ctx.close();
+}
+
+
+/* ============================================================ [88] ====
+   T-S10-19 CLOSED: THE KEY RULE'S SIGNATURE, AND THE ROUND TRIP IS THE
+   FEATURE.
+
+   MINT -> DAY FILE -> REOPEN -> REFUSE. A test that only checks the mint
+   proves nothing: Reco.loadVersionedFile's row literal copied _pk, _ver and
+   tpl.columns and nothing else, and Versioning.appendChangesBatch's own
+   comment says it out loud - "Rows reopened from history only copy
+   tpl.columns, so these never reach the data." T-S10-19 IS the reopened-day-
+   file path, so a signature that is minted and then dropped on the way back
+   in protects nothing while a mint-side assertion goes green. Every check
+   here reads a FILE or a VALUE: the day file's header, the day file's cells,
+   the share's masters, what the next upload mints. Not one reads a toast
+   alone.
+
+   THE FIXTURE IS [84]'S, DELIBERATELY: the same template id, the same three
+   rows, the same key change, so the two sections cannot drift apart into two
+   different screens. THE DIVISION OF LABOUR between them is that [84] walks
+   ALL TEN doors and asserts the OUTCOME - every one refused, nothing on the
+   share under a dead key - and this section asserts the MECHANISM: the
+   signature at every hop of the round trip, and then the same door at the
+   same row with that row's _pksig DELETED going THROUGH again, which is the
+   only form of evidence that the refusal came from the signature rather than
+   from the latch, the row's data or the gesture.
+
+   WHAT IS ASSERTED, AND WHY EACH ONE EXISTS
+     R19a  premise: the mint stamps the signature, and it is a RULE hash - the
+           three rows carry the SAME one although their DATA differs
+     R19b  (THE FILE) the day file's header carries _pksig as a FIXED control
+           column and the upload rows carry the value
+     R19c  (THE FILE) a Cn row appended by an EDIT carries it too, without
+           which one edit launders a protected row into an unprotected one
+     R19d  (THE ROUND TRIP) the reopened row brings the signature back
+     R19e  the write doors are REFUSED at that row with nothing filed on the
+           share - and the SAME door at the SAME row with its _pksig deleted
+           goes THROUGH, which is what proves the signature is the cause and
+           measures the migration on a live screen
+     R19f  the refusal names the FILE and not a colleague
+     R19g  CONTROL: the live copies on the same screen still write, and their
+           records land under the folder's own keys
+     R19h  the all-or-none cost, measured and disclosed (handover 15.6(b))
+     R19i  QUESTION (b): a master_lookup key whose CONFIG is re-pointed is
+           refused; the same template with the MASTER'S DATA edited is
+           writable. The pair that decides honest or theatre
+     R19j  QUESTION (a): no signature and no column where the key names no
+           added column - AND the shape that leaves open, measured (T-S10-25)
+     R19j2 the cost, as an operation count and never a clock
+     R19k  BACK-COMPAT ONE: a day file written BEFORE this change reopens and
+           is WRITABLE. That is the migration, taken deliberately
+     R19l  BACK-COMPAT TWO: the build on 55171d8, run for real against a day
+           file this build wrote
+     R19m  a save OUTSIDE the key rule does not move the signature
+     R19n  a signature whose VERSION this build does not know is ABSENT, not
+           refused */
+section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN -> REFUSE');
+{
+  const V = makeRoot('share-r19');
+  const brV = await startBridge(V.root, PORT_R19); procs.push(brV.proc);
+  const va = await openReco(browser, brV);
+
+  const s1 = await va.page.evaluate(R19_MK('TPL_W', 'DayFile19',
+    [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }, { name:'Vendor', type:'custom' }],
+    ['Ref'], ['Doc','Line','Amount'], ['Line'],
+    [1,2,3].map(i => ({ Doc:'K'+i, Line:'L'+i, Amount:String(i*100) }))) + '()');
+  note('R19a the mint', s1);
+  check(s1.keys.join() === 'K1,K2,K3' && s1.latch === false
+        && /^1:[0-9a-f]{16}$/.test(String(s1.sigs[0]))
+        && s1.sigs[0] === s1.sigs[1] && s1.sigs[1] === s1.sigs[2]
+        && s1.sigs[0] === s1.tplSig,
+    'R19a premise: the mint stamps a versioned 16-hex signature on every row that got a BUSINESS '
+    + 'key, it is the TEMPLATE\'S signature (Reco.keyRuleSig), and all three rows carry the SAME '
+    + 'one although their DATA differs - which is the property the whole round turns on. A value '
+    + 'comparison differs per row; a rule hash cannot', s1);
+
+  const dayV = () => verFile(V.root, s1.folder);
+  const headOf = () => { try { return fs.readFileSync(dayV(), 'utf8').split(/\r?\n/)[0]; } catch (e) { return null; } };
+  note('R19b the day file header', headOf());
+  note('R19b the day file rows', csvRows(dayV()).map(r => [r._pk, r._ver, r._pksig]));
+  check(headOf() === '_pk,_ver,_ts,_src,_by,_pksig,Doc,Line,Amount'
+        && csvRows(dayV()).filter(r => r._ver === 'upload').length === 3
+        && csvRows(dayV()).filter(r => r._ver === 'upload').every(r => r._pksig === s1.tplSig),
+    'R19b (THE FILE) _pksig IS A FIXED CONTROL COLUMN in the day file, beside _pk/_ver/_ts/_src/_by '
+    + 'and before the template columns, and every upload row carries the signature. FIXED, and not '
+    + 'swept in from whichever rows a write happens to carry: Versioning._fields pulls every key '
+    + 'present in ANY row into the header, so a per-row control field left to that sweep would make '
+    + 'the header\'s WIDTH vary between writes, and every widening is a whole-file rewrite inside '
+    + 'append_csv_rows that can lose a colleague\'s concurrent append - which is the reason _src '
+    + 'and _by are fixed too, in that function\'s own comment',
+    { head: headOf(), rows: csvRows(dayV()).map(r => [r._pk, r._ver, r._pksig]) });
+
+  const ed = await va.page.evaluate(`(async function () {
+    const sess = AppState.recoSessions.TPL_W;
+    Reco.editCell(null, 'Line', 'EDITED-1', null, sess.data[0]._id);
+    ${R19_SETTLE}
+    return { said: (window.__toasts || []).map(t => t.kind + ': ' + t.msg.slice(0, 90)) };
+  })()`);
+  note('R19c an edit on a key-feeding editable column', ed);
+  const cn = () => csvRows(dayV()).filter(r => /^C\d+$/.test(String(r._ver)));
+  note('R19c the Cn rows', cn().map(r => [r._pk, r._ver, r._pksig]));
+  check(cn().length >= 1 && cn().every(r => r._pksig === s1.tplSig),
+    'R19c (THE FILE) A Cn ROW APPENDED BY AN EDIT CARRIES THE SIGNATURE TOO. That record build is '
+    + '{_pk,_ver,_ts} plus tpl.columns ONLY, and a signature is not a template column, so without '
+    + 'teaching it one edit would launder a protected row into an unprotected one: '
+    + 'collapseToActive keeps the LATEST version per key, so the Cn row is what a reopen reads',
+    cn().map(r => [r._pk, r._ver, r._pksig]));
+
+  const ak = await va.page.evaluate(R19_A_KEY('TPL_W', 'Ref', 'CONCAT({Doc},"-X")') + '()');
+  note('R19 the same window changes the key definition itself', ak);
+  const rl = await va.page.evaluate(R19_RELOAD('TPL_W', [1,2,3].map(i => ({ Doc:'K'+i, Line:'L'+i, Amount:String(i*100) }))) + '()');
+  note('R19 Clear Loaded Data, then load', rl);
+  check(rl.latch === false && rl.keys.join() === 'K1-X,K2-X,K3-X' && rl.tplSig !== s1.tplSig
+        && rl.sigs.every(s => s === rl.tplSig),
+    'R19 premise: a COMPLETELY HEALTHY window - it made the change itself, it cleared and loaded, '
+    + 'the latch is DOWN, and the rule\'s signature MOVED because the key formula moved', rl);
+
+  const re = await va.page.evaluate(R19_REOPEN('TPL_W') + '()');
+  note('R19d after "Open Existing" on today\'s day file', re);
+  check(re.dead.length === 3 && re.latch === false
+        && re.deadSigs.every(s => s === s1.tplSig)
+        && re.liveSigs.every(s => s === rl.tplSig),
+    'R19d THE ROUND TRIP. The reopened rows bring BACK the signature the day file was written with '
+    + '- Reco.loadVersionedFile\'s row literal is taught it - so the same three business rows are '
+    + 'on screen twice under two identities, each carrying the signature of the rule that minted '
+    + 'it. The latch is still DOWN because nothing happened to this window. Without that one line '
+    + 'the signature never reaches the data and every check below would pass on the mint alone', re);
+
+  const walk = await va.page.evaluate(R19_WALK('TPL_W') + '()');
+  note('R19e the write doors at the rows the day file handed back, and at the live copies', walk);
+  const v19 = () => (diskJson(V.root, 'reco/extraValueMaster.json') || {}).TPL_W || {};
+  const c19 = () => (diskJson(V.root, 'reco/correctionMaster.json') || {}).TPL_W || {};
+  const o19 = () => (diskJson(V.root, 'reco/manualOffsetMaster.json') || {}).TPL_W || {};
+  note('R19e the shared masters after it', { vals: Object.keys(v19()), corr: Object.keys(c19()), off: Object.keys(o19()) });
+  check(walk.dead.setTag.refused === true && walk.dead.setTag.filed === false
+        && walk.dead.correct.refused === true && walk.dead.correct.filed === false
+        && walk.dead.offset.refused === true && walk.dead.offset.filed === false
+        && walk.sigBlanked.setTag.refused === false && walk.sigBlanked.setTag.filed === true,
+    'R19e THE REFUSAL IS CAUSED BY THE SIGNATURE AND BY NOTHING ELSE, measured on ONE screen. The '
+    + 'rows the day file handed back are refused at the typed-value, correction and offset doors '
+    + 'with nothing filed on the share - and then the SAME door at the SAME row, with that row\'s '
+    + '_pksig deleted so it looks like a row minted before this change, GOES THROUGH and the record '
+    + 'lands. So the arm is not the latch (down throughout), not the row\'s data (untouched '
+    + 'between the two halves) and not the gesture: it is the signature. It also measures the '
+    + 'migration on a live screen, which is what [84] and this section together are for - [84] '
+    + 'walks all ten doors and asserts the outcome, this asserts the mechanism',
+    walk);
+  check(walk.dead.setTag.said.some(s => /saved day file/.test(s) && /DIFFERENT row-key rule/.test(s))
+        && walk.dead.setTag.said.some(s => /nothing re-keys a saved file/.test(s))
+        && !walk.dead.setTag.said.some(s => /Somebody else changed/.test(s))
+        && !walk.dead.setTag.said.some(s => /Nobody has changed anything/.test(s))
+        && !walk.dead.setTag.said.some(s => /written before/.test(s)),
+    'R19f THE REFUSAL SAYS ONLY WHAT IT CAN KNOW, AND NAMES A RECOVERY THAT EXISTS. These rows DID '
+    + 'come back from a saved day file, so the file branch is the right one here and the latch\'s '
+    + 'sentence - "Somebody else changed how this reconciliation identifies its rows" - would be '
+    + 'FALSE. ROUND 8 TOOK TWO CLAIMS OUT OF IT AND BOTH ARE NOW ASSERTED ABSENT. "Nobody has '
+    + 'changed anything while you had these rows open" is reachable by the operator\'s OWN '
+    + 'template save, over rows Reco.ingestData minted in that window that no file ever handed '
+    + 'back (skA A3, measured) - which is precisely why round 7 deleted the PREVIOUS second '
+    + 'sentence, so shipping a new one with the same defect would have been the same mistake with '
+    + 'a different object. "written before this reconciliation\'s row-key rule was changed" claims '
+    + 'a DIRECTION this code cannot know: a backup restore puts an OLDER rule back under a NEWER '
+    + 'day file (skA A7). And the recovery it offered - Clear Loaded Data and load the extract '
+    + 'again - was measured going round a loop that cannot help for a file older than the edit '
+    + '(skA A2), so the file branch now says that reopening the file brings the old keys back '
+    + 'every time and names that day\'s EXTRACT instead',
+    walk.dead.setTag.said);
+  check(walk.live.setTag.refused === false && walk.live.setTag.filed === true
+        && walk.live.correct.refused === false && walk.live.correct.filed === true
+        && walk.live.offset.refused === false && walk.live.offset.filed === true,
+    'R19g CONTROL: the healthy copies K1-X/K2-X/K3-X on the SAME SCREEN, in the same template, '
+    + 'still write with nothing said in error, and their records land under the FOLDER\'S own '
+    + 'keys - read back from reco/extraValueMaster.json, reco/correctionMaster.json and '
+    + 'reco/manualOffsetMaster.json. The question is per ROW, so a row that is fine is not '
+    + 'punished for sitting beside one that is not', walk.live);
+  check(walk.fillColumnFromHealthyCell.refused === true,
+    'R19h THE ALL-OR-NONE COST, MEASURED AND DISCLOSED RATHER THAN DESIGNED AWAY. "Fill Column" '
+    + 'writes EVERY row in the filtered view and this view really does hold three rows that cannot '
+    + 'be written, so it is refused AS A WHOLE even from a healthy cell. That is NOT round 6\'s '
+    + 'cost coming back: there the trigger was a row whose own DATA had moved - one ordinary '
+    + 'correction was enough, and [86] R17b keeps that measured - and here it is a file older than '
+    + 'the rule, which is the state the sentence is telling the operator to get out of. "Replaced '
+    + '0 of 2,000" and a silent per-row skip are both worse than one sentence. Handover 15.6(b) '
+    + 'says this to the operator', walk.fillColumnFromHealthyCell);
+
+  /* ---- QUESTION (b). THE PAIR THAT DECIDES WHETHER THE SIGNATURE IS HONEST
+     OR THEATRE. A master_lookup's CONFIG is part of the rule and is inside
+     RecoTemplate._keyDefOf, so re-pointing it moves the signature with no
+     formula text anywhere in sight. The MASTER'S ROWS are not in it and must
+     never be: handover 14.3 is explicit that a lookup key whose master a
+     colleague edits is the frozen value WORKING - the rule did not move -
+     and hashing those rows would make this a value comparison in disguise,
+     refusing every gesture on every lookup-keyed template. [84] R15i is the
+     cheapest tripwire on the second half of this pair. */
+  const lkA = await va.page.evaluate(R19_LOOKUP('TPL_WX') + '()');
+  note('R19i a master_lookup key: CONFIG re-pointed, then the MASTER\'S DATA edited', lkA);
+  check(lkA.sigMintedPresent === true && lkA.cfgMovedTheSig === true && lkA.dataMovedTheSig === false
+        && lkA.afterCfgChange.refused === true && lkA.afterCfgChange.filed === false
+        && lkA.afterDataChange.refused === false && lkA.afterDataChange.filed === true,
+    'R19i QUESTION (b) ANSWERED IN BOTH DIRECTIONS AND MEASURED IN ONE FIXTURE. Re-pointing the '
+    + 'lookup\'s CONFIG (returnKey Nominal -> SubNominal, and there is no formula text to change) '
+    + 'moves the signature, and the row the day file hands back is REFUSED with nothing filed. '
+    + 'Editing the MASTER\'S OWN ROWS does not move it, and that row stays WRITABLE with its '
+    + 'record filed under the frozen key while Reco.keyDrift correctly says the cell is printing a '
+    + 'recalculation. That is the distinction a value comparison cannot make, and it is what makes '
+    + 'this honest rather than theatre: the configuration is the rule, the master\'s data is data',
+    lkA);
+
+  /* ---- QUESTION (a), ANSWERED AND THEN MEASURED THE OTHER WAY. */
+  const plain = await va.page.evaluate(R19_PLAINKEY('TPL_WP') + '()');
+  note('R19j a template whose key names no added column', plain);
+  const dayP = () => verFile(V.root, plain.folder);
+  const headP = () => { try { return fs.readFileSync(dayP(), 'utf8').split(/\r?\n/)[0]; } catch (e) { return null; } };
+  note('R19j its day file header', headP());
+  check(plain.tplSig === null && plain.sigs.every(s => s === undefined)
+        && headP() === '_pk,_ver,_ts,_src,_by,Doc,Line,Amount'
+        && plain.stillWritableAfterPkListChange === true,
+    'R19j QUESTION (a): NO SIGNATURE AND NO COLUMN WHERE THE KEY NAMES NO ADDED COLUMN. The '
+    + 'day-file header is byte-for-byte what it was - no control column, no widened header, no CSV '
+    + 'rewrite - for every template that existed before #24, which is every template on the folder '
+    + 'today. That is what keeps #24\'s migration the no-op run_pk_extras G1 pins byte-for-byte, '
+    + 'and what keeps run_e2e, run_autoload, run_colorder [13] and run_reverse measuring something, '
+    + 'all four of which assert this header verbatim. AND THE COST OF THAT CHOICE IS MEASURED '
+    + 'HERE, NOT ARGUED: the last field is the measurement that editing the primaryKeys LIST on '
+    + 'such a template leaves its pre-change day file WRITABLE under the old keys. That shape is '
+    + 'T-S10-25 and it is filed with this reading, not claimed shut', plain);
+  check(plain.sigComputedOver2000Writes <= 2 && plain.offsetsFiled === 2000
+        && plain.sigComputedTotal >= 1
+        && /^1:[0-9a-f]{16}$/.test(String(plain.costTplSigOnRow)),
+    'R19j2 THE COST, AS AN OPERATION COUNT AND NEVER A CLOCK (handover 16.4a). A keyed template '
+    + 'computes the signature ONCE per mint pass, and the write-side arm is a WeakMap get plus two '
+    + 'identity compares because the cache is keyed on the template object and on the identity of '
+    + 'primaryKeys and additionalColumns, both of which saveTemplate replaces. 2,000 guarded '
+    + 'writes, and this is how many canonical-JSON-plus-hash passes they cost - which is what '
+    + '"skipping it keeps the cost at one property read" was weighing against. The second half is '
+    + 'the premise: all 2,000 offsets really were filed, so the count is not zero because nothing '
+    + 'ran', { sigComputed: plain.sigComputedOver2000Writes, offsetsFiled: plain.offsetsFiled });
+
+  /* ---- BACK-COMPAT, DIRECTION ONE: a file written before the change. */
+  const old = await va.page.evaluate(R19_PRECHANGE('TPL_WO') + '()');
+  note('R19k a day file with NO _pksig column, written through the bridge, then reopened', old);
+  check(old.head === '_pk,_ver,_ts,_src,_by,Doc,Line,Amount'
+        && old.reopenedSigs.every(s => s === undefined)
+        && old.refused === false && old.filed === true,
+    'R19k BACK-COMPAT, DIRECTION ONE: THIS BUILD READING A CSV WRITTEN BEFORE THE CHANGE. The file '
+    + 'has no _pksig column at all, the reopened rows carry no signature, and they are NOT REFUSED '
+    + '- the typed value is filed under the key the file holds. That is the migration decision the '
+    + 'ticket had already taken: every row on every share today has none, and refusing them would '
+    + 'make the app read-only on the day this ships, so the fix protects only rows minted after it. '
+    + 'The row\'s _pksig is ABSENT rather than empty, because Papa gives \'\' for a '
+    + 'present-but-empty column and an empty signature has to mean the same thing as none', old);
+  note('R19k the ONE widening rewrite, measured', { head: old.head, headAfterCn: old.headAfterCn,
+    lines: old.linesAfterCn, preChangeRows: old.preChangeRowsStillThere,
+    blankSig: old.preChangeRowsHaveBlankSig, said: old.saidOnEdit });
+  /* ROUND 8 TURNED THIS CHECK ROUND, AND IT IS THE ONLY GATE IN THIS SECTION
+     THAT CHANGED DIRECTION. It used to assert that the first write into a
+     pre-change day file WIDENS it - the build round's own honest measurement
+     of what the schema change costs, written as "it happens ONCE per file, and
+     it is the migration". What that cost actually is was then measured, in two
+     separate processes against the real bridge: a 120,000-row pre-_pksig day
+     file, this build appending one signed row, a colleague appending 0.00 /
+     0.15 / 0.40 / 0.80 s later. In the first THREE both writers reported
+     success, the header widened, and the COLLEAGUE'S ROW WAS NOT IN THE FILE -
+     120,001 rows where 120,002 were written. At 0.80 s, past the end of the
+     672 ms rewrite, both survived. Versioning._fields's own comment has warned
+     about that rewrite since _src/_by were pinned into the header to avoid it.
+     So the rewrite is not taken any more (Versioning._appendRows, R19w) and
+     this asserts the file is left EXACTLY as it was found, plus the appended
+     row. The price is in the next clause and it is the honest one: the Cn row
+     lands UNSIGNED in a file an un-upgraded build created, which the migration
+     already accepts because an unsigned row is not refused. */
+  check(old.cnRowsAfter >= 1 && old.linesAfterCn === 4
+        && old.headAfterCn === '_pk,_ver,_ts,_src,_by,Doc,Line,Amount'
+        && old.preChangeRowsStillThere === 2
+        && !old.saidOnEdit.some(s => /error/.test(s)),
+    'R19k2 (THE FILE) AND THERE IS NO WIDENING REWRITE ANY MORE - THIS CHECK USED TO ASSERT THE '
+    + 'OPPOSITE AND WAS TURNED ROUND ON PURPOSE, which is the one direction change in this '
+    + 'section. It used to measure the migration\'s cost honestly: the first write into a '
+    + 'pre-change day file - an edit to a template column, which appends a Cn row - made '
+    + 'append_csv_rows rewrite the WHOLE file once with `header + missing` (main.py:683) and the '
+    + 'header gained _pksig at the end, which was called "once per file, and it is the migration". '
+    + 'WHAT THAT COST ACTUALLY IS WAS THEN MEASURED, in two separate processes against the real '
+    + 'bridge, because two windows are two processes and LauncherAPI._writing is a per-path lock '
+    + 'INSIDE one: a 120,000-row pre-_pksig day file, this build appending one signed row, a '
+    + 'colleague appending 0.00 / 0.15 / 0.40 / 0.80 s later. In the first THREE both writers '
+    + 'reported success, the header widened, and the COLLEAGUE\'S ROW WAS NOT IN THE FILE - '
+    + '120,001 rows where 120,002 were written. At 0.80 s, past the end of the 672 ms rewrite, '
+    + 'both survived, so the loss window is exactly the length of the rewrite - and it would have '
+    + 'recurred once per template PER DAY for as long as one colleague is on an older build, '
+    + 'because today\'s day file belongs to whichever build writes it first. Versioning._fields\'s '
+    + 'own comment has warned about precisely that rewrite since _src/_by were pinned into the '
+    + 'header to avoid it. SO THE FILE IS NOW LEFT EXACTLY AS IT WAS FOUND: same header, same '
+    + 'rows, plus the appended one. THE PRICE, which is the honest half: a row written into a day '
+    + 'file an un-upgraded build created lands UNSIGNED, and an unsigned row is not refused - '
+    + 'which is the migration decision the ticket had already taken and is not widened by this. '
+    + 'A day file THIS build creates still carries the column from its first write, where there is '
+    + 'no existing header to rewrite, so the cost is nil once the fleet is uniform',
+    { headBefore: old.head, headAfter: old.headAfterCn, rows: old.preChangeRowsStillThere,
+      blank: old.preChangeRowsHaveBlankSig });
+
+  /* ---- BACK-COMPAT, DIRECTION TWO: the OLDER BUILD, on a file this build
+     wrote. Run for real in a second context against a second bridge whose app
+     root is `git show 55171d8:apps/Reco.html` - measured, not reasoned about,
+     because the handover already warns that a mixed fleet on one folder is a
+     live problem (T-S10-12). */
+  const OLDREV = '55171d8';
+  const Vo = makeRoot('share-r19-old', OLDREV);
+  if (!Vo.root) {
+    check(false, 'R19l NOT RUN: the baseline build ' + OLDREV + ' could not be checked out');
+  } else {
+    fs.cpSync(path.join(V.root, 'reco'), path.join(Vo.root, 'reco'), { recursive: true });
+    fs.cpSync(path.join(V.root, 'reco_data'), path.join(Vo.root, 'reco_data'), { recursive: true });
+    const brVo = await startBridge(Vo.root, PORT_R19B); procs.push(brVo.proc);
+    const vo = await openReco(browser, brVo);
+    const oldHeadBefore = fs.readFileSync(verFile(Vo.root, s1.folder), 'utf8').split(/\r?\n/)[0];
+    const r = await vo.page.evaluate(R19_OLDBUILD('TPL_W') + '()');
+    note('R19l the 55171d8 build on a day file carrying _pksig', r);
+    const headAfter = fs.readFileSync(verFile(Vo.root, s1.folder), 'utf8').split(/\r?\n/)[0];
+    const rowsAfter = csvRows(verFile(Vo.root, s1.folder));
+    note('R19l header before / after the old build appended', { before: oldHeadBefore, after: headAfter });
+    note('R19l what the old build appended', rowsAfter.filter(x => x.Line === 'OLD-BUILD-EDIT').map(x => [x._pk, x._ver, x._pksig]));
+    check(r.loaded >= 3 && r.hasSigProperty === false && !r.said.some(s => /error/.test(s))
+          && headAfter === oldHeadBefore && /_pksig/.test(headAfter)
+          && rowsAfter.filter(x => x.Line === 'OLD-BUILD-EDIT').length >= 1
+          && rowsAfter.filter(x => x.Line === 'OLD-BUILD-EDIT').every(x => !x._pksig)
+          && rowsAfter.filter(x => x._ver === 'upload').every(x => /^1:[0-9a-f]{16}$/.test(String(x._pksig))),
+      'R19l BACK-COMPAT, DIRECTION TWO, MEASURED AND NOT REASONED ABOUT: the build on ' + OLDREV
+      + ' opens a day file this build wrote, loads every row, says nothing in error and appends its '
+      + 'own Cn row. It DROPS _pksig on the way in - its row literal copies _pk, _ver and '
+      + 'tpl.columns - so its appended record carries an EMPTY signature, which this build reads '
+      + 'back as "no signature" and does not refuse. The header is UNCHANGED by its append, '
+      + 'because append_csv_rows writes against the EXISTING header whenever the fields it is '
+      + 'handed are already in it and the old build asks for a NARROWER set. So a mixed fleet on '
+      + 'one folder degrades to "the old build\'s rows are unprotected" and never to a lost '
+      + 'column, a lost row or a refused load',
+      { loaded: r.loaded, hasSig: r.hasSigProperty, said: r.said,
+        headBefore: oldHeadBefore, headAfter: headAfter,
+        appended: rowsAfter.filter(x => x.Line === 'OLD-BUILD-EDIT').map(x => [x._pk, x._ver, x._pksig]) });
+    await vo.ctx.close();
+  }
+
+  const nk = await va.page.evaluate(R19_NOTKEY('TPL_WN') + '()');
+  note('R19m/R19n a save outside the key rule, and an unknown signature version', nk);
+  check(nk.sigAfterUnrelatedSave === nk.sigBefore && nk.refusedAfterUnrelatedSave === false
+        && nk.filedAfterUnrelatedSave === true,
+    'R19m A SAVE THAT CHANGES SOMETHING OUTSIDE THE KEY RULE DOES NOT MOVE THE SIGNATURE. Renaming '
+    + 'the reconciliation, changing the tolerance, marking a column editable and adding an '
+    + 'unrelated added column, all in ONE save, and every row on the share is still writable. The '
+    + 'hash is over RecoTemplate._keyDefOf - the primaryKeys list plus the definitions of the '
+    + 'key\'s dependency closure - and nothing else. There is deliberately NO SECOND DEFINITION of '
+    + '"the key rule" in the file: _keyDefOf is what T-24R2-1\'s refusal and the definition-change '
+    + 'confirm already compare, so the set of changes that raises the latch and the set that moves '
+    + 'the signature are the same set BY CONSTRUCTION, and cannot drift apart', nk);
+  check(nk.unknownVersionRefused === false && nk.sameVersionDifferentHashRefused === true
+        && nk.noSigRefused === false && nk.absentRefused === false,
+    'R19n A SIGNATURE WHOSE VERSION THIS BUILD DOES NOT KNOW IS TREATED AS ABSENT, and a row with '
+    + 'THIS version and a different hash is refused. The hash\'s INPUT is a format: a future round '
+    + 'that changed what is hashed would otherwise make every row minted by this build read as "a '
+    + 'different rule" and take those reconciliations read-only overnight - the same shape as the '
+    + 'clock-reading key formula [86] R17d is about, arriving by the back door of this fix. '
+    + 'Degrading to "those rows are unprotected" is the migration decision applied to the format, '
+    + 'and bumping Reco.KEYSIG_VER is therefore a migration that has to be written down as one',
+    nk);
+  /* R19o. THE CANONICALISATION, WHICH NO BEHAVIOURAL FIXTURE CAN REACH, and
+     which is therefore the easiest thing in this round to lose by accident.
+     Everything above builds its templates in one program, in one property
+     order, so plain JSON.stringify would pass every one of those checks -
+     and then two colleagues' builds holding the SAME key definition with its
+     fields in a DIFFERENT order would hash differently and refuse each
+     other's rows, on a folder where a mixed fleet is already a live problem
+     (T-S10-12). Asserted directly, both ways: field ORDER must not move the
+     signature, and the formula TEXT must. */
+  const canon = await va.page.evaluate(`(function () {
+    if (typeof Reco.keyRuleSig !== 'function') return { noKeyRuleSig: true };
+    const mk = (ac) => ({ id:'CANON', primaryKeys:['Ref'], columns:[{ name:'Doc' }],
+                          additionalColumns:[ac] });
+    const a = mk({ name:'Ref', type:'formula', formula:'CONCAT({Doc})' });
+    const b = mk({ formula:'CONCAT({Doc})', type:'formula', name:'Ref' });
+    const c = mk({ name:'Ref', type:'formula', formula:'CONCAT({Doc},"!")' });
+    return { a: Reco.keyRuleSig(a), b: Reco.keyRuleSig(b), c: Reco.keyRuleSig(c) };
+  })()`);
+  note('R19o the same definition with its fields in two orders, and a changed formula', canon);
+  check(!canon.noKeyRuleSig && canon.a === canon.b && canon.a !== canon.c,
+    'R19o THE SIGNATURE IS OVER A CANONICAL TEXT, so the order of the fields in a stored '
+    + 'definition cannot move it and the definition itself still can. JSON.stringify emits '
+    + 'properties in INSERTION order, so without Reco._keySigCanon two builds that hold the same '
+    + 'key definition with its fields written in a different order - which is what a round trip '
+    + 'through reco/recoTemplates.json and a mixed fleet produce (T-S10-12) - would compute '
+    + 'different signatures and refuse each other\'s rows. Nothing else in this section can catch '
+    + 'that, because every fixture here builds its template in one program in one order',
+    canon);
+  /* R19p. WHAT THE HASH IS OVER, ASKED WITHOUT THE MEMO IN THE WAY - AND THIS
+     CHECK EXISTS BECAUSE A MUTANT SURVIVED EVERYTHING ELSE. A mutant that
+     hashes the accounts master's ROWS into the signature (round 6's value
+     comparison arriving by another route) passed R19a-R19o and R19i, because
+     Reco.keyRuleSig is memoised against the template object and the IDENTITY
+     of primaryKeys/additionalColumns: editing AppState.aegMaster moves none of
+     those, so the cached answer came back and the fixture could not see the
+     difference. The harm would then arrive LATE, at the next unrelated
+     template save, and refuse every row of that template retroactively -
+     which is R17d's shape (not drifted today, drifted tomorrow) reached
+     through this fix. Asked over FRESHLY BUILT template objects, which the
+     cache cannot answer for, so the question is really put. */
+  const whatsIn = await va.page.evaluate(`(function () {
+    if (typeof Reco.keyRuleSig !== 'function') return { noKeyRuleSig: true };
+    const mk = () => ({ id:'WHATSIN', primaryKeys:['AK'], columns:[{ name:'Doc' }],
+      additionalColumns:[{ name:'AK', type:'master_lookup',
+        masterCfg: { source:'accounts', matchColumn:'Doc', matchKey:'Reference', returnKey:'Nominal' } }] });
+    const before = Reco.keyRuleSig(mk());
+    const keep = AppState.aegMaster;
+    AppState.aegMaster = [{ Reference:'ACC1', Nominal:'777777', SubNominal:'0' },
+                          { Reference:'ACCNEW', Nominal:'888888', SubNominal:'0' }];
+    const afterData = Reco.keyRuleSig(mk());
+    AppState.aegMaster = keep;
+    const t2 = mk(); t2.additionalColumns[0].masterCfg.returnKey = 'SubNominal';
+    const afterCfg = Reco.keyRuleSig(t2);
+    return { before: before, afterData: afterData, afterCfg: afterCfg };
+  })()`);
+  note('R19p the signature over a lookup key, with the master\'s ROWS changed and then its CONFIG',
+    whatsIn);
+  check(!whatsIn.noKeyRuleSig && whatsIn.afterData === whatsIn.before
+        && whatsIn.afterCfg !== whatsIn.before,
+    'R19p THE SIGNATURE IS OVER THE RULE\'S DEFINITION AND NOT OVER THE MASTER\'S DATA, asked with '
+    + 'the memo bypassed. Replacing every row of AppState.aegMaster leaves it UNCHANGED; moving the '
+    + 'lookup\'s returnKey moves it. If the master\'s rows were in the hash this would be round 6 by '
+    + 'another route: handover 14.3 is explicit that a lookup key whose master a colleague edits is '
+    + 'the frozen value WORKING - the rule did not move - so every gesture on every lookup-keyed '
+    + 'template would be refused, and because keyRuleSig is MEMOISED the refusal would arrive late, '
+    + 'at the next unrelated template save, retroactively. [84] R15i measures the behaviour; this '
+    + 'measures the hash itself, because a mutant that hashed the master\'s rows passed every other '
+    + 'check in this section for exactly that memoisation reason',
+    whatsIn);
+
+  /* ======================================================================
+     R19q - R19x. THE SIGNATURE'S FALSE-POSITIVE SURFACE, WHICH NOTHING
+     MEASURED AND WHICH IS WHY ROUND 8's FIRST BUILD SHIPPED A BLOCKER AT
+     714 PASSED / 0 FAILED.
+
+     R19m, the only gate there was, measures a save OUTSIDE the key's
+     dependency closure - a rename, a tolerance, an editable column, an
+     unrelated added column - and the signature CANNOT move for any of those,
+     so it could never have caught this. What was missing is a change INSIDE
+     the closure that leaves the computed key IDENTICAL. Two reviewers found
+     four of them independently, all four reachable through the editor's own
+     handlers, and every row minted before was then refused at every door with
+     its key exactly what the folder's rule computes - round 6's harm with a
+     different cause.
+
+     THE MIRROR IS KEPT BESIDE EACH ONE ON PURPOSE (R19r, R19s, R19t's second
+     half): a gate that only says "the signature must not move" is satisfied by
+     a signature that never moves at all, which would be a safety control that
+     refuses nothing. The pair has to be read together.
+
+     ASKED OVER FRESHLY BUILT TEMPLATE OBJECTS, for R19p's reason: Reco.keyRuleSig
+     is memoised against the template object, so a fixture that mutates one in
+     place is answered by the cache and cannot see the difference. */
+  const fp = await va.page.evaluate(`(function () {
+    if (typeof Reco.keyRuleSig !== 'function') return { noKeyRuleSig: true };
+    /* A literal backtick cannot appear in this evaluate() string, which is
+       itself a template literal; the formula under test needs one. */
+    var BT = String.fromCharCode(96);
+    /* Doc/Line are FILE columns; Base is a non-key formula helper the key
+       formula reads (the dependency closure Reco._keyDepNames walks); Ref is
+       the key; Loose is an added column outside the closure. */
+    const mk = (f) => { const t = { id:'FP', primaryKeys:['Ref'],
+      columns:[{ name:'Doc' }, { name:'Line' }],
+      additionalColumns:[{ name:'Base', type:'formula', formula:'UPPER({Doc})' },
+                         { name:'Ref',  type:'formula', formula:'CONCAT({Base})' },
+                         { name:'Loose', type:'custom' }] };
+      if (f) f(t, t.additionalColumns[0], t.additionalColumns[1]); return t; };
+    const S = (f) => Reco.keyRuleSig(mk(f));
+    const base = S(null);
+    return {
+      base: base,
+      /* ---- MUST NOT MOVE: the rule computes byte-identical keys ---- */
+      overrideOnHelper: S((t, b) => { b.allowOverride = true; }),
+      carryOnHelper:    S((t, b) => { b.carryForward = true; }),
+      typeFlipLeftovers: S((t, b, r) => { r.optionsSource = 'manual'; r.options = [];
+                             r.optionsMasterCfg = { source:'accounts', field:'Reference' }; }),
+      formatOnly:       S((t, b, r) => { r.formula = 'CONCAT( {Base} )'; }),
+      cid:              S((t, b, r) => { r._cid = 'c17'; b._cid = 'c16'; }),
+      label:            S((t, b, r) => { r.label = 'Row key'; b.label = 'Helper'; }),
+      singleUse:        S((t, b) => { b._ssSingleUse = true; }),
+      emptyMasterPair:  S((t, b, r) => { r.masterRefColumn = ''; r.masterValueColumn = ''; }),
+      looseReordered:   S((t) => { t.additionalColumns.push(t.additionalColumns.splice(2, 1)[0]); }),
+      carryOnComputedHelper: S((t, b) => { b.type = 'formula'; b.carryForward = true; }),
+      /* ---- MUST MOVE: the rule really changed ---- */
+      helperFormula:    S((t, b) => { b.formula = 'LOWER({Doc})'; }),
+      keyFormula:       S((t, b, r) => { r.formula = 'CONCAT({Base},"!")'; }),
+      keyType:          S((t, b, r) => { r.type = 'dropdown'; }),
+      pkOrder:          Reco.keyRuleSig((function () { const t = mk(null);
+                          t.additionalColumns.splice(1, 0, { name:'Two', type:'formula', formula:'{Line}' });
+                          t.primaryKeys = ['Two','Ref']; return t; })()),
+      closureOrder:     S((t) => { const a = t.additionalColumns;
+                          a.splice(1, 0, a.splice(0, 1)[0]); }),   // Base after Ref
+      /* carryForward on a TYPED helper the key reads IS the rule: Reco._extraTyped
+         reads it as the scope test, so it decides which typed record becomes
+         the value. This is why the projection is per-type and not one list. */
+      dropHelperCarryOff: S((t, b) => { b.type = 'dropdown'; delete b.formula; }),
+      dropHelperCarryOn:  S((t, b) => { b.type = 'dropdown'; delete b.formula; b.carryForward = true; }),
+      /* The formula canonicalisation must keep STRING LITERALS byte for byte. */
+      litA: S((t, b, r) => { r.formula = 'CONCAT({Base}," - ",{Line})'; }),
+      litB: S((t, b, r) => { r.formula = 'CONCAT({Base}," -  ",{Line})'; }),
+      litSpacedOutside: S((t, b, r) => { r.formula = 'CONCAT( {Base} , " - " , {Line} )'; }),
+      /* A backtick is hashed RAW, which is the safe direction: the signature
+         moves on a formatting edit of that one formula rather than hashing two
+         different rules the same. */
+      tickA: S((t, b, r) => { r.formula = 'CONCAT({Base},' + BT + 'x' + BT + ')'; }),
+      tickB: S((t, b, r) => { r.formula = 'CONCAT( {Base} ,' + BT + 'x' + BT + ')'; })
+    };
+  })()`);
+  note('R19q the signature over changes INSIDE the key closure', fp);
+
+  const SAME = ['overrideOnHelper', 'carryOnHelper', 'typeFlipLeftovers', 'formatOnly', 'cid',
+                'label', 'singleUse', 'emptyMasterPair', 'looseReordered', 'carryOnComputedHelper'];
+  check(!fp.noKeyRuleSig && !!fp.base && SAME.every(k => fp[k] === fp.base),
+    'R19q TEN CHANGES INSIDE THE KEY\'S CLOSURE THAT LEAVE THE COMPUTED KEY IDENTICAL MUST LEAVE '
+    + 'THE SIGNATURE IDENTICAL, and FOUR of them were MEASURED refusing every row of a '
+    + 'reconciliation whose keys were exactly what the folder\'s rule computes: ticking "Allow '
+    + 'manual override per row" on a key helper, ticking "Carry this value forward" on one, a '
+    + 'MIS-CLICK on a key extra\'s type dropdown clicked straight back (which leaves '
+    + '_setExtraType\'s three dropdown defaults behind for ever, invisible in the editor, with no '
+    + 'control that removes them), and reformatting a key formula. The cause was one line: '
+    + 'Reco.keyRuleSig hashed RecoTemplate._keyDefOf, which keeps the WHOLE stored column object, '
+    + 'so display and ownership flags the key engine never reads were in the hash. It now hashes '
+    + 'RecoTemplate._keyRuleDefOf, a PROJECTION of the same walk down to the fields '
+    + 'Reco._extraOwnValue\'s ladder actually reads. _keyDefOf is deliberately LEFT COARSE for the '
+    + 'template latch and T-24R2-1\'s confirm: over-approximating is cheap in a WARNING and '
+    + 'ruinous in a REFUSAL, and "the latch\'s set and the signature\'s set are the same set by '
+    + 'construction" was the argument FOR sharing it and is the defect instead',
+    SAME.filter(k => fp[k] !== fp.base).map(k => [k, fp[k]]));
+
+  const MOVED = ['helperFormula', 'keyFormula', 'keyType', 'pkOrder', 'closureOrder'];
+  check(!fp.noKeyRuleSig && MOVED.every(k => fp[k] && fp[k] !== fp.base)
+        && new Set(MOVED.map(k => fp[k])).size === MOVED.length,
+    'R19r AND THE MIRROR, WITHOUT WHICH R19q IS SATISFIED BY A SIGNATURE THAT NEVER MOVES AT ALL. '
+    + 'Editing the helper formula a key reads, editing the key formula, changing the key column\'s '
+    + 'type, adding a second key component (primaryKeys order is part of the key, which is a '
+    + 'concatenation), and MOVING A CLOSURE COLUMN PAST THE KEY THAT READS IT all move it, and all '
+    + 'to different values. The closure\'s DECLARATION ORDER is the one that _keyDefOf\'s '
+    + 'name-keyed `defs` object could not carry at all: Reco._keyScratch materialises the closure '
+    + 'in declaration order, so that reorder genuinely changes what the key comes out as',
+    MOVED.map(k => [k, fp[k]]));
+
+  check(!fp.noKeyRuleSig && fp.dropHelperCarryOff !== fp.dropHelperCarryOn,
+    'R19s THE PROJECTION IS PER TYPE, AND THIS IS THE GATE THAT STOPS R19q BEING SATISFIED BY '
+    + 'DROPPING carryForward ALTOGETHER. On a formula helper the flag is unread - '
+    + 'Reco._extraOwnValue returns _extraComputedBase and never reaches _extraTyped - so ticking '
+    + 'it is not a rule change and R19q requires the signature to hold still. On a DROPDOWN or '
+    + 'custom helper the key reads, Reco._extraTyped reads it as the SCOPE test, so it decides '
+    + 'WHICH typed record becomes the value and therefore what the key is: the signature must '
+    + 'move. A single flat "ignore carryForward" rule would pass R19q and silently fail to refuse '
+    + 'a dead key here, which is the harm this whole ticket exists for',
+    { off: fp.dropHelperCarryOff, on: fp.dropHelperCarryOn });
+
+  check(!fp.noKeyRuleSig
+        && fp.litA !== fp.litB && fp.litSpacedOutside === fp.litA
+        && fp.tickA !== fp.tickB,
+    'R19t THE FORMULA CANONICALISATION KEEPS STRING LITERALS BYTE FOR BYTE, which is the whole '
+    + 'difficulty in fixing the formatting-only edit. Whitespace OUTSIDE a literal is layout - '
+    + 'CONCAT( {Base} , " - " , {Line} ) is the same rule as CONCAT({Base}," - ",{Line}) - but the '
+    + 'spaces INSIDE the quotes ARE the rule, so " - " and " -  " must stay different signatures: '
+    + 'collapsing them would hash two DIFFERENT rules the same and leave a dead key NOT refused. '
+    + 'Reco._keyCanonFormula reuses Formula._compile\'s OWN literal pattern, the one place that '
+    + 'already decides what counts as a string in a formula, so it cannot drift from the language '
+    + 'the evaluator parses - and it BAILS OUT to the raw text on a backtick (a template literal '
+    + 'that pattern does not model) or an unterminated quote, which is why tickA and tickB differ. '
+    + 'The bail-out direction is deliberate: its cost is a formatting edit of that one formula '
+    + 'moving the signature, under saveTemplate\'s own confirm, and the cost of guessing would be '
+    + 'a dead key that is never refused',
+    { litA: fp.litA, litB: fp.litB, outside: fp.litSpacedOutside, tickA: fp.tickA, tickB: fp.tickB });
+
+  /* R19u - R19x. THE REST OF ROUND 8'S CORRECTIONS, asked as pure calls so
+     they are measured rather than read: _keyRefusal, _keyOldRuleWhy,
+     Versioning.collapseToActive and Reco.keyOldRuleCount are all pure given
+     their arguments. The FILE-level halves of B1 and B3 are measured
+     end-to-end in the round's own probes (f1_widen, f2_say, b5_mixed against
+     the real 55171d8 build). */
+  const APPSRC2 = fs.readFileSync(APP_FILE || path.join(REPO, 'apps/Reco.html'), 'utf8');
+  const say = await va.page.evaluate(`(function () {
+    const sig = '1:aaaaaaaaaaaaaaaa';
+    const sess = { dataSetIds: ['reco_data/X/Oct-26/18.csv', 'reco_data/X/Oct-26/19.csv#u1'] };
+    const fromFile = { _pk:'K1', _pksig: sig, _dsi: 0 };
+    const minted   = { _pk:'K1', _pksig: sig, _dsi: 1 };
+    const orphan   = { _pk:'K1', _pksig: sig };
+    const why = r => Reco._keyOldRuleWhy(sess, r);
+    const out = { file: why(fromFile), mine: why(minted), unknown: why(orphan), sentences: {} };
+    ['oldrulefile','oldrulemine','oldrule','stale'].forEach(k => {
+      out.sentences[k] = Reco._keyRefusal('saved', k); });
+    /* B3: a Cn row an un-upgraded build appended carries an EMPTY signature.
+       collapseToActive keeps the latest version per key, so without the repair
+       that one edit launders a protected row into an unprotected one. */
+    out.collapsed = Versioning.collapseToActive([
+      { _pk:'D11', _ver:'upload', _pksig: sig },
+      { _pk:'D11', _ver:'C1',     _pksig: '' },
+      { _pk:'D22', _ver:'upload', _pksig: sig },
+      { _pk:'D33', _ver:'upload' },
+      { _pk:'D33', _ver:'C1' }
+    ]).map(r => [r._pk, r._ver, r._pksig === undefined ? '(absent)' : String(r._pksig)]);
+    return out;
+  })()`);
+  note('R19u the three sentences, and R19v the signature a laundered Cn row inherits', say);
+
+  /* THE POSITIVE SOURCE CLAUSE IS G82f's TRICK AND IT IS HERE BECAUSE A MUTANT
+     NEEDED IT. m3_onesay cut the _keyOldRuleWhy CALL out of the chokepoint and
+     hard-coded one branch; this check went on passing, because it asks
+     _keyOldRuleWhy directly and the function was still there and still right.
+     A three-way answer nothing consults is the same as no answer. */
+  const askSay = /_keyWriteUnsafe\(tpl, sess, row\)\s*\{([\s\S]{0,400}?)\n  \},/.exec(APPSRC2);
+  check(say.file === 'oldrulefile' && say.mine === 'oldrulemine' && say.unknown === 'oldrule'
+        && !!askSay && /_keyOldRuleWhy\(sess, row\)/.test(askSay[1]),
+    'R19u WHICH SENTENCE IS DECIDED FROM A FACT THE CODE ALREADY HAS, not guessed. Reco.ingestData '
+    + 'stamps an upload\'s data set id with a \'#u<n>\' suffix and Reco.loadVersionedFile does not '
+    + '(it sets sess.dataSetIds = [fullPath]), so Reco.dataSetOf tells a row this window minted '
+    + 'from one a file handed back - exactly, per row, which matters because a reopened file plus '
+    + 'Add Data puts both kinds on ONE screen. A row whose data set cannot be named at all (a '
+    + '"+ Row" row, or a session older than S14) answers "cannot tell" and gets the branch that '
+    + 'claims neither - and the CHOKEPOINT really asks it, asserted from the source for G82f\'s '
+    + 'reason: a mutant that hard-coded one branch left every behavioural check here green',
+    { say: say, ask: askSay && askSay[1] });
+
+  check(/rule was changed AFTER/.test(say.sentences.oldrulemine)
+        && !/saved day file|SAVED DAY FILE/.test(say.sentences.oldrulemine)
+        && /nothing re-keys a saved file/.test(say.sentences.oldrulefile)
+        && /EXTRACT again/.test(say.sentences.oldrulefile)
+        && /read-only in the same way/.test(say.sentences.oldrulefile)
+        && !/written before/.test(say.sentences.oldrule)
+        && ['oldrulefile','oldrulemine','oldrule']
+             .every(k => !/Nobody has changed anything/.test(say.sentences[k])
+                      && /DIFFERENT row-key rule/.test(say.sentences[k]))
+        && /Somebody else changed/.test(say.sentences.stale),
+    'R19u2 AND WHAT EACH SENTENCE MAY CLAIM. NOT ONE of the three may say "Nobody has changed '
+    + 'anything while you had these rows open" - the operator\'s own template save reaches all of '
+    + 'them, and round 7 deleted the previous second sentence for making exactly that claim about '
+    + 'a colleague. The MINTED branch may not blame a saved day file, because no file handed those '
+    + 'rows back. The FILE branch has to say that reopening the file brings the old keys back and '
+    + 'name the recovery that EXISTS - that day\'s extract - because "Clear Loaded Data and load '
+    + 'the extract again" was measured going round a loop with nothing filed at the end of it, '
+    + 'which is the "Press Load" defect round 5 fixed; and it has to disclose that every earlier '
+    + 'day file of the reconciliation is read-only the same way, which is the fix\'s real blast '
+    + 'radius (handover 15.6). NO branch may claim a DIRECTION: a backup restore puts an OLDER '
+    + 'rule back under a NEWER day file. The latch keeps its own sentence, which is the better one '
+    + 'when a colleague really did change the definition',
+    say.sentences);
+
+  check(say.collapsed.length === 3
+        && say.collapsed.find(r => r[0] === 'D11')[1] === 'C1'
+        && say.collapsed.find(r => r[0] === 'D11')[2] === '1:aaaaaaaaaaaaaaaa'
+        && say.collapsed.find(r => r[0] === 'D33')[2] === '(absent)',
+    'R19v A VERSION ROW THAT LOST ITS SIGNATURE INHERITS IT FROM ANOTHER VERSION OF THE SAME KEY, '
+    + 'AND THAT IS WHAT KEEPS THE FIX WORTH ANYTHING ON A MIXED FLEET. Measured against the real '
+    + '55171d8 build on one shared folder: it opens a day file this build wrote, says nothing in '
+    + 'error, and appends an ordinary cell edit as a Cn row with an EMPTY _pksig, because it '
+    + 'cannot write a column it does not know about. collapseToActive keeps the LATEST version per '
+    + 'key, so that ONE edit laundered a protected row into an unprotected one: after a genuine '
+    + 'rule change the untouched rows were refused and the edited row went through IN TOTAL '
+    + 'SILENCE with the value landing on the share under the dead key. The repair is exact rather '
+    + 'than a guess - a row\'s _pk is what FILES it, so the versions of one _pk are versions of '
+    + 'one row and no build can change the key without changing the _pk - and it does not widen '
+    + 'the migration one inch: D33, whose every version is unsigned, stays unsigned and stays '
+    + 'writable, which is the migration decision the ticket had already taken',
+    say.collapsed);
+
+  const look = await va.page.evaluate(`(function () {
+    return { count: typeof Reco.keyOldRuleCount === 'function',
+             canon: typeof Reco._keyCanonFormula === 'function' };
+  })()`);
+  /* Read the app the SAME WAY [82] does, honouring APP_FILE, so a mutant copy
+     is what these two source assertions measure and not the working tree
+     (house rule 8). [82]'s own `APP` is scoped to its block. */
+  const APPSRC = fs.readFileSync(APP_FILE || path.join(REPO, 'apps/Reco.html'), 'utf8');
+  const appendBody = /_appendRows\(path, tpl, recs\)\s*\{([\s\S]*?)\n    const existing/.exec(APPSRC);
+  check(!!appendBody && /_headerOf\(path\)/.test(appendBody[1])
+        && /indexOf\('_pksig'\) === -1/.test(appendBody[1])
+        && /delete r\._pksig/.test(appendBody[1]),
+    'R19w A DAY FILE THIS BUILD DID NOT CREATE IS NOT WIDENED, AND THIS ROUND HAD TO ADD THAT '
+    + 'BECAUSE THE SIXTH CONTROL COLUMN IS WHAT FINALLY MADE THE REWRITE HAPPEN. Versioning._fields '
+    + 'has pinned _src/_by into the header since before this ticket precisely so the width never '
+    + 'moves, because append_csv_rows rewrites the WHOLE file in its `header + missing` branch '
+    + '(main.py:683) and that rewrite "can lose a colleague\'s concurrent append" - its own '
+    + 'comment\'s words. MEASURED, two separate processes on one folder (two windows are two '
+    + 'processes; LauncherAPI._writing is a per-path lock INSIDE one): a 120,000-row pre-_pksig day '
+    + 'file, this build appending a signed row, a colleague appending 0.00 / 0.15 / 0.40 / 0.80 s '
+    + 'later - and in the first THREE both writers reported success, the header widened, and the '
+    + 'colleague\'s row was NOT IN THE FILE (120,001 rows where 120,002 were written). The loss '
+    + 'window is exactly the length of the rewrite. It would have been one rewrite per template '
+    + 'PER DAY for as long as one colleague is on an older build, because today\'s day file '
+    + 'belongs to whichever build writes it first. The column is taken off the FIELDS and off the '
+    + 'RECORDS, both, because append_csv_rows unions its fields with every key present in any row. '
+    + 'Those rows land UNSIGNED, which the migration already accepts; a file this build CREATES '
+    + 'still gets the column in its first write, where no existing header exists to rewrite, so '
+    + 'the cost is nil once the fleet is uniform (f1_widen measures both halves on the file)',
+    appendBody && appendBody[1].slice(0, 300));
+
+  const badge = /row\._pksig && Reco\._keySigMoved\(tpl, row\)\)[\s\S]{0,80}badge oldrule/.test(APPSRC);
+  check(badge && look.count && look.canon,
+    'R19x "THIS ROW CANNOT BE WRITTEN" IS VISIBLE BEFORE THE GESTURE, and there is a COUNT. The '
+    + 'same business key was measured on screen TWICE - one copy refused, one writable - with both '
+    + 'rows rendering the same class, no title and no badge, and Reco.keyDriftCount reading ZERO '
+    + 'because it counts VALUE drift and nothing had drifted. The marker goes on the ROW and not '
+    + 'on the key cell, because the key extra is often not in displayColumns at all and a key-cell '
+    + 'badge would be invisible exactly where this was measured missing. Reco.keyOldRuleCount is '
+    + 'the number a Clear-and-load decision needs; keyDriftCount is left alone because it answers '
+    + 'a different question. The guard reads row._pksig FIRST, so no template that existed before '
+    + 'this round renders a byte differently and run_colorder T1\'s <tbody> diff cannot move',
+    { badge: badge, helpers: look });
+
+  /* R19y. THE CORRECTION TAB MAY NOT TURN A KEY EXTRA INTO A FILE COLUMN, and
+     this gate exists because a mutant that removed the refusal survived every
+     other check in this section - the same reason R19p exists.
+     WHAT IT MEASURED: in the Correction tab, "add a format rule for a column"
+     (Reco.addCorrectionCol) prompts for a column NAME and pushes a new entry
+     into tpl.columns IN PLACE when it does not match one. Typing the KEY
+     EXTRA's own name made that name both a file column and an added column -
+     which RecoTemplate.saveTemplate already REFUSES ('"Ref" is both a file
+     column and an added column'), so the template was left unsavable with no
+     control that undoes it - and Reco._keyExtraSet then stopped seeing a key
+     extra at all, so Reco.keyRuleSig went NULL and every signed row of the
+     reconciliation was refused, with a sentence about a day file nobody had
+     opened. It said "success: Format rule added" while doing it.
+     Asked through the REAL handler with the two prompts stubbed, because the
+     defect is in what the handler accepts. */
+  const clash = await va.page.evaluate(`(function () {
+    const tpl = { id:'CLASH', name:'Clash', primaryKeys:['Ref'],
+      columns:[{ name:'Doc', label:'Doc', formats:[] }, { name:'Line', label:'Line', formats:[] }],
+      additionalColumns:[{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' }],
+      displayColumns:['Doc','Line'], editableColumns:[] };
+    AppState.recoTemplates.push(tpl);
+    const keepId = AppState.activeRecoId; AppState.activeRecoId = 'CLASH';
+    const realP = window.prompt, realSave = AppState.save, realNav = App.navigate;
+    const said = []; const realT = U.toast;
+    U.toast = (m, k) => { said.push((k || '') + ': ' + String(m)); };
+    AppState.save = () => {}; App.navigate = () => {};
+    let answers = [];
+    window.prompt = () => answers.shift();
+    const sigBefore = Reco.keyRuleSig(tpl);
+    let out = {};
+    try {
+      answers = ['Ref', 'DDDDD'];                 // the KEY EXTRA's own name
+      Reco.addCorrectionCol();
+      out.afterClash = { cols: tpl.columns.map(c => c.name), said: said.slice(),
+                         sig: Reco.keyRuleSig(tpl) };
+      said.length = 0;
+      answers = ['Doc', 'DDDDD'];                 // an existing FILE column: a format rule
+      Reco.addCorrectionCol();
+      out.afterExisting = { cols: tpl.columns.map(c => c.name), said: said.slice(),
+                            formats: (tpl.columns.find(c => c.name === 'Doc') || {}).formats,
+                            sig: Reco.keyRuleSig(tpl) };
+      said.length = 0;
+      answers = ['Branch', 'N-A@D'];              // a NEW file column: still allowed
+      Reco.addCorrectionCol();
+      out.afterNew = { cols: tpl.columns.map(c => c.name), said: said.slice(),
+                       sig: Reco.keyRuleSig(tpl) };
+    } finally {
+      window.prompt = realP; AppState.save = realSave; App.navigate = realNav; U.toast = realT;
+      AppState.activeRecoId = keepId;
+      AppState.recoTemplates.splice(AppState.recoTemplates.indexOf(tpl), 1);
+    }
+    out.sigBefore = sigBefore;
+    return out;
+  })()`);
+  note('R19y the Correction tab\'s format-rule prompt, given a key extra\'s name', clash);
+  check(clash.afterClash.cols.join(',') === 'Doc,Line'
+        && clash.afterClash.said.some(s => /error/.test(s) && /added column/.test(s))
+        && !clash.afterClash.said.some(s => /success/.test(s))
+        && clash.afterClash.sig === clash.sigBefore
+        && clash.afterExisting.said.some(s => /success/.test(s))
+        && (clash.afterExisting.formats || []).indexOf('DDDDD') !== -1
+        && clash.afterNew.cols.indexOf('Branch') !== -1
+        && clash.afterNew.said.some(s => /success/.test(s)),
+    'R19y A FORMAT RULE IS FOR A COLUMN OF THE FILE, AND THE PROMPT NOW REFUSES AN ADDED COLUMN\'S '
+    + 'NAME - with the two things it must still do asserted beside it, so the fix cannot be a '
+    + 'handler that refuses everything. Typing the KEY EXTRA\'s own name used to push it into '
+    + 'tpl.columns in place under a green "Format rule added", which made the name both a file '
+    + 'column and an added column (a clash RecoTemplate.saveTemplate already refuses, so the '
+    + 'template was left UNSAVABLE with nothing to undo it), stopped Reco._keyExtraSet seeing a '
+    + 'key extra, took Reco.keyRuleSig to NULL and refused every signed row of the reconciliation '
+    + 'with the file-older-than-the-rule sentence. THIS GATE EXISTS BECAUSE THE MUTANT THAT '
+    + 'REVERTS IT SURVIVED EVERYTHING ELSE: the checks around it measure CONSISTENCY - that the '
+    + 'cached signature agrees with a fresh one, and that the same rows get the same answer before '
+    + 'and after an unrelated save - and once tpl.columns was in the cache key the WRONG answer '
+    + 'was consistent. Same shape as R19p, and the same lesson: a consistency gate cannot catch a '
+    + 'wrong premise',
+    clash);
+
+  await va.ctx.close();
 }
 
 

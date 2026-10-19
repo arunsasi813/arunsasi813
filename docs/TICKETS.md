@@ -4,17 +4,25 @@ Things found while building, deliberately not built, and picked up cold from her
 says WHERE, WHAT, WHY IT IS ONLY A TICKET, the FIX and the TEST, because a ticket without those
 is a rumour.
 
-Five are worth promoting above the rest:
+Six are worth promoting above the rest:
 
-- **T-S10-19** — **RE-OPENED in round 7.** A day file written before a key change hands its old keys
-  back to any window, with no latch anywhere, so the same business row sits on screen twice under two
-  identities and both copies are writable. Round 6 closed it with a per-row key *recompute*; that
-  comparison is invalid — a frozen key is supposed to disagree with a recompute when the **row's own
-  data** changed — and it refused five measured pieces of ordinary work, including a correction of a
-  key-feeding column, which is what the Correction tab is for. The remedy is the key rule's
-  **signature** recorded per row at mint time, which is a schema change and a round of its own. It is
-  promoted because this is the **third** time a value comparison has been tried here, and because the
-  gate (`run_store_e2e` [84] R15d/R15e) now measures the hole rather than claiming it is shut.
+- **T-S10-28** — `append_csv_rows`' widening branch rewrites a whole day file and is **not
+  cross-process safe**, and two separate processes were measured losing a colleague's append in three
+  of four timings **with both writers reporting success**. Round 8's review pass stopped T-S10-19
+  from triggering it, but the hazard is still live for everything else that widens a day file: the
+  Excel-link write `Versioning._fields`' own comment names, and `Reco.html:5268`'s history
+  compaction. Promoted because it is the only measured **silent loss of a colleague's committed
+  work** left open, and because the fix is twenty lines in `main.py` that no round has been allowed
+  to touch yet.
+
+
+- **T-S10-25** — a template whose key names **no added column** gets no key-rule signature, so a day
+  file written before its `primaryKeys` **list** was edited still hands those rows back writable
+  under their old keys. This is the measured remainder of T-S10-19 after round 8 closed it for
+  derived keys, and it is promoted because it is the one shape of that harm still open, and because
+  closing it means widening the day-file header of **every** template on the folder — which is the
+  cost round 8 declined to pay silently. `run_store_e2e` **[88] R19j** measures it rather than
+  claiming it shut.
 
 - **T-S10-17** — `AppState.flush()` can now wait on a template settle, so the three rules that
   keep that safe are invariants nothing enforces. It is here because of how it fails: not a wrong
@@ -45,7 +53,8 @@ wrote them down, which is the one failure mode this file exists to prevent:
   backup and does not hold for a partial one.
 - **T-S10-24** — the owed-write replay's confirm names the row key in every line but never says
   that key may no longer be the one this reconciliation computes, so the operator presses Yes on
-  key strings they have no way to judge. Needs T-S10-19's signature to answer properly.
+  key strings they have no way to judge. T-S10-19's signature now EXISTS (round 8, handover §19),
+  so the honest version of this is a clause in a dialog rather than a schema round.
 
 Also still open from earlier rounds, listed here so there is one place to look:
 
@@ -859,11 +868,14 @@ pair of functions through which a row becomes a key for a record the folder hold
 `run_store_e2e` [82] enumerates those writers from the source. "Every operator gesture that writes
 under a row key" was claimed after round 2 and after round 3 and was false both times — eight more
 controls were open. T-S10-19 is the same harm from the other direction — a day file written before
-the change, in a window that did nothing wrong — and it is **RE-OPENED**: round 6 closed it by
-comparing each row's stored key against a fresh recompute, round 7 removed that because the
-comparison cannot tell *"the rule moved"* from *"this row's own data moved"* and it refused five
-measured pieces of ordinary work (T-S10-21). **The remedy is the key rule's SIGNATURE recorded per
-row at mint time**, which is on T-S10-19 with the design.**
+the change, in a window that did nothing wrong — and it is **CLOSED in round 8** for a derived key.
+Round 6 closed it by comparing each row's stored key against a fresh recompute; round 7 removed that
+because the comparison cannot tell *"the rule moved"* from *"this row's own data moved"* and it
+refused five measured pieces of ordinary work (T-S10-21). Round 8 records the key rule's
+**SIGNATURE** on the row at mint time (`_pksig`, a hash of `RecoTemplate._keyDefOf`), carries it
+through the day file's control columns, and compares signature to signature — never value to value.
+A row with **no** signature is not refused, which is the migration. The remainder, a key that names
+no added column, is **T-S10-25**.
 
 **CLOSED, AND AS A REFUSAL RATHER THAN A MERGE.** T-S10-7's general merge would have kept the
 folder's key definition silently, and the share would even have ended with one scheme — but B's
@@ -2650,8 +2662,154 @@ against a row key.
 
 ---
 
-## T-S10-19  A day file written before a key change hands its OLD keys back to any window, with no latch anywhere  **RE-OPENED in round 7** — the per-row fix was invalid; the remedy is the key-rule SIGNATURE recorded per row at mint time
+## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED in round 8** — the key rule's SIGNATURE is recorded on the row at mint time and carried through the day file; the remainder is T-S10-25
 
+> ## CLOSED IN ROUND 8. WHAT WAS BUILT, WHAT THE THREE OPEN QUESTIONS WERE DECIDED TO BE, AND
+> ## WHAT IS LEFT. Everything below this block is the design as it stood when the round started and
+> ## is kept because it is the argument; this block is what happened.
+>
+> ### ROUND 8's REVIEW PASS CHANGED FOUR THINGS IN THIS BLOCK AND ONE OF THEM WAS A BLOCKER.
+> Read this before the block below it, because the block below is the build's own write-up and parts
+> of it are now wrong. Two skeptics, thirteen findings, measured from the files and the probes in
+> `scratchpad/pksig/skA.json`, `skB.json` and `scratchpad/pksig/fix/REPORT.json`.
+>
+> 1. **THE HASH WAS OVER THE WRONG THING (BLOCKER, both skeptics, independently).** It hashed
+>    `RecoTemplate._keyDefOf`, which keeps the **whole stored column object**, so **four edits an
+>    operator can make through the editor's own handlers refused every row minted before while the
+>    keys were exactly what the folder's rule computes**: ticking *Allow manual override per row* on
+>    a key helper, ticking *Carry this value forward* on one, a MIS-CLICK on a key extra's type
+>    dropdown clicked straight back (which leaves `_setExtraType`'s dropdown defaults behind for
+>    ever, invisible, with no control that removes them), and reformatting a key formula. Round 6's
+>    harm with a different cause. It now hashes **`RecoTemplate._keyRuleDefOf`**, a per-type
+>    PROJECTION of the same walk down to the fields `Reco._extraOwnValue`'s ladder reads, plus the
+>    closure's declaration order, plus a formula canonicalisation that keeps string literals byte
+>    for byte. `_keyDefOf` stays coarse for the latch and T-24R2-1's confirm, deliberately:
+>    **over-approximating is cheap in a WARNING and ruinous in a REFUSAL**, and the argument the
+>    build offered for sharing it — *"the same set by construction"* — is the defect, not the
+>    defence. Handover §19.2. Gates **[88] R19q / R19r / R19s / R19t**.
+> 2. **THE SCHEMA CHANGE GUARANTEED A DATA LOSS.** The sixth control column made the first write
+>    into any pre-`_pksig` day file take `append_csv_rows`' whole-file rewrite, and that rewrite was
+>    measured **losing a colleague's concurrent append in three of four timings, with both writers
+>    reporting success** — 120,001 rows where 120,002 were written — and recurring once per template
+>    **per day** while the fleet is mixed, not once per file. `Versioning._appendRows` now refuses
+>    to widen a file it did not create. Handover §19.5. **[88] R19k2** (turned round), **R19w**.
+> 3. **ONE ORDINARY EDIT FROM AN UN-UPGRADED WINDOW STRIPPED A ROW'S SIGNATURE FOR GOOD** and
+>    reopened the dead-key door for exactly that row, in silence, with the value landing on the
+>    share. `Versioning.collapseToActive` now inherits a signature from the newest version of the
+>    same `_pk` that has one — exact, because `_pk` is what files a row. Handover §19.5. **[88] R19v**.
+> 4. **THE REFUSAL SENTENCE WAS FALSE IN THE COMMONEST CASE** — it blamed a saved day file and said
+>    *"Nobody has changed anything"* to an operator whose own save had moved the signature under
+>    rows minted in that window — and the recovery it named does not exist for an older day file.
+>    There are **three** branches now, chosen from the row's own data set id. Handover §19.4.
+>    **[88] R19u / R19u2 / R19f**. §15.6 now tells the operator the real blast radius: **a key-rule
+>    change makes every earlier day file of that reconciliation read-only.**
+>
+> **ALSO FIXED:** the cache keys missed an in-place `tpl.columns` push, so the answer was stale and
+> flipped to *"refuse every row"* at the next unrelated save (**[88] R19y** refuses the clash at
+> source); the hash's second lane was fed only the high byte, which is zero for ASCII, so the
+> discriminating width was 32 bits and a collision turned up in 154,453 tries; and a refused row is
+> now **marked on the row** (`⊘ older rule`) with a count, because the same business key was
+> measured on screen twice, one copy refused and one writable, with nothing to tell them apart.
+> **FILED, NOT FIXED:** T-S10-26 (the backup-restore confirm), T-S10-27 (the toolbar count and
+> filter), T-S10-28 (`main.py`'s widening branch, which this round may not edit), T-S10-29 (30 bytes
+> a row on `recoSessions.json`), T-S10-30 (`Groups.resolvePk`).
+>
+> **THE SIGNATURE EXISTS.** `Reco.keyRuleSig(tpl)` is `'1:' + fnv1a64(canonical(RecoTemplate._keyRuleDefOf(tpl)))`
+> — the `primaryKeys` list plus the DEFINITION of every column in the key's dependency closure
+> (`Reco._keyDepNames`), object keys sorted so the hash survives the JSON round trip through
+> `reco/recoTemplates.json` and a mixed fleet (T-S10-12). `Reco._mintKeysSync` writes it on every row
+> that got a business key as `_pksig`; `Versioning._fields` carries it as a FIXED control column;
+> `Versioning.appendUpload` and `appendChangesBatch` put it in the day file's records;
+> `Reco.loadVersionedFile`'s row literal brings it back; `Reco._keyWriteUnsafe` and `_keyRowsUnsafe`
+> ask the template latch FIRST and then `Reco._keySigMoved(tpl, row)`. **There is deliberately no
+> second definition of "the key rule":** `_keyDefOf` is what T-24R2-1's refusal and the
+> definition-change confirm already compare, so the set of changes that raises the latch and the set
+> that moves the signature are the same set by construction.
+>
+> **IT IS NOT A RECOMPUTE, and that is checkable rather than asserted.** `_keySigMoved` reads two
+> strings. It touches no cell, calls no formula engine and never splits `_pk`, so **[82] G82f did not
+> have to be turned round** — its forbidding half (`_keyRowDrifted`, `_extraComputedValue`,
+> `_keyFrozenPart`, `_keyRowCols` must not appear) passes unchanged, and a third, POSITIVE clause was
+> added so that *removing* the signature arm reddens it too. All six of **[86]**'s false-refusal
+> gates stay green.
+>
+> **THE THREE OPEN QUESTIONS, DECIDED:**
+>
+> **(a) Does a template whose key names no added column need a signature?** *Decided: no — and the
+> ticket's own reason for that ("it cannot drift") is WRONG, so the right reason is written down
+> instead.* Such a rule CAN move: editing `primaryKeys` from `['Doc']` to `['Doc','Line']` re-keys
+> every row, and `RecoTemplate._keyDefMoved` already reports it first ("which columns the row key is
+> built from"). It is declined on **cost and blast radius**, measured: `Versioning._fields` reads
+> `keyRuleSig`, so a signature there widens the day-file header of **every template that existed
+> before #24** — which is every template on the folder — and that header is pinned byte-for-byte by
+> `run_pk_extras` **G1** (the acceptance bar for "#24's migration is a no-op") and asserted verbatim
+> by `run_e2e`, `run_autoload`, `run_colorder` [13] and `run_reverse`. The change it would protect
+> against is also the LOUD one: it fires the definition-change confirm, it marks every exported
+> workbook stale, and it is what #24's own confirm warns about — where T-S10-19's whole premise is
+> the SILENT case, a key extra's `formula` or `masterCfg` moving with `primaryKeys` byte-identical.
+> The cost of the signature itself is **not** what decided it: measured at **[88] R19j2** and
+> **[85] R16d**, 2,000 guarded writes cost **ZERO** canonical-JSON-plus-hash passes (one per mint
+> pass, and nothing after it), because `keyRuleSig` is cached against the template object and the
+> identity of `primaryKeys`/`additionalColumns`, so the write-side arm is a WeakMap get and two
+> identity compares. **The shape this leaves open is measured, not claimed
+> shut: T-S10-25**, gated at [88] R19j.
+>
+> **(b) What does the signature do about a `master_lookup` key extra, whose configuration can change
+> without any formula text changing?** *Decided: the CONFIG is in the signature; the MASTER'S ROWS
+> are not, and must never be.* `masterCfg` (`source`, `matchColumn`, `matchKey`, `returnKey`, and the
+> legacy `masterRefColumn`/`masterValueColumn` pair) sits inside `_keyDefOf`, so re-pointing a lookup
+> moves the signature and a day file written before the re-pointing is refused — which is the gap
+> this ticket's last paragraph named as needing exactly this round. The accounts master's DATA is
+> excluded on §14.3's own grounds: a colleague adding a nominal code changes what the key WOULD
+> compute without changing the rule that minted it, the day file holds the minted key, and every
+> surface in Reco is deliberately on it. Hashing those rows would make this a value comparison in
+> disguise — round 6 by another route — and would refuse every gesture on every lookup-keyed template
+> the first time anybody edited the master. **Both arms are measured in one fixture, [88] R19i**, and
+> **[84] R15i** is kept unchanged as the cheapest tripwire on the second.
+>
+> **(c) Should the signature be shown anywhere?** *Decided: not as a value and not as a badge. Its
+> one reader is its own refusal sentence.* A 16-hex hash is a string no operator can judge, which is
+> T-S10-24's complaint about row keys in a confirm. A badge on the key cell would collide with
+> `Reco.keyDrift`'s existing **⚠ recalculated**, which answers a different question (the cell is
+> printing a recalculation) and would read as "the key is wrong" — and the key is exactly right for
+> the file it came from. What the operator needs is the sentence at the moment of the refusal, so the
+> signature arm has **its own**: *"This row came back from a SAVED DAY FILE that was written before
+> this reconciliation's row-key rule was changed… Nobody has changed anything while you had these
+> rows open: the file is simply older than the rule."* Round 7 deleted the second refusal sentence
+> because nothing could produce it and because the one it deleted blamed a colleague for a change
+> that had never happened; this one is produced only by a signature mismatch, so it is true every
+> time it is said (**[88] R19f**). `Reco.keyDriftCount` is **left alone and still has no reader in
+> the app**: it counts VALUE drift, not rule drift, so it is not this arm's counter and pretending it
+> is would be the round-6 conflation in a tidier form. **R15j** keeps it alive; no new readerless
+> counter was added.
+>
+> **THE MIGRATION, UNCHANGED AND NOT WIDENED:** a row with **no** signature is **not refused**
+> ([88] R19k, and the causal half of R19e deletes a live row's signature on screen and watches the
+> same door go through). An empty string counts as none, because Papa gives `''` for a
+> present-but-empty column. A signature whose VERSION this build does not recognise also counts as
+> none (**[88] R19n**), so a future change to what is hashed degrades to *"those rows are
+> unprotected"* and never to *"the app is read-only"* — bumping `Reco.KEYSIG_VER` is itself a
+> migration and has to be written down as one.
+>
+> **THE FORMAT CHANGE, SAID PLAINLY:** for a template whose key names an added column, every day
+> file gains a `_pksig` column. The first write of the day by an updated build into a file that
+> predates it takes **one** whole-file rewrite inside `append_csv_rows` (`header + missing`), which
+> is the rewrite `Versioning._fields`'s own comment says can lose a colleague's concurrent append. It
+> happens once per file. Both back-compat directions are measured at **[88] R19k** (this build on a
+> pre-change CSV) and **[88] R19l** (the build on `55171d8`, run for real, on a CSV this build
+> wrote: it loads every row, drops `_pksig` on the way in, appends with the column intact and blank,
+> and this build reads that blank back as "no signature").
+>
+> **THE DISCLOSED COST:** a reopened day file now puts writable and unwritable rows on one screen, so
+> an all-or-none control that writes EVERY row in the view — sheet mode's "↓ Fill Column", Find &
+> Replace's "↻ Replace All" — is refused as a whole from a healthy cell. **[84] R15g is rewritten to
+> assert that** and §15.6(b) is corrected with it. It is not round 6's cost: round 6 refused the view
+> because one row's own DATA had moved, which **[86] R17b** still measures and which is still green.
+>
+> ---
+>
+> ## THE DESIGN AS IT STOOD WHEN THE ROUND STARTED — KEPT, BECAUSE IT IS THE ARGUMENT
+>
 > ## RE-OPENED. ROUND 6'S FIX IS REMOVED AND THIS IS WHY, AND WHAT TO BUILD INSTEAD.
 >
 > **Handover §18.12. The hole is measured, not hidden: `run_store_e2e` [84] R15d asserts that all
@@ -2812,11 +2970,26 @@ exactly a row whose `_pk` the folder's rule no longer computes, so the row-level
 **per row** rather than per session, with the same sentence and the existing verbs. That also closes
 the case this ticket is about for a colleague who never saw a refusal.
 
-**Test** `w4_dayfile.mjs` as a suite section on this round's port block: after a refusal and a
-correct recovery, reopen the day file and assert that a row carrying a pre-change key is refused at
-every row-level door and that `reco/extraValueMaster.json` gains nothing under it — with the control
-that the rows the recovery minted still write normally, and that `Reco.keyDriftCount` is the premise
-rather than the assertion.
+**Test** `run_store_e2e` **[84]** (ports 21431) carries the outcome — the ten doors are now
+asserted REFUSED (R15d), nothing reaches any of the five pk-keyed shared masters or the day file
+under a dead key (R15e), the live copies beside them still work and file under the folder's own keys
+(R15f/R15h), the all-or-none refusal is disclosed (R15g), a `master_lookup`-keyed template whose
+master DATA moved is still writable (R15i) and `Reco.keyDriftCount` is the premise and not the
+assertion (R15c/R15j). `run_store_e2e` **[88]** (ports 21482/21483) carries the ROUND TRIP and the
+mechanism: the signature at every hop (R19a–R19d, read out of the CSV), the causal check that
+deleting the row's `_pksig` makes the same door at the same row go through again (R19e), the
+sentence (R19f), the control (R19g), the cost of all-or-none (R19h), question (b) in both
+directions (R19i), question (a) plus the measurement of what it leaves open (R19j) and the cost as
+an operation count (R19j2), both back-compat directions (R19k, R19l — the second against
+`55171d8` for real), that a save outside the key rule does not move the signature (R19m) and that
+an unknown signature version is treated as absent (R19n).
+
+**The original plan for this test was `w4_dayfile.mjs` as a section of its own, and it is worth
+saying why it is not that.** The reproduction it describes is already [84]'s fixture
+(`R15_SETUP` → `R15_A_KEY` → `R15_RELOAD` → `R15_REOPEN` → `R15_WALK`), and round 7 pointed it at
+the open hole. Writing a second fixture for the same screen would have given two screens that could
+drift apart, so [84] was rewritten in place and [88] reuses its template id, rows and key change
+deliberately.
 
 
 ---
@@ -2940,7 +3113,11 @@ was always going to exist because every feature that edits a row produces the di
 **`Reco._keyWriteUnsafe` now asks the TEMPLATE LATCH only.** The latch's question — *did the key
 DEFINITION change while these rows were loaded?* — is a property of the template and cannot be
 confused with a row's data changing. **[82] G82f is the inverse of what it was** and fails if a
-per-row recompute comes back; **T-S10-19 is RE-OPENED** with the key-rule-signature design on it.
+per-row recompute comes back. **T-S10-19 was RE-OPENED here and is CLOSED in round 8** by the
+key-rule-signature design this round wrote onto it — and G82f did **not** have to be turned round to
+let it in, because a signature comparison reads no cell and calls no formula engine. G82f now
+*also* asserts the signature arm positively, so removing it is a red check rather than a silent
+loss.
 
 ### PART 2 — MUTATE-THEN-ASK
 
@@ -3065,6 +3242,16 @@ of the dead-key chokepoint (§18.11) — on the reasoning that *"refusing would 
 unrestorable on the day it is needed"*, which is right for a WHOLE backup and does not hold for a
 partial one.
 
+> **Round 8 note.** A partial restore now has a cheaper honest answer than it had, and it is
+> narrower than it looks. The restored rows carry whatever `_pksig` the backup holds, so a restore
+> bringing `recoSessions` without `recoTemplates` leaves rows whose signature is not the live
+> template's — and the write guard already refuses those, per row, with the file-older-than-the-rule
+> sentence. **Three things are still wrong with that**, which is why this stays open: the refusal
+> arrives one gesture too late, at the first write rather than at the restore, where the operator
+> has already been told it worked; it says *"a saved day file"*, which is not what happened; and it
+> does nothing at all for a backup written before round 8, whose rows carry no signature. The fix
+> is still a decision about what a PARTIAL backup means, taken at `importBackup`.
+
 **Found by** the round 7 adversarial attack (handover §18.12, `stillWrong`), which measured the
 allow-list reason and found this hole in it. **Filed late**, in the pending-work sweep after it:
 the attack reported it and no round wrote it down, which is the failure this file exists to
@@ -3117,17 +3304,20 @@ does not give them the fact they would need.
 round's claim that the confirm does not name the key at all — it does. **Filed late**, in the
 pending-work sweep.
 
-**Why it is only a ticket** It needs the same thing T-S10-19 needs and for the same reason: to say
-"this key was minted by a rule that is no longer in force" you must know which rule minted it, and
-a value comparison cannot tell you (§14.3 — a frozen key is *supposed* to disagree with a recompute
-once the row's data has changed, which is why round 6's per-row arm was removed in round 7). With
-the key-rule SIGNATURE on T-S10-19, this becomes one clause in an existing dialog. Without it, the
-honest version is a general warning on every replay, which trains people to click through.
+**Why it is only a ticket** It needed the same thing T-S10-19 needed and for the same reason: to
+say "this key was minted by a rule that is no longer in force" you must know which rule minted it,
+and a value comparison cannot tell you (§14.3 — a frozen key is *supposed* to disagree with a
+recompute once the row's data has changed, which is why round 6's per-row arm was removed in round
+7). **Round 8 built that signature** (`Reco.keyRuleSig`, handover §19), so this is now one clause in
+an existing dialog rather than a schema round — and it stays a ticket only because the journal's own
+shape has to carry it. Without it the honest version is a general warning on every replay, which
+trains people to click through.
 
-**Fix** With T-S10-19's signature: mark the journal entries whose signature is not the template's
-current one, and say so per line in the confirm. Without it, and cheaper: record the key definition
-(`RecoTemplate._keyDefOf`) on each journal entry when it is buffered, compare it at replay, and name
-the affected lines. That is a change to the journal's own shape, which is local to this PC and
+**Fix** With T-S10-19's signature, which now exists: stamp `Reco.keyRuleSig(tpl)` onto each journal
+entry when it is buffered — the same string the mint already writes onto the row — compare it with
+`Reco._keySigMoved`'s own test at replay, and name the affected lines in the confirm. A journal
+entry buffered before this change has none, and an absent signature means "not flagged", exactly as
+it means "not refused" at the write. That is a change to the journal's own shape, which is local to this PC and
 needs no schema round — it is the one place a signature can be added without touching the day file.
 
 **Test** Type a value with the folder down; change the template's key definition; boot: assert the
@@ -3135,3 +3325,181 @@ confirm NAMES that line as keyed by a rule that has changed, and assert the FILE
 whichever answer the operator gave. Control: with no key change between the typing and the boot,
 the confirm says nothing extra and the replay lands exactly as it does today
 (`run_store_e2e` [73]/[74] already hold that path).
+
+
+---
+
+## T-S10-25  A key that names NO ADDED COLUMN gets no signature, so a day file written before its `primaryKeys` LIST was edited is still writable under the old keys
+
+**Where** `apps/Reco.html` — `Reco.keyRuleSig` returns `null` when `Reco._keyExtraSet(tpl)` is null,
+i.e. when no component of `primaryKeys` is an added column. Nothing is then stamped on the row by
+`Reco._mintKeysSync`, `Versioning._fields` adds no `_pksig` column, and `Reco._keySigMoved` answers
+false for every row of that template for ever.
+
+**What** Measured, `run_store_e2e` **[88] R19j** (and `scratchpad/pksig/build/logs/store.txt`): a
+template keyed `primaryKeys: ['Doc']` on three rows `P1/P2/P3`; the day file's header is
+`_pk,_ver,_ts,_src,_by,Doc,Line,Amount` with no signature column and `row._pksig` is `undefined`;
+`primaryKeys` is then edited to `['Doc','Line']`, which re-keys every row to `P1||L1` and fires the
+definition-change confirm; after Clear Loaded Data and **Open Existing** on that day file the rows
+come back as `P1/P2/P3` and `Reco.setTag` on `P1` **goes through**, filing
+`reco/extraValueMaster.json` → `P1` → `Vendor` under a key the folder's rule no longer computes.
+This is T-S10-19's harm exactly, on the one template shape round 8 declined to cover.
+
+**Why it is only a ticket** Round 8's reason for declining it is cost and blast radius, and it is
+written out on T-S10-19 under question (a). In short: `Versioning._fields` reads the same answer, so
+a signature here widens the day-file header of **every template that existed before #24** — every
+template on the folder today — and that file is pinned byte-for-byte by `run_pk_extras` **G1**, the
+acceptance bar for "#24's migration is a no-op", and asserted verbatim by `run_e2e`,
+`run_autoload`, `run_colorder` [13] and `run_reverse`. The harm is also the LOUD one rather than
+T-S10-19's silent one: editing `primaryKeys` fires the definition-change confirm, raises the latch
+for every window that has rows loaded, and marks every exported workbook stale, where a key extra's
+`formula`/`masterCfg` moving left `primaryKeys` byte-identical and said nothing. So it is a smaller
+hole than the one that was closed, reached only by a change the operator has already been warned
+about, and closing it costs a format change to 100% of the folder's files instead of to the
+templates that can drift silently.
+
+**Fix** Two shapes, and the choice is the point of the ticket.
+1. **Widen unconditionally** — drop the `_keyExtraSet` test from `Reco.keyRuleSig`, so `_keyDefOf`'s
+   `pk` array alone produces a signature. Four assertions in three suites nobody may weaken then
+   have to be re-read as declared differences, exactly as `run_pk_extras` G1 already handles #26's
+   one declared insertion. That is the honest version and it is a round of its own, because "the
+   migration is a no-op" stops being true for every template in the folder.
+2. **Carry it beside the file rather than in it** — a per-day sidecar
+   (`reco_data/<folder>/<MMM-YY>/<DD>.sig`) holding one signature per `_pk`, written by the same
+   two record builds and read by `loadVersionedFile`. No header changes, so nothing is re-read; the
+   cost is a second file per day that can go missing, and a missing sidecar has to mean "no
+   signature" — which is the migration rule again and is therefore consistent.
+
+**Test** `[88] R19j`'s own fixture, with its last assertion inverted: after the `primaryKeys` list
+edit and the reopen, `Reco.setTag` on `P1` is REFUSED with the file-older-than-the-rule sentence and
+`reco/extraValueMaster.json` gains nothing under `P1`. Controls that must stay green with it: the
+day-file header assertions in `run_e2e`, `run_autoload`, `run_colorder` [13] and `run_reverse`, and
+`run_pk_extras` G1's byte-identical day file — whichever of those a chosen fix changes must be
+re-read and declared, never moved.
+
+---
+
+## T-S10-26  `App.importBackup` replaces every template with no key-definition comparison and no confirm, and the refusal then points at the wrong artefact
+
+**Where** `apps/Reco.html` `App.importBackup` — `if (d.recoTemplates) AppState.recoTemplates = d.recoTemplates;`
+— against `RecoTemplate.saveTemplate`'s key-definition confirm, which this path does not have.
+
+**What** The restore confirm lists templates, sessions, masters and entry history and says **nothing
+about row keys**. `reco_data`'s day files are not in the backup and are not replaced. So restoring a
+backup taken BEFORE a legitimate key-rule edit puts the OLD rule back under day files written AFTER
+it, and every row in them is then refused. Round 8's review pass fixed the half of this that is a
+lie — the sentence no longer claims the file was *"written before"* the rule changed, because it
+cannot know the direction — but the restore still moves the rule silently.
+
+**Why it is only a ticket** Measured as a **code-reading claim only**: skA could not drive the file
+input's `FileReader` from the probe harness, so the direction was reasoned from the source and not
+run. It also needs a decision this round did not have the room for: `importBackup` replaces ALL
+templates, so the comparison is a loop and the confirm has to summarise *"N reconciliations' row-key
+rules differ from the folder's"* without becoming a wall of text.
+
+**Fix** Run `RecoTemplate._keyDefMoved(folder's template, backup's template)` for each id present in
+both and name the result in the restore confirm. The coarse `_keyDefOf` is the **right** definition
+here, for §19.2's reason: this is a warning.
+
+**Test** A restore whose backup holds a template whose key definition differs: the confirm names it,
+and declining leaves `AppState.recoTemplates` untouched.
+
+---
+
+## T-S10-27  A screen that is partly read-only says so per row but not as a number, and cannot be filtered
+
+**Where** `apps/Reco.html` — the `⊘ older rule` badge in the row's status cell and
+`Reco.keyOldRuleCount(tpl, sess)`, which exists and has **no reader in the app**.
+
+**What** After a key-rule change a reopened day file plus **Add Data** puts refused and writable rows
+on one screen. Round 8's review pass made each refused row visible before the gesture, which was the
+blocker half. What is missing is the toolbar count and a *"show only rows from an older rule"*
+filter, so a Clear-and-load decision can be made on a number rather than by scrolling.
+
+**Why it is only a ticket** The function is there and measured (**[88] R19x**); a toolbar surface and
+a filter are UI work with their own byte-diff exposure (`run_colorder` T1 diffs the `<tbody>`), and
+the finding that mattered — *"nothing on screen tells them apart"* — is closed.
+
+**Fix** Read `Reco.keyOldRuleCount` into the reconciliation toolbar in the shape `keyDriftCount`
+would have used, and add the filter beside the existing ones.
+
+**Test** Three refused and three writable rows on one screen: the toolbar reads 3, the filter shows
+exactly those three, and `keyDriftCount` still reads 0 (it answers a different question).
+
+---
+
+## T-S10-28  `append_csv_rows`' widening branch is not cross-process safe, and that is a pre-existing hazard this round could only route around
+
+**Where** `main.py:683` — the `missing` branch of `LauncherAPI.append_csv_rows`, which rewrites the
+whole file; and `main.py:243` `_writing`, which is a per-path lock **inside one process**.
+
+**What** MEASURED, two separate python processes against one 7.7 MB day file: writer A takes the
+widening rewrite, writer B appends 0.00 / 0.15 / 0.40 s into it, **both report success, and B's row
+is not in the file**. At 0.80 s, past the end of the 672 ms rewrite, both survive. Two windows are
+two processes, so the lock does not see it. `Versioning._fields`' own comment has warned about this
+rewrite for rounds; nothing had ever made it happen until T-S10-19 added a sixth control column, and
+round 8's review pass stopped asking for the widening rather than fixing the rewrite. **The hazard
+is still there for anything else that widens a day file** — the Excel-link write that comment names,
+and `Reco.html:5268`'s history compaction, which rewrites an arbitrary older file the same way.
+
+**Why it is only a ticket** `main.py` is outside the set of files that round was allowed to edit, and
+routing around it inside `apps/Reco.html` was both available and cheap.
+
+**Fix** A lock file beside the CSV, or write-then-verify-then-retry, in the widening branch. Then
+`Versioning._appendRows` could widen again and the mixed-fleet rows would stay signed.
+
+**Test** `scratchpad/pksig/skB/probes/b3_race.py` as it stands — it already measures the loss and
+already has the 0.80 s control that shows the window is the rewrite. It must read `B_LOST: false` at
+every timing.
+
+---
+
+## T-S10-29  The signature costs 30 bytes a row on `recoSessions.json`, which is the slowest shared write in the product
+
+**Where** `apps/Reco.html` `Store.serialize('recoSessions')` and the mint's `row._pksig` stamp.
+
+**What** MEASURED through the real serialiser: **21,467,287 bytes with `_pksig` and 15,467,287
+without at 200,000 rows** — `+6.0 MB`, exactly 30 bytes a row — and **54,167,287 vs 39,167,287 at
+500,000**, `+15.0 MB`. `reco/recoSessions.json` is rewritten wholesale on a 250 ms timer and shipped
+to the shared folder, and §14.6 already calls an 85 MiB serialise at 200,000 rows a problem.
+
+**Why it is only a ticket** It is a **price, not a bug**, and it is now written down and agreed
+(handover §16.4a's round-8 block) rather than discovered. The saving is bytes, not correctness.
+
+**Fix** The signature is one string per data set, so `sess` could hold it once — beside
+`sess.dataSetIds`, which is already per-row by index through `_dsi` — and the row literal could read
+it from there. The **day file** still needs the per-row column, because a reopened file genuinely
+mixes rules.
+
+**Test** `Store.serialize('recoSessions', …)` at 200,000 rows is within 1 MB of the no-signature
+figure, with **[88] R19a–R19d**'s round trip still green and `run_panes_e2e`'s byte diff of the row
+literal re-read and declared.
+
+---
+
+## T-S10-30  `Groups.resolvePk` reads a row out of a day file FOR A WRITE and does not carry the signature
+
+**Where** `apps/Reco.html` `Groups.resolvePk`'s historic row literal — `{_id:'hist_'+uid, _pk, _ver,
+_historic}` plus `tpl.columns` only — against `Reco.loadVersionedFile`'s literal, which now carries
+`_pksig`; and `Reco.removeMemberFromGroup`, which re-finds the row in `sess.data` only and passes
+`null` when it is not there.
+
+**What** Both literals are built from the same `collapseToActive(readFile(...))` rows, and those rows
+hold the signature. `Reco.openGroupDetails` shows a historic member with a **–** button, and
+`removeMemberFromGroup` then degrades the question to the template latch — which is DOWN after one's
+own key edit. So a group membership filed under a key the rule no longer mints can still be deleted
+from the Group details modal with the signature sitting unread in the file two lines away.
+
+**Why it is only a ticket** T-S10-20's comment makes that deliberate — *"a key with no row left on
+screen can only be the template latch's business"* — and an operator pressing **–** on a historic
+row probably means it. What changed is the **premise** of that comment: the file can answer now. It
+is also a code-reading finding with no measurement attached (skB B6, out of its own dimension), and
+the fix needs a decision about what the refusal should SAY there: *"Clear Loaded Data and load the
+extract again"* is not advice about a group modal.
+
+**Fix** Either carry `_pksig` in `Groups.resolvePk`'s literal and pass the resolved row to
+`Reco._keyStaleBlock`, with a sentence written for that modal — or write one line in the T-S10-20
+note saying why a historic member is deliberately exempt now that the file can answer. Not both.
+
+**Test** A group with one historic member whose signature is not the live template's: pressing **–**
+is refused with a sentence that names the modal, and `reco/groupMaster.json` is unchanged.
