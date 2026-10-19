@@ -5030,8 +5030,30 @@ const Versioning = {
       return true;
     }
     try {
-      const csv = rows && rows.length ? Papa.unparse({ fields: Versioning._fields(rows, tpl), data: rows }) : '';
+      const fields = Versioning._fields(rows, tpl);
+      const csv = rows && rows.length ? Papa.unparse({ fields: fields, data: rows }) : '';
       await window.pywebview.api.write_file(fullPath, csv);
+      /* T-S10-19 / CLEANUP ROUND. THIS WRITE SETS THE FILE'S HEADER, SO IT HAS
+         TO SET WHAT Versioning._headerOf REMEMBERS - and until this line it
+         did not, which left a hole in the signature exactly where B1's guard
+         is supposed to be the only thing narrowing a file.
+         MEASURED (c2_compact C2c-C2g): a pre-_pksig day file, two cell edits
+         (B1 holds, the file stays narrow), then Compact - which does NOT go
+         through _appendRows, so B1 is not on its path - and the whole-file
+         rewrite WIDENS the header to _pk,_ver,_ts,_src,_by,_pksig,... Then
+         Add Data: _appendRows asked _headerOf, got the STALE narrow header out
+         of the cache, concluded "this file has no _pksig" and deleted the
+         signature off the record. A row the mint had signed landed UNSIGNED in
+         a file whose header has the column, and the reopen handed it back
+         unsigned - so after a real key-rule change it is the one row that is
+         NOT refused, which is the harm this whole ticket exists for.
+         A write with no rows writes '' and the file then has no header at all,
+         so the cache is cleared rather than set to a header the file has not
+         got. [88] R19z. */
+      try {
+        if (rows && rows.length) Versioning._hdrCache[fullPath] = fields.slice();
+        else delete Versioning._hdrCache[fullPath];
+      } catch (e) {}
       return true;
     } catch(e) { console.error('Versioning.writeFile', e); Store._reportError('version history', e); return false; }
   },
@@ -14003,9 +14025,8 @@ defaultTemplate() {
                          returnKey, the four Masters._lookupCfg resolves - and
                          that function is already the ONE place that says what
                          a lookup's rule is, so this cannot drift from it
-       dropdown, custom  carryForward, because Reco._extraTyped reads it as
-                         the SCOPE test and it therefore decides WHICH typed
-                         record becomes the value
+       dropdown, custom  the name and the type, and NOTHING ELSE - see the
+                         long note at the `else` branch below
      WHAT IS OUT, AND WHY LEAVING IT OUT CANNOT MISS A RULE CHANGE:
        allowOverride     never read where the value is READ. Reco._extraOverride
                          honours a stored override record whether the box is
@@ -14018,13 +14039,16 @@ defaultTemplate() {
                          all of it in _extraOwnValue's tail.
        _cid, label, _ssSingleUse, every display flag
                          not on the value path at all.
-       carryForward on a COMPUTED column
-                         _extraOwnValue returns _extraComputedBase for
-                         formula / master / master_lookup and never reaches
-                         _extraTyped, so the flag is unread there. That is why
-                         `carry` is recorded for the typed types ONLY and not
-                         for all of them: recording it everywhere is exactly
-                         the over-approximation that caused A1(2).
+       carryForward      on ANY column. On a computed one _extraOwnValue
+                         returns _extraComputedBase and never reaches
+                         _extraTyped at all; on a typed one _extraTyped's
+                         scope test is unreachable while a key is being
+                         minted, and a typed column cannot be in a key's
+                         closure in the first place (_pkEligible1). The
+                         round-8 build recorded it for the typed types and
+                         the cleanup round took it out - A1(2) and the fifth
+                         instance of the same shape; the measurement is in
+                         the note on the `else` branch below.
 
      AND THE CLOSURE'S DECLARATION ORDER IS IN, which _keyDefOf's name-keyed
      `defs` object cannot carry: Reco._keyScratch materialises the closure in
@@ -14058,9 +14082,34 @@ defaultTemplate() {
         d.matchColumn = String(c.matchColumn == null ? '' : c.matchColumn);
         d.matchKey = String(c.matchKey == null ? '' : c.matchKey);
         d.returnKey = String(c.returnKey == null ? '' : c.returnKey);
-      } else {
-        d.carry = (a.carryForward === true);
       }
+      /* THE CLEANUP ROUND TOOK `carry` OUT OF THIS BRANCH, and it is the FIFTH
+         instance of the shape the review found four of. The round-8 build
+         recorded carryForward for dropdown/custom - "because Reco._extraTyped
+         reads it as the SCOPE test and it therefore decides WHICH typed record
+         becomes the value" - and that reason is not live on the MINT path, for
+         two independent measured reasons (c1_carry, [88] R19s):
+           1. A DROPDOWN OR CUSTOM COLUMN CANNOT BE IN A KEY'S CLOSURE AT ALL.
+              RecoTemplate._pkEligible1 refuses it by type ("you type this
+              column in by hand, so its value is not worked out from the data")
+              and _pkFormulaOk refuses a key formula that READS one for the
+              same reason, so saveTemplate's prune empties primaryKeys. This
+              branch is unreachable for every template the app can produce.
+           2. AND PAST THE SAVE, BY HAND, THE FLAG STILL CANNOT REACH A KEY.
+              Reco.ingestData reserves row._pk = '' before the mint and
+              _mintKeysSync assigns the key only AFTER computing it, so
+              Reco.storeKey is null for every row the mint walks; _extraRec
+              finds nothing and _extraTyped returns at its RECORD test, above
+              the line that reads carryForward. Measured: the same file row and
+              the same stored record mint the same key with the box on and off,
+              while Reco._extraOwnValue - the mint's own value function -
+              answers differently over that row once it HAS a key. That is 14.3
+              exactly: the key is frozen, the cell is not.
+         So recording it bought nothing and cost a refusal of every earlier row
+         of the reconciliation the moment somebody ticked the box. Over-
+         approximating is cheap in a WARNING and ruinous in a REFUSAL, which is
+         the asymmetry that sent _keyDefOf back; keeping one field of it would
+         have been the same mistake one field smaller. */
       out.defs[n] = d;
       out.order.push(n);
     });
@@ -21216,19 +21265,42 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
      carried value, a column this month's file does not carry, or the clock,
      because not one of those is in it.
 
-     WHAT IS IN IT: RecoTemplate._keyDefOf(tpl) and nothing else - the
-     primaryKeys list plus the DEFINITION of every column in the key's
-     dependency closure (Reco._keyDepNames). THERE IS DELIBERATELY NO SECOND
-     DEFINITION OF "THE KEY RULE" IN THIS FILE. _keyDefOf is what T-24R2-1's
-     refusal and the definition-change confirm already compare, so "a change
-     that raises the latch" and "a change that moves the signature" are the
-     same set of changes BY CONSTRUCTION. Two definitions of this would drift
-     apart and the one that drifted would be the one nobody ran.
+     WHAT IS IN IT: RecoTemplate._keyRuleDefOf(tpl) and nothing else - the
+     primaryKeys list plus, for every column in the key's dependency closure
+     (Reco._keyDepNames), in DECLARATION order, the fields Reco._extraOwnValue's
+     ladder actually reads. Read the long note on _keyRuleDefOf itself for the
+     field-by-field list and for what is left out.
+
+     THIS HASHED _keyDefOf WHEN ROUND 8 WAS BUILT AND THAT WAS A BLOCKER, and
+     the argument that was offered FOR _keyDefOf is the thing to read, because
+     it is the mistake and it reads like a virtue. It was: there is only ONE
+     definition of "the key rule" in this file, so "a change that raises the
+     latch" and "a change that moves the signature" are the same set of
+     changes BY CONSTRUCTION. _keyDefOf keeps the WHOLE stored column object,
+     so display and ownership flags the key engine never reads were in the
+     hash - and FOUR edits an operator can make through the editor's own
+     handlers moved the signature while the rule went on computing
+     BYTE-IDENTICAL keys (ticking "Allow manual override per row" on a key
+     helper, ticking "Carry this value forward" on one, a MIS-CLICK on a key
+     extra's type dropdown clicked straight back, and reformatting a key
+     formula). Every row minted before was then refused at every door with its
+     key exactly what the folder's rule computes: round 6's harm with a
+     different cause.
+
+     THE ASYMMETRY THAT ARGUMENT MISSES: OVER-APPROXIMATING IS CHEAP IN A
+     WARNING AND RUINOUS IN A REFUSAL. The latch and T-24R2-1's confirm are
+     warnings, so they KEEP the coarse _keyDefOf and may go on firing on a
+     detour. This refuses, so it needs the narrow projection. One definition of
+     "the key rule" was the right instinct and _keyRuleDefOf keeps it - same
+     primaryKeys, same Reco._keyDepNames closure, same walk; one definition of
+     "which BYTES of it matter" was the error. [88] R19q is the ten-change
+     gate and R19r is its mirror, and they have to be read together.
 
      THE MASTER'S ROWS ARE NOT IN IT, AND THAT IS THE DESIGN RATHER THAN AN
      OMISSION. A master_lookup key extra's CONFIG (source, matchColumn,
      matchKey, returnKey, and the legacy masterRefColumn/masterValueColumn
-     pair) is inside _keyDefOf, so RE-POINTING a lookup moves the signature.
+     pair) is inside _keyRuleDefOf, so RE-POINTING a lookup moves the
+     signature.
      The accounts master's DATA is not: a colleague adding a nominal code
      changes what the key WOULD compute without changing the rule that minted
      it, the day file holds the minted key, and every surface in Reco is
@@ -25484,14 +25556,21 @@ renderRecoTable(tpl, sess) {
      is not kept as a dead branch: a refusal sentence nothing can produce is a
      promise of a safety control that does not exist, and the next reader would
      trust it. */
-  /* T-S10-19: THERE ARE TWO SENTENCES AGAIN, and the second one is not the
+  /* T-S10-19: THERE IS MORE THAN ONE SENTENCE AGAIN, and none of them is the
      one round 7 deleted. That one said "These rows carry the keys they were
-     SAVED with" on behalf of the per-row drift arm and, because the arm
-     fired on ordinary work, it blamed a colleague for a template change that
-     had never happened. This one is produced only by a SIGNATURE mismatch,
-     so what it says is true every time it is said: the file is older than
-     the rule, and nobody did anything while these rows were open. Saying the
-     latch's sentence here would be the round-6 mistake in prose. */
+     SAVED with" on behalf of the per-row drift arm and, because the arm fired
+     on ordinary work, it blamed a colleague for a template change that had
+     never happened. These are produced only by a SIGNATURE mismatch, which is
+     why each can be true every time it is said. Saying the latch's sentence
+     here would be the round-6 mistake in prose.
+     THE SENTENCE THE ROUND-8 BUILD WROTE HERE IS NOT THE ONE BELOW, and the
+     paragraph that used to stand on this line claimed "nobody did anything
+     while these rows were open" - which the review then measured REACHABLE by
+     the operator's own template save, over rows Reco.ingestData minted in that
+     window that no file ever handed back. That is the same defect round 7
+     deleted a sentence for. Read the ROUND 8 note immediately below for what
+     each branch may and may not claim; [88] R19u2 asserts both halves ABSENT
+     from all three. */
   /* ROUND 8 REWROTE THESE THREE, AND WHAT CHANGED IS WHAT THEY CLAIM.
      GONE: "Nobody has changed anything while you had these rows open" - the
      operator's own save reaches this branch (A3, measured). GONE: "written

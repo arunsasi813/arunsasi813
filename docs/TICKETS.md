@@ -9,11 +9,12 @@ Six are worth promoting above the rest:
 - **T-S10-28** — `append_csv_rows`' widening branch rewrites a whole day file and is **not
   cross-process safe**, and two separate processes were measured losing a colleague's append in three
   of four timings **with both writers reporting success**. Round 8's review pass stopped T-S10-19
-  from triggering it, but the hazard is still live for everything else that widens a day file: the
-  Excel-link write `Versioning._fields`' own comment names, and `Reco.html:5268`'s history
-  compaction. Promoted because it is the only measured **silent loss of a colleague's committed
-  work** left open, and because the fix is twenty lines in `main.py` that no round has been allowed
-  to touch yet.
+  from triggering it, but the hazard is still live for everything else that widens a day file
+  through that branch: the Excel-link write `Versioning._fields`' own comment names. (It is **not**
+  history compaction — that path does not use `append_csv_rows` at all; the cleanup round measured
+  it and corrected this claim on the ticket.) Promoted because it is the only measured **silent loss
+  of a colleague's committed work** left open, and because the fix is twenty lines in `main.py` that
+  no round has been allowed to touch yet.
 
 
 - **T-S10-25** — a template whose key names **no added column** gets no key-rule signature, so a day
@@ -2662,11 +2663,50 @@ against a row key.
 
 ---
 
-## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED in round 8** — the key rule's SIGNATURE is recorded on the row at mint time and carried through the day file; the remainder is T-S10-25
+## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED in round 8, reviewed, and then cleaned up** — the key rule's SIGNATURE is recorded on the row at mint time and carried through the day file; the remainder is T-S10-25
 
 > ## CLOSED IN ROUND 8. WHAT WAS BUILT, WHAT THE THREE OPEN QUESTIONS WERE DECIDED TO BE, AND
 > ## WHAT IS LEFT. Everything below this block is the design as it stood when the round started and
 > ## is kept because it is the argument; this block is what happened.
+>
+> ### AND THEN A CLEANUP ROUND, BECAUSE THE REVIEW'S VERIFIER SIGNED THE BEHAVIOUR OFF AND REFUSED
+> ### TO SIGN THE ROUND OFF: *"what stops me is not the behaviour."* Nine items: **five sentences,
+> one safety control with no behavioural test anywhere, and three about the code — two of which
+> became code changes.** None is a false refusal and none loses a value; the worst loses the
+> PROTECTION on a value. **Handover §19.9 has all nine; the three that change what this ticket SAYS
+> are here.**
+>
+> 1. **COMPACTION WIDENS AN EXISTING DAY FILE AND THE NEXT APPEND INTO IT LOST ITS SIGNATURE.**
+>    Finding 2 below put the no-widening guard in `Versioning._appendRows`; `Versioning.compactFile`
+>    does not go through it. The widening itself is safe and is the one route that upgrades such a
+>    file, but `Versioning._hdrCache` was never invalidated by `Versioning.writeFile`, so after a
+>    compaction the next `Add Data` read the stale narrow header and **deleted the signature off the
+>    record**: a row the mint had signed landed unsigned in a file whose header carries the column,
+>    and after a real key-rule change it is the one row that is **not** refused. One line in
+>    `writeFile`. Handover §14.5, §19.9. **[88] R19z**.
+> 2. **`carryForward` WAS STILL IN THE SIGNATURE — the FIFTH instance of finding 1's shape.** A
+>    dropdown or custom column cannot be in a key's closure at all (`_pkEligible1` and
+>    `_pkFormulaOk` refuse it, measured through the real save), and past the save the flag still
+>    cannot reach a minted key, because `_extraTyped` returns at its record test while `row._pk` is
+>    the empty string the ingest reserves. **[88] R19s now asserts the opposite of what it
+>    asserted**, and the review pass's own mutation grid had graded the right answer as a defect.
+>    Handover §19.2, §19.9.
+> 3. **THE ⊘ older rule BADGE HAD NO BEHAVIOURAL GATE.** R19x is a regex over the source, and a
+>    mutant that deleted the render while leaving every character that regex matches behind in a
+>    comment read 724 / 0 — the one safety control in the round whose removal nothing noticed.
+>    **[88] R19x2** reads the rendered `<tbody>` of the mixed screen: the badge on each refused row,
+>    on none of the live copies, and `Reco.keyOldRuleCount` beside it.
+>
+> **The five sentences, and they matter because this cluster has already shipped documentation that
+> said the opposite of the code twice:** the summary block below asserted as fact the *"same set by
+> construction"* argument the review called the central defect; the answer to question (c) quoted a
+> refusal sentence the code is gated never to say and cited **R19f** — the gate that asserts it
+> absent — as the proof; the same answer said *"no new readerless counter was added"* when
+> `Reco.keyOldRuleCount` is one; handover §15.6(a) quoted the same dead sentence in the present
+> tense and reinstated the Clear-and-load loop the same bullet says is not advice; and
+> `Reco.keyRuleSig`'s own header in `apps/Reco.html` named `_keyDefOf` sixty lines above the code
+> that hashes `_keyRuleDefOf`. **All five are corrected in place below and marked as the mistake**,
+> because a reader who trusts a summary block rebuilds the defect.
 >
 > ### ROUND 8's REVIEW PASS CHANGED FOUR THINGS IN THIS BLOCK AND ONE OF THEM WAS A BLOCKER.
 > Read this before the block below it, because the block below is the build's own write-up and parts
@@ -2686,13 +2726,15 @@ against a row key.
 >    for byte. `_keyDefOf` stays coarse for the latch and T-24R2-1's confirm, deliberately:
 >    **over-approximating is cheap in a WARNING and ruinous in a REFUSAL**, and the argument the
 >    build offered for sharing it — *"the same set by construction"* — is the defect, not the
->    defence. Handover §19.2. Gates **[88] R19q / R19r / R19s / R19t**.
+>    defence. Handover §19.2. Gates **[88] R19q / R19r / R19s / R19t** — and R19s was itself turned
+>    round by the cleanup round above, because the projection still kept one field it should not.
 > 2. **THE SCHEMA CHANGE GUARANTEED A DATA LOSS.** The sixth control column made the first write
 >    into any pre-`_pksig` day file take `append_csv_rows`' whole-file rewrite, and that rewrite was
 >    measured **losing a colleague's concurrent append in three of four timings, with both writers
 >    reporting success** — 120,001 rows where 120,002 were written — and recurring once per template
 >    **per day** while the fleet is mixed, not once per file. `Versioning._appendRows` now refuses
->    to widen a file it did not create. Handover §19.5. **[88] R19k2** (turned round), **R19w**.
+>    to widen a file it did not create. Handover §19.5. **[88] R19k2** (turned round), **R19w** — and
+>    the one path that is NOT `_appendRows`, compaction, is item 1 of the cleanup round above.
 > 3. **ONE ORDINARY EDIT FROM AN UN-UPGRADED WINDOW STRIPPED A ROW'S SIGNATURE FOR GOOD** and
 >    reopened the dead-key door for exactly that row, in silence, with the value landing on the
 >    share. `Versioning.collapseToActive` now inherits a signature from the newest version of the
@@ -2721,10 +2763,23 @@ against a row key.
 > that got a business key as `_pksig`; `Versioning._fields` carries it as a FIXED control column;
 > `Versioning.appendUpload` and `appendChangesBatch` put it in the day file's records;
 > `Reco.loadVersionedFile`'s row literal brings it back; `Reco._keyWriteUnsafe` and `_keyRowsUnsafe`
-> ask the template latch FIRST and then `Reco._keySigMoved(tpl, row)`. **There is deliberately no
-> second definition of "the key rule":** `_keyDefOf` is what T-24R2-1's refusal and the
-> definition-change confirm already compare, so the set of changes that raises the latch and the set
-> that moves the signature are the same set by construction.
+> ask the template latch FIRST and then `Reco._keySigMoved(tpl, row)`.
+>
+> **IT IS `_keyRuleDefOf` AND NOT `_keyDefOf`, AND THE ARGUMENT FOR `_keyDefOf` IS THE ONE THING IN
+> THIS ROUND WORTH READING TWICE, BECAUSE IT IS THE MISTAKE AND IT READS LIKE A VIRTUE.** That
+> argument was: there is deliberately no second definition of "the key rule" in the file, `_keyDefOf`
+> is what T-24R2-1's refusal and the definition-change confirm already compare, so *"a change that
+> raises the latch"* and *"a change that moves the signature"* are the same set **by construction**.
+> Both skeptics found independently that this is the defect. `_keyDefOf` keeps the **whole stored
+> column object**, so display and ownership flags the key engine never reads were in the hash, and
+> **four edits an operator can make through the editor's own handlers moved the signature while the
+> rule went on computing BYTE-IDENTICAL keys** — round 6's harm with a different cause.
+> **THE ASYMMETRY IT MISSES:** over-approximating is **cheap in a warning and ruinous in a refusal**.
+> The latch and T-24R2-1's confirm are warnings, so they **keep** the coarse `_keyDefOf`; the
+> signature refuses, so it needs the narrow projection. One definition of "the key rule" was the
+> right instinct and `_keyRuleDefOf` keeps it — same `primaryKeys`, same `Reco._keyDepNames` closure,
+> same walk; one definition of "which BYTES of it matter" was the error. **[88] R19q** is the
+> twelve-change gate and **R19r** is the mirror, and they have to be read together. Handover §19.2.
 >
 > **IT IS NOT A RECOMPUTE, and that is checkable rather than asserted.** `_keySigMoved` reads two
 > strings. It touches no cell, calls no formula engine and never splits `_pk`, so **[82] G82f did not
@@ -2773,15 +2828,31 @@ against a row key.
 > `Reco.keyDrift`'s existing **⚠ recalculated**, which answers a different question (the cell is
 > printing a recalculation) and would read as "the key is wrong" — and the key is exactly right for
 > the file it came from. What the operator needs is the sentence at the moment of the refusal, so the
-> signature arm has **its own**: *"This row came back from a SAVED DAY FILE that was written before
-> this reconciliation's row-key rule was changed… Nobody has changed anything while you had these
-> rows open: the file is simply older than the rule."* Round 7 deleted the second refusal sentence
-> because nothing could produce it and because the one it deleted blamed a colleague for a change
-> that had never happened; this one is produced only by a signature mismatch, so it is true every
-> time it is said (**[88] R19f**). `Reco.keyDriftCount` is **left alone and still has no reader in
-> the app**: it counts VALUE drift, not rule drift, so it is not this arm's counter and pretending it
-> is would be the round-6 conflation in a tidier form. **R15j** keeps it alive; no new readerless
-> counter was added.
+> signature arm has **its own**, and there are **three** branches of it chosen from the row's own
+> data set id. The file branch reads: *"This row came back from a saved day file and its key was
+> minted under a DIFFERENT row-key rule from the one in force now … Opening that day file again will
+> keep bringing the old keys back — nothing re-keys a saved file. To record this against the row, use
+> Clear Loaded Data and then load that day's EXTRACT again … Every day file this reconciliation
+> wrote under the previous rule is read-only in the same way."*
+>
+> **THAT IS NOT THE SENTENCE THIS ANSWER ORIGINALLY QUOTED, AND THE TWO CLAIMS IT LOST ARE THE
+> REVIEW'S FINDING.** The round-8 build's version said the file *"was **written before**"* the rule
+> changed and added *"**Nobody has changed anything** while you had these rows open."* Neither is
+> sayable: the direction is not knowable (a backup restore puts an OLDER rule back under a NEWER day
+> file), and "nobody has changed anything" is reachable by the operator's **own** template save, over
+> rows the upload minted in that window that no file ever handed back — which is exactly the claim
+> round 7 deleted a sentence for. Both halves are asserted **ABSENT** from all three branches
+> (**[88] R19u2**, and **R19f** on the live screen), so quoting them here as what the app says
+> described a build that was corrected before it shipped. Each branch now says only what it can
+> know, which is why each is true every time it is said.
+>
+> `Reco.keyDriftCount` is **left alone and still has no reader in the app**: it counts VALUE drift,
+> not rule drift, so it is not this arm's counter and pretending it is would be the round-6
+> conflation in a tidier form. **R15j** keeps it alive. **A SECOND READERLESS COUNTER WAS ADDED, AND
+> SAYING OTHERWISE WAS WRONG:** `Reco.keyOldRuleCount(tpl, sess)` — how many rows on screen cannot
+> be written — has no reader in the app either. It is the number a Clear-and-load decision wants and
+> the toolbar does not show it yet; **T-S10-27** carries that, and **[88] R19x2** reads it beside the
+> badge on a rendered screen so it cannot rot unmeasured.
 >
 > **THE MIGRATION, UNCHANGED AND NOT WIDENED:** a row with **no** signature is **not refused**
 > ([88] R19k, and the causal half of R19e deletes a live row's signature on screen and watches the
@@ -3439,8 +3510,20 @@ is not in the file**. At 0.80 s, past the end of the 672 ms rewrite, both surviv
 two processes, so the lock does not see it. `Versioning._fields`' own comment has warned about this
 rewrite for rounds; nothing had ever made it happen until T-S10-19 added a sixth control column, and
 round 8's review pass stopped asking for the widening rather than fixing the rewrite. **The hazard
-is still there for anything else that widens a day file** — the Excel-link write that comment names,
-and `Reco.html:5268`'s history compaction, which rewrites an arbitrary older file the same way.
+is still there for anything else that widens a day file through `append_csv_rows`** — the Excel-link
+write that comment names.
+
+**AND THE CLEANUP ROUND CORRECTED ONE CLAIM THIS TICKET MADE: HISTORY COMPACTION IS NOT AN INSTANCE
+OF IT.** The line this paragraph used to cite (`Reco.html:5268`) was a stale number that pointed at
+`Versioning.collapseToActive`, and the function it meant, `Versioning.compactFile`, does **not** go
+through `append_csv_rows` at all — it calls `Versioning.writeFile`, which is one atomic whole-file
+`write_file`. So this ticket's measured loss window (a rewrite with a concurrent APPEND landing in
+the middle of it) is not the compaction's shape. Compaction does rewrite a whole day file and will
+drop a colleague's append that lands during it, which is inherent to compacting and is why it is a
+deliberate operator action on one named file with an archive option — a different ticket if anybody
+wants it, not this one. What the cleanup round DID find on that path is fixed: compaction widens a
+pre-`_pksig` day file (safely), and `Versioning._hdrCache` was not following it, so the next append
+stripped the signature off a row. Handover §14.5, §19.9, **[88] R19z**.
 
 **Why it is only a ticket** `main.py` is outside the set of files that round was allowed to edit, and
 routing around it inside `apps/Reco.html` was both available and cheap.

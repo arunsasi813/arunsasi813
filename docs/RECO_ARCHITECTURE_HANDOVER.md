@@ -662,7 +662,7 @@ R1–R6 (F3, F10, F1, F5, F4, F9) and [41]–[48] X1–X8 (F11/F19, F17, F12, F2
 `run_store_e2e` held **378 passed / 0 failed** when this section was written, and is the suite
 that holds all three features' gates — **plus sections [49]–[53]**, which the money round added
 (Z1, T-26-5, T-26-6, T-S10-1, T-30-3; see §16), and [54]–[88] from the five rounds after it. **It
-is at 694 today**; §18 carries the round-by-round arithmetic. The figure is written as history on
+is at 726 today**; §18 and §19 carry the round-by-round arithmetic. The figure is written as history on
 purpose: a bare count in a feature write-up goes stale on the next round and then reads as a claim
 about the suite rather than a note about when the feature landed.
 
@@ -2178,6 +2178,27 @@ why the empty-component warning matters, as a diagnosis.
 > newest version of the same `_pk` that has one, because otherwise one ordinary edit from an
 > un-upgraded window reopened the dead-key door for that row in silence. Measured for real against
 > `55171d8` at `run_store_e2e` **[88] R19l** and **R19v**. §19.
+>
+> **AND THERE IS EXACTLY ONE PATH THAT DOES WIDEN AN EXISTING DAY FILE — COMPACTION — WHICH THE
+> ABSOLUTE TWO PARAGRAPHS UP DID NOT SAY, AND BEHIND IT WAS A HOLE IN THE SIGNATURE.** The B1 guard
+> lives in `Versioning._appendRows`. `Versioning.compactFile` does not go through it: it calls
+> `Versioning.writeFile`, whose `Versioning._fields` asks for `_pksig` for every derived-key
+> template, so "Compact" on a pre-change day file rewrites it with the column in. **That half is
+> safe and is the one route that upgrades such a file** — compaction is already a whole-file rewrite
+> under the path lock, it is a deliberate operator action on one named file from Version History,
+> every row it keeps carries no signature so nothing is claimed about any of them, and
+> `append_csv_rows` writes against the **file's** header, so an un-upgraded build appending
+> afterwards writes a blank in the column rather than a misaligned row (the direction **R19l**
+> measures). **The half that was not safe:** `Versioning._hdrCache` was never invalidated by
+> `writeFile`. Measured end to end — compact a pre-change file, then Add Data — `_appendRows` asked
+> `Versioning._headerOf`, got the **stale narrow header** out of the cache, concluded the file had
+> no `_pksig` and deleted the signature off the record. **A row the mint had signed landed unsigned
+> in a file whose header carries the column**, and the reopen handed it back unsigned, so after a
+> real key-rule change it is the one row that is **not** refused — the harm T-S10-19 exists for,
+> arriving through the guard that was added to protect the file. One line in `writeFile` now sets
+> what the cache holds (and clears it on an empty write, which leaves the file with no header at
+> all). **[88] R19z** gates both halves, because a fix that stopped compaction widening at all would
+> also satisfy the second one.
 
 ### 14.6 Cost
 
@@ -2376,9 +2397,10 @@ end-to-end checks (378 + 304 + 254 + 250 + 170 + 163 + 147 + 123 + 119 + 107 + 1
 + 73 + 65 + 41), with `pytest` — the eighteenth suite — at 75 passed / 1 skipped. Every suite was
 at or above its `4b8fd90` count; not one went down.
 
-> **CURRENT, re-measured on `56c9987`:** `run_store_e2e` **694**, the seventeen node suites
-> **2,892**, `pytest` 75 passed / 1 skipped. Store went 378 → 441 → 508 → 582 → 598 → 638 → 672 →
-> 694 across the money round and the seven data-loss rounds (§16, §18). **The cost table above was
+> **CURRENT, re-measured on this tree:** `run_store_e2e` **726**, the seventeen node suites
+> **2,924**, `pytest` 75 passed / 1 skipped. Store went 378 → 441 → 508 → 582 → 598 → 638 → 672 →
+> 694 across the money round and the seven data-loss rounds (§16, §18), then 714 → 724 → 726 across
+> round 8's build, its review pass and the cleanup round (§19, §19.8, §19.9). **The cost table above was
 > NOT re-measured on this tree** — the figures in it are from the tree that produced the 378, and
 > `XlSchema.build`'s 18x regression (T-26-7) is still open, so they are the right order of
 > magnitude and the wrong decimal. Re-measure before resting an argument on one; §16.4a is the rule
@@ -2466,15 +2488,26 @@ Named as plainly as the rest, because every one of these is reachable by an oper
   operator noticing which of two identical-looking rows was which — and the rows are
   identical-looking **by design**, because the key cell shows the frozen value. **You do not have to
   tell them apart any more.** If a row came out of a day file written before the rule changed, the
-  app refuses the write itself and says so in its own words: *"This row came back from a SAVED DAY
-  FILE that was written before this reconciliation's row-key rule was changed… Nobody has changed
-  anything while you had these rows open: the file is simply older than the rule."* Nothing is
-  filed, nothing is half-done, and the sentence names the verb that did not happen. **Two things it
-  is still worth knowing.** It only works for rows saved from round 8 onwards: a day file older
-  than that carries no signature and its rows are still writable under their old keys, so for an
-  old file the advice above is still the whole of it. And the recovery is unchanged and is still
-  worth doing rather than working around the refusals: **Clear Loaded Data, then load the extract
-  again.**
+  app refuses the write itself and says so in its own words: *"This row came back from a saved day
+  file and its key was minted under a DIFFERENT row-key rule from the one in force now … Opening
+  that day file again will keep bringing the old keys back — nothing re-keys a saved file. To
+  record this against the row, use Clear Loaded Data and then load that day's EXTRACT again …
+  Every day file this reconciliation wrote under the previous rule is read-only in the same way."*
+  Nothing is filed, nothing is half-done, and the sentence names the verb that did not happen.
+  **THAT IS NOT THE SENTENCE THE ROUND-8 BUILD WROTE, AND THE TWO CLAIMS IT LOST ARE WHY THIS
+  PARAGRAPH IS WORTH READING TWICE.** The build's version said the file *"was **written before**
+  this reconciliation's row-key rule was changed"* and added *"**Nobody has changed anything** while
+  you had these rows open: the file is simply older than the rule."* Neither is sayable here. The
+  direction is not knowable — a backup restore puts an OLDER rule back under a NEWER day file — and
+  "nobody has changed anything" is reachable by the operator's **own** template save, over rows the
+  upload minted in that window that no file ever handed back, which is exactly the claim round 7
+  deleted a sentence for. Both halves are now asserted **absent** from all three branches
+  (`run_store_e2e` **[88] R19u2**, **R19f**); if you find either of them on a screen, the gate has
+  been removed. **Two things it is still worth knowing.** It only works for rows saved from round 8
+  onwards: a day file older than that carries no signature and its rows are still writable under
+  their old keys, so for an old file the advice above is still the whole of it. And the recovery is
+  **that day's extract and not today's** — Clear Loaded Data, then load the extract **for the day
+  that file covers**, which is the correction the paragraph above this one is about.
   (b) **A control that writes EVERY row on screen is refused as a whole, and after round 8 that
   costs something again on one screen only — the reopened day file.** sheet mode's "↓ Fill Column"
   and the Find dialog's "↻ Replace All" write every row in the filtered view, so if any row in it
@@ -4567,18 +4600,43 @@ digits, e.g. `1:f21c738dfe7fc3fe`.
   closure column: the normalised `type`; for `formula` the formula text; for `master` the
   `masterRefColumn`/`masterValueColumn` pair; for `master_lookup` the four fields
   `Masters._lookupCfg` resolves (`source`, `matchColumn`, `matchKey`, `returnKey`) — that function
-  is already the one place that says what a lookup's rule IS, so this cannot drift from it; and for
-  `dropdown`/`custom` the `carryForward` flag, because `Reco._extraTyped` reads it as the SCOPE
-  test and it therefore decides WHICH typed record becomes the value.
+  is already the one place that says what a lookup's rule IS, so this cannot drift from it. For
+  `dropdown`/`custom`: the name and the type and **nothing else**.
+- **`carryForward` IS NOT IN IT ON ANY TYPE, AND THE CLEANUP ROUND TOOK IT OUT — the fifth instance
+  of the shape the review found four of.** The round-8 build recorded it for `dropdown`/`custom`
+  *"because `Reco._extraTyped` reads it as the SCOPE test and it therefore decides WHICH typed
+  record becomes the value"*. That reason is not live on the MINT path, for two independent measured
+  reasons (**[88] R19s**, both halves in one fixture). **One: a dropdown or custom column cannot be
+  in a key's closure at all.** `RecoTemplate._pkEligible1` refuses it by TYPE — *"you type this
+  column in by hand, so its value is not worked out from the data"* — and `_pkFormulaOk` refuses a
+  key FORMULA that **reads** one for the same reason, so `saveTemplate`'s prune empties
+  `primaryKeys`; measured through the real save for both types. **Two: and past the save, by hand,
+  the flag still cannot reach a minted key.** `Reco.ingestData` reserves `row._pk = ''` before the
+  mint and `_mintKeysSync` assigns the key only AFTER computing it, so `Reco.storeKey` is null for
+  every row the mint walks, `_extraRec` finds nothing and `_extraTyped` returns at its RECORD test —
+  **above** the line that reads `carryForward`. The same file row and the same stored record mint
+  the same key with the box on and off. **And that half is not blind:** the same record on a row
+  that HAS the key is readable with the flag on and scoped out with it off, and
+  `Reco._extraOwnValue` — the mint's own value function, the one `_keyScratch` calls — answers
+  `OPEN` with the flag on and `''` with it off over that row. The scope test is real; it is only
+  unreachable while a key is being minted. That is §14.3 exactly: **the key is frozen, the cell is
+  not.** **And a third reason, the oldest of the three:** `RecoTemplate._exclusiveRoleConflict`
+  treats `pk`, `allowOverride` and `carryForward` as **exclusive roles** — *"three different answers
+  to who owns its value"* — so a column that **is** part of the row key cannot hold the carry flag
+  at all, refused in both editors and in both directions (§5c). So recording the flag bought nothing
+  and cost a refusal of every earlier row of the reconciliation the moment somebody ticked the box.
+  Keeping one field of `_keyDefOf`'s over-approximation would have been the same mistake one field
+  smaller.
 - **WHAT IS OUT, AND WHY LEAVING IT OUT CANNOT MISS A RULE CHANGE.** `allowOverride` is never read
   where the value is **read** — `Reco._extraOverride` honours a stored override record whether the
   box is ticked or not, and the box gates the WRITE at `Reco._setOverride` — so ticking it cannot
   change what the rule computes for any row. The option list, `optionsSource` and `optionsMasterCfg`
   constrain what an operator may **choose**, which is data, and `row[ac.name] != null` wins over all
   of it in `_extraOwnValue`'s tail. `_cid`, `label`, `_ssSingleUse` and every display flag are not
-  on the value path at all. `carryForward` on a **computed** column is unread (the computed arms
-  never reach `_extraTyped`), which is why it is recorded for the typed types **only** — recording
-  it everywhere is the over-approximation that caused the second of the four shapes.
+  on the value path at all. `carryForward` on a **computed** column is unread for a second,
+  simpler reason as well — the computed arms return `_extraComputedBase` and never reach
+  `_extraTyped` at all — which is the second of the four shapes; the bullet above is why it is out
+  for the typed types too.
 - **THE CLOSURE'S DECLARATION ORDER IS IN, and `_keyDefOf` could not carry it at all** because its
   `defs` is an object keyed by NAME and the canonicaliser sorts object keys. `Reco._keyScratch`
   materialises the closure in declaration order, so moving one closure column past another
@@ -4690,12 +4748,18 @@ edit go red. Both corrections are in the code comments at those lines.
 > The toolbar surface and a *"show only rows from an older rule"* filter are **not** built and are
 > on **T-S10-27**.
 
-#### The round-8 build's own text, kept for the record
+#### The round-8 build's own text, kept for the record — SUPERSEDED, AND NOT WHAT THE APP SAYS
+
+**Everything from here to the end of §19.4 is the BUILD's write-up and the sentence it shipped,
+which the review pass then replaced with the three branches above.** Nothing in it is live. It is
+kept because the argument is the useful part and because this cluster has twice shipped prose that
+said the opposite of the code, so a deleted mistake is a mistake nobody can check.
 
 Round 7 deleted the second refusal sentence because nothing could produce it, and because the one it
 deleted (*"These rows carry the keys they were SAVED with"*) was produced by the per-row drift arm
-on ordinary work and **blamed a colleague for a template change that had never happened**. Something
-can produce a second sentence again, and it says something true every time it is said:
+on ordinary work and **blamed a colleague for a template change that had never happened**. The build
+believed something could produce a second sentence again, and that it said something true every
+time it was said:
 
 > *"Nothing was saved. This row came back from a **SAVED DAY FILE** that was written before this
 > reconciliation's row-key rule was changed, so the key on it is the OLD one — anything filed
@@ -4704,15 +4768,21 @@ can produce a second sentence again, and it says something true every time it is
 > simply older than the rule.** Use Clear Loaded Data and then load the extract again, and try
 > again. (Add Data on its own ADDS to what is on screen, so those rows would keep the old keys.)"*
 
+**And it was not true every time it was said**, which is the finding above: the operator's own
+template save reaches that branch, and *"written before"* claims a direction the code cannot know.
+Both halves are now asserted **absent** from all three branches (**[88] R19u2**, **R19f**).
+
 Saying the **latch's** sentence here would be the round-6 mistake in prose, which is why **[88]
-R19f** asserts which sentence is said and that the other one is not. That sentence is also the
+R19f** asserts which sentence is said and that the other one is not. The sentence is also the
 answer to T-S10-19's question (c): the signature is shown **nowhere else**. A sixteen-digit hash is
 a string no operator can judge (T-S10-24's own complaint about row keys in a confirm), and a badge
 on the key cell would collide with `Reco.keyDrift`'s existing **⚠ recalculated**, which answers a
 different question and would read as *"the key is wrong"* — and the key is exactly right for the
 file it came from. `Reco.keyDriftCount` is left alone and still has **no reader in the app**: it
-counts VALUE drift, not RULE drift, so it is not this arm's counter, and no new readerless counter
-was added.
+counts VALUE drift, not RULE drift, so it is not this arm's counter. **A SECOND READERLESS COUNTER
+WAS ADDED, AND THE BUILD'S SENTENCE HERE SAID OTHERWISE:** `Reco.keyOldRuleCount` has no reader in
+the app either — the toolbar surface is **T-S10-27** — and **[88] R19x2** reads it beside the badge
+on a rendered screen so it cannot rot unmeasured.
 
 ### 19.5 The migration, the format change, and both back-compat directions
 
@@ -4805,12 +4875,12 @@ with `APP_FILE`, so `apps/Reco.html` was never written. Ten reddened only their 
 | `m1_defof` | hash `_keyDefOf` again — round 8's defect | R19q (**nine** of the ten shapes), R19r (loses closure order), R19t, and the A2 loop in `a6_fix` |
 | `m2_rawformula` | no formula canonicalisation | R19q (`formatOnly` alone), R19t, the A2 loop |
 | `m3_onesay` | one sentence again | R19u, and both A3 gates in `f2_say` |
-| `m4_nomark` | no row badge | both A4 gates |
+| `m4_nomark` | no row badge | both A4 gates **in the round's own probes — and NOTHING IN THE SUITE**, which is §19.9's first finding |
 | `m5_widen` | widen the file again | both B1 gates in `f1_widen` |
 | `m6_nolaunderfix` | no signature inheritance | R19v |
 | `m7_hash32` | lane 2 fed the high byte again | the two-lane check |
 | `m10_carryall` | record `carryForward` for every type | R19q |
-| `m11_carrynone` | record it for no type | R19s |
+| `m11_carrynone` | record it for no type | R19s — **and that grading was wrong: `m11_carrynone` is the CORRECT build, and the cleanup round shipped it. See §19.9** |
 | `m12_noorder` | drop the closure's declaration order | R19r |
 
 `m8_clash` **survived the whole grid** and produced **[88] R19y**, which is the same lesson as
@@ -4950,6 +5020,104 @@ same ids, and each carries its own before/after note: R15d and R15e because roun
 asserting the hole was open and said *"so a future fix makes R15e fail and gets re-read"*; R15g
 because the all-or-none cost is real again on one screen and is disclosed rather than designed
 away; G82f because a safety control whose removal nothing notices is what [82] exists to prevent.
+
+### 19.9 The cleanup round — the nine things that stood between round 8 and shipping
+
+The review pass's verifier signed the BEHAVIOUR off and refused to sign the round off: *"what stops
+me is not the behaviour."* Nine items as the verifier listed them. **None is a false refusal and
+none loses a value** — the worst of them loses the PROTECTION on a value rather than the value, by
+letting a row that should be signed land unsigned, which is a refusal that will not happen later.
+**Five were sentences; one was a safety control with no
+behavioural test anywhere; and three were defects in the code or in what the docs claimed about it,
+two of which became code changes.** The four that are not sentences are worth more than the five
+that are — and one of them (the header cache) was a silent hole in the signature itself, which the
+verifier had listed as a one-line tidy-up.
+
+**THE TWO CODE DEFECTS, BOTH MEASURED END TO END BEFORE ANYTHING WAS CHANGED**
+(`scratchpad/cleanup/probes/`, which the gates below were then written from):
+
+1. **COMPACTION WIDENS AN EXISTING DAY FILE, AND THE NEXT APPEND INTO IT LOST ITS SIGNATURE.** B1's
+   guard lives in `Versioning._appendRows`; `Versioning.compactFile` calls `Versioning.writeFile`
+   instead, and `Versioning._fields` asks for `_pksig` for every derived-key template — so §14.5's
+   absolute *"No existing day file on any share is ever rewritten by this change"* was false on
+   that path. **The widening itself is safe and is the only route that upgrades such a file** (see
+   §14.5 for the four reasons). **What was not safe:** `Versioning._hdrCache` was never invalidated
+   by `writeFile`, so after a compaction the next `Add Data` read the stale narrow header, concluded
+   the file had no `_pksig` and **deleted the signature off the record**. A row the mint had signed
+   landed unsigned in a file whose header carries the column, and the reopen handed it back unsigned
+   — so after a real key-rule change it is the one row that is **not** refused. That is the harm
+   T-S10-19 exists for, arriving through the guard added to protect the file. One line in
+   `writeFile`; **[88] R19z** asserts the row the mint signed, the value in the FILE, and the value
+   a reopen brings back, plus both premises (B1 held; the compaction really rewrote).
+2. **`carryForward` WAS STILL IN THE SIGNATURE, which is the fifth instance of the shape the review
+   pass found four of.** §19.2 has the measurement: a dropdown or custom column cannot be in a key's
+   closure at all (`_pkEligible1` and `_pkFormulaOk` refuse it, measured through the real save), and
+   past the save, by hand, the flag still cannot reach a minted key — because `_extraTyped` returns
+   at its record test while `row._pk` is the empty string the ingest reserves. **[88] R19s now
+   asserts the opposite of what it asserted**, and the review pass's own mutation grid had graded
+   the right answer as a defect (`m11_carrynone`, §19.6a). Ticking *Carry this value forward* on a
+   typed key helper no longer refuses every earlier row of the reconciliation.
+
+**THE BLIND GATE.** The **⊘ older rule** badge had no behavioural gate anywhere in the net. R19x is
+a regex over `APPSRC`, and a mutant that deleted the `statusHtml +=` line while leaving every
+character that regex matches behind in a comment read **724 / 0** — which made the badge the one
+safety control in the round whose removal nothing noticed, and it is the control that answers A4's
+measurement (the same business key on screen twice, one copy refused and one writable, with nothing
+to tell them apart). **[88] R19x2** reads the rendered `<tbody>` of the mixed screen R19e already
+builds: `class="badge oldrule"` and the words *"⊘ older rule"* on each of the three rows the day
+file handed back, on **none** of the three live copies of the same business rows in the same
+`<tbody>`, and `Reco.keyOldRuleCount` reading 3 over the same session. The live half is the mirror —
+a badge on every row would satisfy the dead half and be useless.
+
+**THE FIVE SENTENCES, all of them the same failure and all of them in the cluster that has already
+shipped documentation saying the opposite of the code twice.** §15.6(a) quoted, in the present
+tense, a refusal sentence the code is gated never to say, and then reinstated the *Clear and load
+the extract again* loop the same bullet says is not advice for an older day file. T-S10-19's own
+summary block asserted as fact the *"same set by construction"* argument the review called the
+central defect; its answer to question (c) quoted the same dead sentence and cited **R19f** — the
+gate that asserts it ABSENT — as the proof; and the same answer said *"no new readerless counter was
+added"* when `Reco.keyOldRuleCount` is one. `Reco.keyRuleSig`'s own header in `apps/Reco.html` said
+*"`RecoTemplate._keyDefOf(tpl)` and nothing else"* and *"THERE IS DELIBERATELY NO SECOND DEFINITION
+OF THE KEY RULE IN THIS FILE"* sixty lines above the code that hashes `_keyRuleDefOf`, and **[88]
+R19m** repeated the refuted argument as its own reason. Every one of them is now the historical
+account, marked as the mistake, because **a reader who trusts a summary block rebuilds the defect**
+— which is what three of these five would have done.
+
+**One claim the round-8 build made about §19.2 is also withdrawn:** the reason given for recording
+`carryForward` (*"`_extraTyped` reads it as the SCOPE test"*) was not live during a mint, and that
+is why the flag is gone rather than re-justified.
+
+**MUTATION EVIDENCE, three mutants against three probes, every claim asked as a probe of its own so
+the grid runs in minutes instead of in three half-hour suites** (`scratchpad/cleanup/probes/`
+`c1_carry`, `c2_compact`, `c3_badge` — the last reads `R19_MK` / `R19_A_KEY` / `R19_RELOAD` /
+`R19_REOPEN` / `R19_WALK` **out of the suite**, so what it runs is what the suite runs). All three
+with `APP_FILE`, so `apps/Reco.html` was never written: md5 `bdafdc90f7d8ae93751463564dc9282d`
+before and after.
+
+| mutant | what it reverts | c1_carry | c2_compact | c3_badge |
+|---|---|---|---|---|
+| `n1_nobadge` | the badge render deleted, with **every character R19x's regex matches left behind in a comment** | — | — | **C3b, C3d RED** |
+| `n2_nohdrcache` | `writeFile` does not refresh `Versioning._hdrCache` | — | **C2d, C2f, C2g RED** | — |
+| `n3_carryback` | `carry` back in the projection for the typed types | **C1e RED** | — | — |
+
+Each reddens exactly its own probe and nothing else. **`n1_nobadge` leaves C3c — the live-copies
+mirror — GREEN**, which is the point of pairing it: with no badge rendered at all, "no badge on the
+live rows" is satisfied, so the dead half is the load-bearing clause and the mirror only stops a
+build that badges everything. That is the same pairing R19q and R19r have.
+
+**The numbers.** `run_store_e2e` **726 passed, 0 failed** (`+2` on the review pass's 724: [88] gains
+**R19x2** and **R19z**; **R19s** and **R19q**'s `dropHelperCarry*` pair were turned round *in place*,
+so neither adds a count, and nothing was removed). The seventeen node suites total **2,924**.
+
+**Every suite, one at a time, with the seven-glob sweep on the line after each run inside the runner
+script and `df -h /` on the line after that** (`scratchpad/cleanup/net.sh`): pytest 75 (1 skipped) ·
+jv_core_unit 250 · e2e 73 · autoload 41 · xllink 65 · xlview 94 · reports 107 · grid_scale 100 ·
+colorder 147 · pk_extras 170 · **store 726** (baseline 724) · correction 163 · panes 304 · reverse
+256 · specialjv 123 · jv_engine 79 · jv_gen 107 · jv_wizard 119. **0 failed everywhere**, nothing
+below baseline, and all four byte-identity gates untouched and green — colorder T1 (`76dffed`),
+pk_extras G1 (`3047f82`), correction (`d9957fc`) and panes (`5f61d76`). `run_panes_e2e` was read
+**three times** and gave 304 / 0 each time, so T-S10-15's flake did not occur. `apps/Reco.html`'s
+md5 was the same before and after the whole net. Disk 30% at every reading.
 
 
 

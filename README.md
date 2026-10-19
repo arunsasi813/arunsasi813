@@ -261,8 +261,8 @@ node tests/e2e/run_jv_wizard_e2e.mjs    # the Special JV creator wizard, end to 
 
 Run them one at a time — each binds a fixed port block (`run_jv_core_unit.mjs` needs
 neither a port nor a browser, and takes about a second). All eighteen must pass:
-75 pytest cases (1 skipped), and `2,892` end-to-end checks — 250 + 73 + 41 + 65 + 94
-+ 107 + 100 + 147 + 170 + 694 + 163 + 304 + 256 + 123 + 79 + 107 + 119, in the order
+75 pytest cases (1 skipped), and `2,924` end-to-end checks — 250 + 73 + 41 + 65 + 94
++ 107 + 100 + 147 + 170 + 726 + 163 + 304 + 256 + 123 + 79 + 107 + 119, in the order
 above.
 
 Do **not** set `TMPDIR` for `pytest`. Six `tests/test_excel_link.py` cases decide

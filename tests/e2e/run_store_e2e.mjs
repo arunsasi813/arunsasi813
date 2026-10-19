@@ -10651,6 +10651,7 @@ const R16_COST = `(async function (hasKeyExtra) {
    same ten doors over the same screen in both sections. */
 const PORT_R19  = 21482;   // R19 the key-rule signature, and the round trip
 const PORT_R19B = 21483;   // R19l the OLDER build, on a file this build wrote
+const PORT_R19Z = 21484;   // R19z compaction widens the day file; the header cache must follow
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -10985,6 +10986,26 @@ const R19_WALK = (id) => `(async function () {
     await run('offset', () => Reco.manualOffset(null, null, rows[2]._id),
       () => !!offs(rows[2]._pk));
     return out; };
+  /* THE BADGE, READ OFF THE RENDERED SCREEN AND NOT OFF THE SOURCE, before
+     any door is touched. R19x asserts it from APPSRC with a regex, and a
+     mutant that deleted the statusHtml += line while leaving every character
+     that regex matches in a comment read the whole suite green: it was the
+     only safety control in the round whose removal nothing noticed. The
+     screen is MIXED here by construction - three rows the day file handed
+     back beside three live copies of the same business rows - which is the
+     state A4 measured with nothing on screen to tell them apart. */
+  App.navigate('reco');
+  await new Promise(r => setTimeout(r, 250));
+  const badgeOf = (r) => { const tr = document.querySelector('tr[data-rid="' + r._id + '"]');
+    return tr ? /badge oldrule/.test(tr.innerHTML) : 'no such row on screen'; };
+  const sayOf = (r) => { const tr = document.querySelector('tr[data-rid="' + r._id + '"]');
+    return tr ? (tr.textContent.indexOf('\u2298 older rule') !== -1) : 'no such row on screen'; };
+  const badges = { dead: pickRows('dead').map(badgeOf), live: pickRows('live').map(badgeOf),
+                   deadText: pickRows('dead').map(sayOf), liveText: pickRows('live').map(sayOf),
+                   count: (typeof Reco.keyOldRuleCount === 'function')
+                            ? Reco.keyOldRuleCount(tpl, sess) : 'no keyOldRuleCount',
+                   nDead: pickRows('dead').length, nLive: pickRows('live').length,
+                   rendered: document.querySelectorAll('tr[data-rid]').length };
   const dead = await arm(pickRows('dead'), 't19-');
   const live = await arm(pickRows('live'), 't19-live-');
   /* THE CAUSAL HALF. Nothing about the row changes except the signature, so a
@@ -11012,7 +11033,7 @@ const R19_WALK = (id) => `(async function () {
   if (sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
   ${R19_SETTLE}
   return { dead: dead, live: live, sigBlanked: blanked, fillColumnFromHealthyCell: fill,
-           latch: !!(Reco._keyStale || {})[I] };
+           badges: badges, latch: !!(Reco._keyStale || {})[I] };
 })`;
 /* R19m: a save OUTSIDE the key rule must not move the signature.
    R19n: an unknown signature version is treated as absent. */
@@ -12018,7 +12039,7 @@ section(84, 'R15 T-S10-19 — A DAY FILE WRITTEN BEFORE THE KEY CHANGED, WITH NO
 
      WHAT CLOSES IT IS A SCHEMA CHANGE AND NOT A CLEVERER COMPARISON: the KEY
      RULE'S SIGNATURE, recorded on the row at mint time - a hash of
-     RecoTemplate._keyDefOf, written beside _pk and carried through the day
+     RecoTemplate._keyRuleDefOf, written beside _pk and carried through the day
      file's control columns - compared SIGNATURE to SIGNATURE and never value
      to value. A signature says "a DIFFERENT RULE made this key" and says
      nothing whatever about the row's data, which is exactly the distinction
@@ -12627,7 +12648,19 @@ section(87, 'R18 T-S10-21 — ASK FIRST, MUTATE AFTER; AND DOOR 22, THE SPECIAL 
            file this build wrote
      R19m  a save OUTSIDE the key rule does not move the signature
      R19n  a signature whose VERSION this build does not know is ABSENT, not
-           refused */
+           refused
+     R19q  TWELVE changes inside the key's closure that leave the computed key
+           identical leave the signature identical - four of them MEASURED
+           refusing every row - and R19r is the mirror without which R19q is
+           satisfied by a signature that never moves at all
+     R19s  carryForward is in NEITHER half of the projection, measured twice:
+           a typed column cannot be in a key's closure at all, and past the
+           save the flag still cannot reach a minted key
+     R19x  the badge and the count exist in the source
+     R19x2 and the badge is ON the refused rows and NOT on the live ones, read
+           off the RENDERED screen - the clause R19x's regex cannot make
+     R19z  compaction is the one path that widens an existing day file, and
+           the append after it keeps its signature (the header cache) */
 section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN -> REFUSE');
 {
   const V = makeRoot('share-r19');
@@ -12759,7 +12792,8 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
 
   /* ---- QUESTION (b). THE PAIR THAT DECIDES WHETHER THE SIGNATURE IS HONEST
      OR THEATRE. A master_lookup's CONFIG is part of the rule and is inside
-     RecoTemplate._keyDefOf, so re-pointing it moves the signature with no
+     RecoTemplate._keyRuleDefOf (all four of the fields Masters._lookupCfg
+     resolves), so re-pointing it moves the signature with no
      formula text anywhere in sight. The MASTER'S ROWS are not in it and must
      never be: handover 14.3 is explicit that a lookup key whose master a
      colleague edits is the frozen value WORKING - the rule did not move -
@@ -12920,11 +12954,15 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
     'R19m A SAVE THAT CHANGES SOMETHING OUTSIDE THE KEY RULE DOES NOT MOVE THE SIGNATURE. Renaming '
     + 'the reconciliation, changing the tolerance, marking a column editable and adding an '
     + 'unrelated added column, all in ONE save, and every row on the share is still writable. The '
-    + 'hash is over RecoTemplate._keyDefOf - the primaryKeys list plus the definitions of the '
-    + 'key\'s dependency closure - and nothing else. There is deliberately NO SECOND DEFINITION of '
-    + '"the key rule" in the file: _keyDefOf is what T-24R2-1\'s refusal and the definition-change '
-    + 'confirm already compare, so the set of changes that raises the latch and the set that moves '
-    + 'the signature are the same set BY CONSTRUCTION, and cannot drift apart', nk);
+    + 'hash is over RecoTemplate._keyRuleDefOf - the primaryKeys list plus, per closure column, the '
+    + 'fields Reco._extraOwnValue\'s ladder actually reads - and nothing else. IT IS NOT OVER '
+    + '_keyDefOf, WHICH IS WHAT THE ROUND-8 BUILD HASHED AND IS THE ONE THING THE REVIEW CALLED A '
+    + 'BLOCKER: the argument for sharing it was "the latch\'s set and the signature\'s set are the '
+    + 'same set BY CONSTRUCTION", and that is the defect rather than the defence, because '
+    + '_keyDefOf keeps the whole stored column object and four edits through the editor\'s own '
+    + 'handlers moved the signature while the keys stayed byte-identical (R19q). The latch and '
+    + 'T-24R2-1\'s confirm KEEP the coarse _keyDefOf on purpose: over-approximating is cheap in a '
+    + 'warning and ruinous in a refusal', nk);
   check(nk.unknownVersionRefused === false && nk.sameVersionDifferentHashRefused === true
         && nk.noSigRefused === false && nk.absentRefused === false,
     'R19n A SIGNATURE WHOSE VERSION THIS BUILD DOES NOT KNOW IS TREATED AS ABSENT, and a row with '
@@ -13058,6 +13096,14 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
       emptyMasterPair:  S((t, b, r) => { r.masterRefColumn = ''; r.masterValueColumn = ''; }),
       looseReordered:   S((t) => { t.additionalColumns.push(t.additionalColumns.splice(2, 1)[0]); }),
       carryOnComputedHelper: S((t, b) => { b.type = 'formula'; b.carryForward = true; }),
+      /* THESE TWO ARE A PAIR AND BELONG TO NEITHER LIST: changing the
+         helper's TYPE is a real rule change, so both move off the base
+         signature legitimately, and what matters is that they are EQUAL TO EACH OTHER -
+         the only thing between them is carryForward. R19s asserts that, and
+         the cleanup round turned it round: the round-8 build required them to
+         DIFFER. */
+      dropHelperCarryOff: S((t, b) => { b.type = 'dropdown'; delete b.formula; }),
+      dropHelperCarryOn:  S((t, b) => { b.type = 'dropdown'; delete b.formula; b.carryForward = true; }),
       /* ---- MUST MOVE: the rule really changed ---- */
       helperFormula:    S((t, b) => { b.formula = 'LOWER({Doc})'; }),
       keyFormula:       S((t, b, r) => { r.formula = 'CONCAT({Base},"!")'; }),
@@ -13067,11 +13113,6 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
                           t.primaryKeys = ['Two','Ref']; return t; })()),
       closureOrder:     S((t) => { const a = t.additionalColumns;
                           a.splice(1, 0, a.splice(0, 1)[0]); }),   // Base after Ref
-      /* carryForward on a TYPED helper the key reads IS the rule: Reco._extraTyped
-         reads it as the scope test, so it decides which typed record becomes
-         the value. This is why the projection is per-type and not one list. */
-      dropHelperCarryOff: S((t, b) => { b.type = 'dropdown'; delete b.formula; }),
-      dropHelperCarryOn:  S((t, b) => { b.type = 'dropdown'; delete b.formula; b.carryForward = true; }),
       /* The formula canonicalisation must keep STRING LITERALS byte for byte. */
       litA: S((t, b, r) => { r.formula = 'CONCAT({Base}," - ",{Line})'; }),
       litB: S((t, b, r) => { r.formula = 'CONCAT({Base}," -  ",{Line})'; }),
@@ -13116,16 +13157,112 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
     + 'in declaration order, so that reorder genuinely changes what the key comes out as',
     MOVED.map(k => [k, fp[k]]));
 
-  check(!fp.noKeyRuleSig && fp.dropHelperCarryOff !== fp.dropHelperCarryOn,
-    'R19s THE PROJECTION IS PER TYPE, AND THIS IS THE GATE THAT STOPS R19q BEING SATISFIED BY '
-    + 'DROPPING carryForward ALTOGETHER. On a formula helper the flag is unread - '
-    + 'Reco._extraOwnValue returns _extraComputedBase and never reaches _extraTyped - so ticking '
-    + 'it is not a rule change and R19q requires the signature to hold still. On a DROPDOWN or '
-    + 'custom helper the key reads, Reco._extraTyped reads it as the SCOPE test, so it decides '
-    + 'WHICH typed record becomes the value and therefore what the key is: the signature must '
-    + 'move. A single flat "ignore carryForward" rule would pass R19q and silently fail to refuse '
-    + 'a dead key here, which is the harm this whole ticket exists for',
-    { off: fp.dropHelperCarryOff, on: fp.dropHelperCarryOn });
+  /* R19s. THE CLEANUP ROUND REPLACED THIS CHECK WITH ITS OPPOSITE, AND THE
+     MEASUREMENT IS WHY. It used to assert that carryForward on a DROPDOWN
+     helper MOVES the signature, on the reasoning that "Reco._extraTyped reads
+     it as the SCOPE test, so it decides WHICH typed record becomes the value
+     and therefore what the key is". That reasoning is not live on the MINT
+     path, and keeping one field of _keyDefOf's over-approximation was the
+     same mistake one field smaller - a FIFTH instance of the shape R19q
+     exists for. Both halves are measured below, in one fixture, rather than
+     reasoned about. The mirror that stops R19q being satisfied by a signature
+     that never moves at all is R19r, which is unaffected. */
+  const carry = await va.page.evaluate(`(async function () {
+    /* (1) THROUGH THE REAL SAVE: can a typed column be in a key closure? */
+    const mkEdit = (type) => {
+      RecoTemplate.create(); const t = RecoTemplate._editing;
+      t.id = 'R19S_' + type; t.name = 'R19s ' + type;
+      t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+      t.additionalColumns = [{ name:'Stage', type:type },
+                             { name:'Ref', type:'formula', formula:'CONCAT({Doc},"-",{Stage})' }];
+      t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+      t.displayColumns = ['Doc','Line','Amount','Stage'];
+      t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+      return t; };
+    const elig = {};
+    ['dropdown','custom'].forEach(type => {
+      const t = mkEdit(type);
+      elig['pk_' + type]  = RecoTemplate._pkEligible(t, 'Stage').ok;
+      elig['ref_' + type] = RecoTemplate._pkEligible(t, 'Ref').ok;
+      elig['why_' + type] = RecoTemplate._pkEligible(t, 'Ref').reason;
+      const real = window.confirm; window.confirm = () => true;
+      try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+      const saved = AppState.recoTemplates.find(x => x.id === 'R19S_' + type);
+      elig['savedPks_' + type] = saved ? (saved.primaryKeys || []).length : -1;
+      /* THE THIRD REASON, and it is the oldest of the three: pk,
+         allowOverride and carryForward are EXCLUSIVE ROLES - "three different
+         answers to who owns its value" - so a column that IS part of the row
+         key cannot hold the carry flag at all, refused in both editors and
+         both directions. */
+      const t2 = mkEdit(type); t2.primaryKeys = ['Stage'];
+      elig['role_' + type] = RecoTemplate._exclusiveRoleConflict(t2, 'Stage', 'carryForward');
+      t2.additionalColumns[0].carryForward = true;
+      elig['rolePk_' + type] = RecoTemplate._exclusiveRoleConflict(t2, 'Stage', 'pk');
+    });
+    /* (2) PAST THE SAVE, BY HAND, STRAIGHT AT THE MINT. */
+    const mkTpl = (c) => ({ id:'R19SM', primaryKeys:['Ref'],
+      columns:[{ name:'Doc' }, { name:'Line' }],
+      additionalColumns:[{ name:'Stage', type:'dropdown', carryForward: c === true ? true : undefined },
+                         { name:'Ref', type:'formula', formula:'CONCAT({Doc},"-",{Stage})' }] });
+    const sess = { data: [], manualTags: {}, dataSetIds: ['reco_data/x/Jan-26/01.csv'] };
+    const mint = (c) => { const t = mkTpl(c);
+      const r = { _id: U.uid(), Doc:'D1', Line:'L1', _pk:'', _ver:'upload',
+                  _dsi:'reco_data/x/Jan-26/01.csv' };
+      Reco._mintKeysSync(t, sess, [r]); return { pk: r._pk, row: r, tpl: t }; };
+    const first = mint(false);
+    AppState.extraValueMaster = AppState.extraValueMaster || {};
+    AppState.extraValueMaster.R19SM = { [first.pk]:
+      { Stage: { k:'typed', v:'OPEN', ds:'reco_data/x/Dec-25/31.csv', by:'someone', at:'2020-01-01' } } };
+    const off = mint(false), on = mint(true);
+    /* NOT BLIND: the mint's OWN value function, over a row that now HAS a key. */
+    const own = (t, r) => { try {
+      return Reco._extraOwnValue(t, sess, Object.assign({}, r), r, t.additionalColumns[0], Reco._fullCtx());
+    } catch (e) { return 'threw'; } };
+    return { elig: elig, pkOff: off.pk, pkOn: on.pk,
+             typedOff: !!Reco._extraTyped(off.tpl, sess, off.row, 'Stage'),
+             typedOn:  !!Reco._extraTyped(on.tpl,  sess, on.row,  'Stage'),
+             ownOff: own(off.tpl, off.row), ownOn: own(on.tpl, on.row),
+             storeKeyDuringMint: Reco.storeKey(off.tpl, { _pk: '', Doc:'D1' }) };
+  })()`);
+  note('R19s carryForward: eligibility through the save, then the mint by hand', carry);
+
+  check(fp.dropHelperCarryOff === fp.dropHelperCarryOn
+        && fp.dropHelperCarryOff !== fp.base
+        && carry.elig.pk_dropdown === false && carry.elig.ref_dropdown === false
+        && carry.elig.savedPks_dropdown === 0
+        && carry.elig.pk_custom === false && carry.elig.ref_custom === false
+        && carry.elig.savedPks_custom === 0
+        && carry.pkOff === carry.pkOn && carry.pkOff === 'D1-'
+        && carry.typedOn === true && carry.typedOff === false
+        && String(carry.ownOn) === 'OPEN' && String(carry.ownOff) === ''
+        && carry.storeKeyDuringMint === null
+        && ['dropdown','custom'].every(k =>
+             /is already part of the row key/.test(String(carry.elig['role_' + k]))
+             && /carried forward to the next file/.test(String(carry.elig['rolePk_' + k]))),
+    'R19s carryForward IS NOT IN THE PROJECTION ON ANY TYPE, AND THAT IS MEASURED TWICE RATHER '
+    + 'THAN ARGUED ONCE. (1) A DROPDOWN OR CUSTOM COLUMN CANNOT BE IN A KEY\'S CLOSURE AT ALL: '
+    + 'RecoTemplate._pkEligible1 refuses it by TYPE ("you type this column in by hand, so its '
+    + 'value is not worked out from the data") and _pkFormulaOk refuses a key FORMULA that reads '
+    + 'one for the same reason, so saveTemplate\'s prune empties primaryKeys - measured through '
+    + 'the real save for both types. (2) AND PAST THE SAVE, BY HAND, THE FLAG STILL CANNOT REACH '
+    + 'A KEY: the same file row and the same stored record mint the SAME key with the box on and '
+    + 'off, because Reco.ingestData reserves row._pk = "" and _mintKeysSync assigns the key only '
+    + 'AFTER computing it, so Reco.storeKey is null for every row the mint walks and _extraTyped '
+    + 'returns at its RECORD test, above the line that reads carryForward. THE SECOND HALF IS NOT '
+    + 'BLIND: the SAME record on a row that HAS the key is readable with the flag on and scoped '
+    + 'out with it off, and Reco._extraOwnValue - the mint\'s own value function, the one '
+    + '_keyScratch calls - answers OPEN with the flag on and "" with it off over that row. The '
+    + 'scope test is real; it is only unreachable while a key is being minted. That is handover '
+    + '14.3 exactly: the key is frozen, the cell is not. So recording the flag bought nothing and '
+    + 'cost a refusal of every earlier row of the reconciliation the moment somebody ticked the '
+    + 'box, which is R19q\'s shape for the fifth time. AND THE PAIR THE ROUND-8 BUILD REQUIRED TO '
+    + 'DIFFER NOW HAS TO MATCH: a dropdown key helper with the box on and the same one with it off '
+    + 'hash the SAME, while both still differ from the formula-helper base - because changing the '
+    + 'helper\'s TYPE is a real rule change and the flag is not. AND A THIRD REASON, THE OLDEST OF '
+    + 'THE THREE: RecoTemplate._exclusiveRoleConflict treats pk, allowOverride and carryForward as '
+    + 'EXCLUSIVE ROLES - "three different answers to who owns its value" - so a column that IS part '
+    + 'of the row key cannot hold the carry flag, in either editor and in both directions',
+    { carry: carry, pair: [fp.dropHelperCarryOff, fp.dropHelperCarryOn, fp.base] });
 
   check(!fp.noKeyRuleSig
         && fp.litA !== fp.litB && fp.litSpacedOutside === fp.litA
@@ -13279,6 +13416,32 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
     + 'this round renders a byte differently and run_colorder T1\'s <tbody> diff cannot move',
     { badge: badge, helpers: look });
 
+  /* R19x2. AND THE SAME THING BEHAVIOURALLY, WHICH THE CLEANUP ROUND ADDED
+     BECAUSE R19x ON ITS OWN IS BLIND. R19x is a regex over APPSRC: a mutant
+     that deleted the `statusHtml +=` line while leaving every character that
+     regex matches behind in a comment read 724 / 0. That made the badge the
+     one safety control in this round whose removal nothing in the net
+     noticed - and it is the control that answers A4's measurement, where the
+     SAME business key was on screen twice, one copy refused and one writable,
+     with nothing to tell them apart. Read off the RENDERED <tbody> of the
+     mixed screen R19e works on, per row, plus the count a Clear-and-load
+     decision needs. The mirror is the live half: a badge on every row would
+     "pass" the dead half and be useless. */
+  note('R19x2 the badge on the rendered mixed screen', walk.badges);
+  check(walk.badges && walk.badges.nDead === 3 && walk.badges.nLive === 3
+        && walk.badges.dead.length === 3 && walk.badges.dead.every(b => b === true)
+        && walk.badges.live.length === 3 && walk.badges.live.every(b => b === false)
+        && walk.badges.deadText.every(b => b === true)
+        && walk.badges.liveText.every(b => b === false)
+        && walk.badges.count === 3,
+    'R19x2 THE BADGE IS ON THE REFUSED ROWS AND NOT ON THE LIVE ONES, MEASURED ON THE RENDERED '
+    + 'SCREEN. Three rows the day file handed back under the old rule carry class="badge oldrule" '
+    + 'and the words "\u2298 older rule" in the row\'s own text; the three live copies of the SAME '
+    + 'three business rows, in the same <tbody>, carry neither. Reco.keyOldRuleCount reads 3 over '
+    + 'the same session. Without this clause the only gate on the badge was R19x\'s regex over the '
+    + 'source, which a mutant satisfied out of a comment while rendering no badge at all',
+    walk.badges);
+
   /* R19y. THE CORRECTION TAB MAY NOT TURN A KEY EXTRA INTO A FILE COLUMN, and
      this gate exists because a mutant that removed the refusal survived every
      other check in this section - the same reason R19p exists.
@@ -13356,6 +13519,119 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
     + 'was consistent. Same shape as R19p, and the same lesson: a consistency gate cannot catch a '
     + 'wrong premise',
     clash);
+
+  /* ---- R19z. THE ONE PATH THAT WIDENS AN EXISTING DAY FILE, AND THE HOLE
+     THE CLEANUP ROUND FOUND BEHIND IT.
+     ROUND 8 / B1 keeps Versioning._appendRows from widening a day file this
+     build did not create, and R19k2 / R19w gate that. Versioning.compactFile
+     does NOT go through _appendRows: it calls Versioning.writeFile, whose
+     Versioning._fields asks for _pksig for every derived-key template, so the
+     compaction's whole-file rewrite WIDENS the header. That part is safe and
+     is the one path that upgrades such a file - compaction is already a
+     whole-file rewrite under Versioning._withLock, it is a deliberate
+     operator action on one file from the Version History screen, every row it
+     keeps carries no signature so nothing is claimed about them, and
+     append_csv_rows writes against the FILE'S header (main.py:694), so an
+     un-upgraded build appending afterwards writes a blank in the column
+     rather than misaligning the row (R19l measures that direction).
+     WHAT WAS NOT SAFE: Versioning._hdrCache was never invalidated by
+     writeFile. MEASURED (c2_compact): after the compaction had widened the
+     header, the next Add Data asked _headerOf, got the STALE narrow header
+     out of the cache, concluded "this file has no _pksig" and DELETED the
+     signature off the record - so a row the mint had signed landed unsigned
+     in a file whose header has the column, and the reopen handed it back
+     unsigned. After a real key-rule change that is the one row that is NOT
+     refused, which is the harm this whole ticket exists for. One line in
+     writeFile. Both halves are asserted, because a fix that stopped the
+     compaction widening at all would also satisfy the second half. */
+  {
+    const Z = makeRoot('share-r19z');
+    const brZ = await startBridge(Z.root, PORT_R19Z); procs.push(brZ.proc);
+    const za = await openReco(browser, brZ);
+    const z = await za.page.evaluate(`(async function () {
+      const I = 'TPL_Z';
+      RecoTemplate.create(); const t = RecoTemplate._editing;
+      t.id = I; t.name = 'Compact' + I;
+      t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+      t.additionalColumns = [{ name:'Ref', type:'formula', formula:'CONCAT({Doc})' },
+                             { name:'Vendor', type:'custom' }];
+      t.primaryKeys = ['Ref']; t.valueColumn = 'Amount';
+      t.displayColumns = ['Doc','Line','Amount','Vendor'];
+      t.editableColumns = ['Line'];
+      t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+      const real = window.confirm; window.confirm = () => true;
+      try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+      const tpl = AppState.recoTemplates.find(x => x.id === I);
+      RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+      const d = new Date();
+      const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]
+        + '-' + String(d.getFullYear()).slice(-2);
+      const rel = 'reco_data/' + tpl.dataFolder + '/' + mon + '/' + String(d.getDate()).padStart(2, '0') + '.csv';
+      /* A PRE-_pksig DAY FILE, exactly as an un-upgraded build leaves one. */
+      await window.pywebview.api.write_file(rel,
+        '_pk,_ver,_ts,_src,_by,Doc,Line,Amount\\r\\n'
+        + 'Z1,upload,2026-01-01T00:00:00.000Z,,,Z1,L1,10\\r\\n'
+        + 'Z2,upload,2026-01-01T00:00:00.000Z,,,Z2,L2,20\\r\\n');
+      Versioning._cnCache = {}; Versioning._hdrCache = {};
+      await Reco.loadVersionedFile(rel, I);
+      App.closeModal(); ${R19_SETTLE}
+      const s = AppState.recoSessions[I];
+      const row = (s.data || []).find(r => String(r._pk) === 'Z1');
+      /* TWO Cn rows for one pk, so the compaction has something to drop and
+         really rewrites the file. */
+      Reco.editCell(null, 'Line', 'E1', null, row._id); ${R19_SETTLE}
+      Reco.editCell(null, 'Line', 'E2', null, row._id); ${R19_SETTLE}
+      const headBefore = String(await window.pywebview.api.read_file(rel)).split(/\\r?\\n/)[0];
+      const compacted = await Versioning.compactFile(tpl, rel, false);
+      const headAfter = String(await window.pywebview.api.read_file(rel)).split(/\\r?\\n/)[0];
+      const cached = (Versioning._hdrCache || {})[rel];
+      /* AND NOW A SIGNED ROW INTO THAT FILE, through the real ingest. */
+      window.__toasts = [];
+      await Reco.ingestData(tpl, [{ Doc:'Z9', Line:'L9', Amount:'90' }], ['Doc','Line','Amount']);
+      ${R19_SETTLE}
+      const lines = String(await window.pywebview.api.read_file(rel)).split(/\\r?\\n/).filter(Boolean);
+      const cols = lines[0].split(',');
+      const iSig = cols.indexOf('_pksig');
+      const z9 = lines.find(l => /^Z9,upload,/.test(l));
+      const mintedSig = (s.data || []).filter(r => String(r._pk) === 'Z9').map(r => r._pksig);
+      Versioning._cnCache = {};
+      await Reco.loadVersionedFile(rel, I);
+      App.closeModal(); ${R19_SETTLE}
+      const back = (AppState.recoSessions[I].data || [])
+        .filter(r => String(r._pk) === 'Z9').map(r => r._pksig);
+      return { headBefore, headAfter, compacted, cached, iSig, tplSig: Reco.keyRuleSig(tpl),
+               z9SigOnRow: mintedSig,
+               z9SigInFile: (iSig >= 0 && z9) ? (z9.split(',')[iSig] || '') : 'no column',
+               z9SigReopened: back,
+               said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 110)) };
+    })()`);
+    note('R19z compaction, then an append into the file it widened', z);
+    check(z.headBefore === '_pk,_ver,_ts,_src,_by,Doc,Line,Amount'
+          && z.compacted && z.compacted.before > z.compacted.after
+          && z.headAfter === '_pk,_ver,_ts,_src,_by,_pksig,Doc,Line,Amount'
+          && Array.isArray(z.cached) && z.cached.indexOf('_pksig') !== -1
+          && z.z9SigOnRow.length === 1 && /^1:[0-9a-f]{16}$/.test(String(z.z9SigOnRow[0]))
+          && z.iSig === 5 && z.z9SigInFile === z.tplSig
+          && z.z9SigReopened.length === 1 && z.z9SigReopened[0] === z.tplSig
+          && !z.said.some(x => /error/.test(x)),
+      'R19z COMPACTION IS THE ONE PATH THAT WIDENS AN EXISTING DAY FILE, AND THE NEXT APPEND INTO '
+      + 'IT KEEPS ITS SIGNATURE. Premises first: the B1 guard held, so two cell edits left the '
+      + 'pre-change file un-widened; and the compaction really rewrote it (it had a version to '
+      + 'drop). Then Compact widens the header to _pk,_ver,_ts,_src,_by,_pksig,... - it does not '
+      + 'go through _appendRows, so B1 is not on its path, and that is deliberate: it is already a '
+      + 'whole-file rewrite under the path lock, it is an operator action on one file, the rows it '
+      + 'keeps carry no signature, and append_csv_rows writes against the FILE\'S header so an '
+      + 'older build appending afterwards writes a blank rather than a misaligned row. THE PART '
+      + 'THAT WAS BROKEN: Versioning._hdrCache was never invalidated by writeFile, so the next '
+      + 'Add Data read the STALE narrow header, concluded the file had no _pksig and deleted the '
+      + 'signature off the record - a row the mint had SIGNED landed unsigned in a file whose '
+      + 'header has the column, and the reopen handed it back unsigned, which after a real '
+      + 'key-rule change is the one row that is NOT refused. Asserted at every hop: the row the '
+      + 'mint signed, the value in the FILE, and the value a reopen brings back',
+      z);
+    await za.ctx.close();
+    try { fs.rmSync(Z.base, { recursive: true, force: true }); } catch (e) {}
+  }
 
   await va.ctx.close();
 }
