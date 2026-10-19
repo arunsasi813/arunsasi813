@@ -35,6 +35,18 @@ Five are worth promoting above the rest:
 - **T-F2-1** — the second pane's extra filter+sort pass at 200k rows. The cost is confirmed and
   BOTH proposed remedies were measured unsafe; this records what a safe one would need.
 
+**Filed late, in the pending-work sweep after round 7** — the attack reported both and no round
+wrote them down, which is the one failure mode this file exists to prevent:
+
+- **T-S10-23** — a backup carrying pk-keyed records WITHOUT the templates that key them is
+  accepted and restored, so the records land under a rule that is not on this folder. `importBackup`
+  is one of the two paths deliberately allow-listed out of the dead-key chokepoint, and the reason
+  given ("refusing would make a backup unrestorable on the day it is needed") is right for a WHOLE
+  backup and does not hold for a partial one.
+- **T-S10-24** — the owed-write replay's confirm names the row key in every line but never says
+  that key may no longer be the one this reconciliation computes, so the operator presses Yes on
+  key strings they have no way to judge. Needs T-S10-19's signature to answer properly.
+
 Also still open from earlier rounds, listed here so there is one place to look:
 
 - ~~The AEG `''` vs grid `'#ERR'` divergence on a broken formula, which **posts a zero** today.~~
@@ -3033,3 +3045,93 @@ guard call is reachable.
 (`scratchpad/dataloss/unbrick/gates/`) plus two new mutants: a guard call behind a condition that is
 false for other reasons, and a master written through a parameter in a new helper.
 
+---
+
+## T-S10-23  A backup restores typed values WITHOUT the template whose rule minted their keys
+
+**Where** `apps/Reco.html` `App.importBackup` — the acceptance test at line 11664
+(`!(d.recoTemplates || d.aegTemplates || d.recoSessions || d.templates)`) and the eighteen
+INDEPENDENTLY CONDITIONAL assignments below it (`if (d.recoTemplates) …`,
+`if (d.extraValueMaster) {…}`, and sixteen more).
+
+**What** The acceptance test needs only **one** of four keys, and every restore is its own `if`.
+So a backup carrying `recoSessions` + `extraValueMaster` but **no** `recoTemplates` is accepted,
+restores the typed values, and leaves the LIVE template in place — and the live template's key rule
+is not the one that minted those keys. Every record then sits under a key the current rule does not
+compute: filed where no colleague reads it, and where this operator's own next load will not find
+it. It is T-S10-19's harm reached through the restore door instead of through a day file, and
+nothing refuses it because `importBackup` is one of the two paths deliberately **allow-listed** out
+of the dead-key chokepoint (§18.11) — on the reasoning that *"refusing would make a backup
+unrestorable on the day it is needed"*, which is right for a WHOLE backup and does not hold for a
+partial one.
+
+**Found by** the round 7 adversarial attack (handover §18.12, `stillWrong`), which measured the
+allow-list reason and found this hole in it. **Filed late**, in the pending-work sweep after it:
+the attack reported it and no round wrote it down, which is the failure this file exists to
+prevent.
+
+**Why it is only a ticket** The fix is a decision about what a PARTIAL backup means, not a patch.
+Three shapes are defensible and they are not equivalent: refuse a backup that carries pk-keyed
+records without the templates that key them; accept it and **say** which templates' records are now
+keyed by a rule that is not on this folder; or restore the records and raise the key latch for the
+templates involved, so the next gesture is refused with the sentence that already exists. The third
+is closest to the rest of the design and the most intrusive. `importBackup` is also wholesale BY
+DESIGN (T-C27-6) and its confirm says so, so the sentence has to be written carefully or it reads
+as a contradiction.
+
+**Fix** Before the assignments, compare the pk-keyed payload against the templates in the file:
+for every `tplId` present in `extraValueMaster` / `correctionMaster` / `manualOffsetMaster` /
+`groupMaster` / `commentMaster` / `attachmentMaster`, is `d.recoTemplates` carrying that template,
+and does its key definition (`RecoTemplate._keyDefOf`, which already exists for T-24R2-1) match the
+one on the folder? Name the templates that fail in the confirm — the confirm already counts the
+typed values, so this is a clause, not a new dialog.
+
+**Test** A backup containing `recoSessions` and `extraValueMaster` for `TPL_X` but no
+`recoTemplates`, restored over a folder whose `TPL_X` key definition has since changed: assert the
+confirm NAMES `TPL_X`, and assert on the FILES afterwards — either nothing was restored, or the
+records are there and the next gesture on an affected row is refused with the key sentence. Control:
+a WHOLE backup (templates included) restores silently and every gesture works, because that is the
+case the allow-list exists for.
+
+---
+
+## T-S10-24  The replay confirm lists row keys it cannot vouch for
+
+**Where** `apps/Reco.html` `App._replayJournal` (~line 11333) and the confirm it builds, whose
+lines read `<template> · <pk> / <col> = "<value>"`.
+
+**What** The owed-write journal (T-S10-9) holds values typed while the shared folder was down, on
+this PC, and offers them back at the next boot. The confirm names the **key** in every line, which
+is right. What it does not say is that the key may no longer be the key this reconciliation
+computes — because somebody can have changed the key definition between the typing and the boot. So
+the operator presses Yes on a list of key strings they have **no way to judge**, and an accepted
+replay writes them to the share under the old rule's keys.
+
+`App._replayJournal` is the other path deliberately **allow-listed** out of the dead-key chokepoint
+(§18.11), and that reason is sound as far as it goes: refusing would discard work the operator was
+told was saved, and the replay runs inside the flush where T-S10-17 forbids waiting and a toast is
+addressed to nobody. The gap is not the writing — it is that the one dialog which CAN ask a person
+does not give them the fact they would need.
+
+**Found by** the round 7 attack (handover §18.12, `stillWrong`), which also corrected an earlier
+round's claim that the confirm does not name the key at all — it does. **Filed late**, in the
+pending-work sweep.
+
+**Why it is only a ticket** It needs the same thing T-S10-19 needs and for the same reason: to say
+"this key was minted by a rule that is no longer in force" you must know which rule minted it, and
+a value comparison cannot tell you (§14.3 — a frozen key is *supposed* to disagree with a recompute
+once the row's data has changed, which is why round 6's per-row arm was removed in round 7). With
+the key-rule SIGNATURE on T-S10-19, this becomes one clause in an existing dialog. Without it, the
+honest version is a general warning on every replay, which trains people to click through.
+
+**Fix** With T-S10-19's signature: mark the journal entries whose signature is not the template's
+current one, and say so per line in the confirm. Without it, and cheaper: record the key definition
+(`RecoTemplate._keyDefOf`) on each journal entry when it is buffered, compare it at replay, and name
+the affected lines. That is a change to the journal's own shape, which is local to this PC and
+needs no schema round — it is the one place a signature can be added without touching the day file.
+
+**Test** Type a value with the folder down; change the template's key definition; boot: assert the
+confirm NAMES that line as keyed by a rule that has changed, and assert the FILES afterwards match
+whichever answer the operator gave. Control: with no key change between the typing and the boot,
+the confirm says nothing extra and the replay lands exactly as it does today
+(`run_store_e2e` [73]/[74] already hold that path).

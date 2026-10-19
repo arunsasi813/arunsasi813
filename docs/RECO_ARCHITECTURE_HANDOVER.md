@@ -659,9 +659,12 @@ Tests: `tests/e2e/run_store_e2e.mjs` sections [12]–[22] (O1–O14), with O1, O
 gates — **and sections [33]–[48]**, which the fix round added and where every one of the twenty
 review findings is pinned: [33]–[34] the two merge/data-set gates (RC-1, RC-2), [35]–[40]
 R1–R6 (F3, F10, F1, F5, F4, F9) and [41]–[48] X1–X8 (F11/F19, F17, F12, F20, F13, F18, F6, F15).
-`run_store_e2e` is **378 passed / 0 failed** and is the suite that holds all three features'
-gates — **plus sections [49]–[53]**, which the money round added (Z1, T-26-5, T-26-6, T-S10-1,
-T-30-3; see §16).
+`run_store_e2e` held **378 passed / 0 failed** when this section was written, and is the suite
+that holds all three features' gates — **plus sections [49]–[53]**, which the money round added
+(Z1, T-26-5, T-26-6, T-S10-1, T-30-3; see §16), and [54]–[88] from the five rounds after it. **It
+is at 694 today**; §18 carries the round-by-round arithmetic. The figure is written as history on
+purpose: a bare count in a feature write-up goes stale on the next round and then reads as a claim
+about the suite rather than a note about when the feature landed.
 
 ### 5d. Carrying a typed value forward to the next file (#30)
 
@@ -2327,11 +2330,20 @@ the whole 29.6 MB crossing the wire twice** — roughly 6 s at 10 MB/s — for e
 burst, and `Store._enqueue` serialises per file, so bursts queue behind each other and two
 colleagues typing are each moving 30 MB a burst.
 
-**Verified, as opposed to argued.** `run_store_e2e` is 378 passed / 0 failed and holds all three
-features' gates; the **seventeen** node suites total **2,574** end-to-end checks (378 + 304 + 254 +
-250 + 170 + 163 + 147 + 123 + 119 + 107 + 107 + 100 + 94 + 79 + 73 + 65 + 41) and `pytest` — the
-eighteenth suite — is 75 passed / 1 skipped. Every suite is at or above its `4b8fd90` count; not
-one went down. The store gate was also shown
+**Verified, as opposed to argued — AT THE TIME THIS WAS WRITTEN, which is the point of the
+sentence and not a reason to trust the number today.** On the tree this section measured,
+`run_store_e2e` was 378 passed / 0 failed and the **seventeen** node suites totalled **2,574**
+end-to-end checks (378 + 304 + 254 + 250 + 170 + 163 + 147 + 123 + 119 + 107 + 107 + 100 + 94 + 79
++ 73 + 65 + 41), with `pytest` — the eighteenth suite — at 75 passed / 1 skipped. Every suite was
+at or above its `4b8fd90` count; not one went down.
+
+> **CURRENT, re-measured on `56c9987`:** `run_store_e2e` **694**, the seventeen node suites
+> **2,892**, `pytest` 75 passed / 1 skipped. Store went 378 → 441 → 508 → 582 → 598 → 638 → 672 →
+> 694 across the money round and the seven data-loss rounds (§16, §18). **The cost table above was
+> NOT re-measured on this tree** — the figures in it are from the tree that produced the 378, and
+> `XlSchema.build`'s 18x regression (T-26-7) is still open, so they are the right order of
+> magnitude and the wrong decimal. Re-measure before resting an argument on one; §16.4a is the rule
+> for how (an operation count, never a wall clock). The store gate was also shown
 **non-vacuous** by mutation: `Reco._manualTag` forced to return `''` in a **copy** of `Reco.html`
 turns `run_reports_e2e` red (105/2), which is what proves the legacy read fallback is load-bearing
 rather than decorative.
