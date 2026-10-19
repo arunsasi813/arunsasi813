@@ -710,10 +710,15 @@ try {
     'and the entry banner reports 2 released, not 0, for a reversal that released two rows',
     banner4.slice(0, 500));
   const used4 = (await callLog(B4)).calls.map(c => c.method).filter((m, i, a) => a.indexOf(m) === i).sort();
-  check(used4.every(m => ['read_file', 'write_file', 'append_csv_rows', 'list_directories', 'list_files',
+  check(used4.every(m => ['read_file', 'read_file_with_token', 'write_file', 'write_file_if_unchanged',
+    'append_csv_rows', 'list_directories', 'list_files',
     'list_folder_files', 'save_template', 'delete_template', 'current_username', 'load_master',
     'load_templates', 'save_master'].indexOf(m) >= 0),
-    'a reversal needs no new bridge method — read_file, write_file and append_csv_rows already do everything', used4);
+    'a reversal needs no new bridge method — reading and writing a file and appending CSV rows '
+    + 'already do everything. T-S10-10 added read_file_with_token and write_file_if_unchanged to '
+    + 'the two it already used, which is the SAME read and the SAME write with the file\'s content '
+    + 'hash carried between them; this list names them so the gate stays a gate rather than going '
+    + 'red on a safer version of the write it already allowed', used4);
   check(errors.every(e => /injected fault/.test(e)),
     'the only console output is the injected fault itself (Versioning.readFile logs a failed read by design)', errors);
 

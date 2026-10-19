@@ -4180,8 +4180,8 @@ const Store = {
         out.refused = true; out.reason = 'readOnlyFile'; return out;   // F17, re-checked inside the queue
       }
       const mem = AppState[m.key] || (AppState[m.key] = {});
-      const disk = await Store._readJsonFile(m.file, m.key);
-      if (disk === Store._UNREADABLE) {
+      let read = await Store._readJsonFile(m.file, m.key);
+      if (read.data === Store._UNREADABLE) {
         /* Could not read it, or it would not parse. Writing now would replace
            a colleague's file with whatever this session happens to hold, which
            is the one thing this function exists to prevent.
@@ -4205,7 +4205,6 @@ const Store = {
       }
       /* THE SHARE IS THE AUTHORITY for the ids this file owns; this session's
          own unwritten changes are the intents, replayed immediately below. */
-      Store._takeDisk(mem, disk, m.owns);
       /* ...and then the intents, which is what puts this session's own writes
          back on top - at CELL granularity, and including a DELETE, which is
          the one thing "what is in memory" cannot say. */
@@ -4221,20 +4220,72 @@ const Store = {
          with no second copy of what it dropped. Intents are only ever
          APPENDED, so the newcomers are exactly the tail. */
       const answering = m.intents.length;
-      m.intents.slice(0, answering).forEach(fn => { try { fn(mem); } catch (e) { console.error('mergeWrite intent failed for ' + m.key, e); } });
-      /* ---- MR-3. THE POSTED-ROW INDEX IS MEMOISED ON THIS MAP'S SHAPE, and
-         the two lines above have just replaced it with the share's. Every
-         caller that mutates a ledger in memory calls Reco._postedIdxReset()
-         itself; a MERGE had no such call, so a colleague's IN-PLACE reversal
-         arriving on one of our writes could leave the memo describing a
-         history that is no longer there - the symptom being T-26-6's panel
-         omitting "(reversed)" and telling somebody to reverse an entry twice.
-         It is also what lets the memo key stop COUNTING the document numbers
-         on every call (see Reco._postedAuditIndex, and T-26-6's 946x). */
-      if ((m.key === 'entryHistory' || m.key === 'docNumberMaster')
-          && typeof Reco !== 'undefined' && Reco._postedIdxReset) Reco._postedIdxReset();
-      const body = m.owns ? Store._pick(mem, m.owns) : mem;
-      await Store._writeJsonFile(m.file, Store.serialize(m.key, body));
+      /* ---- T-S10-10. READ -> MERGE -> WRITE IS NOW A COMPARE-AND-SWAP, AND
+         THAT IS WHAT MAKES IT SAFE BETWEEN PROCESSES RATHER THAN ONLY INSIDE
+         THIS PAGE. _enqueue serialises these jobs per file inside ONE JS
+         context; nothing serialised them between pages, because
+         Store._writeJsonFile called the bridge's write_file, an unconditional
+         overwrite with no mtime, no size, no hash and no lock. MEASURED in two
+         separate processes on a 1,000-entry reco/entryHistory.json: A reads, B
+         reads, A writes its entry in, B writes A's entry out, BOTH REPORT
+         SUCCESS - so neither operator is told, and A's rows stay stamped
+         POSTED on the share with nothing behind them. An entry was lost at
+         every stagger tried, 0 ms included.
+         THE LOCK IN THE BRIDGE IS NOT THE FIX AND THE PROBE SAYS SO: both
+         pages have already READ before either writes, so serialising the
+         writes just decides which one wins. The fix is the TOKEN - the write
+         is refused when the file no longer holds what this job read - and then
+         this loop re-reads, re-takes the share as authority and REPLAYS THE
+         SAME INTENTS on top. That is sound rather than lucky because the
+         intents were built to be idempotent and to re-find what they mutate by
+         id, which is the property T-S10-1 and the settle round already rely
+         on. `answering` is captured ONCE, above, and deliberately not
+         recomputed: an intent that arrives during a retry must not be applied
+         by a job that is about to clear only the first `answering` of them
+         (MR-8's loss, from the other direction). */
+      let res = null;
+      for (let attempt = 0; attempt < Store._CAS_TRIES; attempt++) {
+        if (attempt) {
+          Store._casRetries++;
+          read = await Store._readJsonFile(m.file, m.key);
+          if (read.data === Store._UNREADABLE) {
+            out.refused = true; out.reason = 'unreadable';
+            Store._sayUnreadable(m);
+            Store._retryLater(qkey, m);
+            return out;
+          }
+        }
+        Store._takeDisk(mem, read.data, m.owns);
+        m.intents.slice(0, answering).forEach(fn => { try { fn(mem); } catch (e) { console.error('mergeWrite intent failed for ' + m.key, e); } });
+        /* ---- MR-3. THE POSTED-ROW INDEX IS MEMOISED ON THIS MAP'S SHAPE,
+           and the two lines above have just replaced it with the share's.
+           Every caller that mutates a ledger in memory calls
+           Reco._postedIdxReset() itself; a MERGE had no such call, so a
+           colleague's IN-PLACE reversal arriving on one of our writes could
+           leave the memo describing a history that is no longer there - the
+           symptom being T-26-6's panel omitting "(reversed)" and telling
+           somebody to reverse an entry twice. It is also what lets the memo
+           key stop COUNTING the document numbers on every call (see
+           Reco._postedAuditIndex, and T-26-6's 946x).
+           INSIDE THE RETRY LOOP, because every pass replaces the map again. */
+        if ((m.key === 'entryHistory' || m.key === 'docNumberMaster')
+            && typeof Reco !== 'undefined' && Reco._postedIdxReset) Reco._postedIdxReset();
+        const body = m.owns ? Store._pick(mem, m.owns) : mem;
+        res = await Store._writeJsonFile(m.file, Store.serialize(m.key, body), read.token);
+        if (res.ok) break;
+        /* 'changed' is the one answer this loop can do something about. 'busy'
+           means another PROCESS held the file past the bridge's wait, which is
+           a failed write like any other: it goes to the catch below, where the
+           value stays buffered, the operator is told and a timer retries. */
+        if (res.reason !== 'changed') break;
+      }
+      if (!res || !res.ok) {
+        throw new Error('could not write ' + m.file + ' - '
+          + (res && res.reason === 'busy'
+              ? 'another window is still writing it'
+              : 'a colleague kept changing it while this save was in flight ('
+                + Store._CAS_TRIES + ' attempts)'));
+      }
       /* Cleared ONLY now that the write has resolved. A failure above leaves
          them buffered so the next job re-applies them onto a fresh read. */
       // MR-8: only the ones this job applied; anything that arrived during
@@ -4273,17 +4324,34 @@ const Store = {
      Distinct from {} (an empty or absent file, which is normal and writable). */
   _UNREADABLE: { __unreadable: true },
 
+  /* T-S10-10. IT BRINGS THE TOKEN BACK WITH THE TEXT, IN ONE READ.
+     { data, token } - token null when this launcher has no conditional write,
+     which is an older build on the same folder (T-S10-12's mixed fleet) and
+     has to go on working. Reading the text and then asking for the token
+     separately would be two reads with a window between them, which is the
+     bug this exists to close. */
   async _readJsonFile(rel, key) {
     if (!Store._hasApi()) {
       /* The browser twin. localStorage is this session's own, so there is no
          colleague to merge with and no unreadable case. */
-      return Store._localGet(key, {});
+      return { data: Store._localGet(key, {}), token: null };
     }
-    let txt;
-    try { txt = await window.pywebview.api.read_file(rel); }
-    catch (e) { console.error('read_file failed for ' + rel, e); return Store._UNREADABLE; }
-    if (!txt || typeof txt !== 'string' || !txt.trim()) return {};
-    try { return JSON.parse(txt); }
+    const api = window.pywebview.api;
+    const canTok = (typeof api.read_file_with_token === 'function'
+                    && typeof api.write_file_if_unchanged === 'function');
+    let txt, token = null;
+    try {
+      if (canTok) {
+        const got = await api.read_file_with_token(rel);
+        const g = (typeof got === 'string') ? JSON.parse(got) : (got || {});
+        txt = g.text; token = (typeof g.token === 'string') ? g.token : null;
+      } else {
+        txt = await api.read_file(rel);
+      }
+    }
+    catch (e) { console.error('read_file failed for ' + rel, e); return { data: Store._UNREADABLE, token: null }; }
+    if (!txt || typeof txt !== 'string' || !txt.trim()) return { data: {}, token: token };
+    try { return { data: JSON.parse(txt), token: token }; }
     catch (e) {
       /* Corrupt - e.g. a half-written file from a share that dropped. Keep a
          copy before anything can overwrite it, exactly as Store.loadAll does,
@@ -4294,19 +4362,49 @@ const Store = {
       Store.readOnlyKeys[key] = true;
       Store.loadProblems.push(rel + ' was damaged and could not be parsed. A copy was kept at '
         + backup + '; nothing is being saved to it in this session.');
-      return Store._UNREADABLE;
+      return { data: Store._UNREADABLE, token: null };
     }
   },
 
-  _writeJsonFile(rel, text) {
+  /* T-S10-10. HOW MANY TIMES A MERGE WILL RE-READ AND REPLAY when a colleague
+     wrote the file between this job's read and its write. Two writers need
+     ONE retry; N writers need N-1, and eight is well past any real team on one
+     reconciliation. It is bounded rather than `while (true)` because a loop
+     that cannot end is how a save turns into a hang (T-S10-17), and the
+     fall-through is the ordinary failed-write path: the value stays buffered
+     and is retried on a timer, which is what every other write failure does. */
+  _CAS_TRIES: 8,
+  /* Counted so the cost can be asserted as an OPERATION COUNT and never as a
+     clock (handover 16.4a). A build that quietly stopped using the token would
+     read ZERO here on a fixture that provokes a collision. */
+  _casRetries: 0,
+  _casWrites: 0,
+  _casUnconditional: 0,
+
+  /* WRITE ONLY WHILE THE FILE STILL HOLDS WHAT `token` DESCRIBES.
+     { ok, token, reason } - reason 'changed' means re-read, replay, try again.
+     A null token means this launcher has no conditional write (an older build
+     on the same folder), and then it is the unconditional overwrite it always
+     was: worse, but not worse than before, and counted so a gate can see it. */
+  async _writeJsonFile(rel, text, token) {
     if (!Store._hasApi()) {
       /* The key, not the path: the browser twin is keyed the way _localGet
          reads it. Only the single-file case can arise here. */
       const key = String(rel).replace(/^reco\//, '').replace(/\.json$/, '');
       if (!Store._localSet(key, text)) throw new Error('browser storage is full');
-      return Promise.resolve();
+      return { ok: true, token: null };
     }
-    return window.pywebview.api.write_file(rel, text);
+    const api = window.pywebview.api;
+    if (token == null || typeof api.write_file_if_unchanged !== 'function') {
+      Store._casUnconditional++;
+      await api.write_file(rel, text);
+      return { ok: true, token: null };
+    }
+    Store._casWrites++;
+    const got = await api.write_file_if_unchanged(rel, text, token);
+    const r = (typeof got === 'string') ? JSON.parse(got) : (got || {});
+    return { ok: r.ok === true, token: (typeof r.token === 'string') ? r.token : null,
+             reason: r.reason || '', detail: r.detail || '' };
   },
 
   /* Make `mem` agree with `disk` for every top-level id THIS FILE OWNS, and

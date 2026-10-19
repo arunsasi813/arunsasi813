@@ -6,15 +6,23 @@ is a rumour.
 
 Six are worth promoting above the rest:
 
-- **T-S10-28** — `append_csv_rows`' widening branch rewrites a whole day file and is **not
-  cross-process safe**, and two separate processes were measured losing a colleague's append in three
-  of four timings **with both writers reporting success**. Round 8's review pass stopped T-S10-19
-  from triggering it, but the hazard is still live for everything else that widens a day file
-  through that branch: the Excel-link write `Versioning._fields`' own comment names. (It is **not**
-  history compaction — that path does not use `append_csv_rows` at all; the cleanup round measured
-  it and corrected this claim on the ticket.) Promoted because it is the only measured **silent loss
-  of a colleague's committed work** left open, and because the fix is twenty lines in `main.py` that
-  no round has been allowed to touch yet.
+- **T-S10-31** — `reco/recoSessions.json` is written **whole** by every window, so one window's
+  boot copy of a template it never opened overwrites another window's morning of work on it,
+  unconditionally and in silence. It is **T-S10-10's shape on a different file**, and a bigger one
+  (24.6 MiB for one 200,000-row template). **READ OFF THE CODE AND NOT YET MEASURED** — which is
+  why it is the one entry on this list without a number beside it, and the first thing to do with
+  it is the two-page fixture its **Test** paragraph names. Promoted because it is the largest
+  unexamined **silent loss of a colleague's committed work** left, and because it is no longer
+  blocked on anything: the primitive it needs exists (`write_file_if_unchanged`, T-S10-10). What it
+  needs is a decision about what merging two windows' sessions means — last-write-wins per template
+  id, probably, which is a rule about the operator's work and not a detail.
+
+> **T-S10-28 and T-S10-10 WERE the first two entries on this list and are both FIXED.** The bridge
+> now has an OS advisory file lock across both branches of `append_csv_rows` (the colleague's
+> append survives the widening rewrite at every timing, where it was lost at 0.00 s and 0.15 s)
+> and a conditional write behind `Store._mergeJob`'s compare-and-swap loop (1,002 of 1,002 ledger
+> entries survive two processes pressing Generate together, where one was lost at every stagger
+> including 0 ms). Handover §20.
 
 
 - **T-S10-25** — a template whose key names **no added column** gets no key-rule signature, so a day
@@ -2115,7 +2123,56 @@ apply — and that a second boot replays nothing.
 
 <!-- the blocker fixer, after the two reviews of T-S10-1 / Z1 / T-26-5 / T-26-6 / T-30-3 -->
 
-## T-S10-10  The ledger merge is atomic inside ONE page and not BETWEEN pages — two colleagues pressing Generate together can still lose an entry
+## T-S10-10  ~~The ledger merge is atomic inside ONE page and not BETWEEN pages — two colleagues pressing Generate together can still lose an entry~~  **FIXED** — the bridge has a conditional write and `Store._mergeJob` is a compare-and-swap
+
+> **FIXED, and the thing to read is WHICH HALF DID IT.** The bridge gained an
+> OS advisory file lock (`flock` on POSIX, `LockFile` on Windows, on one file
+> per path under `ROOT/.locks/`) **and** a content token: `LauncherAPI.read_file_with_token` brings
+> the file and the sha256 of its bytes back in ONE read, and
+> `write_file_if_unchanged(rel, text, token)` writes only while the file still
+> holds what that token describes, with the check and the write inside the lock
+> so it is a real compare-and-swap. `Store._mergeJob` now loops: on a `changed`
+> refusal it re-reads, takes the share as the authority again and **replays the
+> same intents on top**, up to `Store._CAS_TRIES` (8) times.
+>
+> **THE LOCK IS NOT THE FIX, AND THE PROBE SAYS SO IN BOTH DIRECTIONS.** Both
+> pages have already READ before either writes, so serialising the writes just
+> decides which one wins. Measured in two real processes on a 1,000-entry
+> ledger (`scratchpad/bridge/probes/p2_jsonrace.py`): with the plain
+> `write_file` an entry is lost at **every** stagger tried, 0 ms included, with
+> both writers reporting success; with the token, **1,002 of 1,002 entries
+> survive** and exactly one process refuses once and succeeds on the retry.
+> It is the TOKEN that closes it; the lock is what stops two processes both
+> passing the check and both replacing.
+>
+> **THE LOCK-FILE SHAPE THIS TICKET RULED OUT IS STILL RULED OUT, and that
+> objection is why the OS's own lock was used instead.** A lock whose
+> EXISTENCE is the lock is only advisory (`write_file` cannot fail on "already
+> exists") and a stale one left by a page that crashed would block the ledger
+> for everybody. An advisory file lock has no stale state at all: the kernel
+> drops it when the handle closes or the process dies. So there is no staleness
+> timeout to decide and nothing to break by hand — only a WAIT (ten seconds),
+> and a wait that runs out answers `busy`, which `_mergeJob` treats as a failed
+> write: the operator is told, the intent stays buffered, the next flush
+> retries. A share that cannot lock at all degrades to unlocked, which is no
+> worse than before this change and far better than refusing to save.
+>
+> **Gates.** `tests/test_launcher.py`
+> `test_the_ledger_clobber_between_two_processes` (subprocess, not threads — a
+> threaded version passes on the broken code and proves nothing),
+> `test_write_file_if_unchanged_refuses_a_stale_token`,
+> `test_content_token_is_the_bytes_and_not_the_clock`,
+> `test_a_share_that_cannot_lock_still_saves`. The PAGE'S half, which pytest
+> cannot reach, is `run_store_e2e` **[89] R20a–R20e**: that the token is really
+> used (an operation count, never a clock), that a collision is retried and the
+> colleague's record survives it, that `busy` is said rather than swallowed, and
+> that an older launcher with neither method still saves. Handover §20.
+>
+> **What this does NOT cover: T-S10-31**, the whole-file `PERSIST_KEYS` writes
+> (`recoSessions.json` and friends). They go through `Store.save`, which has no
+> intents to replay, so they need a merge RULE before they can use the same
+> primitive — which now exists.
+
 
 **Where** `apps/Reco.html` `Store._enqueue` / `Store._mergeJob`. `Store._queues` lives in one JS
 context, so the read → merge → write of `reco/entryHistory.json` cannot overlap a write of the
@@ -2660,6 +2717,55 @@ afterwards. The reproduction this round used is `scratchpad/dataloss/lift/probes
 (`logs/w1_before.txt` is the before, 1 as-expected / 7 not). Only the **row** branch of the comment
 and attachment dialogs is latched: a group-linked record is filed against the group's id and not
 against a row key.
+
+---
+
+## T-S10-31  `reco/recoSessions.json` is written WHOLE by every window, so one window's boot copy of a template it never opened overwrites another window's work on it
+
+**Where** `apps/Reco.html` `Store.save(key, data, text)` — the tail,
+`api.write_file('reco/' + key + '.json', text)` — for every member of
+`AppState.PERSIST_KEYS`, and `AppState._persistValue('recoSessions')`, which
+returns **the whole of** `AppState.recoSessionsOwned`.
+
+**What** *(Read off the code. NOT measured: a two-page probe was started and
+left hanging in `scratchpad/bridge/probes/p3_sessions.mjs`, and it is not worth
+holding the bridge round for. The Test paragraph below is the measurement this
+ticket wants first.)* `Store.loadAll` reads every session on the folder into
+`recoSessionsOwned`, including templates this window never opens, and
+`AppState.flush` writes all of them back. So window A, which has had T2's
+session in memory since boot and has not touched it, overwrites whatever window
+B has been doing in T2 all morning — with its own stale copy, unconditionally,
+and nobody is told. It is **T-S10-10's shape on a different file**, and a
+bigger one: §14.6 measures `recoSessions.json` at 24.6 MiB for one
+200,000-row template.
+
+**Why it is only a ticket** This round closed the shape on the path that has a
+merge — `Store._mergeJob`, i.e. the values store and the ledgers — because
+that path already has per-id intents that replay. `Store.save` has none: it
+writes a serialised snapshot of the whole key and there is nothing to replay
+onto a fresher read. The primitive it needs now EXISTS
+(`write_file_if_unchanged`, T-S10-10), so this is no longer blocked on the
+bridge; what it needs is a decision about what MERGING two windows' sessions
+means. Last-write-wins **per template id** is the obvious rule and is probably
+right — a session is one window's view of one reconciliation — but it is a rule
+about the operator's work and not a detail, so it is not a drive-by fix.
+
+**Fix** Give `Store.save` the same compare-and-swap loop `_mergeJob` has, with a
+per-key merge rule. For `recoSessions`: take the share as the authority per
+template id and keep only the ids this window has actually OPENED (there is
+already a notion of that — `AppState.activeRecoId` and the pane table), so an
+untouched template's session is never written back at all. The other
+PERSIST_KEYS want naming one at a time: `groupMaster`, `commentMaster`,
+`attachmentMaster` and `correctionMaster` are pk-keyed and merge the way
+`extraValueMaster` does; `recoTemplates` already has its own refusal
+(T-24R2-1).
+
+**Test** Two pages on one share, each with two templates loaded, each editing a
+DIFFERENT template, flushed in turn — then assert both edits are on
+`reco/recoSessions.json`. It fails today. `run_panes_e2e`'s byte-identity gate
+(base `5f61d76`) pins that file, so the change has to leave a single window's
+bytes alone, which is also the proof that the merge only fires where there is
+something to merge.
 
 ---
 
@@ -3499,7 +3605,44 @@ exactly those three, and `keyDriftCount` still reads 0 (it answers a different q
 
 ---
 
-## T-S10-28  `append_csv_rows`' widening branch is not cross-process safe, and that is a pre-existing hazard this round could only route around
+## T-S10-28  ~~`append_csv_rows`' widening branch is not cross-process safe~~  **FIXED** — both branches hold the OS's lock on the file
+
+> **FIXED.** `LauncherAPI.append_csv_rows` now holds a cross-process advisory
+> lock (`main._cross_process_lock`, `flock` on POSIX / `LockFile` on Windows,
+> on one file per path under `ROOT/.locks/`) across **both** branches — the
+> `header + missing` whole-file rewrite AND the plain append, because two
+> processes appending with `open(..., "a")` can interleave and because the
+> header read has to see the same file the append lands in.
+>
+> **MEASURED, the test this ticket asked for.** `scratchpad/bridge/probes/`
+> `p1_csvrace.py` (this ticket's own `b3_race.py`, unchanged in substance): a
+> 30,000-row pre-change day file, this build appending a signed row, a
+> colleague appending 0.00 / 0.15 / 0.40 / 0.80 s into the rewrite. **Before:**
+> `B_LOST: true` at 0.00 and 0.15, 30,001 rows where 30,002 were written, both
+> writers reporting success. **After: `B_LOST: false` at every timing**, which
+> is what this ticket's Test paragraph demanded. In pytest, cross-process, as
+> `test_a_colleagues_append_survives_the_widening_rewrite` — which **fails three
+> times out of three on the build before this round**, naming both writers'
+> success and the missing row. (It needed a barrier and a 60,000-row file: at
+> 4,000 rows the rewrite finished inside the two processes' own startup jitter
+> and the test passed on the broken code, which is worse than no test.)
+>
+> **WHAT IS STILL TRUE, AND IS WHY ROUND 8's B1 GUARD STAYS.** The lock only
+> helps where BOTH writers have it. An un-upgraded build's `append_csv_rows`
+> takes no lock, so its append can still land inside an upgraded build's
+> widening rewrite and be lost — and a mixed fleet is the normal state
+> (T-S10-12). So `Versioning._appendRows` goes on refusing to widen a day file
+> it did not create, and **[88] R19k2 / R19w** go on gating that. The guard
+> comes off when the fleet is uniform, which is a fact about a deployment that
+> no code can assert. Handover §14.5, §20.
+>
+> **AND ONE CLAIM THIS TICKET MADE WAS WRONG, corrected by the cleanup round
+> before this one:** history compaction is **not** an instance of this hazard.
+> It does not use `append_csv_rows` at all — `Versioning.compactFile` calls
+> `Versioning.writeFile`, one atomic whole-file write — so the measured loss
+> window here (a rewrite with a concurrent APPEND landing in the middle of it)
+> is not its shape. It is now also locked, like every other `write_file`.
+
 
 **Where** `main.py:683` — the `missing` branch of `LauncherAPI.append_csv_rows`, which rewrites the
 whole file; and `main.py:243` `_writing`, which is a per-path lock **inside one process**.

@@ -166,3 +166,18 @@ def test_pointer_roundtrip(tmp_path):
 @pytest.mark.parametrize("n,expected", [(0, "0 B"), (1536, "1.5 KB"), (5 * 1024 ** 3, "5.0 GB")])
 def test_human_size(n, expected):
     assert fm.human_size(n) == expected
+
+
+def test_write_locks_are_not_migrated(tmp_path):
+    """T-S10-10 / T-S10-28. The locks mean nothing outside the folder they were
+    taken in, and on Windows the source one may still be held."""
+    src = tmp_path / "src"
+    (src / "reco_data" / "T" / "Oct-26").mkdir(parents=True)
+    (src / "reco_data" / "T" / "Oct-26" / "19.csv").write_text("_pk\r\n1\r\n")
+    (src / "reco").mkdir()
+    (src / "reco" / "entryHistory.json").write_text("[]")
+    (src / ".locks").mkdir()
+    (src / ".locks" / "0123456789abcdef0123.lock").write_bytes(b"")
+    (src / ".locks" / "fedcba98765432100000.lock").write_bytes(b"")
+    names = sorted(rel.replace("\\", "/") for rel, _s, _m in fm.iter_files(str(src)))
+    assert names == ["reco/entryHistory.json", "reco_data/T/Oct-26/19.csv"]

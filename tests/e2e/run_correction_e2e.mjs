@@ -149,13 +149,25 @@ async function openReco(browser, bridge, file) {
        view preference never reaches the shared folder, and the folder is
        reached through exactly one call. */
     window.__writes = [];
-    if (window.pywebview && window.pywebview.api && window.pywebview.api.write_file) {
-      const rw = window.pywebview.api.write_file.bind(window.pywebview.api);
-      window.pywebview.api.write_file = function (p, text) {
-        window.__writes.push(String(p));
-        return rw(p, text);
+    /* BOTH WRITE DOORS. T-S10-10 added write_file_if_unchanged and the merge
+       writes go through it, so recording only write_file would let a view
+       preference reach the shared folder unnoticed - which is the one thing
+       T6 is about. */
+    const api0 = (window.pywebview || {}).api;
+    if (api0) ['write_file', 'write_file_if_unchanged'].forEach(nm => {
+      if (typeof api0[nm] !== 'function') return;
+      const rw = api0[nm].bind(api0);
+      /* FORWARD EXACTLY WHAT CAME IN, and nothing more: a wrapper with a fixed
+         (p, text, token) signature handed write_file a third argument that the
+         bridge does not take, and every recoTemplates save then failed with
+         "takes 3 positional arguments but 4 were given". The suite caught it
+         (this file's "no page or console errors" check), which is the reason
+         that check exists. */
+      api0[nm] = function () {
+        window.__writes.push(String(arguments[0]));
+        return rw.apply(api0, arguments);
       };
-    }
+    });
     /* Which additional columns were actually EVALUATED, by name. T4 cannot be
        written as "the 13th extra throws": _extraOwnValue CATCHES a throwing
        formula and returns '#ERR' (verified, apps/Reco.html _extraOwnValue), so

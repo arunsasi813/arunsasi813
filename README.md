@@ -26,6 +26,8 @@ The first start asks for the base folder. Later changes go through **📁 Base f
 
 > `main.py` was rebuilt from the bridge contract in the handover doc because the original launcher was not available. If you keep your own launcher, Reco still works with it (every new bridge method is optional); to add the folder migration to it, copy `folder_manager.py` and the base-folder methods of `LauncherAPI` (`get_folder_info`, `inspect_path`, `browse_folder`, `set_base_folder`, `initialize_folder`, `preflight_migration`, `start_migration`, `migration_status`, `cancel_migration`, `follow_pointer`) plus the settings modal in `HUB_HTML`.
 
+> **Two bridge methods are optional but worth copying, because without them two colleagues saving at the same moment can lose one of the two saves** — measured, in two processes, with both writers reporting success (T-S10-10). `read_file_with_token(rel)` returns `{text, token}`, the file and the sha256 of its bytes in one read; `write_file_if_unchanged(rel, text, token)` writes only while the file still holds what that token describes, and answers `{ok: false, reason: "changed"}` otherwise. Reco's merge writes use them where they exist and fall back to `write_file` where they do not, so an older launcher keeps working. Copy `_cross_process_lock`, `_content_token` and `_lock_file_for` with them (the locks are one file each under `ROOT/.locks/`, and `folder_manager.iter_files` skips that folder): the lock is what makes the check and the write one step, and it also belongs on `write_file` and on both branches of `append_csv_rows` (T-S10-28). See handover §20.
+
 ## Edit in Excel
 
 In a template's Reco view, **📗 Edit in Excel** writes the rows to a real Excel workbook (dropdowns for list columns, real dates and amounts, read-only columns greyed) and opens it in Microsoft Excel. Edit, press **Ctrl+S**, and Reco notices the save: click **Load back**, review the changes (and any conflicts with edits made in Reco meanwhile), and apply. Every applied change is recorded in the version history (`_src = excel:<id>`). **📗 Links** lists open workbooks; **Load from file…** loads a copy saved elsewhere. Without the new launcher (or without openpyxl) the workbook is downloaded instead and loaded back with *Load from file…* (no dropdowns). Details: handover §11.
@@ -261,8 +263,8 @@ node tests/e2e/run_jv_wizard_e2e.mjs    # the Special JV creator wizard, end to 
 
 Run them one at a time — each binds a fixed port block (`run_jv_core_unit.mjs` needs
 neither a port nor a browser, and takes about a second). All eighteen must pass:
-75 pytest cases (1 skipped), and `2,924` end-to-end checks — 250 + 73 + 41 + 65 + 94
-+ 107 + 100 + 147 + 170 + 726 + 163 + 304 + 256 + 123 + 79 + 107 + 119, in the order
+83 pytest cases (1 skipped), and `2,929` end-to-end checks — 250 + 73 + 41 + 65 + 94
++ 107 + 100 + 147 + 170 + 731 + 163 + 304 + 256 + 123 + 79 + 107 + 119, in the order
 above.
 
 Do **not** set `TMPDIR` for `pytest`. Six `tests/test_excel_link.py` cases decide

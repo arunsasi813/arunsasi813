@@ -262,7 +262,16 @@ async function openReco(browser, bridge, file) {
 const readToasts = page => page.evaluate(() => (window.__toasts || []).slice());
 const callLog = async bridge => (await (await fetch(bridge.url + '/__log')).json()).calls;
 const resetLog = async bridge => { await fetch(bridge.url + '/__reset_log', { method: 'POST' }); };
-const writesOf = (calls, rel) => calls.filter(c => c.method === 'write_file' && c.arg0 === rel).length;
+/* T-S10-10 PUT A SECOND WRITE DOOR ON THE BRIDGE, so every count of "how
+   many times did this file get written" has to name both. Store._mergeJob
+   calls write_file_if_unchanged where this launcher has it and falls back to
+   write_file where it does not (an older build), so a counter that names only
+   one of them reads ZERO against the other and every debounce gate below
+   passes vacuously - which is exactly how S2a, S10b, O9c and C3b first read
+   after the change. */
+const WRITE_METHODS = ['write_file', 'write_file_if_unchanged'];
+const isWrite = c => WRITE_METHODS.indexOf(c.method) !== -1;
+const writesOf = (calls, rel) => calls.filter(c => isWrite(c) && c.arg0 === rel).length;
 /* The day file this template's version rows go into, and its rows. Used by
    O1i, which asserts that an override writes NO Cn row (decision I). */
 const verFile = (root, folder) => {
@@ -1064,11 +1073,20 @@ const MR2_RUN = `(async function (arg) {
   const [down] = arg;
   const api = window.pywebview.api;
   const realWrite = api.write_file;
+  const realCas = api.write_file_if_unchanged;
   let faulting = true;
+  /* BOTH WRITE DOORS, because T-S10-10 added one and a real share that will
+     not take a write does not take it through either. Faulting only
+     write_file left this fixture measuring a write that never failed. */
   api.write_file = function (rel, txt) {
     if (faulting && String(rel) === 'reco/entryHistory.json')
       return Promise.reject(new Error('OSError: the shared folder refused the write'));
     return realWrite.apply(api, arguments);
+  };
+  if (typeof realCas === 'function') api.write_file_if_unchanged = function (rel) {
+    if (faulting && String(rel) === 'reco/entryHistory.json')
+      return Promise.reject(new Error('OSError: the shared folder refused the write'));
+    return realCas.apply(api, arguments);
   };
   const out = {};
   try {
@@ -1098,6 +1116,7 @@ const MR2_RUN = `(async function (arg) {
   } finally {
     faulting = false;
     api.write_file = realWrite;
+    api.write_file_if_unchanged = realCas;
   }
   /* The operator carries on working. Nothing retypes the entry. */
   for (let i = 0; i < 6; i++) {
@@ -1454,13 +1473,21 @@ const S109_SETUP = `(async function () {
    owed when the window closes. */
 const S109_TYPE_DOWN = `(async function (arg) {
   const [pairs] = arg;
+  /* BOTH READ DOORS. T-S10-10 gave the bridge read_file_with_token and the
+     merge read goes through it where the launcher has it, so faulting only
+     read_file left the share ANSWERING and this whole fixture measuring a
+     folder that was never down. */
   const realRead = window.pywebview.api.read_file;
+  const realReadTok = window.pywebview.api.read_file_with_token;
   window.__fault = true;
-  window.pywebview.api.read_file = function (rel) {
+  const downIfValues = (real) => function (rel) {
     if (window.__fault && /extraValue/.test(String(rel)))
       return Promise.reject(new Error('the shared folder did not answer'));
-    return realRead.apply(this, arguments);
+    return real.apply(window.pywebview.api, arguments);
   };
+  window.pywebview.api.read_file = downIfValues(realRead);
+  if (typeof realReadTok === 'function')
+    window.pywebview.api.read_file_with_token = downIfValues(realReadTok);
   window.__toasts = [];
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R');
   const sess = AppState.recoSessions.TPL_R;
@@ -1487,6 +1514,7 @@ const S109_TYPE_DOWN = `(async function (arg) {
   out.gate = asks;
   window.__fault = false;
   window.pywebview.api.read_file = realRead;
+  window.pywebview.api.read_file_with_token = realReadTok;
   return out;
 })`;
 
@@ -1496,13 +1524,21 @@ const S109_TYPE_DOWN = `(async function (arg) {
    colleague who holds the newer value. */
 const S109_RECOVER = `(async function (arg) {
   const [pairs] = arg;
+  /* BOTH READ DOORS. T-S10-10 gave the bridge read_file_with_token and the
+     merge read goes through it where the launcher has it, so faulting only
+     read_file left the share ANSWERING and this whole fixture measuring a
+     folder that was never down. */
   const realRead = window.pywebview.api.read_file;
+  const realReadTok = window.pywebview.api.read_file_with_token;
   window.__fault = true;
-  window.pywebview.api.read_file = function (rel) {
+  const downIfValues = (real) => function (rel) {
     if (window.__fault && /extraValue/.test(String(rel)))
       return Promise.reject(new Error('the shared folder did not answer'));
-    return realRead.apply(this, arguments);
+    return real.apply(window.pywebview.api, arguments);
   };
+  window.pywebview.api.read_file = downIfValues(realRead);
+  if (typeof realReadTok === 'function')
+    window.pywebview.api.read_file_with_token = downIfValues(realReadTok);
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R');
   const sess = AppState.recoSessions.TPL_R;
   await Reco.applyEdits(tpl, sess, pairs.map(([i, v]) => ({ row: sess.data[i], col: 'Vendor', value: v })),
@@ -1512,6 +1548,7 @@ const S109_RECOVER = `(async function (arg) {
   const out = { down: Store._jrnlRead().map(x => x.pk + '/' + x.col) };
   window.__fault = false;
   window.pywebview.api.read_file = realRead;
+  window.pywebview.api.read_file_with_token = realReadTok;
   /* NOTHING IS TYPED AGAIN: the retry budget is what has to carry it. */
   for (let i = 0; i < 12 && Store._jrnlRead().length; i++) {
     if (typeof Store.idle === 'function') await Store.idle();
@@ -1943,15 +1980,21 @@ const MR8_RUN = `(async function () {
   const id = 'TPL_E';
   const api = window.pywebview.api;
   const realWrite = api.write_file;
+  const realCas = api.write_file_if_unchanged;
   let slow = 0;
-  api.write_file = function (rel) {
+  /* BOTH WRITE DOORS (T-S10-10): the merge write goes through
+     write_file_if_unchanged on this launcher, so slowing only write_file left
+     nothing in flight and out.inflight read false. */
+  const slowly = (real) => function (rel) {
     const args = arguments;
     if (slow && String(rel) === 'reco/extraValueMaster.json') {
       const ms = slow;
-      return new Promise(res => setTimeout(() => res(realWrite.apply(api, args)), ms));
+      return new Promise(res => setTimeout(() => res(real.apply(api, args)), ms));
     }
-    return realWrite.apply(api, args);
+    return real.apply(api, args);
   };
+  api.write_file = slowly(realWrite);
+  if (typeof realCas === 'function') api.write_file_if_unchanged = slowly(realCas);
   const put = (pk, col, v) => {
     const rec = { k:'typed', v: String(v), ds:'', by:'x', at:'' };
     AppState.extraValueMaster = AppState.extraValueMaster || {};
@@ -1977,7 +2020,7 @@ const MR8_RUN = `(async function () {
     await new Promise(r => setTimeout(r, 250));
     await AppState.flush();
     if (typeof Store.idle === 'function') await Store.idle();
-  } finally { api.write_file = realWrite; }
+  } finally { api.write_file = realWrite; api.write_file_if_unchanged = realCas; }
   const mem = (AppState.extraValueMaster || {})[id] || {};
   out.mem = { one: ((mem['INV-1']||{}).Note||{}).v || null, two: ((mem['INV-2']||{}).Note||{}).v || null };
   return out;
@@ -2160,7 +2203,7 @@ try {
   });
   const logS2 = await callLog(bridgeA);
   const n2 = writesOf(logS2, 'reco/extraValueMaster.json');
-  note('write_file calls in this burst', logS2.filter(c => c.method === 'write_file').map(c => c.arg0));
+  note('write calls in this burst', logS2.filter(isWrite).map(c => c.method + ' ' + c.arg0));
   check(n2 === 1,
     'S2a after a tag edit PLUS an unrelated AppState.flush(), write_file for reco/extraValueMaster.json was called EXACTLY ONCE',
     { count: n2 });
@@ -2199,7 +2242,7 @@ try {
   check(writesOf(logS7, 'reco/extraValueMaster.json') === 0,
     'S7c an AppState.flush() with only an unrelated change does not write the store at all',
     { count: writesOf(logS7, 'reco/extraValueMaster.json'),
-      wrote: logS7.filter(c => c.method === 'write_file').map(c => c.arg0) });
+      wrote: logS7.filter(isWrite).map(c => c.arg0) });
   check(s7.saveKeys && !(s7.saveKeys.written || []).includes('extraValueMaster'),
     'S7d AppState.saveKeys ignores it too (it filters to PERSIST_KEYS), so S13 is the only writer', s7.saveKeys);
 
@@ -5833,13 +5876,18 @@ try {
     /* THE SHARE STOPS ANSWERING READS, for this file only - the ordinary
        weather of a network folder, injected at the api seam, which is where a
        dropped share really fails. */
+    /* BOTH READ DOORS - see the note on S109_TYPE_DOWN. */
     const realRead = window.pywebview.api.read_file;
+    const realReadTok = window.pywebview.api.read_file_with_token;
     window.__fault = true;
-    window.pywebview.api.read_file = function (rel) {
+    const downIfValues = (real) => function (rel) {
       if (window.__fault && /extraValue/.test(String(rel)))
         return Promise.reject(new Error('the shared folder did not answer'));
-      return realRead.apply(this, arguments);
+      return real.apply(window.pywebview.api, arguments);
     };
+    window.pywebview.api.read_file = downIfValues(realRead);
+    if (typeof realReadTok === 'function')
+      window.pywebview.api.read_file_with_token = downIfValues(realReadTok);
     window.__toasts = [];
     const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_K');
     const sess = AppState.recoSessions.TPL_K;
@@ -5863,6 +5911,7 @@ try {
     if (typeof Store.idle === 'function') await Store.idle();
     out.pendingAfter = AppState.pendingCount();
     window.pywebview.api.read_file = realRead;
+    window.pywebview.api.read_file_with_token = realReadTok;
     return out;
   });
   const sayDisk1 = diskJson(SAY.root, 'reco/extraValueMaster.json');
@@ -6910,7 +6959,7 @@ try {
   check(writesOf(logS101, 'reco/entryHistory.json') === 0
         && writesOf(logS101, 'reco/docNumberMaster.json') === 0,
     'S101c an AppState.flush() with only an unrelated change writes NEITHER ledger file',
-    logS101.filter(c => c.method === 'write_file').map(c => c.arg0));
+    logS101.filter(isWrite).map(c => c.arg0));
 
   /* Page B boots AFTER A's template and rows are on the share and BEFORE A
      posts anything, so its in-memory entryHistory pre-dates A's entry —
@@ -9075,13 +9124,21 @@ const R5_WARMUP = `(async function () {
 
 const R5_TYPE_DOWN_ONE = `(async function (arg) {
   const [idx, val] = arg;
+  /* BOTH READ DOORS. T-S10-10 gave the bridge read_file_with_token and the
+     merge read goes through it where the launcher has it, so faulting only
+     read_file left the share ANSWERING and this whole fixture measuring a
+     folder that was never down. */
   const realRead = window.pywebview.api.read_file;
+  const realReadTok = window.pywebview.api.read_file_with_token;
   window.__fault = true;
-  window.pywebview.api.read_file = function (rel) {
+  const downIfValues = (real) => function (rel) {
     if (window.__fault && /extraValue/.test(String(rel)))
       return Promise.reject(new Error('the shared folder did not answer'));
-    return realRead.apply(this, arguments);
+    return real.apply(window.pywebview.api, arguments);
   };
+  window.pywebview.api.read_file = downIfValues(realRead);
+  if (typeof realReadTok === 'function')
+    window.pywebview.api.read_file_with_token = downIfValues(realReadTok);
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R');
   const sess = AppState.recoSessions.TPL_R;
   await Reco.applyEdits(tpl, sess, [{ row: sess.data[idx], col:'Vendor', value:val }],
@@ -10652,6 +10709,7 @@ const R16_COST = `(async function (hasKeyExtra) {
 const PORT_R19  = 21482;   // R19 the key-rule signature, and the round trip
 const PORT_R19B = 21483;   // R19l the OLDER build, on a file this build wrote
 const PORT_R19Z = 21484;   // R19z compaction widens the day file; the header cache must follow
+const PORT_R20  = 21490;   // R20 T-S10-10/T-S10-28: the conditional write and the lock
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -11037,6 +11095,124 @@ const R19_WALK = (id) => `(async function () {
 })`;
 /* R19m: a save OUTSIDE the key rule must not move the signature.
    R19n: an unknown signature version is treated as absent. */
+/* ============================================================ [89] ====
+   T-S10-10 / T-S10-28. THE CONDITIONAL WRITE, FROM THE PAGE'S SIDE.
+
+   THE CROSS-PROCESS LOSS ITSELF IS NOT MEASURABLE HERE and that is said out
+   loud rather than fudged: this bridge is ONE python process with a threaded
+   HTTP server, so LauncherAPI._writing already serialises the two pages' writes
+   and the race cannot happen. The losses are measured where they live, in two
+   real processes, by pytest - tests/test_launcher.py
+   test_the_ledger_clobber_between_two_processes and
+   test_a_colleagues_append_survives_the_widening_rewrite, both of which FAIL on
+   the build before this round (the CSV one with both writers reporting success
+   and 60,001 rows where 60,002 were written).
+
+   WHAT IS MEASURED HERE IS THE PAGE'S HALF, which pytest cannot reach: that the
+   merge write really uses the token, that a collision is RETRIED and the
+   colleague's record survives the retry, that a `busy` answer is treated as a
+   failed write and not as a success, and that an older launcher with no
+   conditional write still saves. Counted as OPERATION COUNTS and never clocks
+   (handover 16.4a). */
+const R20_CAS = (id, settle) => `(async function () {
+  const I = ${JSON.stringify(id)};
+  const FILE = 'reco/extraValueMaster.json';
+  RecoTemplate.create(); const t = RecoTemplate._editing;
+  t.id = I; t.name = 'Cas' + I;
+  t.columns = ['Doc','Line','Amount'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Amount' }));
+  t.additionalColumns = [{ name:'Vendor', type:'custom' }];
+  t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Line','Amount','Vendor'];
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const real = window.confirm; window.confirm = () => true;
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  const tpl = AppState.recoTemplates.find(x => x.id === I);
+  RecoTemplate.open(tpl.id); AppState.activeRecoId = I;
+  /* FOUR rows, not three: each step below asserts on its OWN row, because
+     the share is read back after the whole fixture has run and a step that
+     re-used a row would be asserted against the LAST value written to it. */
+  await Reco.ingestData(tpl, [1,2,3,4].map(i => ({ Doc:'P'+i, Line:'L'+i, Amount:String(i) })),
+                        ['Doc','Line','Amount']);
+  App.closeModal(); ${settle}
+  const sess = AppState.recoSessions[I];
+  const api = window.pywebview.api;
+  const zero = () => { Store._casWrites = 0; Store._casRetries = 0; Store._casUnconditional = 0; };
+  const counts = () => ({ writes: Store._casWrites, retries: Store._casRetries,
+                          uncond: Store._casUnconditional });
+  const out = { present: { tok: typeof api.read_file_with_token,
+                           cas: typeof api.write_file_if_unchanged },
+                tries: Store._CAS_TRIES };
+
+  /* ---- 1. THE ORDINARY WRITE GOES THROUGH THE TOKEN AND RETRIES NOTHING. */
+  zero(); window.__toasts = [];
+  Reco.setTag(sess.data[0]._id, 'Vendor', 'v-plain');
+  ${settle}
+  out.plain = Object.assign(counts(), {
+    said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 90)) });
+
+  /* ---- 2. A COLLEAGUE WRITES BETWEEN THIS PAGE'S READ AND ITS WRITE, which
+     is the shape that loses an entry on the old bridge. The hook writes the
+     file through the UNCONDITIONAL write_file, exactly as another process
+     would, and arms itself once. */
+  const origRead = api.read_file_with_token;
+  let armed = (typeof origRead === 'function');
+  if (armed) {
+    api.read_file_with_token = async function (rel) {
+      const got = await origRead.call(api, rel);
+      if (armed && rel === FILE) {
+        armed = false;
+        let cur = {};
+        try { cur = JSON.parse((got && got.text) || '{}') || {}; } catch (e) { cur = {}; }
+        cur.COLLEAGUE = { PX: { Vendor: { k: 'typed', v: 'from-a-colleague',
+                                          ds: 'x', by: 'them', at: '2020-01-01T00:00:00.000Z' } } };
+        await api.write_file(FILE, JSON.stringify(cur, null, 2));
+      }
+      return got;
+    };
+  }
+  zero(); window.__toasts = [];
+  Reco.setTag(sess.data[1]._id, 'Vendor', 'v-collided');
+  ${settle}
+  out.collided = Object.assign(counts(), {
+    said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 90)) });
+  api.read_file_with_token = origRead;
+
+  /* ---- 3. A 'busy' ANSWER IS A FAILED WRITE, NOT A SUCCESS. One shot, then
+     the real call - so the value has to land on the RETRY and not be dropped. */
+  const origCas = api.write_file_if_unchanged;
+  let busyOnce = (typeof origCas === 'function');
+  if (busyOnce) {
+    api.write_file_if_unchanged = async function (rel, text, token) {
+      if (busyOnce && rel === FILE) { busyOnce = false; return { ok: false, token: '', reason: 'busy' }; }
+      return origCas.call(api, rel, text, token);
+    };
+  }
+  zero(); window.__toasts = [];
+  Reco.setTag(sess.data[2]._id, 'Vendor', 'v-busy');
+  ${settle}
+  out.busyFirst = Object.assign(counts(), {
+    said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 240)) });
+  ${settle}
+  out.busyThen = Object.assign(counts(), { stillOwed: AppState.pendingCount() });
+  api.write_file_if_unchanged = origCas;
+
+  /* ---- 4. AN OLDER LAUNCHER HAS NEITHER METHOD, and a mixed fleet is the
+     normal state (T-S10-12). The write must still land. */
+  const keepTok = api.read_file_with_token, keepCas = api.write_file_if_unchanged;
+  try {
+    delete api.read_file_with_token; delete api.write_file_if_unchanged;
+    api.read_file_with_token = undefined; api.write_file_if_unchanged = undefined;
+    zero(); window.__toasts = [];
+    Reco.setTag(sess.data[3]._id, 'Vendor', 'v-legacy');
+    ${settle}
+    out.legacy = Object.assign(counts(), {
+      said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 90)) });
+  } finally {
+    api.read_file_with_token = keepTok; api.write_file_if_unchanged = keepCas;
+  }
+  out.keys = (sess.data || []).map(r => r._pk);
+  return out;
+})`;
 const R19_NOTKEY = (id) => `(async function () {
   const I = ${JSON.stringify(id)};
   RecoTemplate.create(); const t = RecoTemplate._editing;
@@ -13636,6 +13812,71 @@ section(88, 'R19 T-S10-19 — THE KEY-RULE SIGNATURE: MINT -> DAY FILE -> REOPEN
   await va.ctx.close();
 }
 
+
+/* ============================================================ [89] ====
+   R20. T-S10-10 / T-S10-28. See the long note on R20_CAS: the cross-process
+   LOSS is measured by pytest, in two real processes; this measures the page's
+   half of the fix, which pytest cannot reach. */
+section(89, 'R20 T-S10-10/T-S10-28 — THE CONDITIONAL WRITE: THE TOKEN, THE RETRY, BUSY, AND AN OLDER LAUNCHER');
+{
+  const C = makeRoot('share-r20');
+  const brC = await startBridge(C.root, PORT_R20); procs.push(brC.proc);
+  const ca = await openReco(browser, brC);
+  const cas = await ca.page.evaluate(R20_CAS('TPL_C', R19_SETTLE) + '()');
+  note('R20 the merge write, with and against a colleague', cas);
+  const evm = () => diskJson(C.root, 'reco/extraValueMaster.json') || {};
+  const val = (tpl, pk) => String((((evm()[tpl] || {})[pk] || {}).Vendor || {}).v || '');
+
+  check(cas.present.tok === 'function' && cas.present.cas === 'function',
+    'R20a PREMISE: this launcher HAS the conditional write. Without it every check below would '
+    + 'pass on the unconditional path and measure nothing - which is how a fix that was never '
+    + 'wired up reads green', cas.present);
+
+  check(cas.plain.writes >= 1 && cas.plain.uncond === 0 && cas.plain.retries === 0
+        && val('TPL_C', 'P1') === 'v-plain'
+        && !cas.plain.said.some(x => /error/.test(x)),
+    'R20b THE ORDINARY MERGE WRITE GOES THROUGH THE TOKEN, AND COSTS NO RETRY. An operation count '
+    + 'and not a clock (handover 16.4a): Store._casWrites counts the conditional writes and '
+    + 'Store._casUnconditional the ones that fell back to write_file, so a build that quietly '
+    + 'stopped using the token reads ZERO in the first and non-zero in the second. The typed '
+    + 'value is read back off reco/extraValueMaster.json, not off a toast',
+    { counts: cas.plain, onShare: val('TPL_C', 'P1') });
+
+  check(cas.collided.retries >= 1 && val('TPL_C', 'P2') === 'v-collided'
+        && val('COLLEAGUE', 'PX') === 'from-a-colleague'
+        && !cas.collided.said.some(x => /error/.test(x)),
+    'R20c A COLLEAGUE WHO WRITES BETWEEN THIS PAGE\'S READ AND ITS WRITE IS NOT CLOBBERED, AND '
+    + 'THIS PAGE\'S VALUE IS NOT LOST EITHER - which is the whole of T-S10-10. The hook writes '
+    + 'the file through the UNCONDITIONAL write_file while the merge job holds a now-stale token, '
+    + 'exactly as another process would. The write is refused, Store._mergeJob re-reads, takes the '
+    + 'share as the authority again and REPLAYS THE SAME INTENTS on top - so BOTH records are on '
+    + 'reco/extraValueMaster.json afterwards, and the operator is told nothing, because nothing '
+    + 'went wrong. Reco._casRetries is how the retry is proved to have happened rather than the '
+    + 'collision having been missed',
+    { counts: cas.collided, mine: val('TPL_C', 'P2'), theirs: val('COLLEAGUE', 'PX') });
+
+  check(cas.busyFirst.said.some(x => /error/.test(x) && /still writing/.test(x))
+        && val('TPL_C', 'P3') === 'v-busy' && cas.busyThen.stillOwed === 0,
+    'R20d A \'busy\' ANSWER IS A FAILED WRITE AND IS SAID, NOT SWALLOWED. The bridge answers busy '
+    + 'when another PROCESS held the file past its ten-second wait; treating that as a success '
+    + 'would be the F11 shape again - a value the operator is told was saved and that is only in '
+    + 'this window. It goes down Store._mergeJob\'s ordinary write-failure path: the operator is '
+    + 'told, the intent STAYS BUFFERED, and the next flush retries it. So the value is on the '
+    + 'share by the end and AppState.pendingCount() is back to zero',
+    { first: cas.busyFirst, then: cas.busyThen, onShare: val('TPL_C', 'P3') });
+
+  check(cas.legacy.uncond >= 1 && cas.legacy.writes === 0
+        && val('TPL_C', 'P4') === 'v-legacy'
+        && !cas.legacy.said.some(x => /error/.test(x)),
+    'R20e AN OLDER LAUNCHER WITH NEITHER METHOD STILL SAVES, which is not a nicety: a mixed fleet '
+    + 'on one folder is the normal state (T-S10-12), and a page that refused to write against an '
+    + 'un-upgraded launcher would take the app read-only for whoever had not restarted yet. With '
+    + 'the two methods gone the write falls back to the unconditional write_file it always used - '
+    + 'no safer than before, and counted, so this degradation can never be mistaken for the fix '
+    + 'working', { counts: cas.legacy, onShare: val('TPL_C', 'P4') });
+
+  await ca.ctx.close();
+}
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
   check(allErrors.length === 0, 'U5 no page error across the whole run', allErrors.slice(0, 6));

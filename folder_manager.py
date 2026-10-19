@@ -189,6 +189,15 @@ def iter_files(root: str, exclude_top: Iterable[str] = (POINTER_FILE,)):
             # Excel owner files (~$Book.xlsx) are locked while a workbook is open.
             if name.startswith("~$"):
                 continue
+            # T-S10-10 / T-S10-28. The write locks (ROOT/.locks/*.lock,
+            # main.py _lock_file_for). They are empty, they mean nothing
+            # anywhere but the folder they were taken in, and on Windows the
+            # source one may be HELD by a window that is still open - which a
+            # copy of a byte-range-locked file can fail on. Skipped here, so
+            # the copy and the verify agree about them (both walks are this
+            # function).
+            if rel_dir.replace("\\", "/").split("/")[0] == ".locks":
+                continue
             full = os.path.join(dirpath, name)
             try:
                 st = os.stat(full)

@@ -23,6 +23,7 @@ import base64
 import contextlib
 import csv
 import datetime as _dt
+import errno
 import getpass
 import hashlib
 import hmac
@@ -39,6 +40,18 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
+# T-S10-10 / T-S10-28. The OS's own advisory file lock, whichever platform this
+# is. Imported here rather than per call so "this build cannot lock at all" is
+# one answer and not a surprise inside a write.
+try:
+    import fcntl as _fcntl           # POSIX
+except ImportError:                  # pragma: no cover - Windows
+    _fcntl = None
+try:
+    import msvcrt as _msvcrt         # Windows
+except ImportError:                  # pragma: no cover - POSIX
+    _msvcrt = None
+
 import folder_manager as fm
 
 __version__ = "2.0.0"
@@ -53,6 +66,29 @@ DEFAULT_ADMIN_PASSWORD = "admin123"
 PROTECTED_NAMES = {"pwd.txt"}
 LEGACY_FOLDER_KEYS = ("folder_path", "folder", "base_folder", "root", "path")
 ACCESS_TRUE = {"1", "y", "yes", "true", "x"}
+
+# T-S10-10 / T-S10-28. How long a write waits for another PROCESS to finish
+# with the same file before it gives up and says so. It is a wait, not a
+# staleness timeout: the lock is the OS's, so it is released when the holder
+# closes it OR DIES, and there is therefore no stale lock to break. Ten seconds
+# is far longer than any write this bridge performs (the longest measured is a
+# 672 ms whole-file rewrite of a 7.7 MB day file) and short enough that a
+# pathological holder cannot wedge the window for ever.
+LOCK_WAIT_S = 10.0
+# Errors that mean THIS FILESYSTEM CANNOT LOCK, as against "somebody holds it".
+# A share that cannot lock degrades to the behaviour before this change -
+# unlocked, so not worse - rather than refusing to save.
+LOCK_UNSUPPORTED = {errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL}
+
+
+class LockBusy(OSError):
+    """Another PROCESS held the file for longer than LOCK_WAIT_S.
+
+    Its own class and not a message to match on: write_file_if_unchanged turns
+    this one case into {ok: false, reason: "busy"} and lets every other OSError
+    through, and deciding that by searching the text of an exception is how a
+    reworded message quietly becomes an unhandled failure.
+    """
 
 log = logging.getLogger("hub")
 
@@ -134,6 +170,159 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     _atomic_write_bytes(path, (text or "").encode("utf-8"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# T-S10-10 / T-S10-28. WRITES THAT ARE SAFE BETWEEN PROCESSES, not just between
+# threads.
+#
+# LauncherAPI._writing is a per-path lock INSIDE one process. Two colleagues are
+# two processes on two machines, so it does not see them at all, and two things
+# were measured losing committed work with BOTH writers reporting success:
+#
+#   T-S10-10  the ledger. A reads reco/entryHistory.json, B reads it, A writes
+#             (its entry in), B writes (A's entry gone). Measured in two
+#             processes on a 1,000-entry ledger: an entry lost at every stagger
+#             tried, including 0 ms, and A's rows stay stamped POSTED on the
+#             share with nothing behind them.
+#   T-S10-28  the CSV. append_csv_rows rewrites the WHOLE file in its
+#             `header + missing` branch, and a colleague's append landing inside
+#             that rewrite is lost. Measured: 30,001 rows where 30,002 were
+#             written, at 0.00 s and 0.15 s into the rewrite.
+#
+# WHY THE OS's OWN LOCK AND NOT A LOCK FILE WHOSE EXISTENCE IS THE LOCK. That
+# shape is what T-S10-10 ruled out, and for a good reason: write_file cannot
+# fail on "already exists", so such a lock is only advisory, and a stale one
+# left by a page that crashed would block the ledger for everybody - a worse
+# failure than the one it replaces. An ADVISORY FILE LOCK (flock on POSIX,
+# LockFile on Windows) has no stale state at all: the kernel drops it when the
+# handle closes or the process dies. So there is no staleness timeout to decide
+# and nothing to break by hand.
+#
+# WHAT IT COVERS, AND WHAT IT DELIBERATELY DOES NOT. It is held inside ONE
+# bridge call and never crosses the JS boundary, so a page that throws between
+# two calls cannot leak it. That is why the ledger needs the token protocol as
+# well: the lock makes the check-and-write atomic, and the token is what tells
+# the caller its READ is out of date.
+LOCK_DIR = ".locks"
+
+
+def _lock_file_for(root: Path, path: Path) -> Path:
+    """The lock that guards `path`: one file under ROOT/.locks, named by the
+    hash of the path relative to ROOT.
+
+    IN ONE HIDDEN FOLDER AND NOT BESIDE THE DATA, and the first version of this
+    round got that wrong. A `.<name>.lock` sidecar beside each file is simpler -
+    no hashing, and LauncherAPI.list_files already skips dotfiles - but it
+    DOUBLES the file count in every folder the app writes to: 31 day files and
+    31 twins in a month folder. This shared folder is browsed by people (that
+    is the whole point of Version History, the Excel link and `_archive/`), so
+    that is a visible change to their folder for an implementation detail. Two
+    suites said so by going red: `run_jv_wizard` lists the engine folder and
+    `run_jv_gen` lists the archive, both through the real filesystem rather
+    than through list_files, and both saw the twins.
+
+    The name is the hash and not the path with separators replaced, because a
+    folder or reconciliation named with the separator character would then
+    collide with another one - and a collision here is two unrelated files
+    sharing a lock, which is a silent stall rather than a visible bug.
+
+    One lock per FILE, so two reconciliations never wait on each other. The
+    folder is skipped by a migration (folder_manager.iter_files): the locks are
+    empty, they mean nothing outside the folder they were taken in, and on
+    Windows the source one may still be HELD by an open window - which a copy
+    of a byte-range-locked file can fail on.
+    """
+    try:
+        rel = os.path.relpath(str(path), str(root))
+    except (ValueError, OSError):
+        rel = str(path)
+    rel = rel.replace("\\", "/")
+    return Path(root) / LOCK_DIR / (hashlib.sha1(rel.encode("utf-8")).hexdigest()[:20] + ".lock")
+
+
+@contextlib.contextmanager
+def _cross_process_lock(lock: Path, wait_s: float = LOCK_WAIT_S):
+    """Hold the OS's exclusive lock on `path` for the body. Yields whether it
+    is actually held.
+
+    Yields False - and does NOT raise - when this filesystem cannot lock
+    (ENOLCK/EOPNOTSUPP/ENOSYS/EINVAL, or the sidecar cannot be created, or this
+    Python has neither fcntl nor msvcrt). That degrades to the behaviour before
+    this change, which is unlocked but no worse, instead of refusing to save
+    onto a share that cannot lock.
+
+    Raises LockBusy (an OSError) when somebody else holds it for longer than
+    `wait_s`. That is deliberately NOT silent: the caller's write has not happened, and the
+    app's own owed-write machinery keeps the value and retries. A write that
+    quietly proceeded after giving up on the lock would be exactly the loss
+    this exists to stop.
+    """
+    fh = None
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock, "a+b")
+    except OSError:
+        fh = None
+    if fh is None or (_fcntl is None and _msvcrt is None):
+        yield False
+        return
+    held = False
+    try:
+        deadline = time.monotonic() + max(0.0, float(wait_s))
+        while True:
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                else:                                    # pragma: no cover - Windows
+                    fh.seek(0)
+                    _msvcrt.locking(fh.fileno(), _msvcrt.LK_NBLCK, 1)
+                held = True
+                break
+            except OSError as exc:
+                # On POSIX a filesystem that cannot lock says so by errno. On
+                # Windows a contended LK_NBLCK is the only OSError this call
+                # produces, so every one of them means "wait".
+                if _fcntl is not None and getattr(exc, "errno", None) in LOCK_UNSUPPORTED:
+                    break
+                if time.monotonic() >= deadline:
+                    raise LockBusy(
+                        f"Another window is still writing this file "
+                        f"(waited {wait_s:g}s). Nothing was written."
+                    ) from exc
+                time.sleep(0.02)
+        yield held
+    finally:
+        if held:
+            with contextlib.suppress(OSError):
+                if _fcntl is not None:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                else:                                    # pragma: no cover - Windows
+                    fh.seek(0)
+                    _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)
+        with contextlib.suppress(OSError):
+            fh.close()
+
+
+def _content_token(path: Path) -> str:
+    """Exactly which bytes `path` holds, or "" when it does not exist.
+
+    A HASH and not mtime+size, because both of those lie in the cases that
+    matter: mtime granularity on a network share can be coarser than the gap
+    between two saves, and a ledger entry replaced by another of the same
+    length leaves the size identical. The hash costs one pass over a file the
+    caller has just read anyway.
+    """
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except FileNotFoundError:
+        return ""
+    except IsADirectoryError as exc:
+        raise OSError(f"{path} is a folder, not a file") from exc
+    return "h1:" + h.hexdigest()
 
 
 def load_config() -> dict:
@@ -293,6 +482,10 @@ class LauncherAPI:
     def _read_text(self, path: Path) -> str:
         with open(path, "rb") as fh:
             return _decode(fh.read())
+
+    def _lock_for(self, path: Path) -> Path:
+        """The lock that guards `path` - see _lock_file_for."""
+        return _lock_file_for(self._root(), path)
 
     # ──────────────────────────────────────────────────────────────────────
     # Hub: state, users, apps
@@ -654,9 +847,75 @@ class LauncherAPI:
     def write_file(self, rel: str, data) -> bool:
         p = self._abs(rel)
         text = data if isinstance(data, str) else json.dumps(data, indent=2, ensure_ascii=False)
-        with self._writing(p):
+        # T-S10-28. The cross-process lock as well as the in-process one, so a
+        # plain overwrite cannot land in the middle of another window's
+        # whole-file rewrite (append_csv_rows' widening branch, or a
+        # compaction). It is still an UNCONDITIONAL overwrite: callers that
+        # must not clobber a colleague use write_file_if_unchanged below.
+        with self._writing(p), _cross_process_lock(self._lock_for(p)):
             _atomic_write_text(p, text)
         return True
+
+    # ---- T-S10-10. The conditional write, and the token it compares ----------
+    def file_token(self, rel: str) -> str:
+        """Which bytes the file holds now, or "" when it does not exist."""
+        return _content_token(self._abs(rel))
+
+    def read_file_with_token(self, rel: str) -> dict:
+        """{"text": ..., "token": ...} - the file and the identity of what was
+        read, in ONE read, so a caller can write it back conditionally.
+
+        Hand the token to write_file_if_unchanged. Reading the text and then
+        asking file_token separately would be two reads with a window between
+        them, which is the bug this is here to close.
+        """
+        p = self._abs(rel)
+        if not p.is_file():
+            if not os.path.isdir(self._root()):
+                raise OSError(f"The base folder is not reachable: {self.folder_path}")
+            return {"text": "", "token": ""}
+        with open(p, "rb") as fh:
+            raw = fh.read()
+        h = hashlib.sha256()
+        h.update(raw)
+        return {"text": _decode(raw), "token": "h1:" + h.hexdigest()}
+
+    def write_file_if_unchanged(self, rel: str, data, token: str = "") -> dict:
+        """Write only while the file still holds what `token` describes.
+
+        {"ok": True,  "token": "<the new one>"}                      - written
+        {"ok": False, "token": "<what it holds now>", "reason": "changed"}
+                                        - somebody else wrote since the read;
+                                          re-read, replay the intents, try again
+        {"ok": False, ..., "reason": "busy"}
+                                        - another PROCESS held the file for
+                                          longer than LOCK_WAIT_S
+
+        THE CHECK AND THE WRITE ARE INSIDE ONE CROSS-PROCESS LOCK, which is
+        what makes this a compare-and-swap rather than a narrower race: without
+        the lock, two processes could both pass the check and both replace.
+
+        `token` is "" for "I expect this file not to exist yet", so the first
+        writer of a ledger cannot clobber a second one that got there first.
+        An absent/None token is NOT treated as "write anyway": that would make
+        a caller that forgot the token silently as dangerous as write_file.
+        """
+        p = self._abs(rel)
+        text = data if isinstance(data, str) else json.dumps(data, indent=2, ensure_ascii=False)
+        want = "" if token is None else str(token)
+        try:
+            with self._writing(p), _cross_process_lock(self._lock_for(p)) as locked:
+                have = _content_token(p)
+                if have != want:
+                    return {"ok": False, "token": have, "reason": "changed", "locked": locked}
+                _atomic_write_text(p, text)
+                return {"ok": True, "token": _content_token(p), "locked": locked}
+        except LockBusy as exc:
+            # The ONE case that becomes an answer rather than a throw, because
+            # the caller can do something with it (retry on a timer with the
+            # value still owed). Every other OSError goes on past the caller
+            # the way write_file's does.
+            return {"ok": False, "token": "", "reason": "busy", "detail": str(exc)}
 
     def append_csv_rows(self, rel: str, fields: list | None, rows: list | None) -> int:
         """Append rows (dicts) to a CSV without rewriting it.
@@ -669,7 +928,16 @@ class LauncherAPI:
         fields = [str(f) for f in (fields or [])]
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         wanted = list(dict.fromkeys(fields + [k for r in rows for k in r.keys()]))
-        with self._writing(p):
+        # T-S10-28. THE CROSS-PROCESS LOCK, AND IT COVERS BOTH BRANCHES.
+        # The `missing` branch rewrites the whole file, and a colleague's append
+        # landing inside that rewrite was measured lost - 30,001 rows where
+        # 30,002 were written, at 0.00 s and 0.15 s in, with both writers
+        # reporting success. The plain append branch takes it too: two
+        # processes appending with open(..., "a") can interleave their writes,
+        # and the header read above has to see the same file the append lands
+        # in. Versioning._fields's own comment has warned about this rewrite
+        # for rounds.
+        with self._writing(p), _cross_process_lock(self._lock_for(p)):
             text = self._read_text(p) if p.is_file() and p.stat().st_size > 0 else ""
             header = next(csv.reader(io.StringIO(text)), None) if text else None
             if not header:

@@ -291,3 +291,214 @@ def test_save_dialog_returns_plain_path(api, monkeypatch, tmp_path):
     assert api.show_save_dialog("out.csv").endswith("out.csv")
     api._set_window(_FakeWindow(None))                          # cancelled
     assert api.show_save_dialog("out.csv") == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# T-S10-10 / T-S10-28. Writes that are safe between PROCESSES.
+#
+# LauncherAPI._writing is a per-path lock inside ONE process, and two colleagues
+# are two processes on two machines. Both tickets were measured losing committed
+# work with BOTH writers reporting success, so the cases that matter here are
+# the cross-process ones and they are run with subprocess, not threads: a
+# threaded version of either test passes on the old code and proves nothing.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# A BARRIER, because without one the two processes' startup jitter is longer
+# than the thing being measured and the test passes on the broken code. Each
+# worker touches <gate>.<who>.ready and then waits for <gate>.go, so both are
+# inside LauncherAPI before either writes.
+_WORKER = r'''
+import json, os, sys, time
+sys.path.insert(0, %r)
+import main
+cfg, rel, who, hold, mode, gate = sys.argv[1:7]
+api = main.LauncherAPI(config_path=cfg)
+open(gate + "." + who + ".ready", "wb").close()
+while not os.path.exists(gate + ".go"):
+    time.sleep(0.002)
+out = {"who": who, "refused": 0, "ok": False}
+if mode == "csv":
+    time.sleep(float(hold))
+    fields = json.loads(sys.argv[7])
+    out["n"] = api.append_csv_rows(rel, fields, [{"_pk": who, "_ver": "C1", "Doc": who}])
+    out["ok"] = True
+else:
+    for attempt in range(12):
+        got = api.read_file_with_token(rel)
+        hist = json.loads(got["text"]) if got["text"].strip() else []
+        if attempt == 0:
+            time.sleep(float(hold))          # the window both pages sit in
+        hist.append({"accountingId": who})
+        res = api.write_file_if_unchanged(rel, json.dumps(hist), got["token"])
+        if res.get("ok"):
+            out["ok"] = True
+            break
+        out["refused"] += 1
+        out["reason"] = res.get("reason")
+print(json.dumps(out))
+'''
+
+
+def _two_processes(tmp_path, root, rel, mode, hold, extra=None):
+    """Run two LauncherAPIs against one file in two real processes."""
+    import subprocess
+    import time as _time
+    w = tmp_path / "worker.py"
+    w.write_text(_WORKER % str(Path(__file__).resolve().parents[1]))
+    cfg = tmp_path / "wcfg.json"
+    cfg.write_text(json.dumps({"folder_path": str(root)}))
+    gate = tmp_path / ("gate_" + mode)
+    who2 = ("A-ENTRY", "B-ENTRY")
+    procs = []
+    for i, who in enumerate(who2):
+        argv = [sys.executable, "-I", str(w), str(cfg), rel, who,
+                str(hold if i else 0.0), mode, str(gate)]
+        if extra:
+            argv.append(extra[i])
+        procs.append(subprocess.Popen(argv, stdout=subprocess.PIPE, text=True))
+    deadline = _time.monotonic() + 60
+    while _time.monotonic() < deadline:
+        if all(Path(str(gate) + "." + w2 + ".ready").exists() for w2 in who2):
+            break
+        _time.sleep(0.005)
+    Path(str(gate) + ".go").write_bytes(b"")
+    return [json.loads(p.communicate()[0].strip() or "{}") for p in procs]
+
+
+def test_content_token_is_the_bytes_and_not_the_clock(api, root):
+    rel = "reco/tok.json"
+    assert api.file_token(rel) == ""            # absent is its own answer
+    api.write_file(rel, '{"a":1}')
+    t1 = api.file_token(rel)
+    assert t1.startswith("h1:") and len(t1) == 67
+    # Re-writing the SAME bytes leaves the token alone: it describes content,
+    # so a save that changed nothing cannot refuse a colleague's next write.
+    api.write_file(rel, '{"a":1}')
+    assert api.file_token(rel) == t1
+    # ...and a change of the same LENGTH moves it, which mtime+size would not
+    # reliably see on a share.
+    api.write_file(rel, '{"a":2}')
+    assert api.file_token(rel) != t1
+    got = api.read_file_with_token(rel)
+    assert got["text"] == '{"a":2}' and got["token"] == api.file_token(rel)
+
+
+def test_write_file_if_unchanged_refuses_a_stale_token(api, root):
+    rel = "reco/cas.json"
+    first = api.write_file_if_unchanged(rel, "[]", "")      # "" = expect no file
+    assert first["ok"] and first["token"] == api.file_token(rel)
+    stale = first["token"]
+    assert api.write_file_if_unchanged(rel, '["mine"]', stale)["ok"]
+    # Somebody else's write moved it; the stale token must now be refused and
+    # the refusal must hand back what the file HOLDS, so the caller can re-read.
+    res = api.write_file_if_unchanged(rel, '["clobber"]', stale)
+    assert res["ok"] is False and res["reason"] == "changed"
+    assert res["token"] == api.file_token(rel)
+    assert json.loads(api.read_file(rel)) == ["mine"]
+    # An empty token against a file that EXISTS is refused too, so a first
+    # writer cannot clobber a second one that got there first.
+    assert api.write_file_if_unchanged(rel, "[]", "")["ok"] is False
+
+
+def test_the_ledger_clobber_between_two_processes(api, root, tmp_path):
+    """T-S10-10. Two pages pressing Generate together keep both entries."""
+    rel = "reco/entryHistory.json"
+    api.write_file(rel, json.dumps([{"accountingId": "AE%05d" % i} for i in range(200)]))
+    said = _two_processes(tmp_path, root, rel, "ledger", 0.25)
+    hist = json.loads(api.read_file(rel))
+    ids = {e.get("accountingId") for e in hist}
+    assert all(s["ok"] for s in said), said
+    assert {"A-ENTRY", "B-ENTRY"} <= ids, said
+    assert len(hist) == 202
+    # ...and the retry really happened, so this is not passing because the two
+    # processes never overlapped. Exactly one of them had to re-read.
+    assert sum(s["refused"] for s in said) >= 1, said
+
+
+def test_a_colleagues_append_survives_the_widening_rewrite(api, root, tmp_path):
+    """T-S10-28. append_csv_rows' `header + missing` branch rewrites the whole
+    file; an append landing inside that rewrite used to be lost."""
+    rel = "reco_data/T/Oct-26/19.csv"
+    pre = ["_pk", "_ver", "_ts", "Doc"]
+    body = io.StringIO()
+    w = csv.writer(body, lineterminator="\r\n")
+    w.writerow(pre)
+    # Big enough that the whole-file rewrite is the longest thing happening:
+    # at 4,000 rows it finished inside the processes' own startup jitter and
+    # this test PASSED on the broken code, which is worse than no test.
+    for i in range(60000):
+        w.writerow(["K%d" % i, "upload", "2026-10-19T08:00:00.000Z", "D%d" % i])
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text(body.getvalue(), encoding="utf-8", newline="")
+    # A widens the header (a new control column); B appends against the old one.
+    said = _two_processes(tmp_path, root, rel, "csv", 0.0,
+                          extra=[json.dumps(pre + ["_pksig"]), json.dumps(pre)])
+    rows = list(csv.DictReader(io.StringIO(api.read_file(rel))))
+    got = {r["_pk"] for r in rows if r["_ver"] == "C1"}
+    assert all(s["ok"] for s in said), said
+    assert got == {"A-ENTRY", "B-ENTRY"}, said
+    assert len(rows) == 60002
+
+
+def test_a_share_that_cannot_lock_still_saves(api, root, monkeypatch):
+    """The degradation is deliberate: unlocked is no worse than before this
+    change, and refusing to save onto such a share would be much worse."""
+    import errno as _errno
+
+    def cannot_lock(*a, **kw):
+        raise OSError(_errno.ENOLCK, "no locks on this filesystem")
+
+    monkeypatch.setattr(main, "_fcntl", type("F", (), {
+        "flock": staticmethod(cannot_lock), "LOCK_EX": 2, "LOCK_NB": 4, "LOCK_UN": 8})())
+    rel = "reco/nolock.json"
+    assert api.write_file(rel, '{"a":1}') is True
+    res = api.write_file_if_unchanged(rel, '{"a":2}', api.file_token(rel))
+    assert res["ok"] and res["locked"] is False
+    assert json.loads(api.read_file(rel)) == {"a": 2}
+
+
+def test_the_locks_live_in_one_hidden_folder_and_not_beside_the_data(api, root):
+    """The first version of this round put a `.<name>.lock` sidecar beside each
+    file, which doubled the file count in every folder the app writes to - and
+    this shared folder is browsed by people. One hidden folder instead, named
+    by the hash of the path relative to ROOT."""
+    rel = "reco_data/T/Nov-26/01.csv"
+    api.append_csv_rows(rel, ["_pk"], [{"_pk": "1"}])
+    # nothing new beside the data, through list_files OR the real filesystem
+    assert [f["name"] for f in api.list_files("reco_data/T/Nov-26")] == ["01.csv"]
+    assert sorted(c.name for c in (root / rel).parent.iterdir()) == ["01.csv"]
+    # ...and exactly one lock, under ROOT/.locks
+    locks = sorted(c.name for c in (root / main.LOCK_DIR).iterdir())
+    assert locks == [main._lock_file_for(root, root / rel).name]
+    assert len(locks[0]) == 25 and locks[0].endswith(".lock")   # 20 hex + ".lock"
+    # The NAME is the hash of the relative path, so two files that differ only
+    # by a separator-looking character cannot share a lock.
+    a = main._lock_file_for(root, root / "reco_data/A__B/x.csv")
+    b = main._lock_file_for(root, root / "reco_data/A/B/x.csv")
+    assert a != b
+
+
+def test_a_busy_lock_is_its_own_answer_and_not_a_throw(api, root, monkeypatch):
+    """The lock WAIT running out is the one OSError that becomes an answer, and
+    it is decided by the exception's CLASS: deciding it by searching the text of
+    a message is how a reworded message quietly becomes an unhandled failure."""
+    rel = "reco/busy.json"
+    api.write_file(rel, "{}")
+    tok = api.file_token(rel)
+
+    def always_busy(*a, **kw):
+        raise main.LockBusy("Another window is still writing busy.json (waited 10s).")
+
+    monkeypatch.setattr(main, "_cross_process_lock", always_busy)
+    res = api.write_file_if_unchanged(rel, '{"a":1}', tok)
+    assert res == {"ok": False, "token": "", "reason": "busy",
+                   "detail": "Another window is still writing busy.json (waited 10s)."}
+    assert json.loads(api.read_file(rel)) == {}          # nothing was written
+
+    # ...and any OTHER OSError still goes on past the caller.
+    def other_error(*a, **kw):
+        raise OSError("the share went away")
+
+    monkeypatch.setattr(main, "_cross_process_lock", other_error)
+    with pytest.raises(OSError, match="the share went away"):
+        api.write_file_if_unchanged(rel, '{"a":2}', tok)

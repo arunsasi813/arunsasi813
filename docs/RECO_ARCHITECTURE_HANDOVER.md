@@ -662,7 +662,7 @@ R1–R6 (F3, F10, F1, F5, F4, F9) and [41]–[48] X1–X8 (F11/F19, F17, F12, F2
 `run_store_e2e` held **378 passed / 0 failed** when this section was written, and is the suite
 that holds all three features' gates — **plus sections [49]–[53]**, which the money round added
 (Z1, T-26-5, T-26-6, T-S10-1, T-30-3; see §16), and [54]–[88] from the five rounds after it. **It
-is at 726 today**; §18 and §19 carry the round-by-round arithmetic. The figure is written as history on
+is at 731 today**; §18, §19 and §20 carry the round-by-round arithmetic. The figure is written as history on
 purpose: a bare count in a feature write-up goes stale on the next round and then reads as a claim
 about the suite rather than a note about when the feature landed.
 
@@ -2397,10 +2397,13 @@ end-to-end checks (378 + 304 + 254 + 250 + 170 + 163 + 147 + 123 + 119 + 107 + 1
 + 73 + 65 + 41), with `pytest` — the eighteenth suite — at 75 passed / 1 skipped. Every suite was
 at or above its `4b8fd90` count; not one went down.
 
-> **CURRENT, re-measured on this tree:** `run_store_e2e` **726**, the seventeen node suites
-> **2,924**, `pytest` 75 passed / 1 skipped. Store went 378 → 441 → 508 → 582 → 598 → 638 → 672 →
-> 694 across the money round and the seven data-loss rounds (§16, §18), then 714 → 724 → 726 across
-> round 8's build, its review pass and the cleanup round (§19, §19.8, §19.9). **The cost table above was
+> **CURRENT, re-measured on this tree:** `run_store_e2e` **731**, the seventeen node suites
+> **2,929**, `pytest` **83 passed / 1 skipped**. Store went 378 → 441 → 508 → 582 → 598 → 638 →
+> 672 → 694 across the money round and the seven data-loss rounds (§16, §18), then 714 → 724 → 726
+> across round 8's build, its review pass and the cleanup round (§19, §19.8, §19.9), then **731**
+> with the bridge round's [89] (§20). `pytest` went 75 → 83 in that last round, which is the first
+> time it moved in nine rounds: the losses it closes are CROSS-PROCESS, and pytest is the only
+> suite that can run two processes. **The cost table above was
 > NOT re-measured on this tree** — the figures in it are from the tree that produced the 378, and
 > `XlSchema.build`'s 18x regression (T-26-7) is still open, so they are the right order of
 > magnitude and the wrong decimal. Re-measure before resting an argument on one; §16.4a is the rule
@@ -5122,3 +5125,159 @@ md5 was the same before and after the whole net. Disk 30% at every reading.
 
 
 
+
+## 20. The bridge round — T-S10-10 and T-S10-28: writes that are safe between PROCESSES
+
+**`main.py` had never been edited by any of the nine rounds before this one**, by their own
+self-imposed scope, and both of these tickets said in their **Why it is only a ticket** paragraph
+that the fix was in there. So they stayed open while every other door was closed around them. This
+round opened that file.
+
+### 20.1 What was wrong, measured first, in two real processes
+
+`LauncherAPI._writing` is a per-path lock **inside one process**. Two colleagues are two processes
+on two machines, so it does not see them at all. Both losses were reproduced before anything was
+changed, with `subprocess` and not threads — a threaded version of either passes on the broken code
+and proves nothing.
+
+| | probe | before | after |
+|---|---|---|---|
+| **T-S10-10** the ledger | `scratchpad/bridge/probes/p2_jsonrace.py`, 1,000 entries | an entry lost at **every** stagger, 0 ms included, **both writers reporting success** | 1,002 of 1,002, one process refusing once and succeeding on the retry |
+| **T-S10-28** the CSV | `p1_csvrace.py` (T-S10-28's own `b3_race.py`), 30,000 rows | `B_LOST` at 0.00 s and 0.15 s — 30,001 rows where 30,002 were written | `B_LOST: false` at 0.00 / 0.15 / 0.40 / 0.80 s |
+
+In the ledger case nobody is told, and **the rows stay stamped POSTED on the share with nothing
+behind them**, which is what makes it the worst of the open tickets rather than a tidiness one.
+
+### 20.2 The lock, and why it is the OS's and not a lock FILE
+
+T-S10-10 ruled out the lock-file shape and was right: `write_file` cannot fail on "already
+exists", so such a lock is only advisory, and **a stale one left by a page that crashed would block
+the ledger for everybody** — a worse failure than the one it replaces.
+
+`main._cross_process_lock` uses the **OS's own advisory file lock** instead (`fcntl.flock` on
+POSIX, `msvcrt.locking` on Windows) on one file per path under `ROOT/.locks/` (see below for why
+it is one folder and not a sidecar beside each file). The kernel drops it when the handle closes **or the process dies**, so there is no stale
+state at all: no staleness timeout to decide, nothing to break by hand. What remains is a **wait**
+(`LOCK_WAIT_S`, ten seconds — far longer than the longest write this bridge performs, a 672 ms
+whole-file rewrite of a 7.7 MB day file, and short enough that a pathological holder cannot wedge
+the window).
+
+Three properties were chosen deliberately and each has a test:
+
+- **It is held inside ONE bridge call and never crosses the JS boundary**, so a page that throws
+  between two calls cannot leak it. That is also why the ledger needs the token as well as the
+  lock.
+- **A share that cannot lock degrades to unlocked** (`ENOLCK` / `EOPNOTSUPP` / `ENOSYS` /
+  `EINVAL`, or no `fcntl` and no `msvcrt`, or the lock file cannot be created) — no worse than before
+  this change, and far better than refusing to save. `test_a_share_that_cannot_lock_still_saves`.
+- **A wait that runs out raises `main.LockBusy`**, and the caller treats it as a failed write. A
+  write that quietly proceeded after giving up on the lock would be exactly the loss this exists to
+  stop. It is **its own exception class** and not a message to match on: `write_file_if_unchanged`
+  turns this one case into `{ok: false, reason: "busy"}` and lets every other `OSError` through, and
+  deciding that by searching the text of an exception is how a reworded message quietly becomes an
+  unhandled failure. (The first version of this round did match on the text; the class and
+  `test_a_busy_lock_is_its_own_answer_and_not_a_throw` replaced it, and the test asserts both
+  directions.)
+
+**WHERE THE LOCKS LIVE, AND THE FIRST VERSION OF THIS ROUND GOT IT WRONG.** They are one file each
+under **`ROOT/.locks/`**, named by the sha1 of the path relative to ROOT. The first version put a
+`.<name>.lock` **sidecar beside each file**: simpler — no hashing, and `LauncherAPI.list_files`
+already skips dotfiles — but it **doubles the file count in every folder the app writes to**, 31
+day files and 31 twins in a month folder. This shared folder is browsed by people; that is the
+whole point of Version History, the Excel link and `_archive/`. So that is a visible change to
+their folder for an implementation detail. **Two suites said so by going red**, both listing the
+real filesystem rather than going through `list_files`: `run_jv_wizard`'s "the engine was seeded
+once and only once" saw `.jv-core-1.0.0.js.lock` beside the engine, and `run_jv_gen`'s R-19 saw
+them in the archive. The name is the **hash** and not the path with its separators replaced,
+because a reconciliation named with the separator character would then collide with another one —
+and a collision here is two unrelated files sharing a lock, a silent stall rather than a visible
+bug. `test_the_locks_live_in_one_hidden_folder_and_not_beside_the_data` asserts both halves.
+
+Granularity stays **one lock per file**, so two reconciliations never wait on each other.
+`folder_manager.iter_files` **skips the whole `.locks` directory** on a folder migration: the locks
+are empty, they mean nothing outside the folder they were taken in, and on Windows the source one
+may still be HELD by an open window — which a copy of a byte-range-locked file can fail on. The
+copy and the verify are the same walk, so they agree about it.
+
+### 20.3 The token, which is what actually closes the ledger
+
+**The lock is NOT the fix for T-S10-10, and the probe says so in both directions.** Both pages have
+already READ before either writes, so serialising the writes just decides which one wins: with the
+lock and the plain `write_file`, `p2_jsonrace.py` still loses an entry at every stagger. What
+closes it is a compare-and-swap:
+
+- `LauncherAPI.read_file_with_token(rel)` → `{text, token}` — the file and the **sha256 of its
+  bytes**, in ONE read. Reading the text and then asking for the token separately would be two
+  reads with a window between them, which is the bug.
+- `LauncherAPI.write_file_if_unchanged(rel, text, token)` → `{ok, token, reason}` — the check and
+  the write **inside the lock**, so two processes cannot both pass the check and both replace.
+  `reason` is `changed` (re-read and replay) or `busy` (the wait ran out).
+- A **hash and not mtime+size**, because both of those lie in the cases that matter: mtime
+  granularity on a share can be coarser than the gap between two saves, and a ledger entry replaced
+  by another of the same length leaves the size identical.
+  `test_content_token_is_the_bytes_and_not_the_clock` asserts both halves, including that
+  re-writing the SAME bytes leaves the token alone.
+- `token: ""` means **"I expect this file not to exist yet"**, so the first writer of a ledger
+  cannot clobber a second one that got there first. An absent token is not "write anyway" — that
+  would make a caller who forgot the token silently as dangerous as `write_file`.
+
+`Store._mergeJob` is now that loop. On a `changed` refusal it re-reads, takes the share as the
+authority again (`Store._takeDisk`) and **replays the same intents on top**, up to
+`Store._CAS_TRIES` (8). That is sound rather than lucky because the intents were built to be
+idempotent and to re-find what they mutate **by id** — the property T-S10-1 and the settle round
+already rely on. `answering` is captured once, before the loop, and deliberately not recomputed: an
+intent that arrives during a retry must not be applied by a job that is about to clear only the
+first `answering` of them, which is MR-8's loss from the other direction.
+
+### 20.4 What this round did NOT change
+
+- **Round 8's B1 guard stays.** `Versioning._appendRows` goes on refusing to widen a day file it
+  did not create, and **[88] R19k2 / R19w** go on gating that. The lock only helps where BOTH
+  writers have it, and an un-upgraded build takes none — so on a mixed fleet, which is the normal
+  state (T-S10-12), the widening rewrite is still unsafe. The guard comes off when the fleet is
+  uniform, which is a fact about a deployment that no code can assert.
+- **The whole-file `PERSIST_KEYS` writes are untouched**, and that is **T-S10-31**, filed by this
+  round: `Store.save` writes a serialised snapshot with no intents to replay, so it needs a merge
+  RULE before it can use the primitive that now exists. `reco/recoSessions.json` is the one that
+  matters, and it is read off the code rather than measured.
+- **`write_file` is still an unconditional overwrite.** It takes the lock, so it cannot land inside
+  another process's multi-step operation, but callers that must not clobber a colleague use
+  `write_file_if_unchanged`. Making `write_file` itself conditional would break every caller that
+  legitimately replaces a file.
+
+### 20.5 The gates, and the one that needed a barrier
+
+**pytest, where the losses live:** seven new cases in `tests/test_launcher.py` and one in
+`tests/test_folder_manager.py`. **All of them fail on the build before this round and all of them
+pass on it** (`7 failed, 37 passed` → `0 failed, 44 passed` for the seven that existed when that
+was measured), and
+`test_a_colleagues_append_survives_the_widening_rewrite` fails **three times out of three**, naming
+both writers' success and the missing row.
+
+**That test needed two things to stop being vacuous.** A **barrier** (each worker touches a
+`.ready` file and waits for `.go`), because without one the two processes' startup jitter is longer
+than the thing being measured; and a **60,000-row file**, because at 4,000 rows the rewrite
+finished inside that jitter and the test PASSED on the broken code — which is worse than no test.
+Both are written down in the test.
+
+**`run_store_e2e` [89] R20a–R20e, the page's half, which pytest cannot reach.** The cross-process
+loss is *not* measurable in the e2e bridge and that is said in the section rather than fudged: it
+is one python process with a threaded server, so `_writing` already serialises the two pages. What
+[89] measures instead: that the token is really used (`Store._casWrites` / `_casRetries` /
+`_casUnconditional`, operation counts and never clocks, §16.4a); that a colleague writing between
+this page's read and its write is **not clobbered and does not clobber** (both records on the share
+afterwards, with the retry counted so the collision cannot have been missed); that `busy` is said
+and the value lands on the retry with `pendingCount()` back to zero; and that an older launcher
+with neither method still saves (`_casUnconditional` non-zero, so the degradation can never be
+mistaken for the fix working).
+
+**AND THE SECOND WRITE DOOR BROKE THIRTY-THREE EXISTING CHECKS, which is the useful part of this
+section.** Every fixture that counted "how many times did this file get written" named
+`write_file`, and every fixture that faulted "the share did not answer" faulted `read_file`. The
+merge now goes through `read_file_with_token` and `write_file_if_unchanged`, so those counters read
+**zero** and those faults **never fired** — so the debounce gates (S2a, S10b, O9c, C3b) passed
+vacuously and the whole T-S10-9 journal block (S109*, R5*, R6*) measured a folder that was never
+down. Not one of them was weakened: `writesOf` now names both doors through one `WRITE_METHODS`
+list, and each fault fixture faults both. **A rename of a write path is a silent test-coverage
+change**, and the only reason this was caught is that those checks assert on FILES and VALUES, so
+they went RED instead of staying green on nothing.
