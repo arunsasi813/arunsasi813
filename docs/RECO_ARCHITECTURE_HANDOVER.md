@@ -662,7 +662,7 @@ R1–R6 (F3, F10, F1, F5, F4, F9) and [41]–[48] X1–X8 (F11/F19, F17, F12, F2
 `run_store_e2e` held **378 passed / 0 failed** when this section was written, and is the suite
 that holds all three features' gates — **plus sections [49]–[53]**, which the money round added
 (Z1, T-26-5, T-26-6, T-S10-1, T-30-3; see §16), and [54]–[88] from the five rounds after it. **It
-is at 731 today**; §18, §19 and §20 carry the round-by-round arithmetic. The figure is written as history on
+is at 743 today**; §18 to §21 carry the round-by-round arithmetic. The figure is written as history on
 purpose: a bare count in a feature write-up goes stale on the next round and then reads as a claim
 about the suite rather than a note about when the feature landed.
 
@@ -2397,11 +2397,11 @@ end-to-end checks (378 + 304 + 254 + 250 + 170 + 163 + 147 + 123 + 119 + 107 + 1
 + 73 + 65 + 41), with `pytest` — the eighteenth suite — at 75 passed / 1 skipped. Every suite was
 at or above its `4b8fd90` count; not one went down.
 
-> **CURRENT, re-measured on this tree:** `run_store_e2e` **731**, the seventeen node suites
-> **2,929**, `pytest` **83 passed / 1 skipped**. Store went 378 → 441 → 508 → 582 → 598 → 638 →
+> **CURRENT, re-measured on this tree:** `run_store_e2e` **743**, the seventeen node suites
+> **2,941**, `pytest` **83 passed / 1 skipped**. Store went 378 → 441 → 508 → 582 → 598 → 638 →
 > 672 → 694 across the money round and the seven data-loss rounds (§16, §18), then 714 → 724 → 726
 > across round 8's build, its review pass and the cleanup round (§19, §19.8, §19.9), then **731**
-> with the bridge round's [89] (§20). `pytest` went 75 → 83 in that last round, which is the first
+> with the bridge round's [89] (§20) and **743** with T-26-11's [90] (§21). `pytest` went 75 → 83 in that last round, which is the first
 > time it moved in nine rounds: the losses it closes are CROSS-PROCESS, and pytest is the only
 > suite that can run two processes. **The cost table above was
 > NOT re-measured on this tree** — the figures in it are from the tree that produced the 378, and
@@ -5281,3 +5281,120 @@ down. Not one of them was weakened: `writesOf` now names both doors through one 
 list, and each fault fixture faults both. **A rename of a write path is a silent test-coverage
 change**, and the only reason this was caught is that those checks assert on FILES and VALUES, so
 they went RED instead of staying green on nothing.
+
+## 21. T-26-11 — the two values the app promised to keep, and where it put them
+
+### 21.1 What was wrong, and the measurement that isolated it
+
+T-30-3 made the one-time carry-forward promotion **refuse to pick** when one row key holds two
+different legacy values, and leave both where they are. That was right: a `k:'typed'` record
+broadcasts to every row with the key, so writing one of them would have deleted the other in the
+same pass with no second copy. The dialog said so.
+
+But *"where they are"* is `sess.manualTags`, keyed on `row._id + '||' + col`, and `row._id` is
+re-minted by `U.uid()` on **every load**. So the next time those rows come back off a day file the
+keys point at nothing.
+
+**The YES path is what isolates the cause** (`scratchpad/cf/probes/q1_orphan.mjs`). Tick the box,
+answer YES, then reopen through Version History:
+
+| | before the reopen | after it |
+|---|---|---|
+| `INV-8` (one row, `Carol`) | promoted into the store | **`INV-8=Carol` on screen**, off the share |
+| `INV-9` (two rows, both `Dave`) | promoted — not a conflict | **`INV-9=Dave` on screen** |
+| `INV-7` (two rows, `Alice` / `Bob`) | refused, left in `manualTags` | **`INV-7=` blank**, both strings orphaned |
+
+The declined path cannot show this, and that is worth knowing: a decline abandons the save above
+the template swap, so **nothing** is promoted and every legacy value in the column orphans at the
+next reopen — which also means T-30-3's promised recovery (*"fix the duplicate rows and save
+again"*) has nothing left to promote by then. Nothing said so. **[90] R21f**.
+
+> **One correction to my own first measurement, because it would have "proved" the right conclusion
+> for the wrong reason.** `Reco._extraValueForRow(tpl, sess, row, ac)` takes the **column object**,
+> not its name. The first version of the probe passed `'Vendor'`, so the function read
+> `row[undefined]` and answered `''` for every row — a blank cell for all three keys, including the
+> two the promotion had successfully moved. Passing the def is what produced the table above, and
+> the table is the finding: `INV-8` and `INV-9` are **not** blank.
+
+### 21.2 The shape chosen: a note, not a value
+
+`Reco._cfRecord` writes the conflict onto the session when the promotion refuses to pick — the key,
+the column, **both strings**, `at` and `by` — and `Reco.carryConflicts(tpl, sess)` reads it back,
+pruned of pairs something else has since answered (a record now exists for that cell, whoever wrote
+it).
+
+**No reader of the values store was taught anything.** That is the whole reason for this shape: the
+ticket's own "honest shape", a `k:'conflict'` record in `extraValueMaster` carrying two values and
+no value, would have needed the grid, the ladder, the reports, the CSV, the workbook, the AEG
+extras loop and both ledger-write refusals all taught what it means — the review that `k:'typed'`
+vs `k:'override'` already cost once. **[90] R21d** asserts the cell is still blank and the promoted
+keys still come back, so "it is a note and not a value" is gated rather than claimed.
+
+**Why the session, and what that costs.** It survives the reopen that causes the harm
+(`Reco.loadVersionedFile` replaces `sess.data` and nothing else) and it is persisted whole in
+`reco/recoSessions.json` — **[90] R21c2** reads the note off the share, because a note that lived
+only in this window's memory would die at the next restart, which is the same harm one day away.
+The property is **created lazily and deleted when the last note goes**, so a session with nothing
+to say is byte-identical to one that never had a conflict: `run_panes_e2e` diffs that file byte for
+byte against base `5f61d76`, and `row._dsi` goes on the end of a row for the same gate's sake.
+The honest limit: the note is exactly as durable as the two values it describes, which are in the
+same file — and no more. A window that writes `recoSessions.json` whole can still clobber another
+window's note, which is **T-S10-31** and not this ticket's to fix.
+
+### 21.3 The recovery is the operator's, which is not the app picking
+
+The panel — the existing **Column Values** screen, which is already "the one screen that lists the
+typed values" — gains the conflicts **at the top**, because they are the only thing on it waiting
+for somebody. Each row shows the key, the column, both strings, when and by whom, and two actions:
+
+- **Keep this one.** The person is shown both values and told, before anything happens, that the one
+  they pick will read on **every** row with that key and how many loaded rows that is, and what the
+  other value was. It goes through `Reco.setTag`, the door a typed value in the grid already uses,
+  so the key-rule refusals (T-S10-19/20), the carried-value `force` path, the journal (T-S10-9) and
+  the merge write all apply with nothing re-implemented. **This is the operator choosing, which is a
+  different thing from the promotion choosing silently** — the thing T-30-3 forbade.
+- **Dismiss.** Removes the note and nothing else — it writes nothing and deletes nothing, for
+  somebody who has corrected the duplicate rows and retyped by hand. The confirm names both values
+  first, because the note is the last copy that is easy to read.
+
+**The card carries the count** (`⚠ N unresolved`), and that is not decoration: the Column Values
+card appears only once the template HAS a carry column or a stored value, and the whole point of
+the conflict is that **neither happened for that key**. A panel nobody can find is the same as no
+panel. **[90] R21e** reads the panel off the rendered modal, **R21e2** reads the card off
+`Reco.renderManage`'s own output, and **R21j** reads the kept value off the share.
+
+> **The first version of R21e2 was a false positive and is worth naming.** It called a
+> `Reco.openManageModal` that does not exist (the cards come from `Reco.renderManage`), read
+> `#modalBody` anyway, and matched the Column Values panel that was still sitting in it — so it went
+> green while gating nothing. The lesson is the cheap one: a check that reads a shared DOM container
+> after opening something else is asserting about whatever was there last.
+
+### 21.4 The two refusals that had to be right
+
+- **A refused write must not forget the note.** With the key-rule latch up, `setTag` refuses —
+  and if `cfKeep` cleared the note on the way past, the refusal would have **deleted the only
+  record of the two values**. It is forgotten only once a record for that cell really exists.
+  **[90] R21g**.
+- **No row with that key on screen is a refusal with a reason.** A value is kept *against* the row
+  key, so there has to be a row to keep it against; the sentence names the key and says to load the
+  file that holds it. **[90] R21h**.
+
+### 21.5 Two defects this round's own gates caught, both worth naming
+
+**The note was wired into the wrong function, and only the DECLINED path could tell.**
+`Reco._cfRecord` went into `Reco._promoteCarryForward`, which looked like the right place: it is
+where the conflict is computed and where the refusal to pick happens. But the confirm is asked by
+`RecoTemplate.saveTemplate` **above the template swap**, so that Cancel can abandon the save — and
+on Cancel the promotion never runs at all. **[90] R21f** read `recorded: []` on the declined
+template. The note is now written at the ask, which both paths reach; the promotion keeps a second,
+idempotent call for the caller that promotes with no ask at all. **The decline is the path that
+needs it more**: it stores nothing, so nothing in that column is kept against a row key, and the
+next reopen orphans every legacy value in it rather than just the conflicting pair.
+
+**R21g passed on nothing happening at all.** It asserted "nothing was filed and the note is still
+there", which is also true when the action does nothing — and the action was doing nothing, because
+the fixture had left `AppState.activeRecoId` on the other template, so `Reco.cfKeep` looked in the
+wrong session and every arm answered *"That conflict is no longer listed"*. It now asserts the
+**latch's own sentence**, so a refusal for the wrong reason reads red. Same shape as every other
+vacuous-pass this project has had: an assertion about an ABSENCE needs a second clause naming what
+should be PRESENT.

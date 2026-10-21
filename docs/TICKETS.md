@@ -2383,7 +2383,60 @@ carries a correcting line.
 
 ---
 
-## T-26-11  After a T-30-3 conflict the two values are in the file but unreachable, so the column reads blank next month
+## T-26-11  ~~After a T-30-3 conflict the two values are in the file but unreachable, so the column reads blank next month~~  **FIXED** — the conflict is recorded where a reopen cannot orphan it, and the Column Values panel lists both strings
+
+> **FIXED, and the measurement that mattered is the YES path rather than the
+> decline.** Tick the box, answer YES, then reopen the day file through Version
+> History (`scratchpad/cf/probes/q1_orphan.mjs`): the keys the promotion COULD
+> move come back off the shared store — `INV-8=Carol`, `INV-9=Dave` on screen —
+> and the conflicting key reads **blank**, with its two values in
+> `reco/recoSessions.json` under ids no reader can reach. That isolates the
+> conflict as the cause, which the declined path cannot: on a decline the save
+> is abandoned above the template swap, so nothing is promoted at all.
+>
+> **THE SHAPE: A NOTE, NOT A VALUE.** `Reco._cfRecord` writes the conflict —
+> the key, the column, **both strings**, when and by whom — onto the session
+> when the promotion refuses to pick, and `Reco.carryConflicts` reads it back.
+> Nothing in the values store was taught a new record kind, which is the review
+> this ticket's own "honest shape" (a `k:'conflict'` record in
+> `extraValueMaster`) would have needed from the grid, the ladder, the reports,
+> the CSV, the workbook, the AEG extras loop and both ledger refusals. **[90]
+> R21d** asserts the cell is still blank and the promoted keys still come back,
+> so that claim is gated rather than asserted.
+>
+> **WHY THE SESSION.** It survives the reopen that causes the harm
+> (`Reco.loadVersionedFile` replaces `sess.data` and nothing else) and it is
+> persisted whole in `reco/recoSessions.json` (**[90] R21c2** reads it off the
+> share, because a note that lived only in memory would die on the next
+> restart — the same harm one day away). The property is created **lazily and
+> deleted when the last note goes**, so a session with nothing to say is
+> byte-identical to one that never had a conflict: `run_panes_e2e` diffs that
+> file byte for byte against base `5f61d76`. It also means the note is exactly
+> as durable as the two values it describes, which are in the same file — and
+> no more: a window that writes `recoSessions.json` whole can still clobber
+> another window's note, which is **T-S10-31** and is not this ticket's to fix.
+>
+> **THE RECOVERY IS THE OPERATOR'S, which is not the same as the app picking.**
+> T-30-3 forbade the PROMOTION choosing a winner silently, because a typed
+> record broadcasts to every row with the key and the loser was deleted in the
+> same pass. The panel shows both strings and offers **"Keep this one"**, after
+> a confirm that says the value will read on every row sharing the key and
+> names what the other value is. It goes through `Reco.setTag` — the door a
+> typed value in the grid already uses — so the key-rule refusals, the journal
+> and the merge write apply unchanged. **Dismiss** removes the note and nothing
+> else, for somebody who has corrected the duplicate rows and retyped by hand.
+>
+> **Gates: [90] R21a–R21j.** Including the two refusals that matter: with the
+> key-rule latch up the write is refused and **the note is NOT forgotten**
+> (R21g — a note cleared on a refused write would have deleted the only record
+> of the two values), and with no row of that key on screen it refuses with a
+> sentence naming the key (R21h). The panel itself is read off the **rendered
+> modal** (R21e), because a record nothing shows is this ticket's own bug one
+> level down. **The decline is recorded too and needs it more** (R21f): nothing
+> is promoted, so the next reopen orphans every legacy value in that column and
+> T-30-3's promised *"fix the duplicate rows and save again"* has nothing left
+> to promote. Handover §21.
+
 
 **Where** `apps/Reco.html` `Reco._promoteCarryForward` (the `clash` skip), `Reco._cfScan`, and
 `Reco._tagKey(row, name) = row._id + '||' + name`.

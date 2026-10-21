@@ -14963,6 +14963,22 @@ defaultTemplate() {
          way the primary-key warning twenty lines above does: nothing is
          stored, the flag is not stored, and the promotion is still owed. */
       const cfc = Reco._carryForwardConflicts(t, prevExtras);
+      /* ---- T-26-11. RECORDED HERE, BEFORE THE QUESTION IS ASKED, because
+         this is the only place the DECLINED path reaches: Cancel abandons the
+         save and Reco._promoteCarryForward never runs, so a note written
+         inside the promotion exists on the yes path only. MEASURED: [90] R21f
+         read `recorded: []` on the declined template with the note wired into
+         the promotion alone.
+         AND THE DECLINE NEEDS IT MORE than the yes path does. Declining stores
+         nothing, so NOTHING in that column is kept against a row key - and the
+         next reopen orphans every legacy value in it, not just the conflicting
+         pair, because sess.manualTags is keyed on a row._id that U.uid()
+         re-mints. T-30-3's promised recovery ("sort the duplicate rows out and
+         save again") then has nothing left to promote. The confirm below says
+         the cells "will read BLANK the next time this file is opened"; this is
+         what makes the two values findable when they do. */
+      if (cfc.conflicts.length) Reco._cfRecord(t, (AppState.recoSessions || {})[t.id],
+        cfc.conflicts, new Date().toISOString(), String(AppState.currentUser || ''));
       if (cfc.conflicts.length) {
         const cfl = cfc.conflicts.slice(0, 8).map(c => '  \u2022 ' + Reco._pkLabel(t, c.pk) + ' / '
           + c.col + ': ' + c.values.slice(0, 4).map(v => '"' + v + '"').join(' and ')
@@ -20041,6 +20057,74 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
              cols: Array.from(new Set(conflicts.map(c => c.col))) };
   },
 
+  /* ---- T-26-11. THE CONFLICT, WRITTEN DOWN WHERE A RELOAD CANNOT ORPHAN IT.
+     T-30-3 made the promotion refuse to pick between two legacy values on one
+     key and leave BOTH where they are, which is right - but "where they are"
+     is sess.manualTags, keyed on row._id + '||' + col, and row._id is
+     re-minted by U.uid() on every load. MEASURED (q1_orphan): answer YES, then
+     reopen the day file through Version History, and the keys the promotion
+     COULD move come back off the shared store (INV-8=Carol, INV-9=Dave) while
+     the conflicting key reads BLANK and its two values - the only two the
+     dialog promised it was keeping - are in reco/recoSessions.json under ids
+     no reader can reach. The app told the operator it was keeping them and
+     then put them somewhere nothing can look.
+
+     SO THE CONFLICT ITSELF IS RECORDED, with both strings in it. Not a value:
+     this is a record OF A CONFLICT and no reader of the values store is
+     taught anything (which is the review T-26-11's "honest shape" - a
+     k:'conflict' record in extraValueMaster - would have needed from the
+     grid, the ladder, the reports, the CSV, the workbook, the AEG extras loop
+     and both ledger refusals). It lives on the SESSION because the session
+     survives a reopen (Reco.loadVersionedFile replaces sess.data and nothing
+     else) and is persisted whole in reco/recoSessions.json.
+
+     CREATED LAZILY, AND THAT IS NOT TIDINESS: run_panes_e2e diffs
+     reco/recoSessions.json BYTE FOR BYTE against base 5f61d76, so a field
+     that existed on every session would move those bytes for every template
+     that has no conflict at all. A session with nothing to say carries no
+     property, exactly as row._dsi goes on the END for the same gate's sake.
+
+     IDEMPOTENT per (key, column): ticking the box again, saving twice, or
+     declining and coming back must not stack up duplicates. The newest `vs`
+     wins, because the operator may have edited one of the two rows in
+     between. */
+  _cfRecord(tpl, sess, conflicts, at, by) {
+    if (!sess || !conflicts || !conflicts.length) return 0;
+    const list = sess.carryConflicts || (sess.carryConflicts = []);
+    let n = 0;
+    conflicts.forEach(c => {
+      if (!c || !c.pk || !c.col) return;
+      const vs = (c.values || []).map(String);
+      if (vs.length < 2) return;                 // not a conflict: nothing to pick between
+      const i = list.findIndex(x => x && x.pk === c.pk && x.col === c.col);
+      const rec = { pk: String(c.pk), col: String(c.col), vs: vs, at: String(at || ''),
+                    by: String(by || '') };
+      if (i === -1) { list.push(rec); n++; } else { list[i] = rec; }
+    });
+    return n;
+  },
+
+  /* WHAT IS STILL UNPICKED, for the panel and for anybody asking whether this
+     template has anything owed.
+
+     PRUNED OF PAIRS SOMETHING ELSE HAS ANSWERED, because a list that keeps
+     naming a conflict nobody can act on any more is how a panel stops being
+     read: once a record exists for that (key, column) the question is settled,
+     whether it was settled by somebody typing into the cell, by the duplicate
+     rows being corrected so a later promotion could move it, or by a colleague
+     in another window. The panel's own "Keep this one" does not rely on this -
+     it DELETES the note through Reco._cfForget - so a value removed again
+     later cannot resurrect a note the operator has already dealt with. */
+  carryConflicts(tpl, sess) {
+    const list = (sess && sess.carryConflicts) || [];
+    if (!list.length || !tpl) return [];
+    return list.filter(c => {
+      if (!c || !c.pk || !c.col) return false;
+      const bag = ((AppState.extraValueMaster || {})[tpl.id] || {})[c.pk] || {};
+      return !bag[c.col];                        // answered: a record exists for that cell now
+    });
+  },
+
   /* The conflicts a save is about to raise, for the caller that has to ASK
      before it stores anything. Same scan, same guards, no writes. */
   _carryForwardConflicts(tpl, prevExtras) {
@@ -20097,6 +20181,13 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     /* ONE question, and it is asked by RecoTemplate.saveTemplate ABOVE the
        template swap now, where Cancel can abandon the save. The hook is kept
        for a caller that has a person in front of it and no save to abandon. */
+    /* T-26-11. THE SECOND OF TWO CALLS, AND IT IS NOT THE IMPORTANT ONE.
+       RecoTemplate.saveTemplate records the same conflicts before it asks,
+       which is the only place the DECLINED path reaches. This one covers the
+       caller that promotes with no ask at all (the hook `ask` is optional) and
+       re-stamps `at`/`by` on the yes path. _cfRecord is idempotent per
+       (key, column) - the newest values win - so two calls are one record. */
+    Reco._cfRecord(tpl, sess, conflicts, at, by);
     if (conflicts.length && typeof ask === 'function' && !ask(conflicts, scan.cols)) {
       return { cols: cols, cells: 0, conflicts: conflicts, declined: true };
     }
@@ -25979,7 +26070,47 @@ renderRecoTable(tpl, sess) {
     const orphans = list.filter(it => !loaded.has(it.pk)).length;
     const carryCols = (tpl.additionalColumns || []).filter(ac => ac && Reco._carryColumn(tpl, ac.name))
       .map(ac => ac.name);
-    let h = '<div class="help">The values people type into added columns are kept against the ROW KEY '
+    /* ---- T-26-11. THE CONFLICTS FIRST, because they are the only thing on
+       this screen that is WAITING FOR SOMEBODY. Everything below is a record
+       that exists and works; these are two strings the app refused to choose
+       between and then had nowhere to show, so they come first and they say
+       what to do. */
+    const cfl = Reco.carryConflicts(tpl, sess);
+    let h = '';
+    if (cfl.length) {
+      const loadedPk = new Set(((sess && sess.data) || []).map(r => r && Reco.storeKey(tpl, r)).filter(Boolean));
+      h += '<div class="xl-warn"><b>' + U.fmtInt(cfl.length) + ' row key(s) hold two different '
+        + 'values that could not be carried forward.</b> More than one loaded row shared the key, '
+        + 'and a value kept against a row key applies to EVERY row with that key — so there was no '
+        + 'way to keep both and this app does not pick for you. Both values are below. '
+        + '<b>Correct the duplicate rows</b> and retype the one you want, or keep one here: it will '
+        + 'then read on every row with that key.</div>';
+      h += '<div style="overflow:auto; max-height:30vh;"><table><thead><tr>'
+        + '<th>Row key</th><th>Column</th><th>The values</th><th>When</th><th>By</th><th></th>'
+        + '</tr></thead><tbody>';
+      cfl.forEach(c => {
+        const on = loadedPk.has(c.pk);
+        h += '<tr><td><code>' + U.esc(Reco._pkLabel(tpl, c.pk)) + '</code>'
+          + (on ? '' : ' <span class="badge general" title="No row with this key is loaded right now, '
+              + 'so a value cannot be kept against it from here">not loaded</span>') + '</td>';
+        h += '<td>' + U.esc(c.col) + '</td>';
+        h += '<td>' + (c.vs || []).map((v, i) => '<b>' + U.esc(v) + '</b>'
+              + (on ? ' <button class="small" onclick="Reco.cfKeep(\'' + U.jsq(c.pk) + '\',\''
+                      + U.jsq(c.col) + '\',' + i + ')">Keep this one</button>' : '')).join('<br/>')
+          + '</td>';
+        h += '<td>' + U.esc(String(c.at || '').slice(0, 16).replace('T', ' ')) + '</td>';
+        h += '<td>' + U.esc(c.by || '') + '</td>';
+        h += '<td><button class="small" onclick="Reco.cfDismiss(\'' + U.jsq(c.pk) + '\',\''
+          + U.jsq(c.col) + '\')">Dismiss</button></td></tr>';
+      });
+      h += '</tbody></table></div>';
+      h += '<div class="help">Dismiss removes the note and nothing else — it writes nothing and '
+        + 'deletes nothing. These notes are kept with this reconciliation\'s session, so they '
+        + 'survive reopening a day file; the two values themselves were typed against rows that are '
+        + 'no longer on screen, which is why they are written out here rather than left in the '
+        + 'cells they came from.</div><hr/>';
+    }
+    h += '<div class="help">The values people type into added columns are kept against the ROW KEY '
       + 'in the shared values file, not on the row and not in <code>reco_data/</code>. A column with '
       + '<b>Carry this value forward</b> on is honoured for its key in any file; a column with it off '
       + 'is honoured only on rows from the file the value was typed into.'
@@ -26030,6 +26161,87 @@ renderRecoTable(tpl, sess) {
     }
     App.openModal('Column Values — ' + U.esc(tpl.name), h,
       '<button onclick="App.closeModal()">Close</button>');
+  },
+
+  /* ---- T-26-11. THE TWO ACTIONS THE PANEL OFFERS, and the line between them.
+
+     cfKeep is THE OPERATOR PICKING, which is a different thing from the app
+     picking. T-30-3 forbade the PROMOTION choosing a winner silently, because
+     a typed record broadcasts to every row with the key and the losing value
+     was deleted in the same pass with no second copy. Here the person is
+     shown both strings, told that the one they pick will show on every row
+     with that key, and clicks. It goes through Reco.setTagForKey - the same
+     door a typed value in the grid goes through - so the key-rule refusals
+     (T-S10-19/20), the journal (T-S10-9) and the merge write all apply
+     unchanged, and the conflict then prunes itself out of Reco.carryConflicts
+     because a record exists for that cell.
+
+     cfDismiss REMOVES THE NOTE AND NOTHING ELSE. It is for the operator who
+     has corrected the duplicate rows and retyped by hand: the note has done
+     its job and should not nag for ever. It cannot delete a value, because it
+     does not touch the values store at all. */
+  cfKeep(pk, col, idx) {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    const c = (sess.carryConflicts || []).find(x => x && x.pk === pk && x.col === col);
+    if (!c) { U.toast('That conflict is no longer listed', 'error'); return; }
+    const v = (c.vs || [])[Number(idx)];
+    if (v == null) { U.toast('That value is no longer listed', 'error'); return; }
+    const rows = (sess.data || []).filter(r => Reco.storeKey(tpl, r) === pk);
+    if (!rows.length) {
+      U.toast('Load the file that holds ' + Reco._pkLabel(tpl, pk) + ' first: a value is kept '
+        + 'against the row key, and this window has no row with that key on screen to keep it '
+        + 'against.', 'error');
+      return;
+    }
+    if (!confirm('Keep "' + v + '" in ' + col + ' for ' + Reco._pkLabel(tpl, pk) + '?\n\n'
+      + 'A value kept against the row key applies to EVERY row with that key, and '
+      + rows.length + ' loaded row(s) share this one — so all of them will read "' + v + '".\n\n'
+      + 'The other value (' + (c.vs || []).filter(x => x !== v).map(x => '"' + x + '"').join(', ')
+      + ') is NOT written anywhere and this note goes away, so write it down now if you still '
+      + 'need it.')) return;
+    /* THE SAME DOOR A TYPED VALUE IN THE GRID GOES THROUGH, by row id, so
+       Reco.setTag's own key-rule block, the carried-value `force` path, the
+       journal and the merge write all apply with nothing re-implemented
+       here. It refuses silently when the key rule has moved - setTag has
+       already said why - so the note is only forgotten once a record for
+       that cell really exists. */
+    Reco.setTag(rows[0]._id, col, v);
+    const landed = !!(((AppState.extraValueMaster || {})[id] || {})[pk] || {})[col];
+    if (!landed) return;                         // the write door refused and has said why
+    Reco._cfForget(sess, pk, col);
+    U.toast('Kept "' + v + '" in ' + col + ' for ' + Reco._pkLabel(tpl, pk)
+      + ' — ' + rows.length + ' row(s) with that key now read it', 'success');
+    Reco.openValuesModal();
+    Reco.refreshGrid();
+  },
+
+  cfDismiss(pk, col) {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    const sess = AppState.recoSessions[id];
+    if (!tpl || !sess) return;
+    const c = (sess.carryConflicts || []).find(x => x && x.pk === pk && x.col === col);
+    if (!c) { U.toast('That conflict is no longer listed', 'error'); return; }
+    if (!confirm('Stop listing the two values for ' + Reco._pkLabel(tpl, pk) + ' / ' + col
+      + '?\n\nThey are ' + (c.vs || []).map(x => '"' + x + '"').join(' and ') + '. Nothing is '
+      + 'written and nothing is deleted - this only removes the note, so write them down now if '
+      + 'you have not dealt with them yet.')) return;
+    Reco._cfForget(sess, pk, col);
+    U.toast('Note removed. Nothing was written and nothing was deleted.', 'success');
+    Reco.openValuesModal();
+  },
+
+  _cfForget(sess, pk, col) {
+    if (!sess || !Array.isArray(sess.carryConflicts)) return;
+    sess.carryConflicts = sess.carryConflicts.filter(x => !(x && x.pk === pk && x.col === col));
+    /* The property goes away entirely when the last one does, so a session
+       with nothing to say is byte-identical to one that never had a conflict
+       - which is what run_panes_e2e's diff of reco/recoSessions.json needs. */
+    if (!sess.carryConflicts.length) delete sess.carryConflicts;
+    AppState.save();
   },
 
   removeValueRec(pk, col) {
@@ -31282,13 +31494,25 @@ renderCustomReport(tpl, sess, rpt, idx) {
        exists today gains a card. */
     const cfCols = (tpl.additionalColumns || []).filter(ac => ac && Reco._carryColumn(tpl, ac.name));
     const cfTotal = Reco._typedCount(tpl);
-    if (cfCols.length || cfTotal) {
+    /* ---- T-26-11. A DECLINED CARRY-FORWARD CONFLICT OPENS THIS CARD BY
+       ITSELF. Without that, the only route to the two values is a card that
+       appears only once the template HAS a carry column or a stored value -
+       and the whole point of the conflict is that neither happened for that
+       key. The count is on the card because a panel nobody can find is the
+       same as no panel. */
+    const cfBad = Reco.carryConflicts(tpl, AppState.recoSessions[tpl.id]).length;
+    if (cfCols.length || cfTotal || cfBad) {
       h += '<div class="card" onclick="Reco.openValuesModal()">';
-      h += '<h3>Column Values <span class="badge general">'+U.fmtInt(cfTotal)+'</span></h3>';
+      h += '<h3>Column Values <span class="badge general">'+U.fmtInt(cfTotal)+'</span>'
+        + (cfBad ? ' <span class="badge offset">⚠ '+U.fmtInt(cfBad)+' unresolved</span>' : '')
+        + '</h3>';
       h += '<p>'+U.fmtInt(cfTotal)+' value(s) typed into added columns, kept against the row key'
         + (cfCols.length ? ' — '+U.fmtInt(cfCols.length)+' column(s) carry forward to the next file'
                          : '')
-        + '. Who, when, which file — and Remove.</p></div>';
+        + '. Who, when, which file — and Remove.'
+        + (cfBad ? ' <b>'+U.fmtInt(cfBad)+' row key(s) hold two values that could not be carried '
+            + 'forward and are waiting for somebody.</b>' : '')
+        + '</p></div>';
     }
 
     h += '<div class="card" onclick="Reco.openVersionHistoryModal()">';

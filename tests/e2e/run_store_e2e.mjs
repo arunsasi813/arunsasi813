@@ -10710,6 +10710,7 @@ const PORT_R19  = 21482;   // R19 the key-rule signature, and the round trip
 const PORT_R19B = 21483;   // R19l the OLDER build, on a file this build wrote
 const PORT_R19Z = 21484;   // R19z compaction widens the day file; the header cache must follow
 const PORT_R20  = 21490;   // R20 T-S10-10/T-S10-28: the conditional write and the lock
+const PORT_R21  = 21494;   // R21 T-26-11: the declined carry-forward conflict, and the panel
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -13876,6 +13877,250 @@ section(89, 'R20 T-S10-10/T-S10-28 — THE CONDITIONAL WRITE: THE TOKEN, THE RET
     + 'working', { counts: cas.legacy, onShare: val('TPL_C', 'P4') });
 
   await ca.ctx.close();
+}
+
+/* ============================================================ [90] ====
+   R21. T-26-11. THE TWO VALUES THE PROMOTION REFUSED TO PICK BETWEEN WERE
+   STILL IN THE FILE AND NO LONGER REACHABLE.
+
+   T-30-3 made the promotion refuse to choose when one key holds two different
+   legacy values, and leave BOTH where they are. That was right, and the dialog
+   said so - but "where they are" is sess.manualTags, keyed on
+   row._id + '||' + col, and row._id is re-minted by U.uid() on every load.
+
+   MEASURED (scratchpad/cf/probes/q1_orphan.mjs), AND THE YES PATH IS WHAT
+   ISOLATES THE CAUSE: tick the box, answer YES, then reopen the day file
+   through Version History. The keys the promotion COULD move come back off
+   the shared store - INV-8=Carol, INV-9=Dave on screen - and the conflicting
+   key reads BLANK, with its two values in reco/recoSessions.json under ids no
+   reader can reach. The app told the operator it was keeping them and then put
+   them somewhere nothing could look. The declined path is worse in a different
+   way and is R21e.
+
+   WHAT THIS SECTION ASSERTS, and what it deliberately does not: the note is a
+   note. No reader of the values store was taught a new record kind - which is
+   the review T-26-11's own "honest shape" (a k:'conflict' record in
+   extraValueMaster) would have needed from the grid, the ladder, the reports,
+   the CSV, the workbook, the AEG extras loop and both ledger refusals - so
+   R21c asserts the cell is STILL BLANK and the promoted keys still come back.
+   The recovery is the operator's: both strings are shown, and keeping one is
+   them picking, through the door a typed value already uses. */
+const R21_RUN = (answer, settle) => `(async function () {
+  const o = { answer: ${JSON.stringify(answer)} };
+  const T = ${JSON.stringify(answer ? 'TPL_C' : 'TPL_D')};
+  o.hasReader = (typeof Reco.carryConflicts === 'function');
+  if (!o.hasReader) return o;
+  RecoTemplate.edit(T);
+  RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor').carryForward = true;
+  const real = window.confirm;
+  window.confirm = () => ${answer ? 'true' : 'false'};
+  window.__toasts = [];
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = real; }
+  App.closeModal();
+  await new Promise(r => setTimeout(r, 90));
+  ${settle}
+  const list = () => { const t = AppState.recoTemplates.find(x => x.id === T);
+    return Reco.carryConflicts(t, AppState.recoSessions[T])
+      .map(c => c.pk + '/' + c.col + '=' + (c.vs || []).join('|')); };
+  const cells = () => { const t = AppState.recoTemplates.find(x => x.id === T);
+    const ss = AppState.recoSessions[T];
+    const def = (t.additionalColumns || []).find(a => a.name === 'Vendor');
+    return (ss.data || []).map(r => r._pk + '=' + String(Reco._extraValueForRow(t, ss, r, def) || '')); };
+  o.recorded = list();
+  /* THE REOPEN THAT ORPHANS THE LEGACY CELLS. */
+  const tpl0 = AppState.recoTemplates.find(x => x.id === T);
+  const idsBefore = (AppState.recoSessions[T].data || []).map(r => r._id).join(',');
+  const f = await Versioning.latestDataFile(tpl0);
+  Versioning._cnCache = {};
+  await Reco.loadVersionedFile(f.fullPath || f.path || f, T);
+  App.closeModal(); ${settle}
+  o.idsChanged = idsBefore !== (AppState.recoSessions[T].data || []).map(r => r._id).join(',');
+  o.orphanedLegacy = Object.keys(AppState.recoSessions[T].manualTags || {})
+    .filter(k => !(AppState.recoSessions[T].data || []).some(r => r._id === String(k).split('||')[0]))
+    .length;
+  o.afterReopen = list();
+  o.cellsAfterReopen = cells();
+  /* THE PANEL, RENDERED FOR REAL. */
+  AppState.activeRecoId = T;
+  Reco.openValuesModal();
+  const html = (document.querySelector('#modalBody') || document.body).innerHTML;
+  o.panel = { both: /Alice/.test(html) && /Bob/.test(html),
+              says: /could not be carried forward/.test(html),
+              /* DOUBLE-ESCAPED ON PURPOSE: this is inside a template
+                 literal, which eats one backslash before the page ever sees
+                 the regex - the first version read /Reco.cfKeep(/ and threw
+                 "Unterminated group" at run time. */
+              keep: /Reco\\.cfKeep\\(/.test(html),
+              dismiss: /Reco\\.cfDismiss\\(/.test(html) };
+  App.closeModal();
+  /* AND THE CARD THAT LEADS TO IT. The Column Values card appears only once
+     the template HAS a carry column or a stored value, and the whole point of
+     the conflict is that neither happened for that key - so without the count
+     on the card there is no route to the panel at all.
+     THE MANAGE SECTION'S OWN RENDERER, by name. The first version of this
+     check called a Reco.openManageModal that does not exist, read #modalBody
+     anyway and matched the Column Values panel that was still in it - a
+     false positive that would have gated nothing. */
+  const tplNow = AppState.recoTemplates.find(x => x.id === T);
+  const mh = (typeof Reco.renderManage === 'function')
+    ? String(Reco.renderManage(tplNow, AppState.recoSessions[T]) || '')
+    : 'no renderManage in this build';
+  o.card = { unresolved: /unresolved/.test(mh),
+             says: /could not be carried forward and are waiting/.test(mh),
+             hasCard: /Column Values/.test(mh) };
+  return o;
+})`;
+
+/* THE TWO THINGS "Keep this one" MUST REFUSE, and one it must do. */
+const R21_ACT = (settle) => `(async function () {
+  const o = {};
+  const T = 'TPL_C';
+  /* THE ACTIVE TEMPLATE IS PART OF THE FIXTURE. Reco.cfKeep reads
+     AppState.activeRecoId - it is a panel action and the panel is about one
+     reconciliation - and the declined run above left it on TPL_D, so every
+     arm here answered "That conflict is no longer listed" and R21g passed on
+     nothing happening at all. */
+  AppState.activeRecoId = T;
+  const real = window.confirm;
+  const bag = () => (((AppState.extraValueMaster || {})[T] || {})['INV-7'] || {}).Vendor;
+  const notes = () => { const t = AppState.recoTemplates.find(x => x.id === T);
+    return Reco.carryConflicts(t, AppState.recoSessions[T]).length; };
+
+  /* (1) THE KEY RULE HAS MOVED: setTag's own block refuses, and the note must
+     NOT be forgotten - a note dropped on a refused write is the value gone. */
+  Reco._keyStale[T] = 'saved';
+  window.confirm = () => true; window.__toasts = [];
+  try { Reco.cfKeep('INV-7', 'Vendor', 0); } finally { window.confirm = real; }
+  App.closeModal(); ${settle}
+  /* 200 AND NOT 80: the latch's sentence is longer than 80 characters, so the
+     clause asserting WHICH refusal it is was being matched against a string
+     cut off at "...identifies its ". Same trap as R19_WALK's 240. */
+  o.latched = { filed: !!bag(), notesKept: notes(),
+                said: (window.__toasts || []).map(t => t.kind + ': ' + String(t.msg).slice(0, 200)) };
+  delete Reco._keyStale[T];
+
+  /* (2) NO ROW WITH THAT KEY ON SCREEN: a value is kept against a row key, so
+     there is nothing to keep it against. */
+  const keepData = AppState.recoSessions[T].data;
+  AppState.recoSessions[T].data = keepData.filter(r => r._pk !== 'INV-7');
+  window.confirm = () => true; window.__toasts = [];
+  try { Reco.cfKeep('INV-7', 'Vendor', 0); } finally { window.confirm = real; }
+  App.closeModal(); ${settle}
+  o.notLoaded = { filed: !!bag(), notesKept: notes(),
+                  said: (window.__toasts || []).map(t => t.kind + ': ' + String(t.msg).slice(0, 110)) };
+  AppState.recoSessions[T].data = keepData;
+
+  /* (3) AND THEN IT WORKS. */
+  window.confirm = () => true; window.__toasts = [];
+  try { Reco.cfKeep('INV-7', 'Vendor', 0); } finally { window.confirm = real; }
+  App.closeModal(); ${settle}
+  const t = AppState.recoTemplates.find(x => x.id === T);
+  const ss = AppState.recoSessions[T];
+  const def = (t.additionalColumns || []).find(a => a.name === 'Vendor');
+  o.kept = { filed: bag() ? String(bag().v) : null, notesKept: notes(),
+             fieldGone: !('carryConflicts' in ss),
+             cells: (ss.data || []).map(r => r._pk + '=' + String(Reco._extraValueForRow(t, ss, r, def) || '')),
+             said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 110)) };
+  return o;
+})`;
+
+section(90, 'R21 T-26-11 — THE DECLINED CARRY-FORWARD CONFLICT: RECORDED, LISTED, AND THE OPERATOR PICKS');
+{
+  const F = makeRoot('share-r21');
+  const brF = await startBridge(F.root, PORT_R21); procs.push(brF.proc);
+  const fa = await openReco(browser, brF);
+  await fa.page.evaluate(T303_SETUP + '()');
+
+  const yes = await fa.page.evaluate(R21_RUN(true, R19_SETTLE) + '()');
+  note('R21 the YES path, then the reopen', yes);
+  check(yes.hasReader === true,
+    'R21a PREMISE: this build has Reco.carryConflicts. Without it every check below would be '
+    + 'asserting against a reader that does not exist', yes.hasReader);
+  check(yes.recorded.join(',') === 'INV-7/Vendor=Alice|Bob',
+    'R21b THE CONFLICT IS RECORDED WHEN THE PROMOTION REFUSES TO PICK, with BOTH strings in it, '
+    + 'and ONLY for the key it refused - INV-8 and INV-9 were moved into the store and are not '
+    + 'notes', yes.recorded);
+  check(yes.idsChanged === true && yes.orphanedLegacy > 0
+        && yes.afterReopen.join(',') === 'INV-7/Vendor=Alice|Bob',
+    'R21c AND IT SURVIVES THE REOPEN THAT ORPHANS THE CELLS, which is the whole of T-26-11. The '
+    + 'reopen re-mints every row._id, so every sess.manualTags key points at nothing; the note is '
+    + 'on the SESSION, and Reco.loadVersionedFile replaces sess.data and nothing else',
+    { idsChanged: yes.idsChanged, orphaned: yes.orphanedLegacy, notes: yes.afterReopen });
+  const sessOnShare = () => ((diskJson(F.root, 'reco/recoSessions.json') || {}).TPL_C || {});
+  note('R21 the session on the share', (sessOnShare().carryConflicts || []));
+  check((sessOnShare().carryConflicts || []).length === 1
+        && String((sessOnShare().carryConflicts[0] || {}).pk) === 'INV-7'
+        && ((sessOnShare().carryConflicts[0] || {}).vs || []).join('|') === 'Alice|Bob',
+    'R21c2 AND IT IS ON THE SHARE, in reco/recoSessions.json - not only in this window\'s memory. '
+    + 'A note that lived in memory would die on the next restart, which is the same harm one '
+    + 'remove away: the operator comes in tomorrow and the two values the app promised to keep '
+    + 'are gone again', sessOnShare().carryConflicts);
+
+  check(yes.cellsAfterReopen.indexOf('INV-8=Carol') !== -1
+        && yes.cellsAfterReopen.indexOf('INV-9=Dave') !== -1
+        && yes.cellsAfterReopen.filter(c => /^INV-7=/.test(c)).every(c => c === 'INV-7='),
+    'R21d CONTROL, AND IT IS THE POINT OF THE SHAPE CHOSEN: the cell is STILL BLANK and the '
+    + 'promoted keys still come back off the share. The note is a note, not a value - no reader of '
+    + 'the values store was taught a new record kind, which is the review the ticket\'s own '
+    + '"honest shape" (a k:\'conflict\' record in extraValueMaster) would have needed from the '
+    + 'grid, the ladder, the reports, the CSV, the workbook, the AEG extras loop and both ledger '
+    + 'refusals', yes.cellsAfterReopen);
+  check(yes.card && yes.card.hasCard === true && yes.card.unresolved === true
+        && yes.card.says === true,
+    'R21e2 AND THE CARD THAT LEADS TO THE PANEL CARRIES THE COUNT. The Column Values card appears '
+    + 'only once the template HAS a carry column or a stored value, and the whole point of the '
+    + 'conflict is that NEITHER happened for that key - so without the count there is no route to '
+    + 'the two values at all. A panel nobody can find is the same as no panel', yes.card);
+  check(yes.panel.says && yes.panel.both && yes.panel.keep && yes.panel.dismiss,
+    'R21e THE REAL PANEL LISTS BOTH VALUES, SAYS WHAT TO DO AND OFFERS BOTH ACTIONS, read off the '
+    + 'rendered modal rather than off a helper - because a record nothing shows is the bug this '
+    + 'ticket is about, one level down', yes.panel);
+
+  const no = await fa.page.evaluate(R21_RUN(false, R19_SETTLE) + '()');
+  note('R21 the DECLINED path, then the reopen', no);
+  check(no.recorded.join(',') === 'INV-7/Vendor=Alice|Bob'
+        && no.afterReopen.join(',') === 'INV-7/Vendor=Alice|Bob'
+        && no.panel.both,
+    'R21f THE DECLINE IS RECORDED TOO, and it needs it MORE. Declining abandons the save above the '
+    + 'template swap, so the box goes back off and NOTHING is promoted - which means the next '
+    + 'reopen orphans every legacy value in that column, not just the conflicting pair, and '
+    + 'T-30-3\'s promised recovery ("fix the duplicate rows and save again") has nothing left to '
+    + 'promote. The note is written before the ask is answered, so it exists whichever way the '
+    + 'operator answers', { recorded: no.recorded, after: no.afterReopen, panel: no.panel });
+
+  const act = await fa.page.evaluate(R21_ACT(R19_SETTLE) + '()');
+  note('R21 the two refusals and the one that works', act);
+  check(act.latched.filed === false && act.latched.notesKept === 1
+        && act.latched.said.some(x => /error/.test(x) && /identifies its rows/.test(x))
+        && !act.latched.said.some(x => /no longer listed/.test(x)),
+    'R21g A REFUSED WRITE MUST NOT FORGET THE NOTE - AND IT HAS TO BE THE RIGHT REFUSAL. The first '
+    + 'version of this check asserted only "nothing was filed and the note is still there", which '
+    + 'is also true when the action did nothing at all: the fixture had left AppState.activeRecoId '
+    + 'on another template, so every arm answered "That conflict is no longer listed" and this '
+    + 'passed on nothing. It now asserts the LATCH\'S own sentence. "Keep this one" goes through '
+    + 'Reco.setTag, so '
+    + 'the key-rule block (T-S10-19/20) refuses it with the latch up - and if the note were '
+    + 'cleared on the way past, the refusal would have deleted the only record of the two values. '
+    + 'It is forgotten only once a record for that cell really exists', act.latched);
+  check(act.notLoaded.filed === false && act.notLoaded.notesKept === 1
+        && act.notLoaded.said.some(x => /error/.test(x) && /row key/.test(x)),
+    'R21h AND IT REFUSES WITH A REASON WHEN NO ROW WITH THAT KEY IS ON SCREEN. A value is kept '
+    + 'AGAINST the row key, so there has to be a row to keep it against; the sentence names the '
+    + 'key and says to load the file that holds it, rather than failing silently', act.notLoaded);
+  check(act.kept.filed === 'Alice' && act.kept.notesKept === 0 && act.kept.fieldGone === true
+        && act.kept.cells.filter(c => /^INV-7=/.test(c)).every(c => c === 'INV-7=Alice')
+        && act.kept.said.some(x => /success/.test(x)),
+    'R21i AND THEN IT WORKS, THROUGH THE DOOR A TYPED VALUE ALREADY USES. The record lands on '
+    + 'reco/extraValueMaster.json, BOTH rows sharing the key read it - which the confirm says '
+    + 'before anything happens, because that is the thing T-30-3 refused to do SILENTLY - the note '
+    + 'prunes itself out, and the session PROPERTY goes away entirely, so a session with nothing '
+    + 'to say is byte-identical to one that never had a conflict (run_panes_e2e diffs '
+    + 'reco/recoSessions.json byte for byte against 5f61d76)', act.kept);
+  const share = () => ((diskJson(F.root, 'reco/extraValueMaster.json') || {}).TPL_C || {})['INV-7'] || {};
+  check(String((share().Vendor || {}).v) === 'Alice',
+    'R21j and it is on the SHARE, not only in memory', share());
+
+  await fa.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
