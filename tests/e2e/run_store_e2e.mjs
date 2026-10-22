@@ -10726,6 +10726,7 @@ const PORT_R22  = 21498;   // R22 T-26-9: the ticked row that produces no journa
 const PORT_R23  = 21502;   // R23 T-26-8: the AEG keyword filter with half a pair set
 const PORT_R24  = 21506;   // R24 T-26-10: the report summary cards' own silence
 const PORT_R25  = 21510;   // R25 T-S10-13: the refused document number says so in a modal
+const PORT_R26  = 21514;   // R26 T-S10-14: the re-minted reversal mirror says so
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -15138,6 +15139,242 @@ section(94, 'R25 T-S10-13 — the refused document number is a MODAL, and the su
     [...dnA.errors, ...dnB.errors].slice(0, 5));
   await dnB.ctx.close();
   await dnA.ctx.close();
+}
+
+/* ============================================================ [95] ====
+   R26. T-S10-14. The reversal mirror is re-minted on the share, and nobody
+   tells the operator - so the toast and reco/reversals.log.csv both name a
+   reference that belongs to somebody else's entry.
+
+   T-S10-11 gave the reversal mirror the same protections the generated entry
+   has: a per-window suffix, an idNonce, the shared append rule, and
+   e.reversal.reversalId set INSIDE the mutate from where the mirror actually
+   landed. So the mirror is never lost and the original -> contra link is
+   always right (R26n, R26o). What the reversal door did NOT get is
+   Reco._noticeReMint, which the Generate door has had since that same ticket.
+   The operator was told the reference the mint PROPOSED.
+
+   THE WINDOW IS NARROWER THAN THE TICKET SAYS, and finding that is most of
+   this round. T-S10-14 describes "two people reversing different entries in
+   the same millisecond and drawing the same two base-36 characters - about 1
+   in 1,296". That is the condition for the CLASH, not for the stale
+   announcement: reverseEntry reads the share itself and adoptLedgers it
+   BEFORE the mint - twice, in fact - so its own local de-dup loop normally
+   sees the colleague's mirror and corrects newId before a word is said. The
+   announcement can only go stale if the colleague's write lands AFTER every
+   read this window made and BEFORE this window's merge job: one read-write
+   cycle, on top of the 1-in-1,296. The ticket's closing note records this.
+
+   SO THE FIXTURE HAS TWO HALVES, and R26d is what pins that they are both
+   needed. U.accountingId is pinned to one string in both windows - the
+   technique [57b] uses, because no test can wait for the real draw - AND
+   Reco._reverseReadShareHistory is stubbed in B to hide A's mirror from
+   EVERY read B makes. Hiding only the first read leaves the second to inform
+   the local loop, which is a different measurement; three earlier versions of
+   this probe measured B's own loop doing the right thing and called it the
+   bug.
+
+   WHAT WAS BUILT: reverseEntry captures the announced newId, and after the
+   flush adopts mirror.accountingId when the share moved it. Then the toast
+   names the real reference (R26f), _noticeReMint raises the same "This entry
+   is X, not Y" modal the Generate door raises (R26g), and the log line
+   carries BOTH references (R26l). The ticket's Fix asks for "a correcting
+   line ... because the log is append-only" - but the log is appended AFTER
+   the flush, so there was never a line to correct; one line carrying both is
+   the same audit trail with nothing to reconcile.
+
+   AND THE ALLOCATE DIALOG IS NOT OPENED ON THAT PATH (R26h). reverseEntry
+   opens it 300ms later, which would replace the one sentence that matters.
+   Being told the reference is wrong comes before being asked to type document
+   numbers against it. R26c is the other half of that: the ordinary path still
+   gets the dialog, so the early return is taken only when the reference moved.
+
+   EVERY ID COMPARISON HERE IS EXACT AND EVERY CSV FIELD IS READ BY COLUMN
+   INDEX. _reMintAgainst returns U.accountingId() + (++n), so the re-minted
+   reference has the announced one as a PREFIX: /reversed by AEPINREVZZZZ/
+   matches a CORRECT toast naming AEPINREVZZZZ1. Two versions of this probe
+   reported first the harm and then the fix off exactly that ambiguity.
+
+   MUTATION GRID: scratchpad/rev/mut/run.py, 7 mutations x the 15 checks of
+   this section's own probe (scratchpad/rev/probes/r2_fix.mjs), named by the
+   check of THIS section carrying the same assertion:
+
+     the mirror is not adopted (the pre-round state) -> R26f/g/h/j/k/l
+     adopted, but no notice is raised               -> R26g, R26h
+     the notice is raised without the early return  -> R26g, R26h
+     the announced reference is not passed to the log -> R26l
+     ...passed on EVERY line, not only the moved one  -> R26m
+     the log's flat literal drops the field           -> R26i/l/m
+     the early return is taken on every reversal      -> R26c
+
+   THE SIXTH MUTATION IS A BUG THIS SECTION'S PROBE ACTUALLY FOUND:
+   _reverseAppendLog builds a FIXED field list, so the new key was dropped in
+   silence and the column never appeared. R26i is the premise check that
+   caught it.
+
+   AND THE THIRD AND SEVENTH ARE WHY THIS SECTION WAITS 450ms before reading
+   the modal. The stomp happens on a setTimeout; a probe that reads straight
+   after the flush sees the notice whether or not something replaces it a
+   moment later, and both of those mutations measured NOTHING until the wait
+   existed. */
+const R26_REVERSE = (accountingId, pinned, hide) => `(async function () {
+  AppState.activeRecoId = 'TPL_E';
+  U.accountingId = function () { return ${JSON.stringify(pinned)}; };
+  const HIDE = ${JSON.stringify(hide || '')};
+  const realRead = Reco._reverseReadShareHistory;
+  /* EVERY read this window makes, not just the first - see the note in this
+     section's header about why. The share FILE is untouched; only what this
+     window's read RETURNS has the colleague's mirror removed. */
+  if (HIDE) {
+    Reco._reverseReadShareHistory = async function () {
+      const r = await realRead.apply(Reco, arguments);
+      if (r && r.ok && r.base && Array.isArray(r.base.TPL_E)) {
+        r.base.TPL_E = r.base.TPL_E.filter(e => !e || e.accountingId !== HIDE);
+      }
+      return r;
+    };
+  }
+  window.__toasts = [];
+  let mintedAs = '';
+  try {
+    await Reco.openReverseEntryModal(${JSON.stringify(accountingId)});
+    if (Reco._reverseState && Reco._reverseState.mode !== 'reversed') Reco._reverseSetMode('reversed');
+    const el = document.getElementById('revReason');
+    if (el) { el.value = 'because the ticket says so'; Reco._reverseValidate(); }
+    /* WHAT THIS WINDOW KNEW AT THE MOMENT OF THE MINT - the premise that
+       decides whether the local loop or the append intent catches the clash.
+       Read HERE: after the dialog, immediately before the commit. */
+    mintedAs = ((AppState.entryHistory || {}).TPL_E || [])
+      .map(e => e && e.accountingId).join(',');
+    await Reco.reverseEntry();
+  } finally { Reco._reverseReadShareHistory = realRead; }
+  await AppState.flush();
+  if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  /* PAST THE 300ms, DELIBERATELY - see the header. */
+  await new Promise(r => setTimeout(r, 450));
+  const hist = (AppState.entryHistory || {}).TPL_E || [];
+  const orig = hist.find(e => e && e.accountingId === ${JSON.stringify(accountingId)}) || {};
+  return {
+    announced: ${JSON.stringify(pinned)}, knewAtMint: mintedAs,
+    /* WHERE THE LINK POINTS - set inside the mutate from where the mirror
+       actually landed, which T-S10-11 made right and this ticket leaves alone. */
+    linkSaysMirrorIs: ((orig.reversal || {}).reversalId) || '',
+    toasts: (window.__toasts || []).map(t => t.kind + ': ' + String(t.msg).slice(0, 180)),
+    modalTitle: (document.getElementById('appModalTitle') || {}).textContent || '',
+    modalOpen: !!document.querySelector('#appModal.show')
+  };
+})`;
+
+section(95, 'R26 T-S10-14 — a re-minted reversal mirror says so, in the toast, a modal and the log');
+{
+  const RV = makeRoot('share-r26');
+  const brRV = await startBridge(RV.root, PORT_R26); procs.push(brRV.proc);
+  const rvA = await openReco(browser, brRV);
+  await rvA.page.evaluate(S101_SETUP + '()');
+  const rvAp = await rvA.page.evaluate(S101_POST + `([['INV-1','INV-2']])`);
+  const rvB = await openReco(browser, brRV);
+  const rvBp = await rvB.page.evaluate(S101_POST + `([['INV-3','INV-4']])`);
+  note('R26 two posted entries, distinct references', { a: rvAp.accountingId, b: rvBp.accountingId });
+
+  /* THE PIN IS APPLIED ONLY AT REVERSE TIME. Pinning before the entries are
+     posted would collide those too and measure a different thing. */
+  const PIN26 = 'AEPINREVZZZZ';
+  const aRev = await rvA.page.evaluate(R26_REVERSE(rvAp.accountingId, PIN26, '') + '()');
+  note('R26 A reversed first, and took the pinned reference', aRev);
+  check(aRev.linkSaysMirrorIs === PIN26,
+    'R26a PREMISE: A\'s mirror is under the pinned reference, so it is TAKEN before B tries',
+    aRev.linkSaysMirrorIs);
+  check(aRev.toasts.some(t => /reversed by/.test(t)) && !/, not /.test(aRev.modalTitle),
+    'R26b CONTROL, ON THE ORDINARY PATH: A\'s reference did not move, so A gets its plain success '
+    + 'toast and NO notice. _noticeReMint is a no-op when nothing moved and this round must not '
+    + 'make it furniture', { toasts: aRev.toasts.map(t => t.slice(0, 80)), title: aRev.modalTitle });
+  check(/Allocate Document Numbers/.test(aRev.modalTitle),
+    'R26c CONTROL, AND THE OTHER HALF OF THE ORDINARY PATH: A still gets the allocate dialog 300ms '
+    + 'later. The fix returns early to protect the notice, so this is what pins that the early '
+    + 'return is taken ONLY when the reference moved', aRev.modalTitle);
+
+  /* B REVERSES A DIFFERENT ENTRY, mints the same reference, and every read it
+     made predates A's write - the window this ticket really lives in. */
+  const bRev = await rvB.page.evaluate(R26_REVERSE(rvBp.accountingId, PIN26, PIN26) + '()');
+  note('R26 B reversed a different entry under the same reference', bRev);
+  check(bRev.knewAtMint.split(',').indexOf(PIN26) === -1,
+    'R26d PREMISE, AND IT IS WHAT PUTS THIS ON THE INTENT PATH: B\'s copy of the history does not '
+    + 'hold ' + PIN26 + ' at the mint, so the local de-dup loop passes it through and only the '
+    + 'append intent - the one place that reads the SHARE - can catch it', bRev.knewAtMint);
+  check(bRev.linkSaysMirrorIs && bRev.linkSaysMirrorIs !== PIN26,
+    'R26e PREMISE: B\'s mirror was RE-MINTED inside the intent, and e.reversal.reversalId names '
+    + 'where it landed - T-S10-11 working, and why this was never data loss', bRev.linkSaysMirrorIs);
+
+  /* EXACT, NOT A SUBSTRING - see the header on the prefix. */
+  const saidBy26 = (bRev.toasts.find(t => /reversed by/.test(t)) || '')
+    .replace(/^.*reversed by /, '').split(/[ —]/)[0];
+  note('R26 what B was told its mirror is', { said: saidBy26, actual: bRev.linkSaysMirrorIs });
+  check(saidBy26 === bRev.linkSaysMirrorIs,
+    'R26f THE FIX, IN THE TOAST: B is told the reference its mirror ACTUALLY has. It used to be '
+    + 'told ' + PIN26 + ' exactly - a reference belonging to A\'s mirror, which is the number B '
+    + 'would quote and write on a document', { said: saidBy26, actual: bRev.linkSaysMirrorIs });
+  check(/, not /.test(bRev.modalTitle) && bRev.modalTitle.indexOf(PIN26) !== -1
+        && bRev.modalTitle.indexOf(bRev.linkSaysMirrorIs) !== -1,
+    'R26g AND THE NOTICE IS THERE, naming BOTH references - the same "This entry is X, not Y" '
+    + 'modal the Generate door has had since T-S10-11. _noticeReMint already existed and was '
+    + 'already a no-op when nothing moved; the reversal door simply never called it', bRev.modalTitle);
+  check(bRev.modalOpen === true && !/Allocate Document Numbers/.test(bRev.modalTitle),
+    'R26h ...AND THE ALLOCATE DIALOG DID NOT STOMP IT, 450ms later. reverseEntry opens it on a '
+    + 'setTimeout on the ordinary path, which would have replaced the one sentence that matters',
+    { open: bRev.modalOpen, title: bRev.modalTitle });
+
+  /* THE LOG, read by COLUMN INDEX so a prefix cannot pass for the whole. */
+  const log26 = (() => {
+    try { return fs.readFileSync(RV.root + '/reco/reversals.log.csv', 'utf8'); } catch (e) { return ''; }
+  })();
+  const ll26 = log26.split(/\r?\n/).filter(Boolean);
+  const h26 = (ll26[0] || '').split(',');
+  const cRev26 = h26.indexOf('reversalId'), cAnn26 = h26.indexOf('announcedReversalId'),
+        cAid26 = h26.indexOf('accountingId');
+  const rows26 = ll26.slice(1).map(l => { const c = l.split(',');
+    return { entry: c[cAid26], reversalId: c[cRev26],
+             announced: cAnn26 >= 0 ? c[cAnn26] : '(no column)' }; });
+  note('R26 reversals.log.csv, by column', { cRev: cRev26, cAnn: cAnn26, rows: rows26 });
+  check(cRev26 > 0 && cAnn26 > 0 && rows26.length === 2,
+    'R26i PREMISE: the log has both a reversalId and an announcedReversalId column, and one line '
+    + 'per reversal. This is the check that caught _reverseAppendLog building a FIXED field list, '
+    + 'which dropped the new key in silence', { cRev: cRev26, cAnn: cAnn26, lines: rows26.length });
+  check(rows26.filter(r => r.reversalId === PIN26).length === 1,
+    'R26j THE FIX, IN THE LOG: exactly ONE line names ' + PIN26 + ' as the reversing entry - A\'s, '
+    + 'whose mirror really has it. Two lines used to, and the log is the record that stands in for '
+    + 'entryHistory when a whole-file write loses it', rows26);
+  check((rows26.find(r => r.entry === rvBp.accountingId) || {}).reversalId === bRev.linkSaysMirrorIs,
+    'R26k ...and B\'s line names where B\'s mirror actually is, so the log and the share agree',
+    rows26.find(r => r.entry === rvBp.accountingId));
+  check((rows26.find(r => r.entry === rvBp.accountingId) || {}).announced === PIN26,
+    'R26l ...AND IT KEEPS THE ANNOUNCED ONE TOO, in the SAME line. The ticket asked for a '
+    + 'correcting second line "because the log is append-only" - but the log is appended AFTER the '
+    + 'flush, so there was never a line to correct. One line carrying both is the same audit trail '
+    + 'with nothing to reconcile', rows26.find(r => r.entry === rvBp.accountingId));
+  check((rows26.find(r => r.entry === rvAp.accountingId) || {}).announced === '',
+    'R26m CONTROL: and the column is EMPTY on the ordinary reversal, so it is not noise on every '
+    + 'line of a log that is only ever read by a human',
+    rows26.find(r => r.entry === rvAp.accountingId));
+
+  /* THE SHARE, which this round does not touch. */
+  const sh26 = (diskJson(RV.root, 'reco/entryHistory.json') || {}).TPL_E || [];
+  const mir26 = sh26.filter(e => e && e.reverses).map(e => e.accountingId).sort();
+  const origB26 = sh26.find(e => e && e.accountingId === rvBp.accountingId) || {};
+  note('R26 the share at the end', { mirrors: mir26, bLink: (origB26.reversal || {}).reversalId });
+  check(mir26.length === 2 && mir26.indexOf(PIN26) !== -1
+        && mir26.indexOf(bRev.linkSaysMirrorIs) !== -1,
+    'R26n CONTROL: both mirrors are on the share under different references - nothing was lost, '
+    + 'which is what T-S10-11 bought and is why this was a notice bug and not a data one', mir26);
+  check(String((origB26.reversal || {}).reversalId) === bRev.linkSaysMirrorIs,
+    'R26o CONTROL: and B\'s original points at B\'s mirror on the share. The data was always '
+    + 'right; now the operator is told the same thing', (origB26.reversal || {}).reversalId);
+
+  check([...rvA.errors, ...rvB.errors]
+          .filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R26p no page or console error across the whole section',
+    [...rvA.errors, ...rvB.errors].slice(0, 5));
+  await rvB.ctx.close();
+  await rvA.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

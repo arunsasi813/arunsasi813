@@ -29367,6 +29367,14 @@ renderCustomReport(tpl, sess, rpt, idx) {
       const flat = {
         at: line.at || '', by: line.by || '', template: line.template || '', templateId: line.templateId || '',
         accountingId: line.accountingId || '', mode: line.mode || '', reversalId: line.reversalId || '',
+        /* T-S10-14. The field list below is explicit, so a caller that passes a new key gets it
+           silently dropped. announcedReversalId is the reference the operator was TOLD, on the one
+           path where the share had already taken it and the mirror landed under another; it is ''
+           on every ordinary reversal. Keeping both in the SAME line is what makes the log
+           reconcilable without rewriting the line already there - which is also why there is
+           nothing to "correct" later: the log is appended after the flush, so by the time this
+           runs the final reference is already known. */
+        announcedReversalId: line.announcedReversalId || '',
         reverses: line.reverses || '', reason: line.reason || '',
         unstamped: String(line.unstamped == null ? '' : line.unstamped),
         alreadyUnstamped: String(line.alreadyUnstamped == null ? '' : line.alreadyUnstamped),
@@ -29787,6 +29795,30 @@ renderCustomReport(tpl, sess, rpt, idx) {
       });
     }
     await AppState.flush();
+    /* ---- T-S10-14. WHERE THE MIRROR ACTUALLY LANDED, adopted before anything
+       is said or logged. The mint above de-dups against THIS WINDOW's list,
+       and reverseEntry adopts the share twice before it - so the local loop
+       catches an ordinary collision and newId is right. What it cannot catch
+       is a colleague's write that lands after every read this window made and
+       before this merge job: _appendEntryIntent then re-mints the mirror in
+       place (T-S10-11, which is what stops it being lost) and `newId` is the
+       string nobody updated.
+       MEASURED (scratchpad/rev/probes/r1_repro.mjs): the toast said
+       AEPINREVZZZZ while e.reversal.reversalId - set inside the mutate, and
+       right - said AEPINREVZZZZ1, and reco/reversals.log.csv carried TWO
+       lines naming AEPINREVZZZZ as the reversing entry, one of them a
+       colleague's. The share was correct throughout; only what the operator
+       was told was wrong.
+       THE WINDOW IS NARROWER THAN T-S10-14 DESCRIBES, and that is worth
+       recording rather than quietly inheriting: the ticket says "the same
+       millisecond and the same two base-36 characters", but this window's own
+       read-and-adopt means it also takes the colleague's write landing inside
+       one read-write cycle of ours. Hence the probe simulates that window
+       rather than pinning the mint alone. */
+    const announcedNewId = newId;
+    if (mirror && mirror.accountingId && String(mirror.accountingId) !== String(newId)) {
+      newId = String(mirror.accountingId);
+    }
     const back = await Reco._reverseReadShareHistory();
     const onShare = back.ok && ((back.base[tpl.id] || []).find(e => e && e.accountingId === base.accountingId) || {}).reversal;
     /* The log line now carries the MIRROR'S OWN LINES, which is what lets
@@ -29795,6 +29827,14 @@ renderCustomReport(tpl, sess, rpt, idx) {
        exists but not what it was. */
     const logged = await Reco._reverseAppendLog({ at, by, template: tpl.name, templateId: tpl.id,
       accountingId: base.accountingId, mode, reason, reversalId: newId,
+      /* T-S10-14. BOTH, and in ONE line rather than a correcting second one.
+         The ticket's Fix asks for "a correcting line ... rather than rewriting
+         the one already there, because the log is append-only" - but the log
+         is appended AFTER the flush, so at this point there is nothing there
+         yet to correct. One line that says what was announced and what it
+         became is the same audit trail with nothing to reconcile, and the
+         column is empty on every ordinary reversal. */
+      announcedReversalId: announcedNewId === newId ? '' : announcedNewId,
       reverses: String(base.reverses || ''),
       unstamped: rec.unstamped.length, alreadyUnstamped: rec.alreadyUnstamped.length,
       skipped: rec.unstampedSkipped.length,
@@ -29833,6 +29873,24 @@ renderCustomReport(tpl, sess, rpt, idx) {
       + (releasedN ? '. A colleague who already has this data loaded must press Load before they touch these '
         + 'rows, or their copy puts the stamp back' : ''), 'success');
     if (rec.logProblem) console.error('reverse: ' + rec.logProblem);
+    /* ---- T-S10-14. THE NOTICE, AND IT MUST NOT BE STOMPED. _noticeReMint is
+       already a no-op when the reference did not move, so this is simply the
+       call the reversal door never made - the Generate door has had it since
+       T-S10-11 and the harm is the same one: the operator has the old
+       reference on screen, in the toast above, and quite possibly written on a
+       document, and the number to quote is the new one.
+       NO regDns: the reversal FREES document numbers (step 6), it does not
+       register any, so there is nothing to re-point. The empty array is the
+       honest argument and _noticeReMint skips that block on it.
+       AND THE ALLOCATE DIALOG IS NOT OPENED ON THIS PATH. It would replace
+       the notice 300 ms later and the one sentence that matters would be gone
+       - the operator can allocate from the entries tab, which the notice's own
+       re-render leaves them looking at, and being told the reference is wrong
+       has to come before being asked to type numbers against it. */
+    if (announcedNewId !== newId) {
+      Reco._noticeReMint(tpl, announcedNewId, mirror, []);
+      return;
+    }
     if (newId) setTimeout(() => Reco.openAllocateModal(newId), 300);
   },
 

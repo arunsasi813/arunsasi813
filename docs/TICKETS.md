@@ -2554,6 +2554,85 @@ way `run_store_e2e` `[57b]` pins it: assert the mirror is on the share under a r
 original's `reversal.reversalId` names, that the modal names both references, and that the log
 carries a correcting line.
 
+**CLOSED — AND TWO PARAGRAPHS ABOVE ARE WRONG, which is the more useful half of the round.**
+The harm is real and was reproduced exactly; the ticket's account of *how rare it is* and of *what
+the log needs* both turned out not to survive measurement.
+
+**The first correction — "Why it is only a ticket" understates it.** "Two people reversing
+different entries in the same millisecond **and** drawing the same two base-36 characters — about
+1 in 1,296" is the condition for the **clash**, not for the stale announcement. `reverseEntry`
+does not mint blind: it reads the share itself and `AppState.adoptLedger`s the result **before**
+the mint — twice, in fact (`sh` before the plan re-check, `sh2` before the writes) — so its own
+local de-dup loop normally sees the colleague's mirror and corrects `newId` before a word is said.
+The announcement can only go stale if the colleague's write lands **after every read this window
+made and before this window's merge job**: one read-write cycle, *on top of* the 1 in 1,296. Three
+versions of this round's probe measured B's own loop doing the right thing and reported it as the
+bug; the fourth stubbed `Reco._reverseReadShareHistory` to hide the colleague's mirror from
+**every** read B makes, which is the honest shape of that window and nothing more — the share
+file itself is untouched.
+
+**The second correction — there was never a line to correct.** The Fix asks for "a correcting
+line to `reco/reversals.log.csv` rather than rewriting the one already there, because the log is
+append-only by design". But `Reco._reverseAppendLog` is called **after** `await
+AppState.flush()`, so at the moment the adoption happens the log holds nothing about this
+reversal yet. **One line carrying both references** is the same audit trail with nothing to
+reconcile, and the append-only design is respected by construction. `R26l` is the check that pins
+it and `R26m` is the control that keeps the new column empty on every ordinary reversal, so a log
+only ever read by a human does not grow a column of noise.
+
+**What was built, in `Reco.reverseEntry`:**
+
+- **The announced reference is captured and the real one adopted**, immediately after
+  `await AppState.flush()` and before anything is said or logged: `announcedNewId = newId`, then
+  `newId = String(mirror.accountingId)` when the two differ. Everything downstream — toast, log,
+  `AppState._activeEntryId`, the allocate dialog — was already reading `newId`, so one adoption
+  fixes all of them.
+- **The toast names the reference the mirror actually has** (`R26f`). It used to name the one the
+  mint proposed, which in this window belongs to somebody else's mirror — and is the number the
+  operator would quote and write on a document.
+- **`Reco._noticeReMint(tpl, announcedNewId, mirror, [])`** raises the same "This entry is X, not
+  Y" modal the Generate door has had since T-S10-11 (`R26g`). It already existed and was already a
+  no-op when nothing moved; the reversal door simply never called it. The empty array is the honest
+  argument: a reversal **frees** document numbers (step 6), it registers none, so there is nothing
+  to re-point.
+- **The allocate dialog is not opened on that path** (`R26h`). `reverseEntry` opens it on a 300 ms
+  `setTimeout`, which would have replaced the one sentence that matters. Being told the reference
+  is wrong comes before being asked to type document numbers against it, and the notice's own
+  re-render leaves the operator on the entries tab where allocation is a click away. `R26c` is the
+  other half of that: the ordinary path **still** gets the dialog, so the early return is taken
+  only when the reference moved.
+- **The log line carries both references.** `announcedReversalId` is `''` on every ordinary
+  reversal and the announced reference on the one path where it moved.
+
+**A bug this round's own probe found.** `Reco._reverseAppendLog` builds a **fixed** `flat` literal
+and calls `append_csv_rows(…, Object.keys(flat), [flat])`, so a caller passing a new key gets it
+dropped in silence and the column never appears. `R26i` — the premise check that the log has both
+columns — is what caught it, with three checks red on a build whose code was otherwise right.
+
+**Measured before the fix** (`scratchpad/rev/probes/r1_repro.mjs`): the toast said
+`AEPINREVZZZZ` while `e.reversal.reversalId` — set inside the mutate, and right — said
+`AEPINREVZZZZ1`; `reco/reversals.log.csv` carried **two** lines naming `AEPINREVZZZZ` as the
+reversing entry, one of them a colleague's; and no notice modal was raised. Both mirrors were on
+the share under different references throughout, which is what T-S10-11 bought and is why this was
+a notice bug and not a data one.
+
+**Every id comparison in the probe and the suite section is exact, and every CSV field is read by
+column index.** `Reco._reMintAgainst` returns `U.accountingId() + (++n)`, so the re-minted
+reference has the announced one as a **prefix**: `/reversed by AEPINREVZZZZ/` matches a *correct*
+toast naming `AEPINREVZZZZ1`. Two versions of this probe reported first the harm and then the fix
+off exactly that ambiguity.
+
+**Gated by `[95] R26a—R26p` in `run_store_e2e`** (16 checks), not `run_reverse_e2e` as the Test
+paragraph proposed: only `run_store_e2e` carries the two-window share fixture (`S101_SETUP` /
+`S101_POST`) and the `[57b]` pinning technique this needs.
+
+**Mutation grid 7 x 15** in `scratchpad/rev/mut/run.py` against the round's own probe
+(`scratchpad/rev/probes/r2_fix.mjs`), each turning exactly the checks it should — and **two of
+them measured nothing on the first pass**, which was a fault in the probe rather than in the grid.
+The notice raised *without* the early return, and the early return taken on *every* reversal, are
+both invisible to a probe that reads the modal straight after the flush: the stomp happens on a
+`setTimeout`. The probe now waits 450 ms past it, which also bought `R26c`.
+
 ---
 
 ## T-26-11  ~~After a T-30-3 conflict the two values are in the file but unreachable, so the column reads blank next month~~  **FIXED** — the conflict is recorded where a reopen cannot orphan it, and the Column Values panel lists both strings

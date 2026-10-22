@@ -5786,3 +5786,148 @@ The grid as it stands, named by the `[94]` check carrying each assertion:
 (Also, for the third time in this project: a **backtick inside a page-side template literal closes
 it**. The repaired comment quoted `entry` in backticks and the probe threw `SyntaxError: missing )
 after argument list` at parse time.)
+
+## 26. T-S10-14 — the reversal mirror moved on the share and nobody said so
+
+### 26.1 The harm
+
+T-S10-11 gave the reversal mirror the same protections the generated entry has: a per-window
+suffix, an `idNonce`, the shared append rule, and `e.reversal.reversalId` set **inside the mutate**
+from where the mirror actually landed. So the mirror is never lost and the original→contra link is
+always right. What the reversal door did **not** get is `Reco._noticeReMint`, which the Generate
+door has had since that same ticket. The toast and the `reco/reversals.log.csv` line were both
+written from `newId` **as announced**, so when the share re-minted the mirror they named a
+reference the mirror does not have — and that reference belongs to somebody else's entry.
+
+Measured (`scratchpad/rev/probes/r1_repro.mjs`):
+
+```
+toast:                  Entry AEMVJWG1C4AB reversed by AEPINREVZZZZ
+e.reversal.reversalId:  AEPINREVZZZZ1        <- set in the mutate, and right
+reversals.log.csv:      AEPINREVZZZZ on BOTH lines, one of them a colleague's
+notice modal:           none
+the share:              both mirrors present, under different references
+```
+
+The data was correct throughout. Only what the operator was told was wrong — and the number they
+were told is the one they would quote and write on a document.
+
+### 26.2 The window is narrower than the ticket said, and finding that was most of the round
+
+T-S10-14 described *"two people reversing different entries in the same millisecond and drawing
+the same two base-36 characters — about 1 in 1,296"*. That is the condition for the **clash**, not
+for the stale announcement.
+
+`Reco.reverseEntry` does not mint blind. It reads the share itself and `AppState.adoptLedger`s the
+result **before** the mint — twice (`sh` before the plan re-check, `sh2` before the writes) — so
+its own local de-dup loop normally sees the colleague's mirror and corrects `newId` before a word
+is said. The announcement can only go stale if the colleague's write lands **after every read this
+window made and before this window's merge job**: one read-write cycle, *on top of* the 1 in 1,296.
+
+Three versions of the probe measured B's own de-dup loop doing the right thing and reported it as
+the bug. The fourth stubs `Reco._reverseReadShareHistory` so that **every** read B makes has the
+colleague's mirror filtered out of what it RETURNS — the share file is untouched. That is the
+honest shape of the window and nothing more.
+
+```js
+/* in the probe: the stub applies to EVERY read, not just the first.
+   Hiding only the first leaves sh2 to inform the local loop, which is a
+   different measurement. */
+Reco._reverseReadShareHistory = async function () {
+  const r = await realRead.apply(Reco, arguments);
+  if (r && r.ok && r.base && Array.isArray(r.base.TPL_E)) {
+    r.base.TPL_E = r.base.TPL_E.filter(e => !e || e.accountingId !== HIDE);
+  }
+  return r;
+};
+```
+
+### 26.3 The fix, and the one place it lives
+
+Everything downstream of the mint — toast, log, `AppState._activeEntryId`, the allocate dialog —
+already read `newId`, so a single adoption after the flush fixes all of them:
+
+```js
+await AppState.flush();
+const announcedNewId = newId;
+if (mirror && mirror.accountingId && String(mirror.accountingId) !== String(newId)) {
+  newId = String(mirror.accountingId);
+}
+```
+
+Then the toast names the real reference, the log line carries both, and:
+
+```js
+if (announcedNewId !== newId) {
+  Reco._noticeReMint(tpl, announcedNewId, mirror, []);
+  return;                        // deliberately NOT the 300ms allocate dialog
+}
+if (newId) setTimeout(() => Reco.openAllocateModal(newId), 300);
+```
+
+The empty array is the honest fourth argument: a reversal **frees** document numbers (step 6), it
+registers none, so there is nothing to re-point, and `_noticeReMint` skips that block on it.
+
+**The `return` is load-bearing.** `reverseEntry` opens the allocate dialog on a 300 ms
+`setTimeout`, which would replace the notice — the one sentence that matters — a third of a second
+after it appeared. The operator can allocate from the entries tab, which the notice's own
+re-render leaves them looking at. Being told the reference is wrong comes before being asked to
+type numbers against it.
+
+### 26.4 There was never a log line to correct
+
+The ticket's Fix asked for *"a correcting line to `reco/reversals.log.csv` rather than rewriting
+the one already there, because the log is append-only by design"*. But `_reverseAppendLog` is
+called **after** `await AppState.flush()`, so at the moment the adoption happens the log holds
+nothing about this reversal yet. One line carrying `reversalId` **and** `announcedReversalId` is
+the same audit trail with nothing to reconcile, and append-only is respected by construction.
+
+The column is empty on every ordinary reversal (`R26m`), so a log only ever read by a human does
+not grow a column of noise.
+
+### 26.5 `_reverseAppendLog` builds a FIXED field list — a bug the probe found
+
+```js
+const flat = { at: …, by: …, template: …, reversalId: line.reversalId || '', … };
+await window.pywebview.api.append_csv_rows('reco/reversals.log.csv', Object.keys(flat), [flat]);
+```
+
+The field list is explicit, so a caller passing a new key gets it **dropped in silence** and the
+column never appears. Three checks were red on a build whose `reverseEntry` was already right, and
+the premise check `R26i` (*the log has both a `reversalId` and an `announcedReversalId` column*) is
+what located it. **Anything new passed to `_reverseAppendLog` must be added to that literal too.**
+
+### 26.6 Two mutations measured nothing until the probe waited past the setTimeout
+
+| mutation | turns red |
+| --- | --- |
+| the mirror is not adopted (the pre-round state) | `R26f`, `R26g`, `R26h`, `R26j`, `R26k`, `R26l` |
+| adopted, but no notice is raised | `R26g`, `R26h` |
+| the notice is raised without the early return | `R26g`, `R26h` |
+| the announced reference is not passed to the log | `R26l` |
+| ...passed on EVERY line, not only the moved one | `R26m` |
+| the log's `flat` literal drops the field | `R26i`, `R26l`, `R26m` |
+| the early return is taken on every reversal | `R26c` |
+
+The third and the seventh were `red=NONE` on the first pass. Both are about **which modal is on
+screen a third of a second later**, and the probe was reading it straight after the flush, so the
+notice was there whether or not something replaced it. The probe now waits 450 ms past the
+`setTimeout`, which also bought `R26c` — the control that the ordinary path still gets its
+allocate dialog.
+
+**The general lesson: a check that reads UI state can only measure a deferred change if it waits
+past the defer.** This project already keeps a rule that performance gates must be operation counts
+and never wall clocks (§16.4a); this is the opposite case, where a wall-clock wait is the only
+honest way to read a `setTimeout`'s effect, and the right length is *past the known delay* rather
+than a guess.
+
+### 26.7 A prefix is not a reference
+
+`Reco._reMintAgainst` returns `U.accountingId() + (++n)`, so the re-minted reference has the
+announced one as a **prefix**: `/reversed by AEPINREVZZZZ/` matches a *correct* toast naming
+`AEPINREVZZZZ1`. Two versions of this probe reported first the harm and then the fix off exactly
+that ambiguity.
+
+Every id comparison in `[95]` is `===` against `e.reversal.reversalId`, and every field of
+`reversals.log.csv` is read by **column index** off the header row rather than by a regex over the
+line.
