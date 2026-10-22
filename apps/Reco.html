@@ -27608,41 +27608,76 @@ renderCustomReport(tpl, sess, rpt, idx) {
       +U.fmtInt(CAP)+' of '+U.fmtInt(rows.length)+' rows — Export CSV gives all '+U.fmtInt(rows.length)+'</span>';
     h += '<button class="success small" onclick="Reco.exportCustomReport('+idx+')">Export CSV</button></div>';
 
+    /* ---- T-26-5 / T-26-10. What each figure on this report LEFT OUT, so the
+       footer below can say it ONCE per column. Declared above the cards
+       because the cards reach it too now, and keyed by column: a column with
+       a Sum card AND a place in the total row is added up twice and is still
+       one fact about one column, so the operator does not need the sentence
+       twice. `noteFor` is what stops that. */
+    const totalNotes = [];
+    const noteFor = (col, tt) => {
+      if (!tt.excluded) return false;
+      if (!totalNotes.some(tn => tn.col === col))
+        totalNotes.push({ col: col, n: tt.excluded, samples: tt.samples });
+      return true;
+    };
+
     // 2. Render Summary Cards
     if (rpt.summaryCards && rpt.summaryCards.length > 0) {
         h += '<div class="report-cards" style="display:flex; gap:10px; margin-bottom:15px; flex-wrap:wrap;">';
+        /* ONE PASS PER COLUMN, not per card: four cards on one column used to
+           walk the rows four times. Memoised on the column name for this
+           render only, so nothing can go stale between renders. */
+        const colTotals = Object.create(null);
+        const totalsFor = (col) => colTotals[col]
+          || (colTotals[col] = Reco._reportColumnTotal(rows, col));
         rpt.summaryCards.forEach(card => {
             if (!card.col) return;
             const func = card.func || 'Sum';
             const cardTitle = card.displayName || (func + ' of ' + card.col);
-            // One pass, no Math.min(...nums): spreading a 200k-value array
-            // threw "Maximum call stack size exceeded" and took the whole
-            // report down with it.
-            let filled = 0, n = 0, sum = 0, mn = Infinity, mx = -Infinity;
-            for (let i = 0; i < rows.length; i++) {
-              const v = rows[i][card.col];
-              if (v == null || v === '') continue;
-              filled++;
-              if (!U.isNumeric(v)) continue;
-              const x = U.num(v);
-              n++; sum += x;
-              if (x < mn) mn = x;
-              if (x > mx) mx = x;
-            }
+            /* THE SAME ARITHMETIC AS THE TOTAL ROW, OUT OF THE SAME FUNCTION.
+               The card used to run its own pass with its own U.isNumeric test
+               (and its own Math.min caution, which now lives in the helper);
+               two copies of that is how a card and the total row for one
+               column come to disagree, which is the shape T-26-5 closed from
+               the other side. */
+            const tt = totalsFor(card.col);
+            const n = tt.n;
             let cardValue;
-            if (func === 'Count') cardValue = U.fmtInt(filled);
+            /* Count is a FILLED-cell count and takes no part in this: a cell
+               holding characters that are not a number is still a filled
+               cell, so Count is right to count it - n + excluded is exactly
+               the old `filled`. */
+            if (func === 'Count') cardValue = U.fmtInt(tt.n + tt.excluded);
             // Sum of nothing is zero; an average, minimum or maximum of
             // nothing has no answer, so those stay blank.
-            else if (func === 'Sum') cardValue = (n || !rows.length) ? U.fmtNum(sum) : '—';
+            else if (func === 'Sum') cardValue = (n || !rows.length) ? U.fmtNum(tt.sum) : '—';
             else if (!n) cardValue = '—';
-            else if (func === 'Avg') cardValue = U.fmtNum(sum / n);
-            else if (func === 'Min') cardValue = U.fmtNum(mn);
-            else if (func === 'Max') cardValue = U.fmtNum(mx);
-            else cardValue = U.fmtNum(sum);
+            else if (func === 'Avg') cardValue = U.fmtNum(tt.sum / n);
+            else if (func === 'Min') cardValue = U.fmtNum(tt.mn);
+            else if (func === 'Max') cardValue = U.fmtNum(tt.mx);
+            else cardValue = U.fmtNum(tt.sum);
 
-            h += `<div class="card" style="padding:10px; border:1px solid var(--border, #ccc); border-radius:5px;">
+            /* ---- T-26-10. THE CARD SAYS WHAT IT DROPPED, the same way the
+               total row does: a * on the figure, the count in the tooltip and
+               one sentence in the footer naming the characters. The cards are
+               the figures somebody reads FIRST, and Avg is the worst of them
+               for being less obviously a sum - 50.00 is the average of two
+               cells where the column shows three.
+               COUNT IS EXEMPT BY CONSTRUCTION rather than by a special case
+               further down: it is the only card that does not drop the cell.
+               The numbers are on the card as data- attributes for the same
+               reason the total row's are: a figure is the one thing a test
+               has to be able to read as a VALUE and not as a sentence. */
+            const dropped = func !== 'Count' && noteFor(card.col, tt);
+            const cardAttrs = ' data-card-col="' + U.escAttr(card.col) + '"'
+              + ' data-card-func="' + U.escAttr(func) + '"'
+              + ' data-card-excluded="' + (dropped ? tt.excluded : 0) + '"'
+              + (dropped ? ' title="' + U.escAttr(tt.excluded + ' cell(s) in ' + card.col
+                  + ' are not numbers and are not in this figure') + '"' : '');
+            h += `<div class="card"${cardAttrs} style="padding:10px; border:1px solid var(--border, #ccc); border-radius:5px;">
                     <div class="card-title text-muted">${U.esc(cardTitle)}</div>
-                    <div class="card-value"><strong>${U.esc(cardValue)}</strong></div>
+                    <div class="card-value"><strong>${U.esc(cardValue)}</strong>${dropped ? ' *' : ''}</div>
                   </div>`;
         });
         h += '</div>';
@@ -27668,8 +27703,6 @@ renderCustomReport(tpl, sess, rpt, idx) {
     });
 
     // 4. Render Total Row (Only for selected columns)
-    /* T-26-5. What each total LEFT OUT, so the footer below can say it. */
-    const totalNotes = [];
     if (rpt.showTotalRow && rows.length > 0) {
         const selectedTotals = rpt.totalColumns || []; // Fallback to empty array if undefined
         
@@ -27688,7 +27721,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
                    because a total is the one thing in a report a test has to
                    be able to read as a VALUE and not as a sentence. */
                 const tt = Reco._reportColumnTotal(rows, c);
-                if (tt.excluded) totalNotes.push({ col: c, n: tt.excluded, samples: tt.samples });
+                /* T-26-10: through noteFor, so a column with a Sum card AND a
+                   total gets ONE sentence instead of two identical ones. The
+                   * and the tooltip stay on both, because both are figures. */
+                noteFor(c, tt);
                 h += '<td data-total-col="'+U.escAttr(c)+'" data-total-sum="'+tt.sum+'"'
                   + ' data-total-excluded="'+tt.excluded+'"'
                   + (tt.excluded ? ' title="'+U.escAttr(tt.excluded + ' cell(s) in this column are not '
@@ -27756,13 +27792,34 @@ renderCustomReport(tpl, sess, rpt, idx) {
      counting it would put a warning under every sparse column in the app -
      including a deliberately blank override, which is a decision somebody
      made and not a value that cannot be added. */
+  /* ---- T-26-10. AND IT IS NOW THE ONE READER FOR A REPORT COLUMN, which is
+     why mn/mx are here rather than in the card loop. The cards used to do
+     their own pass and their own U.isNumeric test, and dropped the same cells
+     in silence - a Sum card reading 100.00 beside a column of 40, 60 and
+     1.234,50 with no * and no tooltip, one line above a total row that said
+     so (scratchpad/cards/probes/c1_repro.mjs C1e-C1g). Two implementations of
+     "what this column adds up to" is what T-26-5's own comment warned about:
+     the count lives WITH the arithmetic so the figure and the sentence cannot
+     disagree about how many.
+     IT IS ALSO FEWER PASSES, not more. The card loop called its own pass once
+     per CARD; this is called once per distinct COLUMN and memoised across the
+     cards on it, so the Sum/Avg/Min/Max four-card fixture goes from four
+     passes to one. At REPORT_ROW_CAP and above that is the difference that
+     matters, and it is why the original comment's "One pass, no
+     Math.min(...nums)" caution is kept rather than undone. */
   _reportColumnTotal(rows, col) {
-    let sum = 0, excluded = 0, n = 0;
+    let sum = 0, excluded = 0, n = 0, mn = Infinity, mx = -Infinity;
     const samples = [];
     for (let i = 0; i < rows.length; i++) {
       const v = rows[i][col];
       if (v == null || v === '') continue;
-      if (U.isNumeric(v)) { sum += U.num(v); n++; continue; }
+      if (U.isNumeric(v)) {
+        const x = U.num(v);
+        sum += x; n++;
+        if (x < mn) mn = x;
+        if (x > mx) mx = x;
+        continue;
+      }
       excluded++;
       if (samples.length < 3) samples.push(String(v));
     }
@@ -27772,7 +27829,12 @@ renderCustomReport(tpl, sess, rpt, idx) {
        column on the same screen said '—', because the card already refuses
        that case (`(n || !rows.length) ? fmtNum(sum) : '—'`). Two figures for
        one column, and the card made the better choice. */
-    return { sum: sum, excluded: excluded, samples: samples, n: n };
+    /* T-26-10. mn/mx are meaningful only when n > 0; with nothing numeric they
+       stay at their sentinels and every caller already answers '—' off `n`.
+       There is deliberately no `filled`: the Count card wants the count of
+       NON-BLANK cells, which is n + excluded exactly, and a fourth number
+       that is the sum of two others is a fourth number to keep in step. */
+    return { sum: sum, excluded: excluded, samples: samples, n: n, mn: mn, mx: mx };
   },
 
   /* Run a custom report definition against the data */

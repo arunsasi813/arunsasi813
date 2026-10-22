@@ -5619,3 +5619,79 @@ every `aegIntegration` fixture across all sixteen suites found no other half-pai
 `keywordValues: ''`, and the one other non-empty value (`Status` / `Closed`) is complete. This is
 the ordinary shape of a gate landing: the first thing it catches is the code that had been living
 in the state, and here that was a test fixture rather than a template on the share.
+
+## 24. T-26-10 — the summary cards had T-26-5's silence too
+
+### 24.1 The harm
+
+T-26-5 gave the total **row** a count of the cells it could not add and a footnote naming them. The
+**cards** beside it still dropped the same cells in silence: `Sum`, `Avg`, `Min` and `Max` each ran
+their own pass with their own `U.isNumeric` test and `continue`d, keeping no count.
+
+Measured on T-26-5's own fixture, as the ticket's Test asks — `Net` reading 40, 60 and `1.234,50`
+(a European decimal comma, which `U.isNumeric` correctly refuses):
+
+| figure | before |
+| --- | --- |
+| total row | `100.00 *`, one footer sentence |
+| `Sum` card | `100.00` — no `*`, no tooltip |
+| `Avg` card | `50.00` — the average of **two** cells where the column shows three |
+| `Min` / `Max` | `40.00` / `60.00` — ranked only over the cells they could read |
+| `Count` card | `3` — correct, and untouched by this round |
+
+The card is the figure somebody reads **first**, and it sat one line above a total row that did say
+so.
+
+### 24.2 `Reco._reportColumnTotal` is now the one reader for a report column
+
+`mn`/`mx` moved into the helper, so the total row and every card come out of the same arithmetic.
+Two implementations of *"what this column adds up to"* is exactly what T-26-5's own comment warned
+about: the count lives **with** the arithmetic so the figure and the sentence cannot disagree about
+how many. There is deliberately no `filled` field — the `Count` card wants the count of non-blank
+cells, which is `n + excluded` exactly, and a fourth number that is the sum of two others is a
+fourth number to keep in step.
+
+### 24.3 All four, not only `Sum`
+
+The ticket's **Fix** names `Sum` because that is where the helper was reusable; its **What** names
+all four, and all four drop the cell. Scaling the fix down to `Sum` would have left three cards
+with the same silence. `Avg` is the worst of them for being less obviously a sum. `Min` and `Max`
+rank only what they could read, and the dropped cell may be either extreme — **R24k** makes that
+concrete by overriding the cell to the **largest** value and watching `Max` pick it up.
+
+`Count` is exempt **by construction**, at the one place the mark is decided (`func !== 'Count'`),
+rather than by a special case bolted on later. A cell holding characters that are not a number is
+still a filled cell.
+
+### 24.4 One sentence per column, and the mark follows the total row
+
+`noteFor(col, tt)` is keyed by column, so five figures on `Net` that all dropped the same cell
+produce **one** footer sentence (**R24f**). Without that the operator reads the same sentence five
+times and learns to skip it.
+
+The card is marked the way the total row already is — a `*` on the figure, the count in the
+tooltip, the sentence in the footer — so there is one convention to learn. The numbers are on the
+card as `data-card-col` / `data-card-func` / `data-card-excluded`, for the reason the total row's
+are: a figure is the one thing a test must be able to read as a **value** and not as a sentence.
+
+### 24.5 Fewer passes, not more — as an operation count
+
+The card loop memoises the helper per **column** for the life of one render. Five cards on `Net`
+plus a total row on `Net` walk the rows **twice** where the old loop walked them **six** times
+(once per card, `Count` included, plus the total). **R24l** and **R24m** count the calls to the one
+function that walks the rows; **R24n** is the clause that catches a memo keyed wrongly, because a
+single global slot would hand one column's cards another column's figures and both counts would
+still pass. An operation count and never a wall clock (§16.4a).
+
+The original comment's caution — *"One pass, no `Math.min(...nums)`: spreading a 200k-value array
+threw Maximum call stack size exceeded"* — is kept rather than undone; it now lives in the helper.
+
+### 24.6 One trap this round walked into twice
+
+The `*` lives **inside** `.card-value`, beside the `<strong>`, as the total row's does inside its
+`<td>`. So a check that reads the whole node and compares it to `'100.00'` asserts the fix did
+**not** land, and the round's own probe went red on a correct build until the figure and the mark
+were read separately. And the pass-count arm runs after the control reverted the override, so `Net`
+is back to its formula values — the first version of `R24n` expected the overridden figures. Both
+are the same lesson: a check that encodes an assumption about state the previous arm left behind
+has to say so, and `R24n`'s comment now does.

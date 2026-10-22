@@ -2083,6 +2083,45 @@ per place that adds it up. `Count` is already a filled-cell count and is unaffec
 **Test** The T-26-5 fixture with a `Sum` card on `Net`: assert the card's value is 100, assert the
 count reaches the footer once (not twice), and keep the canonicalised control fully in both.
 
+**CLOSED — AND `Reco._reportColumnTotal` IS NOW THE ONE READER FOR A REPORT COLUMN.** The cards
+each ran their own pass with their own `U.isNumeric` test; `mn`/`mx` moved into the helper, so the
+total row and every card come out of the same arithmetic. Two implementations of *"what this column
+adds up to"* is what T-26-5's own comment warned about: the count lives **with** the arithmetic so
+the figure and the sentence cannot disagree about how many.
+
+**All four, not only `Sum`.** The Fix names `Sum` because that is where the helper was reusable,
+but the **What** names all four and all four drop the cell. `Avg` is the worst of them for being
+less obviously a sum — `50.00` is the average of *two* cells where the column shows three. `Min`
+and `Max` silently rank only the cells they could read, and the dropped cell may be either extreme
+(**R24k** makes that concrete: override the cell to the largest value and `Max` picks it up).
+`Count` is untouched, as the ticket asks — a cell holding characters that are not a number is still
+a **filled** cell — and it is exempt *by construction* at the one place the mark is decided
+(`func !== 'Count'`), not by a special case bolted on later.
+
+**The mark follows the total row's convention**, so there is one thing to learn: a `*` on the
+figure, the count in the tooltip, and one sentence in the footer naming the characters. The counts
+are also on the card as `data-card-excluded` / `data-card-col` / `data-card-func`, for the reason
+the total row's are: a figure is the one thing a test must read as a **value** and not as a
+sentence.
+
+**One sentence per column** (`noteFor`, keyed by column): five figures on `Net` all dropped the
+same cell and the footer carries **one** sentence. Without that the operator reads the same
+sentence five times and learns to skip it — **R24f** pins it.
+
+**And it is FEWER passes, not more** — an operation count, never a wall clock (§16.4a). The card
+loop memoises the helper per **column**, so five cards on `Net` plus a total row on `Net` walk the
+rows **twice** where the old loop walked them **six** times (**R24l**). **R24m** shows the memo is
+per column, and **R24n** is the clause that catches one keyed wrongly: a single global slot would
+hand one column's cards another column's figures and both counts would still pass.
+
+**Measured before the fix** (`scratchpad/cards/probes/c1_repro.mjs`, on T-26-5's own fixture as the
+Test asks): `Net` reads 40, 60 and `1.234,50`; the total row said `100.00 *` with one footer
+sentence, and the cards said `100.00`, `50.00`, `40.00`, `60.00` with no asterisk and no tooltip.
+
+**Gated by `[93] R24a–R24o` in `run_store_e2e`** (15 checks). Mutation grid 7 × 14 in
+`scratchpad/cards/mut/run.py` against the round's own probe, each of the seven turning exactly the
+checks it should and no others.
+
 ## T-S10-8  `pytest` and `run_panes_e2e` read the temp root's PATH SHAPE, so a long `TMPDIR` goes red
 
 **Where** `tests/test_excel_link.py` (every fixture built on pytest's `tmp_path`) and

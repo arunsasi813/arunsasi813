@@ -10724,6 +10724,7 @@ const PORT_R20  = 21490;   // R20 T-S10-10/T-S10-28: the conditional write and t
 const PORT_R21  = 21494;   // R21 T-26-11: the declined carry-forward conflict, and the panel
 const PORT_R22  = 21498;   // R22 T-26-9: the ticked row that produces no journal line
 const PORT_R23  = 21502;   // R23 T-26-8: the AEG keyword filter with half a pair set
+const PORT_R24  = 21506;   // R24 T-26-10: the report summary cards' own silence
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -14709,6 +14710,233 @@ section(92, 'R23 T-26-8 — THE AEG KEYWORD FILTER IS A PAIR, AND HALF A PAIR PO
   check(ka.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R23t no page or console error across the whole section', ka.errors.slice(0, 5));
   await ka.ctx.close();
+}
+
+/* ============================================================ [93] ====
+   R24. T-26-10. THE REPORT SUMMARY CARDS HAD T-26-5's SILENCE TOO.
+
+   T-26-5 gave the total ROW a count of the cells it could not add and a
+   footnote naming them. The CARDS beside it still dropped the same cells in
+   silence: Sum, Avg, Min and Max each ran their own pass with their own
+   U.isNumeric test and `continue`d, keeping no count. So a Sum card and its
+   own column disagreed for exactly the reason the total used to - and the
+   card is the figure somebody reads FIRST.
+
+   MEASURED BEFORE THE FIX (scratchpad/cards/probes/c1_repro.mjs, on T-26-5's
+   own fixture as the ticket's Test asks): Net reads 40, 60 and '1.234,50' (a
+   European decimal comma, which U.isNumeric correctly refuses). The total row
+   said `100.00 *` with one footer sentence. The cards said `100.00`, `50.00`,
+   `40.00`, `60.00` - no asterisk, no tooltip, nothing - one line above a
+   total row that did say so.
+
+   ALL FOUR, NOT ONLY Sum. The ticket's Fix names the Sum card because that is
+   where Reco._reportColumnTotal was reusable, but its What names all four and
+   all four drop the cell. Avg is the worst of them for being less obviously a
+   sum: 50.00 is the average of TWO cells where the column shows three. Min
+   and Max silently rank only the cells they could read, and the dropped cell
+   could be either extreme - R24k is the control that makes that concrete by
+   overriding the cell to the LARGEST value and watching Max pick it up.
+
+   COUNT IS UNTOUCHED, which the ticket asks for explicitly: a cell holding
+   characters that are not a number is still a FILLED cell, so 3 is right.
+   It is exempt BY CONSTRUCTION (`func !== 'Count'` at the one place the mark
+   is decided) rather than by a special case bolted on later, and R24e is what
+   holds that.
+
+   ONE SENTENCE PER COLUMN, which is the other half of the ticket's Fix and
+   what R24f pins: five figures on Net all dropped the same cell, and the
+   footer carries ONE sentence, because the note list is keyed by column.
+   Without that the operator reads the same sentence five times and learns to
+   skip it.
+
+   AND IT IS FEWER PASSES, NOT MORE - an OPERATION COUNT and not a wall clock
+   (§16.4a). Reco._reportColumnTotal is now THE one reader for a report column
+   (mn/mx moved into it) and the card loop memoises it per COLUMN, so five
+   cards on Net plus a total row on Net walk the rows twice where the old card
+   loop walked them six times. R24l and R24m count the calls; R24n is the
+   clause that catches a memo keyed wrongly, because a single global slot
+   would hand one column's cards another column's figures and both counts
+   would still pass.
+
+   MUTATION GRID: scratchpad/cards/mut/run.py, 7 mutations x the 14 checks of
+   this section's own probe (scratchpad/cards/probes/c2_fix.mjs - the same
+   assertions over the same fixture; the grid runs against the probe because
+   it can be pointed at a mutated copy of Reco.html through APP_FILE, which a
+   suite section cannot). Named by the check of THIS section carrying the same
+   assertion, every one turning exactly those and no others:
+
+     the card is not marked at all (the pre-round silence) -> R24c, R24d
+     Count is marked too                        -> R24e
+     the note list is not keyed                 -> R24f
+     the memo is one global slot                -> R24m, R24n
+     no memo: one pass per CARD again           -> R24l, R24m
+     the helper drops mn/mx                     -> R24d, R24i, R24k, R24n
+     Count uses n instead of n + excluded       -> R24e */
+const R24_SETUP = `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = 'TPL_RC'; t.name = 'Cards';
+  t.columns = ['Invoice','Base'].map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base';
+  t.displayColumns = ['Invoice','Base'];
+  t.additionalColumns = [{ name:'Net', type:'formula', formula:'NUM({Base})*2', allowOverride:true }];
+  t.enableReporting = true;
+  /* T-26-5's fixture plus the five cards: two rows worth 40 and 60 - 100
+     between them - and a third to type over. */
+  t.reports = [{ name:'R', columns:['Invoice','Net'], showTotalRow:true, totalColumns:['Net'],
+    summaryCards: [ { col:'Net', func:'Sum' }, { col:'Net', func:'Avg' },
+                    { col:'Net', func:'Min' }, { col:'Net', func:'Max' },
+                    { col:'Net', func:'Count' } ] }];
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_RC');
+  RecoTemplate.open(tpl.id);
+  await Reco.ingestData(tpl, [{ Invoice:'INV-1', Base:'20' }, { Invoice:'INV-2', Base:'30' },
+                              { Invoice:'INV-3', Base:'5' }], ['Invoice','Base']);
+  App.closeModal(); AppState.activeRecoId = 'TPL_RC';
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return true;
+})`;
+
+/* THE FIGURE AND THE MARK READ SEPARATELY. The * lives INSIDE .card-value
+   (beside the <strong>, as the total row's does inside its <td>), so reading
+   the whole node and comparing it to '100.00' asserts the fix did NOT land -
+   which is how the first run of this round's probe went red on a correct
+   build. The counts come off data- attributes for the same reason the total
+   row's do: a figure is the one thing a test must read as a VALUE. */
+const R24_RUN = (value) => `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_RC');
+  const sess = AppState.recoSessions.TPL_RC;
+  const row = sess.data.find(r => r._pk === 'INV-3');
+  await Reco.setOverride(row._id, 'Net', ${JSON.stringify(value)});
+  const rpt = tpl.reports[0];
+  const rows = Reco.runReport(tpl, sess, rpt);
+  const d = document.createElement('div');
+  d.innerHTML = Reco.renderCustomReport(tpl, sess, rpt, 0);
+  const cards = Array.from(d.querySelectorAll('.card')).map(c => {
+    const v = ((c.querySelector('.card-value') || {}).textContent || '').trim();
+    return { func: c.getAttribute('data-card-func'), col: c.getAttribute('data-card-col'),
+             value: v.replace(/\\s*\\*$/, ''), marked: /\\*/.test(v),
+             titled: !!c.getAttribute('title'),
+             excluded: Number(c.getAttribute('data-card-excluded')) };
+  });
+  const td = d.querySelector('td[data-total-col="Net"]');
+  const notes = Array.from(d.querySelectorAll('[data-total-note]'))
+    .map(n => n.textContent.replace(/\\s+/g, ' ').trim());
+  const out = { cells: rows.map(r => String(r.Net)), cards: cards,
+                totalText: td ? td.textContent.trim() : null,
+                totalExcluded: td ? Number(td.getAttribute('data-total-excluded')) : null,
+                noteCount: notes.length, notes: notes.map(s => s.slice(0, 180)) };
+  await Reco.revertOverride(row._id, 'Net');
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return out;
+})`;
+
+section(93, 'R24 T-26-10 — THE SUMMARY CARDS SAY WHAT THEY DROPPED, ONCE PER COLUMN');
+{
+  const RC = makeRoot('share-r24');
+  const brRC = await startBridge(RC.root, PORT_R24); procs.push(brRC.proc);
+  const rca = await openReco(browser, brRC);
+  await rca.page.evaluate(R24_SETUP + '()');
+
+  const a1 = await rca.page.evaluate(R24_RUN('1.234,50') + '()');
+  note('R24 a non-numeric override', a1);
+  const card = (f) => (a1.cards.find(c => c.func === f) || {});
+
+  check(a1.cells.join('|') === '40|60|1.234,50',
+    'R24a PREMISE: the column on screen reads 40, 60 and the typed characters', a1.cells);
+  check(a1.totalExcluded === 1 && /^100\.00 \*$/.test(a1.totalText || ''),
+    'R24b PREMISE: the TOTAL ROW still does what T-26-5 built - 100.00 with a *',
+    { text: a1.totalText, excluded: a1.totalExcluded });
+  check(card('Sum').value === '100.00' && card('Sum').excluded === 1
+        && card('Sum').marked === true && card('Sum').titled === true,
+    'R24c THE FIX: the Sum card still reads 100.00 - the arithmetic is UNCHANGED, and now comes '
+    + 'out of the same function the total row uses - and it says so: a *, the count on the card, '
+    + 'and a tooltip', card('Sum'));
+  check(card('Avg').value === '50.00' && card('Avg').marked === true
+        && card('Min').value === '40.00' && card('Min').marked === true
+        && card('Max').value === '60.00' && card('Max').marked === true,
+    'R24d ...AND SO DO Avg, Min AND Max. The ticket\'s Fix names only Sum because that is where '
+    + 'the helper was reusable; its What names all four, and all four drop the cell. An Avg of two '
+    + 'cells where the column shows three is the same silence with a less obvious figure',
+    { avg: card('Avg'), min: card('Min'), max: card('Max') });
+  check(card('Count').value === '3' && card('Count').marked === false
+        && card('Count').excluded === 0,
+    'R24e AND COUNT IS UNTOUCHED, which the ticket asks for explicitly: a cell holding characters '
+    + 'that are not a number is still a FILLED cell, so 3 is right and there is nothing to mark. '
+    + 'Exempt by construction at the one place the mark is decided, not by a later special case',
+    card('Count'));
+  check(a1.noteCount === 1,
+    'R24f ONCE, NOT FIVE TIMES: four cards and the total row all add up Net and all four dropped '
+    + 'the same cell, and the footer carries ONE sentence - the note list is keyed by column. '
+    + 'Without that the operator reads the same sentence five times and learns to skip it',
+    { count: a1.noteCount, notes: a1.notes });
+  check(/1 cell\(s\)/.test(a1.notes[0] || '') && /Net/.test(a1.notes[0] || '')
+        && /1\.234,50/.test(a1.notes[0] || ''),
+    'R24g ...and that one sentence still names the count, the column and the characters',
+    a1.notes);
+
+  /* THE CANONICALISED CONTROL. */
+  const a2 = await rca.page.evaluate(R24_RUN('250') + '()');
+  note('R24 the control', a2);
+  const c2 = (f) => (a2.cards.find(c => c.func === f) || {});
+  check(a2.totalExcluded === 0 && a2.noteCount === 0,
+    'R24h CONTROL: a value U.isNumeric accepts excludes nothing and writes no footer sentence',
+    a2);
+  check(c2('Sum').value === '350.00' && c2('Avg').value === '116.67'
+        && c2('Min').value === '40.00' && c2('Count').value === '3',
+    'R24i CONTROL: every card counts all three cells (40+60+250), so the marks above are a silent '
+    + 'card now speaking and not a card that cannot read its column at all',
+    { sum: c2('Sum').value, avg: c2('Avg').value, min: c2('Min').value });
+  check(a2.cards.every(c => c.marked === false && c.excluded === 0),
+    'R24j CONTROL: and no card is marked, so the * is not permanent furniture', a2.cards);
+  check(c2('Max').value === '250.00',
+    'R24k CONTROL, AND IT IS THE MIN/MAX ONE: the overridden cell is now the LARGEST and Max '
+    + 'reads it - which is exactly what a dropped cell costs when it is an extreme, and is why '
+    + 'Min and Max are marked above rather than left alone', c2('Max'));
+
+  /* THE PASS COUNT - an operation count, never a wall clock (§16.4a). */
+  const a3 = await rca.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_RC');
+    const sess = AppState.recoSessions.TPL_RC;
+    const rpt = tpl.reports[0];
+    const real = Reco._reportColumnTotal;
+    const calls = [];
+    Reco._reportColumnTotal = function (rws, col) { calls.push(String(col)); return real.apply(Reco, arguments); };
+    try { Reco.renderCustomReport(tpl, sess, rpt, 0); } finally { Reco._reportColumnTotal = real; }
+    /* A SECOND REPORT OVER TWO COLUMNS, so the memo is shown to be per column
+       and not one global slot that would serve the wrong one. */
+    const rpt2 = { name:'R2', columns:['Invoice','Net','Base'], showTotalRow:false, totalColumns:[],
+                   summaryCards: [ { col:'Net', func:'Sum' }, { col:'Net', func:'Avg' },
+                                   { col:'Base', func:'Sum' }, { col:'Base', func:'Max' } ] };
+    const calls2 = [];
+    Reco._reportColumnTotal = function (rws, col) { calls2.push(String(col)); return real.apply(Reco, arguments); };
+    let html2;
+    try { html2 = Reco.renderCustomReport(tpl, sess, rpt2, 0); } finally { Reco._reportColumnTotal = real; }
+    const d2 = document.createElement('div'); d2.innerHTML = html2;
+    const vals = Array.from(d2.querySelectorAll('.card')).map(c =>
+      c.getAttribute('data-card-col') + '/' + c.getAttribute('data-card-func') + '='
+      + ((c.querySelector('.card-value') || {}).textContent || '').trim().replace(/\\s*\\*$/, ''));
+    return { calls: calls, calls2: calls2, vals: vals };
+  })()`);
+  note('R24 the pass count', a3);
+  check(a3.calls.length === 2 && a3.calls.join(',') === 'Net,Net',
+    'R24l THE PASS COUNT: five cards on Net plus a total row on Net walk the rows TWICE - once '
+    + 'for the whole card block and once for the total row. The old card loop had its own inline '
+    + 'walk per card, so the same report was SIX walks. An operation count and not a wall clock '
+    + '(§16.4a)', a3.calls);
+  check(a3.calls2.length === 2 && a3.calls2.slice().sort().join(',') === 'Base,Net',
+    'R24m ...and the memo is PER COLUMN: four cards over two columns is two walks, one each',
+    a3.calls2);
+  check(a3.vals.join('|') === 'Net/Sum=110.00|Net/Avg=36.67|Base/Sum=55.00|Base/Max=30.00',
+    'R24n ...AND EACH CARD STILL GETS THE FIGURE FOR ITS OWN COLUMN. The control above reverted '
+    + 'the override, so Net is back to its formula (40, 60, 10) and Base is 20, 30, 5 - the two '
+    + 'columns disagree on every figure, which is what this needs: a memo keyed wrongly would '
+    + 'hand Base\'s cards Net\'s numbers and both counts above would still pass', a3.vals);
+
+  check(rca.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R24o no page or console error across the whole section', rca.errors.slice(0, 5));
+  await rca.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
