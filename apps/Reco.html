@@ -14594,6 +14594,51 @@ defaultTemplate() {
     const clash = extraRaw.filter(Boolean).find(n => colNames.includes(n));
     if (clash) { U.toast('"' + clash + '" is both a file column and an added column', 'error'); return; }
 
+    /* ---- T-26-8. THE AEG KEYWORD FILTER IS A PAIR, AND HALF A PAIR POSTS
+       EVERYTHING. `if (aeg.keywordColumn && aeg.keywordValues)` in
+       Reco.previewEntryFromSelection is the only thing that narrows the
+       selection to the rows the operator meant; with the VALUES set and the
+       COLUMN empty the && is false, no filter runs, and every selected row
+       posts. Measured on a five-row fixture whose filter names one value that
+       one row carries: the entry posted 1015 (1+2+4+8+1000) where the
+       operator had asked for 4, all five rows audited and stamped, and
+       NOTHING on the Generate screen said the filter was not running
+       (scratchpad/kw/probes/k1_repro.mjs K1d-K1g).
+       ASKED IN BOTH DIRECTIONS, because half a pair is a question either way:
+       values with no column posts everything, and a column with no values is
+       a filter that was set up and never finished. Both are states the editor
+       can produce and neither can be read off the Generate screen.
+       HERE AND NOT ONLY AT THE LEDGER DOOR, because this is where the state is
+       created - and the walk in is one the app itself leads: S11's matrix
+       refuses a column holding override records as the AEG keyword column
+       (correctly), setAegRole returns false and leaves the field at '', and
+       the values the operator already typed are in the editing template,
+       written by an `oninput` with no gate at all (K1h-K1i). One dismissed
+       toast was the whole of their protection.
+       A CONFIRM AND NOT A REFUSAL, in this one place: the siblings in this
+       function are confirms, a template can legitimately be saved half-set-up
+       mid-edit, and the ledger door REFUSES - so nothing can post out of this
+       state whatever is answered here. BOTH FIELDS EMPTY is left alone: that
+       is "no keyword filter", today's deliberate behaviour and not the bug. */
+    const kwAeg = t.aegIntegration || {};
+    if (kwAeg.enabled) {
+      const kwC = String(kwAeg.keywordColumn == null ? '' : kwAeg.keywordColumn).trim();
+      const kwV = String(kwAeg.keywordValues == null ? '' : kwAeg.keywordValues).trim();
+      if (kwV && !kwC) {
+        if (!confirm('The AEG keyword filter names the value(s) "' + kwV + '" but no column to look '
+            + 'them up in, so the filter CANNOT RUN: Preview Entry would be given every row you '
+            + 'select, not the ones carrying those values.\n\nPick a keyword column, or clear the '
+            + 'values if you do not want a keyword filter.\n\nSave it like this anyway? (Generating '
+            + 'an entry will refuse until one of the two is fixed.)')) return;
+      } else if (kwC && !kwV) {
+        if (!confirm('The AEG keyword filter names the column "' + kwC + '" but no values to match in '
+            + 'it, so the filter CANNOT RUN: Preview Entry would be given every row you select.'
+            + '\n\nType the values that mean "post this row", or clear the column if you do not want '
+            + 'a keyword filter.\n\nSave it like this anyway? (Generating an entry will refuse until '
+            + 'one of the two is fixed.)')) return;
+      }
+    }
+
     /* The three name sets, built once, read by every prune below.
        The prune that follows used to test against t.columns alone, so the
        moment anything else may legitimately name an added column - a primary
@@ -29804,9 +29849,43 @@ renderCustomReport(tpl, sess, rpt, idx) {
       });
     });
 
-    if (aeg.keywordColumn && aeg.keywordValues) {
-      const allowed = aeg.keywordValues.split(',').map(s => s.trim()).filter(Boolean);
-      sourceRows = sourceRows.filter(r => allowed.includes(String(r[aeg.keywordColumn]||'')));
+    /* ---- T-26-8. LEDGER-WRITE REFUSAL: THE KEYWORD FILTER IS HALF SET UP, so
+       it cannot run, and the line below would hand this entry every row in the
+       selection. Measured before the fix: five rows, the filter naming one
+       value that one row carries, and the entry posted 1015 against the 4 the
+       operator asked for, all five stamped POSTED
+       (scratchpad/kw/probes/k1_repro.mjs K1d-K1f).
+       A REFUSAL HERE, where T-26-4 and T-26-9 chose warn-and-offer at the same
+       door, and the difference is what the state can mean. Those two name a
+       judgement the operator could genuinely have intended - re-post a row on
+       purpose, close a row that produced no line - so the preview opens and
+       they choose. This one is a template that CONTRADICTS ITSELF: it names
+       values to match and no column to match them in, and there is no reading
+       under which "post every row instead" is what it was asked to do. The
+       recovery is one edit in the template editor, which the sentence names,
+       and the save-time confirm has already asked once.
+       NARROW BY CONSTRUCTION, in both arms: it fires only when exactly one of
+       the pair is set. BOTH EMPTY is "no keyword filter" - today's deliberate
+       behaviour, the overwhelmingly common template, and not the bug - and
+       both set is the filter working as designed. */
+    const kwCol0 = String(aeg.keywordColumn == null ? '' : aeg.keywordColumn).trim();
+    const kwVal0 = String(aeg.keywordValues == null ? '' : aeg.keywordValues).trim();
+    if ((kwVal0 && !kwCol0) || (kwCol0 && !kwVal0)) {
+      U.toast('Nothing was posted. This reconciliation\'s AEG keyword filter names '
+        + (kwVal0 && !kwCol0
+            ? 'the value(s) "' + kwVal0 + '" but NO COLUMN to look them up in'
+            : 'the column "' + kwCol0 + '" but NO VALUES to match in it')
+        + ', so the filter cannot run \u2014 and without it this entry would be given all '
+        + sourceRows.length + ' row(s) you selected rather than the ones the filter is for. '
+        + 'Open the template and ' + (kwVal0 && !kwCol0
+            ? 'pick a keyword column, or clear the values if you do not want a keyword filter.'
+            : 'type the values that mean "post this row", or clear the column if you do not want a '
+              + 'keyword filter.'), 'error');
+      return;
+    }
+    if (kwCol0 && kwVal0) {
+      const allowed = kwVal0.split(',').map(s => s.trim()).filter(Boolean);
+      sourceRows = sourceRows.filter(r => allowed.includes(String(r[kwCol0]||'')));
       if (!sourceRows.length) { U.toast('No selected rows match the keyword filter','error'); return; }
     }
 

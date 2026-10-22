@@ -5520,3 +5520,102 @@ ticked and a button has just been pressed — a bad message, not a silence. Both
 corrected, T-26-9's own guard is an improvement on that message rather than the removal of a
 silence, and `R22v` is the control that keeps the claim honest: it asserts that nothing is written
 and the preview stays open **and says in its own text that this was already true**.
+
+## 23. T-26-8 — the AEG keyword filter is a pair, and half a pair posted everything
+
+### 23.1 The harm
+
+`if (aeg.keywordColumn && aeg.keywordValues)` in `Reco.previewEntryFromSelection` was the only
+thing narrowing a selection to the rows the operator meant. With the **values** set and the
+**column** empty the `&&` is false, no filter runs, and every selected row posts — and nothing on
+the Generate screen said the filter was not running. The AEG never validated the pair; it behaves
+the same on `e9851b4`.
+
+Measured before the fix (`scratchpad/kw/probes/k1_repro.mjs`), five rows worth 1, 2, 4, 8 and 1000
+with a filter naming the one value `POST` that only the row worth 4 carries, all five ticked:
+
+```
+standardRows: [INV-1, INV-2, INV-3, INV-4, INV-5]
+postedDr:     1015            <- 1+2+4+8+1000, against the 4 that was asked for
+postedPks:    all five        stamped: all five POSTED
+previewSaysFilter: false      <- /keyword/i matches nothing in the rendered preview
+```
+
+The largest row in the file was in the general ledger because a dropdown was left at *"— none —"*.
+The amounts are powers of two plus 1000 on purpose: every subset sums to a different number, so
+the posted total **names** which rows went in rather than merely counting them.
+
+### 23.2 The walk in is one the app itself leads
+
+This is why it is a ticket now rather than a curiosity. S11's exclusive-role matrix refuses a
+column still holding override records as the AEG keyword column — correctly, since an override is
+**key-scoped** and would decide whether a row posts at all. `RecoTemplate.setAegRole` returns
+`false` and leaves the field at `''`. The values the operator has already typed are in the editing
+template, written by an `oninput` with **no gate at all**. `K1h`–`K1i` measured exactly that:
+`returned: false`, the matrix's own sentence in the toast, `column: ''`, `values: 'POST'`. One
+dismissed toast was the whole of the protection.
+
+(The probe's first two attempts at this arm asserted against a fixture that did not exist —
+`Reco.setTag` writes a `k:'typed'` record and only the **override** arm refuses, then
+`_setOverride` refuses a row arm 1 had already posted. Both are recorded in the probe's comments;
+the matrix's own comment explains why a plain dropdown may legitimately be the keyword column, and
+`O14a` asserts it.)
+
+### 23.3 Asked at the save, refused at the ledger door
+
+- **The save asks**, beside `saveTemplate`'s own confirms, naming the values (or the column), that
+  the other half is missing, and the consequence. OK still saves — a template may legitimately be
+  half set up mid-edit — and Cancel abandons the save like every other confirm there.
+- **The door refuses**, before the entry is built, and names **how many rows it would have been
+  handed instead**. That count is what makes the sentence act-on-able rather than a complaint.
+
+**A refusal here, where T-26-4 and T-26-9 chose warn-and-offer at this same door.** Those two name
+a judgement the operator could genuinely have intended, so the preview opens and they choose. This
+one is a template that *contradicts itself* — values to match, no column to match them in — and
+there is no reading under which "post every row instead" is what it was asked to do. The recovery
+is one edit, which the sentence names.
+
+**Both directions and trimmed.** A column with no values is a filter that was set up and never
+finished and posts everything just the same. And both readers `.trim()`, which is a behavioural
+choice: untrimmed, `'   '` is **truthy**, so the old `&&` read it as a filter in force, split it
+into an empty allow-list and answered *"No selected rows match the keyword filter"* — a sentence
+about the rows, on a selection where every row would have matched a filter that had been finished.
+
+**Both fields empty is left alone.** That is "no keyword filter": the overwhelmingly common
+template, deliberate, and not the bug. `R23n`–`R23o` pin it, and they pin it with a **posting** —
+`dr 1015`, all five rows — so the control cannot be a second refusal read the same way.
+
+### 23.4 The gates
+
+`[92] R23a–R23t`, 20 checks over five templates (one per arm; arm A is run twice, before and after
+the column is filled in, which is the recovery the refusal names). "Nothing was posted" is read off
+`entryHistory` **and** every post-entry cell, never off the absence of a pending entry — a refusal
+that still wrote would look identical otherwise.
+
+`scratchpad/kw/mut/run.py`, 7 × 19 against the round's own probe
+(`scratchpad/kw/probes/k2_fix.mjs`), each mutation turning exactly the checks it should, named here
+by the `[92]` check carrying the same assertion:
+
+| mutation | red |
+| --- | --- |
+| no ledger-door refusal at all | `R23c/d/e/i/k/l/r` |
+| no save-time ask | `R23a`, `R23j`, `R23p`, `R23q` |
+| the refusal widened to both-empty too | `R23n`, `R23o` |
+| only the values-no-column arm | `R23k`, `R23l`, `R23r` |
+| the readers do not trim | `R23r` |
+| the refusal drops the row count | `R23d` |
+| the save-side column-no-values arm dropped | `R23j`, `R23q` |
+
+### 23.5 The gate found a suite fixture in the same state
+
+`[31] C6f` empties `keywordColumn` so `Vendor` can be offered *as* the keyword column without
+clashing with itself, and saves — leaving `keywordValues: 'go'` behind. That is exactly the
+half-set-up pair this ticket is about, so `TPL_S11` then posted every row it was given, and `C6h`
+— which is about a **carried** value and has nothing to do with the keyword filter — was quietly
+relying on that. With the door refusing, `C6h` read `ctx.sourceRows` of `null` and the suite threw.
+
+The fixture now clears **both** fields, which states what it means: no keyword filter. A sweep of
+every `aegIntegration` fixture across all sixteen suites found no other half-pair — the rest set
+`keywordValues: ''`, and the one other non-empty value (`Status` / `Closed`) is complete. This is
+the ordinary shape of a gate landing: the first thing it catches is the code that had been living
+in the state, and here that was a test fixture rather than a template on the share.

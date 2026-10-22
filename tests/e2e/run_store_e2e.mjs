@@ -4322,7 +4322,18 @@ try {
        STORED, not as somebody happens to have one open. */
     RecoTemplate.edit('TPL_S11');
     RecoTemplate._editing.additionalColumns.find(a => a.name === 'Vendor').carryForward = true;
+    /* ---- T-26-8 REPAIRED THIS FIXTURE, and the gate is what found it. The
+       column is emptied so "Vendor" can be offered AS the keyword column
+       without clashing with itself; the VALUES used to be left at 'go', which
+       is precisely the half-set-up pair T-26-8 is about - a filter naming a
+       value and no column to look it up in. So this template then posted
+       every row it was given, and C6h below (which is about a CARRIED value,
+       not about the keyword filter) was quietly relying on that. Now the
+       ledger door refuses it and C6h read `ctx.sourceRows` of null.
+       Both are cleared, which says what this fixture means: no keyword filter.
+       R23n-R23o are the gates that keep THAT the unfiltered behaviour. */
     RecoTemplate._editing.aegIntegration.keywordColumn = '';
+    RecoTemplate._editing.aegIntegration.keywordValues = '';
     RecoTemplate.saveTemplate();
     RecoTemplate.edit('TPL_S11');
     const t = RecoTemplate._editing;
@@ -10712,6 +10723,7 @@ const PORT_R19Z = 21484;   // R19z compaction widens the day file; the header ca
 const PORT_R20  = 21490;   // R20 T-S10-10/T-S10-28: the conditional write and the lock
 const PORT_R21  = 21494;   // R21 T-26-11: the declined carry-forward conflict, and the panel
 const PORT_R22  = 21498;   // R22 T-26-9: the ticked row that produces no journal line
+const PORT_R23  = 21502;   // R23 T-26-8: the AEG keyword filter with half a pair set
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -14436,6 +14448,267 @@ section(91, 'R22 T-26-9 — THE TICKED ROW THAT PRODUCES NO JOURNAL LINE, NAMED 
   check(za.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R22x no page or console error across the whole section', za.errors.slice(0, 5));
   await za.ctx.close();
+}
+
+/* ============================================================ [92] ====
+   R23. T-26-8. AN AEG LEFT HOLDING KEYWORD VALUES WITH NO KEYWORD COLUMN
+   POSTS EVERY ROW.
+
+   `if (aeg.keywordColumn && aeg.keywordValues)` in previewEntryFromSelection
+   was the only thing narrowing the selection to the rows the operator meant.
+   With the VALUES set and the COLUMN empty the && is false, no filter runs,
+   and every selected row posts - and nothing on the Generate screen said the
+   filter was not running. The AEG never validated the pair; it behaves the
+   same on e9851b4.
+
+   MEASURED BEFORE THE FIX (scratchpad/kw/probes/k1_repro.mjs): five rows
+   worth 1, 2, 4, 8 and 1000, a filter naming the one value `POST` that only
+   the row worth 4 carries, all five ticked. The entry posted `dr 1015` -
+   1+2+4+8+1000 - all five keys in `entry.postedPks`, all five cells stamped
+   POSTED, and `/keyword/i` matched nothing in the rendered preview. The
+   largest row in the file was in the general ledger because a dropdown was
+   left at "— none —".
+
+   THE WALK IN IS ONE THE APP LEADS, which is why this is a ticket now and not
+   a curiosity: S11's exclusive-role matrix refuses a column still holding
+   override records as the AEG keyword column (correctly - an override is
+   KEY-scoped and would decide whether a row posts at all), `setAegRole`
+   returns false and leaves the field at '', and the values the operator has
+   already typed are in the editing template, written by an `oninput` with no
+   gate at all. K1h-K1i measured exactly that: `returned: false`, the matrix's
+   own sentence in the toast, `column: ''`, `values: 'POST'`. One dismissed
+   toast was the whole of the protection.
+
+   ASKED AT THE SAVE, REFUSED AT THE LEDGER DOOR, and the split is deliberate.
+   The confirm sits beside saveTemplate's own confirms and lets a template be
+   saved half-set-up mid-edit, which is a real thing to be doing; nothing can
+   POST out of that state whatever is answered, because the door refuses.
+   A REFUSAL AND NOT WARN-AND-OFFER, where T-26-4 and T-26-9 chose the latter
+   at this same door: those two name a judgement the operator could genuinely
+   have intended - re-post a row on purpose, close a row that produced no line
+   - so the preview opens and they choose. This one is a template that
+   CONTRADICTS ITSELF, naming values to match and no column to match them in,
+   and there is no reading under which "post every row instead" is what it was
+   asked to do.
+
+   BOTH DIRECTIONS, because half a pair is a question either way: a column
+   with no values is a filter that was set up and never finished and posts
+   everything just the same (R23j-R23l). BOTH EMPTY IS LEFT ALONE and R23n-R23o
+   are what pin that: "no keyword filter" is what nearly every template in the
+   folder is, it still posts every selected row unfiltered, and it is not what
+   this ticket is about.
+
+   MUTATION GRID: scratchpad/kw/mut/run.py, 7 mutations x the 19 checks of
+   this section's own probe (scratchpad/kw/probes/k2_fix.mjs - the same
+   assertions over the same fixtures; the grid runs against the probe because
+   it can be pointed at a mutated copy of Reco.html through APP_FILE, which a
+   suite section cannot). Named by the check of THIS section carrying the same
+   assertion, every one turning exactly those and no others:
+
+     no ledger-door refusal at all  -> R23c/d/e/i/k/l/r
+     no save-time ask               -> R23a, R23j, R23p, R23q
+     the refusal widened to both-empty too -> R23n, R23o
+     only the values-no-column arm  -> R23k, R23l, R23r
+     the readers do not trim        -> R23r
+     the refusal drops the row count -> R23d
+     the save-side column arm dropped -> R23j, R23q */
+const R23_SETUP = (tid, kwCol, kwVal, answer) => `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = ${JSON.stringify(tid)}; t.name = 'Kw ' + ${JSON.stringify(tid)};
+  t.columns = ['Invoice','Base','Flag','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = false; aegTpl.aggregateBy = [];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id,
+    keywordColumn:${JSON.stringify(kwCol)}, keywordValues:${JSON.stringify(kwVal)},
+    postEntryColumn:'Reco', postEntryValue:'POSTED' };
+  const realC = window.confirm;
+  const asked = [];
+  window.confirm = (m) => { asked.push(String(m).slice(0, 260)); return ${answer ? 'true' : 'false'}; };
+  window.__toasts = [];
+  try { RecoTemplate.saveTemplate(); } finally { window.confirm = realC; }
+  const saved = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(tid)});
+  const o = { asked: asked, saved: !!saved,
+              savedKw: saved ? [String((saved.aegIntegration||{}).keywordColumn||''),
+                                String((saved.aegIntegration||{}).keywordValues||'')] : null };
+  if (!saved) { App.closeModal(); return o; }
+  RecoTemplate.open(${JSON.stringify(tid)});
+  const F = ['Invoice','Base','Flag','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  /* 1, 2, 4, 8, 1000: every subset sums to a different number, so the posted
+     total NAMES which rows went in rather than merely counting them. */
+  const spec = [
+    ['INV-1','1',    '',     '','ACC1','AED','D1','one',  '01/01/26','ACC1'],
+    ['INV-2','2',    '',     '','ACC1','AED','D2','two',  '01/01/26','ACC1'],
+    ['INV-3','4',    'POST', '','ACC1','AED','D3','three','01/01/26','ACC1'],
+    ['INV-4','8',    '',     '','ACC1','AED','D4','four', '01/01/26','ACC1'],
+    ['INV-5','1000', '',     '','ACC1','AED','D5','five', '01/01/26','ACC1']
+  ];
+  await Reco.ingestData(saved, spec.map(x => { const r={}; F.forEach((f,i)=>r[f]=x[i]); return r; }), F);
+  App.closeModal(); AppState.activeRecoId = ${JSON.stringify(tid)};
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return o;
+})`;
+
+/* Tick all five, Preview Entry, and Generate if it opened. NOTHING POSTED is
+   read off entryHistory and every post-entry cell, not off the absence of a
+   pending entry - a refusal that still wrote would look identical otherwise. */
+const R23_RUN = (tid) => `(async function () {
+  AppState.activeRecoId = ${JSON.stringify(tid)};
+  const sess = AppState.recoSessions[${JSON.stringify(tid)}];
+  sess.selectedRows = {};
+  (sess.data || []).forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null; Reco._dropZero = false; Reco._dropPosted = false;
+  window.__toasts = [];
+  Reco.previewEntryFromSelection(true);
+  const p = Reco._pendingEntry;
+  const o = { refused: !p,
+              said: (window.__toasts || []).map(x => x.kind + ': ' + String(x.msg).slice(0, 340)),
+              standard: p ? (p.standardRows || []).map(r => r._pk).sort() : null };
+  if (!p) {
+    await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    o.history = ((AppState.entryHistory || {})[${JSON.stringify(tid)}] || []).length;
+    o.stamped = (sess.data || []).map(r => r._pk + '=' + String(r.Reco || ''));
+    return o;
+  }
+  Reco.commitEntryFromPreview(); App.closeModal();
+  await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  const hist = (AppState.entryHistory || {})[${JSON.stringify(tid)}] || [];
+  const e = hist[hist.length - 1] || {};
+  o.history = hist.length;
+  o.postedPks = (e.postedPks || []).slice().sort();
+  const lc = Reco._jvLineCols(AppState.aegTemplates[0]);
+  const amt = (l, n) => { const v = l[n]; return Number((v && typeof v === 'object') ? v.value : v) || 0; };
+  o.postedDr = (e.lines || []).reduce((s, l) => s + amt(l, lc.dr), 0);
+  o.stamped = (sess.data || []).map(r => r._pk + '=' + String(r.Reco || ''));
+  return o;
+})`;
+
+section(92, 'R23 T-26-8 — THE AEG KEYWORD FILTER IS A PAIR, AND HALF A PAIR POSTED EVERYTHING');
+{
+  const K = makeRoot('share-r23');
+  const brK = await startBridge(K.root, PORT_R23); procs.push(brK.proc);
+  const ka = await openReco(browser, brK);
+
+  /* ---- A: values, no column. */
+  const s1 = await ka.page.evaluate(R23_SETUP('TPL_KA', '', 'POST', true) + '()');
+  note('R23 A - saving with values and no column', s1);
+  check(s1.asked.length === 1 && /no column to look them up in/i.test(s1.asked[0])
+        && /every row you select/i.test(s1.asked[0]),
+    'R23a THE SAVE ASKS, naming the values, that there is no column, and what the consequence is. '
+    + 'Before this it saved under a green "Template saved to database" - the stale-template and '
+    + 'primary-key confirms were sitting right there and the keyword PAIR had never been '
+    + 'validated at all', s1.asked);
+  check(s1.saved === true && s1.savedKw.join('|') === '|POST',
+    'R23b ...and OK still saves. A template may legitimately be half set up mid-edit; the ledger '
+    + 'door is what refuses, so nothing can post out of this state whatever is answered here',
+    s1.savedKw);
+
+  const a1 = await ka.page.evaluate(R23_RUN('TPL_KA') + '()');
+  note('R23 A - the preview', a1);
+  check(a1.refused === true,
+    'R23c THE FIX: the preview is REFUSED. It used to open on all five rows', a1);
+  check(a1.said.some(s => /Nothing was posted/.test(s) && /NO COLUMN/.test(s) && /"POST"/.test(s)
+                          && /all 5 row\(s\) you selected/.test(s)),
+    'R23d ...BY NAME, and the count is the part that makes it act-on-able: the values it names, '
+    + 'that there is no column, how many rows it would have been handed instead, and the one edit '
+    + 'in the template that fixes it', a1.said);
+  check(a1.history === 0 && (a1.stamped || []).length === 5
+        && (a1.stamped || []).every(c => /=$/.test(c)),
+    'R23e ...AND NOTHING WAS POSTED, off entryHistory AND every post-entry cell - not off the '
+    + 'absence of a pending entry, which a refusal that still wrote would show just the same',
+    a1);
+
+  /* ---- A again, with the column filled in. */
+  const a2 = await ka.page.evaluate(`(async function () {
+    RecoTemplate.edit('TPL_KA');
+    const ok = RecoTemplate.setAegRole('keywordColumn', 'Flag');
+    const realC = window.confirm; const asked = [];
+    window.confirm = (m) => { asked.push(String(m).slice(0, 200)); return true; };
+    try { RecoTemplate.saveTemplate(); } finally { window.confirm = realC; }
+    App.closeModal();
+    const t = AppState.recoTemplates.find(x => x.id === 'TPL_KA');
+    return { roleOk: ok, asked: asked,
+             kw: [String((t.aegIntegration||{}).keywordColumn||''),
+                  String((t.aegIntegration||{}).keywordValues||'')] };
+  })()`);
+  note('R23 A - the column filled in', a2);
+  check(a2.roleOk === true && a2.kw.join('|') === 'Flag|POST' && a2.asked.length === 0,
+    'R23f the pair is completed and THE SAVE NOW ASKS NOTHING - a question that fires when there '
+    + 'is nothing at stake is how operators learn to click through questions', a2);
+
+  const a3 = await ka.page.evaluate(R23_RUN('TPL_KA') + '()');
+  note('R23 A - the preview with the pair complete', a3);
+  check(a3.refused === false && a3.standard.join(',') === 'INV-3',
+    'R23g AND THEN IT POSTS THAT ONE ROW ONLY, which is the recovery the refusal names and is one '
+    + 'edit away', a3);
+  check(a3.postedDr === 4 && a3.postedPks.join(',') === 'INV-3',
+    'R23h ...measured on the entry: dr 4 against the 1015 it used to post, and INV-3 the only key '
+    + 'audited', a3);
+  check((a3.stamped || []).filter(c => /=POSTED$/.test(c)).join(',') === 'INV-3=POSTED',
+    'R23i ...and the only row stamped, so the other four are still open and workable',
+    a3.stamped);
+
+  /* ---- B: the other half of the pair. */
+  const s4 = await ka.page.evaluate(R23_SETUP('TPL_KB', 'Flag', '', true) + '()');
+  note('R23 B - a column with no values', s4);
+  check(s4.asked.length === 1 && /no values to match in it/i.test(s4.asked[0]),
+    'R23j BOTH DIRECTIONS: a column with no values is a filter that was set up and never '
+    + 'finished, and it posts everything just the same', s4.asked);
+  const a4 = await ka.page.evaluate(R23_RUN('TPL_KB') + '()');
+  note('R23 B - the preview', a4);
+  check(a4.refused === true
+        && a4.said.some(s => /Nothing was posted/.test(s) && /NO VALUES/.test(s)
+                             && /"Flag"/.test(s)),
+    'R23k ...and so does the refusal, naming the column this time', a4.said);
+  check(a4.history === 0,
+    'R23l ...with nothing posted', a4.history);
+
+  /* ---- C: THE CONTROL THE TICKET NAMES. */
+  const s5 = await ka.page.evaluate(R23_SETUP('TPL_KC', '', '', true) + '()');
+  note('R23 C - both fields empty', s5);
+  check(s5.asked.length === 0 && s5.saved === true,
+    'R23m CONTROL: both fields empty asks nothing at the save', s5);
+  const a5 = await ka.page.evaluate(R23_RUN('TPL_KC') + '()');
+  note('R23 C - the preview', a5);
+  check(a5.refused === false && a5.standard.join(',') === 'INV-1,INV-2,INV-3,INV-4,INV-5',
+    'R23n CONTROL, AND IT IS THE WHOLE POINT OF THE NARROWNESS: with no keyword filter at all '
+    + 'every selected row still posts, unfiltered. That is what nearly every template in the '
+    + 'folder does, it is deliberate, and it is not what this ticket is about', a5.standard);
+  check(a5.postedDr === 1015 && a5.history === 1,
+    'R23o ...and it really posted all five (1+2+4+8+1000) - so the control is a POSTING and not '
+    + 'another refusal being read the same way', a5);
+
+  /* ---- D: Cancel at the save. */
+  const s6 = await ka.page.evaluate(R23_SETUP('TPL_KD', '', 'POST', false) + '()');
+  note('R23 D - Cancel at the save', s6);
+  check(s6.asked.length === 1 && s6.saved === false,
+    'R23p CANCEL ABANDONS THE SAVE, like every other confirm in saveTemplate: the template is not '
+    + 'stored at all', s6);
+
+  /* ---- E: a values box holding only spaces. */
+  const s7 = await ka.page.evaluate(R23_SETUP('TPL_KE', 'Flag', '   ', true) + '()');
+  note('R23 E - a values box of spaces', s7);
+  check(s7.asked.length === 1 && /no values to match in it/i.test(s7.asked[0]),
+    'R23q A VALUES BOX OF SPACES IS NO VALUES, and both readers trim so it reads that way. This '
+    + 'is a behavioural choice and not a tidiness one', s7.asked);
+  const a7 = await ka.page.evaluate(R23_RUN('TPL_KE') + '()');
+  note('R23 E - the preview', a7);
+  check(a7.refused === true && a7.said.some(s => /NO VALUES/.test(s)),
+    'R23r ...and the door refuses by the same name. Untrimmed, "   " is TRUTHY: the old && read '
+    + 'it as a filter in force, split it into an EMPTY allow-list and answered "No selected rows '
+    + 'match the keyword filter" - a sentence about the rows, on a selection where every row '
+    + 'would have matched a filter that had been finished', a7.said);
+  check(a7.history === 0,
+    'R23s ...and nothing posted', a7.history);
+
+  check(ka.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R23t no page or console error across the whole section', ka.errors.slice(0, 5));
+  await ka.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

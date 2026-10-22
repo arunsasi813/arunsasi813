@@ -1945,6 +1945,53 @@ which one carries POST: assert the preview is refused by name and nothing is pos
 column and assert the entry posts that one row only. Control: both fields empty must stay
 unfiltered, which is today's deliberate behaviour and not the bug.
 
+**CLOSED — ASKED AT THE SAVE, REFUSED AT THE LEDGER DOOR.** The ticket's two options are both
+taken, in the two places it names, and the split is what makes the pair coherent:
+
+- **`RecoTemplate.saveTemplate` asks**, beside its own stale-template and primary-key confirms. A
+  template may legitimately be half set up mid-edit, so OK still saves; Cancel abandons the save
+  like every other confirm there (**R23p**).
+- **`Reco.previewEntryFromSelection` refuses**, by name, before the entry is built — naming the
+  values (or the column), that the other half is missing, **how many rows it would have been
+  handed instead**, and the one edit in the template that fixes it. So nothing can post out of
+  this state whatever was answered at the save.
+
+**A refusal here, where T-26-4 and T-26-9 chose warn-and-offer at the same door.** Those two name
+a judgement the operator could genuinely have intended — re-post a row on purpose, close a row
+that produced no line — so the preview opens and they choose. This one is a template that
+*contradicts itself*: it names values to match and no column to match them in, and there is no
+reading under which "post every row instead" is what it was asked to do.
+
+**Both directions**, because half a pair is a question either way: a column with no values is a
+filter that was set up and never finished and posts everything just the same (**R23j–R23l**). And
+**both readers trim**, which is behavioural and not tidiness: untrimmed, a values box of spaces is
+*truthy*, so the old `&&` read it as a filter in force, split it into an empty allow-list and
+answered *"No selected rows match the keyword filter"* — a sentence about the rows, on a selection
+where every row would have matched a filter that had been finished (**R23q–R23r**).
+
+**Measured before the fix** (`scratchpad/kw/probes/k1_repro.mjs`): five rows worth 1, 2, 4, 8 and
+1000, a filter naming the one value `POST` that only the row worth 4 carries, all five ticked. The
+entry posted `dr 1015`, all five keys in `entry.postedPks`, all five cells stamped POSTED, and
+`/keyword/i` matched nothing in the rendered preview. **K1h–K1i measured the walk in** the ticket
+describes: `setAegRole` returns `false` with the matrix's own sentence, leaves `keywordColumn` at
+`''`, and the typed values are already in the editing template — one dismissed toast was the whole
+of the protection.
+
+**Gated by `[92] R23a–R23t` in `run_store_e2e`** (20 checks over five templates). **R23n–R23o** are
+the control the ticket asks for and the point of the narrowness: both fields empty still posts
+every selected row unfiltered — `dr 1015`, deliberately — which is what nearly every template in
+the folder does. Mutation grid 7 × 19 in `scratchpad/kw/mut/run.py` against the round's own probe,
+each of the seven turning exactly the checks it should and no others.
+
+**And the gate found a suite fixture sitting in the state the ticket is about.** `[31] C6f` empties
+`keywordColumn` so that `Vendor` can be offered *as* the keyword column without clashing with
+itself, and saves — leaving `keywordValues: 'go'` behind. That template then posted every row it
+was given, and `C6h` (which is about a *carried* value and nothing to do with the keyword filter)
+was quietly relying on it; with the door refusing, it read `ctx.sourceRows` of `null`. The fixture
+now clears both fields, which says what it means: no keyword filter. Every other `aegIntegration`
+fixture across all sixteen suites already had `keywordValues: ''`, and the one other non-empty
+value (`Status`/`Closed`) is a complete pair.
+
 ## T-26-9  A row whose amount works out to a legitimate ZERO is stamped Posted with no journal line
 
 **Where** `apps/Reco.html` `Reco._buildEntryLines` (`if (value === 0) return;`) and
