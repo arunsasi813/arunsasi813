@@ -29855,6 +29855,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
        it reopens, so the next Preview Entry is back to the plain behaviour. */
     const dropPosted = !!Reco._dropPosted;
     Reco._dropPosted = false;
+    /* T-26-9's twin flag, read here so both are consumed on the same pass and
+       neither can survive into the next Preview Entry as a mode. */
+    const dropZero = !!Reco._dropZero;
+    Reco._dropZero = false;
     const postedHere = [];
     /* ONE PASS FOR THE WHOLE LOOP, the same guard Reco.postedJvAudit opens and
        for the same reason: the post-entry column may be an ADDED column, and
@@ -29941,7 +29945,8 @@ renderCustomReport(tpl, sess, rpt, idx) {
        stamped POSTED (scratchpad/money/skA/probes/p7_jv_agg.mjs). Nothing
        downstream changes: the same two arrays, built from the same
        post-keyword-filter sourceRows, in the same order. */
-    const standardRows = [];
+    /* `let`, because T-26-9's drop filters it after the lines are built. */
+    let standardRows = [];
     const jvBuckets = Object.create(null);   // { jvRef: [rows] }
     const rowJvRef = new Map();              // row _id -> the JV ref it is bucketed to
     sourceRows.forEach(r => {
@@ -30144,7 +30149,7 @@ renderCustomReport(tpl, sess, rpt, idx) {
     // judges a row against the columns the thing it is going to decides.
 
     // Build standard lines
-    const aegInputs = standardRows.map(r => {
+    let aegInputs = standardRows.map(r => {
       const o = {};
       aegTpl.inputColumns.forEach(ic => {
         if (r[ic.name] != null) o[ic.name] = r[ic.name];
@@ -30156,18 +30161,82 @@ renderCustomReport(tpl, sess, rpt, idx) {
       }
       return o;
     });
+    /* ---- T-26-9. WHICH TICKED ROWS PRODUCE NO JOURNAL LINE.
+       aegInputs is built by index from standardRows just above, so the map
+       from an input object back to its row is identity - no index arithmetic
+       to get wrong, and nothing stamped onto the input objects themselves
+       (AEG.buildLine reads them, and a property added for bookkeeping would be
+       one more thing an output-column mapping could pick up).
+       THE DEFAULT IS UNCHANGED, which is the whole of this ticket's caution:
+       the rows are STILL stamped unless somebody presses the button. Leaving
+       the stamp off by default would change what entry.postedPks means for
+       every entry already on the share, and T-26-4's own comment records
+       three suites going red when that default was flipped for its sibling.
+       So: warn loudly, name the rows, offer the drop, change nothing else. */
+    const zeroAudit = {};
     const standardLines = standardRows.length
-      ? Reco._buildEntryLines(aegTpl, aegInputs, aeg.fromAccountOverride, aeg.toAccountOverride)
+      ? Reco._buildEntryLines(aegTpl, aegInputs, aeg.fromAccountOverride, aeg.toAccountOverride,
+                              zeroAudit)
       : [];
+    const rowOfInput = new Map();
+    aegInputs.forEach((o, i) => rowOfInput.set(o, standardRows[i]));
+    const zeroHere = [];
+    (zeroAudit.dropped || []).forEach(g => {
+      g.rows.forEach(o => {
+        const r = rowOfInput.get(o);
+        if (!r) return;
+        zeroHere.push({ id: r._id, pk: String(r._pk || ''),
+                        value: U.num(o[aegTpl.valueColumn]), groupValue: g.value });
+      });
+    });
 
     // Completed JVs waiting for an entry. One completed for exactly these rows
     // satisfies the requirement; others are "carried forward" (shown with Discard).
     const pendings = (AppState.pendingSpecialJV[id] || []).map(p =>
       Object.assign({}, p, { _fromCurrentSelection: !!jvBuckets[p.ref] && SpecialJV.matchesRows(p, jvBuckets[p.ref]) }));
 
+    /* ---- T-26-9. ONE PRESS, NOT A MODE - the same rule T-26-4's flag
+       follows, and the flag is consumed by the preview it reopens so the next
+       Preview Entry is back to the plain behaviour.
+       FILTERED AFTER THE LINES ARE BUILT, and that is sound rather than lazy:
+       the rows being dropped are exactly the ones whose GROUP summed to zero,
+       so they contributed no line and the entry this writes is byte for byte
+       the entry it would have written anyway. What changes is the STAMP -
+       which rows are closed and which keys go into entry.postedPks - and that
+       is the whole of what the operator is being asked. aegInputs is filtered
+       with them so the pending entry cannot carry an input whose row is gone;
+       the line build is already done and does not run again. */
+    const dropZeroNow = zeroHere.length && dropZero;
+    if (dropZeroNow) {
+      const gone = new Set(zeroHere.map(z => z.id));
+      const keepIdx = [];
+      standardRows.forEach((r, i) => { if (!gone.has(r._id)) keepIdx.push(i); });
+      aegInputs = keepIdx.map(i => aegInputs[i]);
+      standardRows = standardRows.filter(r => !gone.has(r._id));
+      sourceRows = sourceRows.filter(r => !gone.has(r._id));
+    }
+    if (zeroHere.length) {
+      /* Said out loud as well as shown in the banner, for the same reason
+         T-26-4's is: the banner is where the decision is made and the toast is
+         what reaches somebody who pressed Generate without reading it. */
+      const one = zeroHere[0];
+      U.toast(zeroHere.length + ' selected row(s) produce NO journal line, because the amount '
+        + 'they are worth works out to zero \u2014 ' + Reco._pkLabel(tpl, one.pk)
+        + (zeroHere.length > 1 ? ' and ' + (zeroHere.length - 1) + ' more' : '')
+        + '. ' + (dropZeroNow
+            ? 'They have been LEFT OUT, so they are not marked posted; the preview says how to put '
+              + 'them back.'
+            : 'They are STILL marked posted by this entry, so they will read as closed with '
+              + 'nothing behind them in the ledger. Press "Leave them unmarked" in the preview if '
+              + 'that is not what you meant.'), 'error');
+    }
     Reco._pendingEntry = {
       tplId: id, aegTpl, sourceRows, standardRows, aegInputs,
       lines: standardLines,
+      /* T-26-9. The rows that produced no line, and whether this entry is
+         going to mark them anyway. Same shape as postedRows/postedIncluded,
+         read by the banner's inline handlers off Reco._pendingEntry. */
+      zeroRows: zeroHere, zeroIncluded: !dropZeroNow,
       jvBuckets, jvCompleted: pendings,
       /* T-26-4. What was already posted, whether it is in this entry, and
          enough to rebuild the same preview the other way round. `reopen`
@@ -30187,8 +30256,34 @@ renderCustomReport(tpl, sess, rpt, idx) {
      one that double-posts every day. The selection has not changed, so
      rebuilding the preview is the same call with the same arguments. */
   previewIncludePosted(yes) {
-    const re = (Reco._pendingEntry && Reco._pendingEntry.reopen) || { forceAll: false, paneKey: null };
+    const pe = Reco._pendingEntry;
+    const re = (pe && pe.reopen) || { forceAll: false, paneKey: null };
     Reco._dropPosted = !yes;
+    /* T-26-9. THE OTHER BANNER'S ANSWER IS CARRIED, NOT SILENTLY RESET. Both
+       flags are consumed by the one rebuild below, so a reopen that re-states
+       only this banner's answer would put the zero rows back INTO the stamp
+       behind an operator who had already pressed "Leave them unmarked" - and
+       the preview would then read "Marked posted by this entry" with nothing
+       to show that the answer had changed. Read off the pending entry rather
+       than kept in a second flag: _pendingEntry.zeroIncluded is what the
+       banner on screen is displaying, so this cannot drift from it. */
+    Reco._dropZero = !!(pe && (pe.zeroRows || []).length && pe.zeroIncluded === false);
+    Reco._pendingEntry = null;
+    Reco.previewEntryFromSelection(re.forceAll, re.paneKey);
+  },
+
+  /* ---- T-26-9. "Mark them anyway" / "Leave them unmarked", from the
+     preview's own banner, and the same one-press-not-a-mode rule as its
+     sibling: _dropZero is consumed by the preview this reopens, so the next
+     Preview Entry is back to the plain behaviour. The entry's LINES are
+     identical either way - a group worth zero contributed none - so the only
+     thing this button moves is which rows this entry closes. */
+  previewMarkZero(yes) {
+    const pe = Reco._pendingEntry;
+    const re = (pe && pe.reopen) || { forceAll: false, paneKey: null };
+    Reco._dropZero = !yes;
+    /* Carried for the same reason, the other way round. */
+    Reco._dropPosted = !!(pe && (pe.postedRows || []).length && pe.postedIncluded === false);
     Reco._pendingEntry = null;
     Reco.previewEntryFromSelection(re.forceAll, re.paneKey);
   },
@@ -30296,6 +30391,49 @@ renderCustomReport(tpl, sess, rpt, idx) {
           + '<button class="small" onclick="Reco.previewIncludePosted(false)">Leave them out</button>'
         : '<span class="badge open">Left out of this entry</span>'
           + '<button class="small danger" onclick="Reco.previewIncludePosted(true)">Post them anyway</button>';
+      h += '</div>';
+    }
+
+    /* ---- T-26-9. THE TICKED ROWS THAT PRODUCE NO JOURNAL LINE, named on the
+       last screen before the stamp. _buildEntryLines drops a group whose
+       amounts sum to zero and it is right to - a zero line is not an
+       accounting entry - but the stamp pass then closes those rows and writes
+       their keys into entry.postedPks, so the row reads POSTED against a
+       reference with no line behind it. Nothing in the app said so: the
+       preview showed the lines that WERE built, which is exactly the set that
+       cannot show this. Warn-and-offer, like its sibling above: the default
+       still marks them (the reason is at the flag in previewEntryFromSelection)
+       and what is new is that it is said out loud and has a way out. */
+    if ((ctx.zeroRows || []).length) {
+      const zr = ctx.zeroRows;
+      h += '<div class="doc-banner" style="margin-bottom:6px;">';
+      h += '<b>⚠ ' + zr.length + ' selected row(s) produce no journal line</b>';
+      /* The row's OWN amount and its GROUP's, because they answer different
+         questions: a row worth zero is a data problem on that row, while a
+         row worth something in a group worth zero means the rows ticked with
+         it cancel it out - and only the second one is fixed by regrouping. */
+      const sayZero = z => U.esc(Reco._pkLabel(tpl, z.pk) + ' — worth ' + U.fmtNum(z.value)
+            + (U.num(z.groupValue) !== U.num(z.value)
+                ? ', grouped with rows that cancel it out (group total ' + U.fmtNum(z.groupValue) + ')'
+                : ''));
+      h += '<span>' + zr.slice(0, 8).map(sayZero).join('; ')
+        + (zr.length > 8
+            ? '; <details style="display:inline;"><summary style="display:inline; cursor:pointer;">'
+              + '…and ' + (zr.length - 8) + ' more</summary> '
+              + zr.slice(8).map(sayZero).join('; ') + '</details>'
+            : '')
+        + '. ' + (ctx.zeroIncluded
+            ? 'This entry has NO line for them, and generating it still marks them posted — '
+              + 'they will read as closed with nothing behind them in the ledger, and no colleague '
+              + 'can tell that from the row. '
+            : 'They are left out of this entry, so they stay open and are not marked posted. ')
+        + 'Correct the amount, or untick the rows that cancel them out, if neither is what you '
+        + 'meant.</span>';
+      h += ctx.zeroIncluded
+        ? '<span class="badge offset">Marked posted by this entry</span>'
+          + '<button class="small" onclick="Reco.previewMarkZero(false)">Leave them unmarked</button>'
+        : '<span class="badge open">Left out of this entry</span>'
+          + '<button class="small danger" onclick="Reco.previewMarkZero(true)">Mark them anyway</button>';
       h += '</div>';
     }
 
@@ -30519,7 +30657,22 @@ renderCustomReport(tpl, sess, rpt, idx) {
   },
 
 
-  _buildEntryLines(aegTpl, aegInputs, fromOverride, toOverride) {
+  /* ---- T-26-9. `audit` IS AN OUT-PARAMETER AND IT IS HERE AND NOWHERE ELSE.
+     A group whose summed value is 0 produces no lines, which is right - a
+     zero-value line is not worth a journal entry and some templates rely on
+     that. What was wrong is that nothing upstream could SEE it, so
+     commitEntryFromPreview stamped every standard row in the selection and put
+     every one of them in entry.postedPks: a row closed and audited as posted
+     under an accounting reference with nothing behind it in the ledger
+     (measured, scratchpad/zero/probes/z1_zero.mjs - INV-2 worth 0 stamped
+     POSTED beside four lines for the other two rows).
+     REPORTED FROM THE LINE THAT DROPS IT, not re-derived by a caller that
+     mirrors this grouping. A second copy of "which groups come out as zero"
+     would drift from this one, and the copy that drifted would be the one
+     nobody ran - which is the mistake the key-rule signature round had to
+     take back out. `audit.dropped` carries the INPUT objects; the caller owns
+     both arrays and maps them back to its own rows by identity. */
+  _buildEntryLines(aegTpl, aegInputs, fromOverride, toOverride, audit) {
     const groups = [];
     if (aegTpl.aggregate && aegTpl.aggregateBy && aegTpl.aggregateBy.length) {
       const map = new Map();
@@ -30538,7 +30691,10 @@ renderCustomReport(tpl, sess, rpt, idx) {
     groups.forEach(group => {
       const rep = group.rows[0];
       const value = group.rows.reduce((s,r) => s + U.num(r[aegTpl.valueColumn]), 0);
-      if (value === 0) return;
+      if (value === 0) {
+        if (audit) (audit.dropped || (audit.dropped = [])).push({ rows: group.rows, value: value });
+        return;
+      }
       
       let fromRef;
       if (fromOverride) fromRef = fromOverride;
@@ -30571,9 +30727,14 @@ renderCustomReport(tpl, sess, rpt, idx) {
     /* ---- T-26-4. EVERY ROW WAS LEFT OUT, SO THERE IS NOTHING TO POST.
        The preview OPENS on purpose - the decision here is warn-and-offer, not
        a refusal - so a selection in which every row is already in the ledger
-       opens on an empty entry, and Generate used to close the modal having
-       written nothing and said nothing. That is the silent shape this whole
-       round is about. Narrow by construction: it fires only when something
+       opens on an empty entry.
+       CORRECTED BY T-26-9's ROUND, WHICH MEASURED IT: this comment used to
+       say Generate "closed the modal having written nothing and said
+       nothing". It did not. The lines-less guard further down already caught
+       it, wrote nothing and left the preview open - but all it said was
+       "Nothing to post", which names no row, no reason and nothing to do
+       next, and that is what the sentence below replaces.
+       Narrow by construction: it fires only when something
        was dropped for being posted, so a preview that is empty for any other
        reason behaves exactly as it did. */
     if ((pending.postedRows || []).length && pending.postedIncluded === false
@@ -30585,6 +30746,30 @@ renderCustomReport(tpl, sess, rpt, idx) {
         + (pending.postedRows.length > 4 ? ', \u2026' : '')
         + '), so they are all left out of this entry. Press "Post anyway" above if you mean to post '
         + 'them a second time, or reverse their entries first \u2014 that releases the rows.', 'error');
+      return;
+    }
+    /* ---- T-26-9. EVERY ROW WAS LEFT OUT FOR PRODUCING NO LINE, so there is
+       nothing to post. The sibling guard above cannot cover this: it fires on
+       postedIncluded === false, and these rows were dropped for being worth
+       zero, which a selection of perfectly unposted rows can be. What the
+       operator gets without it is the lines-less guard's bare "Nothing to
+       post" (measured both guards off: scratchpad/zero arm 5 reads
+       `said: ["error: Nothing to post"], history: 0, modal still open`) -
+       true, and useless on a screen where three rows are ticked and a button
+       has just been pressed.
+       Narrow the same way: only when something was dropped for being zero and
+       nothing at all is left to write. */
+    if ((pending.zeroRows || []).length && pending.zeroIncluded === false
+        && !(pending.standardRows || []).length
+        && !Object.keys(pending.jvBuckets || {}).length
+        && !(pending.jvCompleted || []).length) {
+      U.toast('Nothing was posted. Every row in this selection produces no journal line because '
+        + 'the amount it is worth works out to zero ('
+        + pending.zeroRows.slice(0, 4).map(z => Reco._pkLabel(tpl, z.pk)).join(', ')
+        + (pending.zeroRows.length > 4 ? ', \u2026' : '')
+        + '), and you chose to leave them unmarked, so this entry has no lines and no rows to '
+        + 'close. Correct their amounts, or untick the rows that cancel them out, and preview '
+        + 'again.', 'error');
       return;
     }
     /* ---- MR-6. LEDGER-WRITE REFUSAL 4: THE SHARED ENTRY HISTORY IS LATCHED

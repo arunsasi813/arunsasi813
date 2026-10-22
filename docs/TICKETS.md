@@ -1972,6 +1972,49 @@ marked posted"*.
 chosen — it is NOT in `postedPks`, or the preview names it — and keep a control where every row
 is worth something.
 
+**CLOSED — AS WARN-AND-OFFER, THE SHAPE THIS TICKET ASKED TO BE DECIDED WITH T-26-4.** The
+ticket's two options are not equal and the measurement says which: leaving the stamp off a row
+that produced no line changes what `entry.postedPks` means for every entry already on the share,
+and T-26-4's round recorded three suites going red when that default was flipped for its sibling.
+So the default is **unchanged** — the rows are still stamped — and what is new is that it is said
+and that there is a way out.
+
+`Reco._buildEntryLines` gained a fifth `audit` out-param, reported **from the line that drops the
+group** (`if (value === 0)`), because that is the only place the group's total is known and a
+caller that re-derived this grouping would be a second copy of it to get wrong.
+`previewEntryFromSelection` resolves each dropped input back to its row through an identity `Map`
+(`aegInputs` is built by index from `standardRows`, so the map is identity and there is no index
+arithmetic to get wrong, and nothing is stamped onto the input objects — `AEG.buildLine` reads
+them and an output-column mapping could pick a bookkeeping property up). The preview banner names
+every dropped row with **its own amount and its group's total**, because those answer different
+questions: a row worth zero is a data problem on that row, a row worth something inside a group
+worth zero means the rows ticked with it cancel it out, and only the second is fixed by reticking.
+*"Leave them unmarked"* / *"Mark them anyway"* is one press and not a mode — `Reco._dropZero` is
+consumed by the preview it reopens, exactly as T-26-4's flag is.
+
+**And the round found one thing it did not set out to find.** Both drop flags are consumed by the
+ONE rebuild the banner buttons trigger, so pressing *"Leave them out"* on the posted banner put
+the zero rows back **into** the stamp behind an operator who had already pressed *"Leave them
+unmarked"* — with the banner on screen back to reading "Marked posted by this entry". Each handler
+now carries the other banner's answer off `Reco._pendingEntry`, which is what that banner is
+displaying, so the two cannot drift (**R22s**).
+
+**Gated by `[91] R22a–R22x` in `run_store_e2e`** (24 checks: the unchanged default, the banner and
+its one button, the toast, the drop across `standardRows`/`sourceRows`/`aegInputs`, `postedPks`
+without the row, a control where every row is worth something, both banners at once, and the
+all-dropped case). **Mutation grid 7 × 26** in `scratchpad/zero/mut/run.py` — seven mutations
+against the 26 checks of the round's own probe (`scratchpad/zero/probes/z2_fix.mjs`, the same
+assertions over the same four fixtures; the grid runs against the probe because a probe can be
+pointed at a mutated copy of `apps/Reco.html` through `APP_FILE` and a suite section cannot).
+Each of the seven turned exactly the checks it should and no others.
+
+**One correction this round owes T-26-4.** T-26-4's guard comment and §18 of the handover both
+said Generate "closed the modal having written nothing and said nothing" when every row had been
+dropped. It did not: the lines-less guard in `commitEntryFromPreview` already caught it, wrote
+nothing and left the preview open — it just said `Nothing to post`, three words naming no row, no
+reason and nothing to do next. Measured with both all-dropped guards disabled. Both sentences are
+corrected, and `R22v` is the control that keeps them honest.
+
 ## T-26-10  The report SUMMARY CARDS have T-26-5's silence too
 
 **Where** `apps/Reco.html` `Reco.renderCustomReport`'s summary-card loop (`Sum`, `Avg`, `Min`,

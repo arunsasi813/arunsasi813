@@ -3366,11 +3366,17 @@ was deferred for in the first place.
   (§12) and a gate that fired on it would make the recovery route unusable. **T264j–T264k** are the
   control: a reversed row previews with no warning and no banner.
 - **And one thing the ticket did not ask for.** Once the operator has pressed *"Leave them out"* on
-  a selection in which *every* row is already posted, the entry is **empty** — and Generate would
-  close the modal having written nothing and said nothing, which is the silent shape this whole
-  round is about. It now refuses with a sentence (**T264l**). The guard is narrow by construction:
-  it fires only when rows were dropped **for being posted** (`postedIncluded === false`), so a
-  preview that is empty for any other reason behaves exactly as it did.
+  a selection in which *every* row is already posted, the entry is **empty**, and Generate now
+  refuses with a sentence that names the rows and their references (**T264l**). The guard is narrow
+  by construction: it fires only when rows were dropped **for being posted**
+  (`postedIncluded === false`), so a preview that is empty for any other reason behaves exactly as
+  it did.
+  **This bullet used to say Generate "would close the modal having written nothing and said
+  nothing", and that was wrong** — corrected in T-26-9's round, which measured it with both
+  all-dropped guards disabled (§22). The lines-less guard in `commitEntryFromPreview` already
+  caught the empty entry, wrote nothing and left the preview open. What it said was `Nothing to
+  post`: three words naming no row, no reason and nothing to do next. The sentence is an
+  improvement on a bad message, not the removal of a silence.
 
 **`Z1h` is unchanged and a second check was added beside it.** `Z1h` pins the *scope* of Z1's
 `#ERR` refusal, and it gets there by re-posting the three rows `Z1g` posted a moment earlier. With
@@ -5398,3 +5404,119 @@ wrong session and every arm answered *"That conflict is no longer listed"*. It n
 **latch's own sentence**, so a refusal for the wrong reason reads red. Same shape as every other
 vacuous-pass this project has had: an assertion about an ABSENCE needs a second clause naming what
 should be PRESENT.
+
+## 22. T-26-9 — the ticked row that produces no journal line, named before it is stamped
+
+### 22.1 The harm
+
+`Reco._buildEntryLines` drops a group whose summed value is 0 (`if (value === 0) return;`) and it
+is right to: a zero-value line is not an accounting entry, and templates rely on that.
+`commitEntryFromPreview` then stamps **every** standard row in the selection with the post-entry
+value and puts every one of them into `entry.postedPks`. So a row can be closed, audited as posted
+under an accounting reference, and have nothing at all behind it in the ledger.
+
+Measured before the fix (`scratchpad/zero/probes/z1_zero.mjs`, three rows, one worth `0`, all three
+ticked):
+
+```
+lines: 4            entryLines: 4         <- the zero row produced none, correctly
+postedPks: ["INV-1","INV-2","INV-3"]      <- and is audited as posted anyway
+stamped:   ["INV-1=POSTED","INV-2=POSTED","INV-3=POSTED"]
+previewNamesZero: false
+zeroReader: "no such field"
+```
+
+The last two lines are the reason this was invisible rather than merely wrong. The preview renders
+the lines that **were** built, which is exactly the set that cannot show a dropped group, and
+`Reco._pendingEntry` had no field for it — nothing in the app, on any surface, could name the row.
+
+### 22.2 What was built, and what was deliberately not
+
+**Warn and offer to drop.** The ticket lists two options and says it should be decided with
+T-26-4; they are not equal. Leaving the stamp off a row that produced no line changes what
+`entry.postedPks` means for every entry already on the share, and T-26-4's round recorded three
+suites going red when that default was flipped for its sibling (`run_jv_gen` read `standard:1
+buckets:[]` where it expects two TCH rows bucketed, `run_jv_engine` read 4 lines where the
+hand-written page writes 8, and `Z1h` could not reach a posting at all — every one of them a
+workflow that deliberately posts what the gate would drop). So **the default is unchanged**,
+`R22d` is the check that pins it, and what is new is that it is said and that there is a way out.
+
+**Reported from the line that drops the group.** `_buildEntryLines` gained a fifth `audit`
+out-param and pushes `{ rows, value }` from inside the `value === 0` branch. The group's total is
+only known there, and a caller that re-derived this grouping to find the dropped rows would be a
+second copy of the grouping to get wrong.
+
+**The row is found by identity, not by index.** `aegInputs` is built by index from `standardRows`,
+so a `Map` from input object to row is identity. Nothing is stamped onto the input objects:
+`AEG.buildLine` reads them and an output-column mapping could pick a bookkeeping property up.
+
+**The banner names each row's OWN amount and its GROUP's total**, because those answer different
+questions. A row worth zero is a data problem on that row. A row worth something inside a group
+worth zero means the rows ticked with it cancel it out — and only the second one is fixed by
+reticking.
+
+**The drop is applied AFTER the lines are built**, which is sound rather than lazy: the rows being
+dropped are exactly the ones whose group summed to zero, so they contributed no line and the entry
+written is the same entry either way (`R22h` asserts four lines before and four after). The only
+thing the button moves is which rows this entry closes — which is the whole of what the operator is
+being asked. `standardRows`, `sourceRows` and `aegInputs` are all filtered (`R22i`), so nothing
+downstream can still reach a dropped row.
+
+**One press, not a mode.** `Reco._dropZero` is consumed by the preview it reopens, exactly as
+`Reco._dropPosted` is, so the next *Preview Entry* is back to the plain behaviour. A sticky "leave
+zero rows open" is how a workflow quietly stops closing rows it should.
+
+### 22.3 The defect the round did not set out to find
+
+Both drop flags are consumed by the **one** rebuild the banner buttons trigger. So on a selection
+that trips both banners, pressing *"Leave them out"* on the posted banner put the zero rows back
+**into** the stamp behind an operator who had already pressed *"Leave them unmarked"* — and the
+banner on screen went back to reading *"Marked posted by this entry"*, with nothing to show that
+the answer had changed. Each handler now carries the other banner's answer, read off
+`Reco._pendingEntry` rather than kept in a second flag: `_pendingEntry.zeroIncluded` is what the
+banner on screen is displaying, so the two cannot drift. **R22s** is the gate.
+
+### 22.4 The gates, and the mutation grid
+
+`[91] R22a–R22x` in `run_store_e2e`, 24 checks over four fixtures — one template per arm, because
+re-using one carries the previous arm's `POSTED` stamps into the next and the control arm's whole
+job is to measure a selection with nothing wrong with it (the first version did re-use one, and the
+control read *"4 selected row(s) are already posted"*).
+
+The modal is read as `document.getElementById('appModalBody')` with **no `|| document.body`
+fallback**: `document.body.innerHTML` contains this app's own `<script>` text, so a phrase that
+appears in a code comment or in a string the app builds matches with no modal rendered at all.
+`opened` is the clause that says an absence is a quiet banner and not an empty modal.
+
+`scratchpad/zero/mut/run.py`, 7 × 26 — seven mutations against the 26 checks of the round's own
+probe (`scratchpad/zero/probes/z2_fix.mjs`: the same assertions over the same four fixtures). The
+grid runs against the probe and not against `[91]` because a probe can be pointed at a mutated
+copy of `apps/Reco.html` through `APP_FILE` and a suite section cannot. Each mutation turned
+exactly the checks it should, named below by the `[91]` check carrying the same assertion:
+
+| mutation | red |
+| --- | --- |
+| no `audit` out-param — the drop is not reported at all | 14 |
+| no banner in the preview | `R22e`, `R22f`, `R22j` |
+| no toast | `R22g` |
+| the default flipped — rows dropped unless somebody asks | `R22d` + downstream |
+| the sibling banner's answer not carried | `R22s`, `R22t` |
+| no all-dropped guard | `R22w` |
+| `sourceRows` left unfiltered | `R22i` |
+
+### 22.5 One correction this round owes T-26-4
+
+T-26-4's guard comment and §18 both said that when every row had been dropped, Generate "closed the
+modal having written nothing and said nothing". **It did not.** Measured with both all-dropped
+guards disabled, the lines-less guard already in `commitEntryFromPreview` caught it, wrote nothing
+and left the preview open:
+
+```
+said: ["error: Nothing to post"]    history: 0    modal still open
+```
+
+Three words naming no row, no reason and nothing to do next, on a screen where three rows are
+ticked and a button has just been pressed — a bad message, not a silence. Both sentences are
+corrected, T-26-9's own guard is an improvement on that message rather than the removal of a
+silence, and `R22v` is the control that keeps the claim honest: it asserts that nothing is written
+and the preview stays open **and says in its own text that this was already true**.

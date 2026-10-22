@@ -10711,6 +10711,7 @@ const PORT_R19B = 21483;   // R19l the OLDER build, on a file this build wrote
 const PORT_R19Z = 21484;   // R19z compaction widens the day file; the header cache must follow
 const PORT_R20  = 21490;   // R20 T-S10-10/T-S10-28: the conditional write and the lock
 const PORT_R21  = 21494;   // R21 T-26-11: the declined carry-forward conflict, and the panel
+const PORT_R22  = 21498;   // R22 T-26-9: the ticked row that produces no journal line
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -13943,8 +13944,17 @@ const R21_RUN = (answer, settle) => `(async function () {
   /* THE PANEL, RENDERED FOR REAL. */
   AppState.activeRecoId = T;
   Reco.openValuesModal();
-  const html = (document.querySelector('#modalBody') || document.body).innerHTML;
-  o.panel = { both: /Alice/.test(html) && /Bob/.test(html),
+  /* #appModalBody, BY ID AND WITH NO FALLBACK. The first version read
+     '#modalBody' - which does not exist - and fell back to document.body,
+     whose innerHTML includes this app's own <script> text: the panel-building
+     source contains both "could not be carried forward" and "Reco.cfKeep(",
+     so three of the four clauses below were matching the SOURCE and would
+     have passed with no panel rendered at all. The house idiom is
+     run_colorder's document.getElementById('appModalBody'). */
+  const el = document.getElementById('appModalBody');
+  const html = el ? el.innerHTML : '(no appModalBody)';
+  o.panel = { opened: !!el,
+              both: /Alice/.test(html) && /Bob/.test(html),
               says: /could not be carried forward/.test(html),
               /* DOUBLE-ESCAPED ON PURPOSE: this is inside a template
                  literal, which eats one backslash before the page ever sees
@@ -14071,7 +14081,8 @@ section(90, 'R21 T-26-11 — THE DECLINED CARRY-FORWARD CONFLICT: RECORDED, LIST
     + 'only once the template HAS a carry column or a stored value, and the whole point of the '
     + 'conflict is that NEITHER happened for that key - so without the count there is no route to '
     + 'the two values at all. A panel nobody can find is the same as no panel', yes.card);
-  check(yes.panel.says && yes.panel.both && yes.panel.keep && yes.panel.dismiss,
+  check(yes.panel.opened === true && yes.panel.says && yes.panel.both
+        && yes.panel.keep && yes.panel.dismiss,
     'R21e THE REAL PANEL LISTS BOTH VALUES, SAYS WHAT TO DO AND OFFERS BOTH ACTIONS, read off the '
     + 'rendered modal rather than off a helper - because a record nothing shows is the bug this '
     + 'ticket is about, one level down', yes.panel);
@@ -14121,6 +14132,310 @@ section(90, 'R21 T-26-11 — THE DECLINED CARRY-FORWARD CONFLICT: RECORDED, LIST
     'R21j and it is on the SHARE, not only in memory', share());
 
   await fa.ctx.close();
+}
+
+/* ============================================================ [91] ====
+   R22. T-26-9. A ROW WHOSE AMOUNT WORKS OUT TO A LEGITIMATE ZERO IS STAMPED
+   POSTED WITH NO JOURNAL LINE BEHIND IT.
+
+   Reco._buildEntryLines drops a group whose summed value is 0 ("if (value ===
+   0) return;") and that is right - a zero line is not an accounting entry.
+   commitEntryFromPreview then stamps EVERY standard row in the selection and
+   puts every one of them into entry.postedPks. So the row is closed, audited
+   as posted under an accounting reference, and has nothing behind it in the
+   ledger; the colleague who opens the file tomorrow reads POSTED and finds no
+   line for it.
+
+   MEASURED BEFORE THE FIX (scratchpad/zero/probes/z1_zero.mjs): three rows,
+   one worth 0, all three ticked. Preview `lines: 4`, entry `lines: 4` - the
+   zero row produced none, correctly - and `postedPks: [INV-1, INV-2, INV-3]`,
+   `INV-2=POSTED` in the day file. The preview said nothing about it: it
+   renders the lines that WERE built, which is exactly the set that cannot
+   show this, and `Reco._pendingEntry` had no field for it at all.
+
+   WARN AND OFFER TO DROP, which is the shape T-26-4 settled on for its
+   sibling and the ticket's own instruction to decide it with T-26-4. THE
+   DEFAULT IS UNCHANGED and R22d is what pins that: leaving the stamp off by
+   default would change what entry.postedPks means for every entry already on
+   the share, and T-26-4's comment records three suites going red when that
+   default was flipped for its sibling.
+
+   REPORTED FROM THE LINE THAT DROPS THE GROUP, not re-derived by a caller
+   that mirrors _buildEntryLines' grouping - a second copy of that grouping is
+   a second thing to get wrong, and the group total is only known inside it.
+   R22c asserts both numbers because they answer different questions: a row
+   worth zero is a data problem on that row, a row worth something inside a
+   group worth zero means the rows ticked with it cancel it out, and only the
+   second is fixed by reticking.
+
+   AND R22s IS THE ONE THE ROUND DID NOT SET OUT TO FIND: both drop flags are
+   consumed by the ONE rebuild the banner buttons trigger, so a reopen that
+   re-stated only its own answer put the zero rows back INTO the stamp behind
+   an operator who had already pressed "Leave them unmarked" - while the
+   banner on screen went back to reading "Marked posted by this entry". Each
+   handler now carries the other banner's answer off Reco._pendingEntry, which
+   is what that banner is displaying, so the two cannot drift.
+
+   MUTATION GRID: scratchpad/zero/mut/run.py, 7 mutations x the 26 checks of
+   this section's own probe (scratchpad/zero/probes/z2_fix.mjs, whose Z2a-Z2z
+   are these same assertions over the same four fixtures - the grid runs
+   against the probe because it can be pointed at a mutated copy of Reco.html
+   through APP_FILE, which this suite's section cannot). Every one of the
+   seven turned exactly the checks it should and no others; named here by the
+   check of THIS section that carries the same assertion: no audit out-param
+   -> 14 red; no banner -> R22e/f/j only; no toast -> R22g only; the default
+   flipped -> R22d and its downstream; the sibling answer not carried ->
+   R22s/t only; no all-dropped guard -> R22w only; sourceRows left unfiltered
+   -> R22i only. */
+const R22_SETUP = (tid, bases) => `(async function () {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = ${JSON.stringify(tid)}; t.name = 'Zero ' + ${JSON.stringify(tid)};
+  t.columns = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account']
+    .map(n => ({ name:n, label:n, formats:[], isValue:n==='Base' }));
+  t.primaryKeys = ['Invoice'];
+  t.valueColumn = 'Base'; t.docNumberColumn = 'Doc';
+  t.displayColumns = t.columns.map(c => c.name);
+  t.toleranceMode = 'value'; t.toleranceValue = 1e12;
+  const aegTpl = AppState.aegTemplates[0];
+  aegTpl.aggregate = false; aegTpl.aggregateBy = [];
+  t.aegIntegration = { enabled:true, aegTemplateId: aegTpl.id,
+    keywordColumn:'', keywordValues:'', postEntryColumn:'Reco', postEntryValue:'POSTED' };
+  RecoTemplate.saveTemplate();
+  const tpl = AppState.recoTemplates.find(x => x.id === ${JSON.stringify(tid)});
+  RecoTemplate.open(tpl.id);
+  const F = ['Invoice','Base','Reco','ToAccount','Cur','Doc','Desc','Date','Account'];
+  const B = ${JSON.stringify(bases)};
+  const spec = [
+    ['INV-1', B[0], '', 'ACC1','AED','D1','one',  '01/01/26','ACC1'],
+    ['INV-2', B[1], '', 'ACC1','AED','D2','two',  '01/01/26','ACC1'],
+    ['INV-3', B[2], '', 'ACC1','AED','D3','three','01/01/26','ACC1']
+  ];
+  await Reco.ingestData(tpl, spec.map(x => { const o={}; F.forEach((f,i)=>o[f]=x[i]); return o; }), F);
+  App.closeModal(); AppState.activeRecoId = tpl.id;
+  await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+  return (AppState.recoSessions[${JSON.stringify(tid)}].data || []).map(r => r._pk + '=' + r.Base);
+})`;
+
+/* ONE TEMPLATE PER ARM. Re-using one carries the previous arm's POSTED stamps
+   into the next, and the control arm's whole job is to measure a selection
+   with nothing wrong with it - the first version of this did re-use one and
+   the control read "4 selected row(s) are already posted". */
+const R22_SELECT = (tid) => `
+  AppState.activeRecoId = ${JSON.stringify(tid)};
+  const sess = AppState.recoSessions[${JSON.stringify(tid)}];
+  sess.selectedRows = {};
+  (sess.data || []).forEach(r => { sess.selectedRows[r._id] = true; });
+  Reco._pendingEntry = null; Reco._dropZero = false; Reco._dropPosted = false;
+  window.__toasts = [];`;
+
+/* THE PREVIEW AS IT OPENS. #appModalBody BY ID AND WITH NO `|| document.body`
+   FALLBACK: document.body.innerHTML contains this app's own <script> text, so
+   a phrase that appears in a code comment or in a string the app builds would
+   match with no modal rendered at all - which is how an earlier check in this
+   file matched the app's source instead of a panel. `opened` is the clause
+   that says the absences below are a quiet banner and not an empty modal. */
+const R22_OPEN = (tid) => `(async function () {
+  ${R22_SELECT(tid)}
+  Reco.previewEntryFromSelection(true);
+  const p = Reco._pendingEntry || {};
+  const el = document.getElementById('appModalBody');
+  return {
+    opened: !!el,
+    lines: (p.lines || []).length,
+    standard: (p.standardRows || []).map(r => r._pk).sort(),
+    zeroRows: (p.zeroRows || []).map(z => z.pk + '@' + z.value + '/' + z.groupValue),
+    zeroIncluded: p.zeroIncluded,
+    namesZero: el ? /produce no journal line/i.test(el.innerHTML) : 'no appModalBody',
+    namesThePk: el ? el.innerHTML.indexOf('INV-2') !== -1 : 'no appModalBody',
+    hasLeave: el ? /Reco\\.previewMarkZero\\(false\\)/.test(el.innerHTML) : 'no appModalBody',
+    hasMark: el ? /Reco\\.previewMarkZero\\(true\\)/.test(el.innerHTML) : 'no appModalBody',
+    said: (window.__toasts || []).map(t => t.kind + ': ' + String(t.msg).slice(0, 240))
+  };
+})`;
+
+section(91, 'R22 T-26-9 — THE TICKED ROW THAT PRODUCES NO JOURNAL LINE, NAMED BEFORE IT IS STAMPED');
+{
+  const Z = makeRoot('share-r22');
+  const brZ = await startBridge(Z.root, PORT_R22); procs.push(brZ.proc);
+  const za = await openReco(browser, brZ);
+
+  note('R22 fixture A', await za.page.evaluate(R22_SETUP('TPL_ZA', ['100','0','500']) + '()'));
+  const a1 = await za.page.evaluate(R22_OPEN('TPL_ZA') + '()');
+  note('R22 the preview as it opens', a1);
+
+  check(a1.opened === true, 'R22a PREMISE: the preview modal really rendered', a1.opened);
+  check(a1.lines === 4 && a1.standard.join(',') === 'INV-1,INV-2,INV-3',
+    'R22b UNCHANGED: three ticked rows, four lines, and all three still in the entry. The zero '
+    + 'row produces no line and it is right not to - this round changes what is SAID about it, '
+    + 'not what is posted', a1);
+  check(a1.zeroRows.join(',') === 'INV-2@0/0',
+    'R22c THE DROP IS REPORTED, with the row\'s OWN amount and its GROUP\'s total, from the line '
+    + 'in _buildEntryLines that drops the group - the only place the group total is known',
+    a1.zeroRows);
+  check(a1.zeroIncluded === true,
+    'R22d THE DEFAULT IS UNCHANGED, and this is the check that pins it: the row is STILL marked '
+    + 'posted unless somebody presses the button. Leaving the stamp off by default would change '
+    + 'what entry.postedPks means for every entry already on the share, and T-26-4 recorded three '
+    + 'suites going red when that default was flipped for its sibling', a1.zeroIncluded);
+  check(a1.namesZero === true && a1.namesThePk === true,
+    'R22e THE PREVIEW NAMES IT: the banner says the rows produce no journal line, and says which '
+    + 'row - the one screen where the operator can still act',
+    { phrase: a1.namesZero, pk: a1.namesThePk });
+  check(a1.hasLeave === true && a1.hasMark === false,
+    'R22f ...and offers exactly ONE way out, the one that is not already the case: "Leave them '
+    + 'unmarked" is on screen and "Mark them anyway" is not, because they already are',
+    { leave: a1.hasLeave, mark: a1.hasMark });
+  check(a1.said.some(s => /no journal line/i.test(s) && /STILL marked posted/.test(s)),
+    'R22g ...and it is said out loud as well, which is what reaches somebody who presses Generate '
+    + 'without reading the banner', a1.said);
+
+  /* PRESS IT, THEN GENERATE. */
+  const a2 = await za.page.evaluate(`(async function () {
+    window.__toasts = [];
+    Reco.previewMarkZero(false);
+    const p = Reco._pendingEntry || {};
+    const el = document.getElementById('appModalBody');
+    const o = {
+      lines: (p.lines || []).length,
+      standard: (p.standardRows || []).map(r => r._pk).sort(),
+      source: (p.sourceRows || []).map(r => r._pk).sort(),
+      inputs: (p.aegInputs || []).length,
+      zeroIncluded: p.zeroIncluded,
+      badge: el ? /Left out of this entry/.test(el.innerHTML) : 'no appModalBody',
+      hasMark: el ? /Reco\\.previewMarkZero\\(true\\)/.test(el.innerHTML) : 'no appModalBody',
+      flagConsumed: Reco._dropZero
+    };
+    window.__toasts = [];
+    Reco.commitEntryFromPreview();
+    App.closeModal();
+    await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    const hist = (AppState.entryHistory || {}).TPL_ZA || [];
+    const e = hist[hist.length - 1] || {};
+    o.entryLines = (e.lines || []).length;
+    o.postedPks = (e.postedPks || []).slice().sort();
+    o.stamped = (AppState.recoSessions.TPL_ZA.data || []).map(r => r._pk + '=' + String(r.Reco || ''));
+    return o;
+  })()`);
+  note('R22 left unmarked, then generated', a2);
+
+  check(a2.lines === 4 && a2.entryLines === 4,
+    'R22h THE SAME ENTRY EITHER WAY: four lines before the drop and four after, because the '
+    + 'dropped row contributed none of them. That is why the filter is applied AFTER the lines '
+    + 'are built and why doing so is sound rather than lazy - the only thing the button moves is '
+    + 'which rows this entry closes', { preview: a2.lines, entry: a2.entryLines });
+  check(a2.standard.join(',') === 'INV-1,INV-3' && a2.source.join(',') === 'INV-1,INV-3'
+        && a2.inputs === 2,
+    'R22i the dropped row is out of standardRows, sourceRows AND aegInputs - all three, so '
+    + 'nothing downstream can still reach it', a2);
+  check(a2.zeroIncluded === false && a2.badge === true && a2.hasMark === true,
+    'R22j the reopened preview says so and offers the way back', a2);
+  check(a2.flagConsumed === false,
+    'R22k ONE PRESS, NOT A MODE: _dropZero is consumed by the preview it reopens, so the next '
+    + 'Preview Entry is back to the plain behaviour. A sticky "leave zero rows open" is how a '
+    + 'workflow quietly stops closing rows it should', a2.flagConsumed);
+  check(a2.postedPks.join(',') === 'INV-1,INV-3',
+    'R22l THE FIX: the zero row is NOT in entry.postedPks, so nothing audits it as posted under a '
+    + 'reference with no line behind it', a2.postedPks);
+  check(a2.stamped.indexOf('INV-2=') !== -1,
+    'R22m ...and its post-entry cell is empty, so it reads as open and can be worked', a2.stamped);
+  check(a2.stamped.indexOf('INV-1=POSTED') !== -1 && a2.stamped.indexOf('INV-3=POSTED') !== -1,
+    'R22n ...while the two rows that DID produce lines are stamped - so the absence above is the '
+    + 'dropped row and not a stamp pass that did nothing at all', a2.stamped);
+
+  /* THE CONTROL: a fresh template, every row worth something. */
+  note('R22 fixture B', await za.page.evaluate(R22_SETUP('TPL_ZB', ['100','250','500']) + '()'));
+  const a3 = await za.page.evaluate(R22_OPEN('TPL_ZB') + '()');
+  note('R22 the control', a3);
+  check(a3.opened === true && a3.lines === 6,
+    'R22o CONTROL PREMISE: the preview rendered and all three rows produced lines', a3);
+  check(a3.zeroRows.length === 0 && a3.namesZero === false
+        && !a3.said.some(s => /no journal line/i.test(s)),
+    'R22p CONTROL: nothing reported dropped, no banner and no toast - the warning is not '
+    + 'permanent furniture', a3);
+
+  /* BOTH BANNERS AT ONCE, AND THE BUG THAT FOUND. */
+  note('R22 fixture C', await za.page.evaluate(R22_SETUP('TPL_ZC', ['100','0','500']) + '()'));
+  const a4 = await za.page.evaluate(`(async function () {
+    AppState.activeRecoId = 'TPL_ZC';
+    const s0 = AppState.recoSessions.TPL_ZC;
+    /* post INV-1 on its own first, so it is genuinely in the ledger with a
+       reference of its own - which is what makes the posted banner appear. */
+    s0.selectedRows = {};
+    s0.selectedRows[(s0.data || []).find(r => r._pk === 'INV-1')._id] = true;
+    Reco._pendingEntry = null; Reco._dropZero = false; Reco._dropPosted = false;
+    Reco.previewEntryFromSelection(true);
+    Reco.commitEntryFromPreview(); App.closeModal();
+    await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    const o = { prePosted: (s0.data || []).map(r => r._pk + '=' + String(r.Reco || '')) };
+    ${R22_SELECT('TPL_ZC')}
+    Reco.previewEntryFromSelection(true);
+    o.bothSeen = ((Reco._pendingEntry || {}).zeroRows || []).length + '/'
+               + ((Reco._pendingEntry || {}).postedRows || []).length;
+    Reco.previewMarkZero(false);
+    o.afterZero = { zeroIncluded: (Reco._pendingEntry||{}).zeroIncluded,
+                    postedIncluded: (Reco._pendingEntry||{}).postedIncluded };
+    Reco.previewIncludePosted(false);
+    o.afterPosted = { zeroIncluded: (Reco._pendingEntry||{}).zeroIncluded,
+                      postedIncluded: (Reco._pendingEntry||{}).postedIncluded };
+    o.standard = ((Reco._pendingEntry||{}).standardRows || []).map(r => r._pk).sort();
+    App.closeModal();
+    return o;
+  })()`);
+  note('R22 both banners, one reopen', a4);
+  check(a4.prePosted.indexOf('INV-1=POSTED') !== -1 && a4.bothSeen === '1/1',
+    'R22q PREMISE: INV-1 really is in the ledger and this selection trips BOTH banners at once',
+    a4);
+  check(a4.afterZero.zeroIncluded === false && a4.afterZero.postedIncluded === true,
+    'R22r answering the zero banner answers only the zero banner', a4.afterZero);
+  check(a4.afterPosted.zeroIncluded === false && a4.afterPosted.postedIncluded === false,
+    'R22s AND ANSWERING THE OTHER ONE DOES NOT RESET IT. Both flags are consumed by the one '
+    + 'rebuild the buttons trigger, so a reopen that re-stated only its own answer put the zero '
+    + 'row back INTO the stamp behind an operator who had already said no - with the banner on '
+    + 'screen back to reading "Marked posted by this entry". Each handler carries the other\'s '
+    + 'answer off Reco._pendingEntry, which is what that banner is displaying, so the two cannot '
+    + 'drift', a4.afterPosted);
+  check(a4.standard.join(',') === 'INV-3',
+    'R22t ...and the only row left in the entry is the one that is neither posted nor zero',
+    a4.standard);
+
+  /* EVERY ROW DROPPED, SO THERE IS NOTHING TO POST. */
+  note('R22 fixture D', await za.page.evaluate(R22_SETUP('TPL_ZD', ['0','0','0']) + '()'));
+  const a5 = await za.page.evaluate(`(async function () {
+    ${R22_SELECT('TPL_ZD')}
+    Reco.previewEntryFromSelection(true);
+    const o = { lines: ((Reco._pendingEntry||{}).lines || []).length,
+                zeroRows: ((Reco._pendingEntry||{}).zeroRows || []).length };
+    Reco.previewMarkZero(false);
+    o.standard = ((Reco._pendingEntry||{}).standardRows || []).length;
+    window.__toasts = [];
+    Reco.commitEntryFromPreview();
+    o.said = (window.__toasts || []).map(t => t.kind + ': ' + String(t.msg).slice(0, 240));
+    await AppState.flush(); if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+    o.history = ((AppState.entryHistory || {}).TPL_ZD || []).length;
+    o.modalOpen = !!document.getElementById('appModalBody');
+    App.closeModal();
+    return o;
+  })()`);
+  note('R22 nothing left to post', a5);
+  check(a5.lines === 0 && a5.zeroRows === 3 && a5.standard === 0,
+    'R22u PREMISE: all three rows are worth zero, so dropping them leaves nothing at all', a5);
+  check(a5.history === 0 && a5.modalOpen === true,
+    'R22v CONTROL, AND IT WAS ALREADY TRUE: no entry is written and the preview stays open. The '
+    + 'lines-less guard in commitEntryFromPreview has always caught this - which is why the claim '
+    + 'that Generate "closed the modal having written nothing and said nothing", in T-26-4\'s '
+    + 'comment and in §18, was wrong, and this round corrected both. Measured with both '
+    + 'all-dropped guards disabled: said ["error: Nothing to post"], history 0, modal open', a5);
+  check(a5.said.some(s => /Nothing was posted/.test(s) && /works out to zero/.test(s)
+                          && /INV-1/.test(s)),
+    'R22w AND WHAT IT SAYS IS USABLE. "Nothing to post" is three words naming no row, no reason '
+    + 'and nothing to do next, on a screen where three rows are ticked and a button has just been '
+    + 'pressed. This sentence names the rows, why they produce no line, and the two ways forward',
+    a5.said);
+
+  check(za.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R22x no page or console error across the whole section', za.errors.slice(0, 5));
+  await za.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
