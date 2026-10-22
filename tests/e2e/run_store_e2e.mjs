@@ -10725,6 +10725,7 @@ const PORT_R21  = 21494;   // R21 T-26-11: the declined carry-forward conflict, 
 const PORT_R22  = 21498;   // R22 T-26-9: the ticked row that produces no journal line
 const PORT_R23  = 21502;   // R23 T-26-8: the AEG keyword filter with half a pair set
 const PORT_R24  = 21506;   // R24 T-26-10: the report summary cards' own silence
+const PORT_R25  = 21510;   // R25 T-S10-13: the refused document number says so in a modal
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -14937,6 +14938,206 @@ section(93, 'R24 T-26-10 — THE SUMMARY CARDS SAY WHAT THEY DROPPED, ONCE PER C
   check(rca.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R24o no page or console error across the whole section', rca.errors.slice(0, 5));
   await rca.ctx.close();
+}
+
+/* ============================================================ [94] ====
+   R25. T-S10-13. "Document numbers saved", and then one toast later "it was
+   NOT saved".
+
+   Reco.saveAllocation tests the number against THIS window's copy of the
+   shared master and refuses properly when it is taken there. The
+   AUTHORITATIVE test lives inside the merge intent - the only one that runs
+   on the file the merge has just read - so it resolves AFTER the function has
+   closed the dialog and said "Document numbers saved". When the share
+   disagreed, Reco._dnRefused took the claim back off both files and said so
+   in an ERROR TOAST: the shape MR-6 was raised about, "the one toast that did
+   fire scrolled away in four seconds". The operator's last unambiguous signal
+   was a SUCCESS for a number that is not theirs.
+
+   THE ORDERING IS THE WHOLE FIXTURE, and R25b is what pins it: B writes
+   GL-7000 to the share, then A allocates the same number while A's IN-MEMORY
+   master still does not know it. A booted before B's write and nothing
+   re-read the file, so A's immediate test passes and only the intent can
+   catch it. Reaching the in-memory refusal instead measures MR-7 ([58]) and
+   not this ticket - and [58] already covers that side.
+
+   SAVEALLOCATION IS STILL SYNCHRONOUS, which is the constraint this round is
+   built around. The comment at its head records why and it cost a suite run:
+   two existing callers do not await it, so when its tail moved to a later
+   tick it closed a dialog the caller had opened in the meantime -
+   run_reverse_e2e went 254 -> 236, with Reco.reverseEntry() finding
+   _reverseState already null and silently minting no mirror. So the TAIL is
+   untouched and on this tick (R25d); only the SENTENCE is deferred, in a
+   promise nothing awaits. A UI entry point other code drives must not become
+   async quietly - but it may speak late.
+
+   WHAT WAS BUILT: a MODAL from _dnRefused, the same precedence
+   _confirmEntryOnShare uses for a journal entry that may not have landed and
+   for the same reason - a document number the operator believes is theirs is
+   a RESOLVER for every future re-upload, so a row carrying it resolves to
+   somebody else's accounting reference. The TOAST STAYS (R25j): it reaches
+   somebody looking at the grid rather than the dialog. The footer carries the
+   way back (R25i). And the success waits for the merge and checks _dnSaid,
+   which _dnRefused sets BEFORE either of its sentences, so the success cannot
+   slip out between them even if its flush resolves first (R25k).
+
+   R25n-R25p ARE THE CONTROL THAT KEEPS THE DEFERRAL HONEST: a deferred
+   sentence that never arrives would be a worse bug than the one this round
+   fixes, so a number nobody holds is asserted to land on the share AND on the
+   entry AND still be confirmed.
+
+   MUTATION GRID: scratchpad/dn/mut/run.py, 7 mutations x the 16 checks of
+   this section's own probe (scratchpad/dn/probes/d2_fix.mjs), named by the
+   check of THIS section carrying the same assertion:
+
+     no modal (the pre-round toast only) -> R25e/f/g/h/i
+     the success fires on this tick again -> R25c, R25k
+     the deferred success ignores _dnSaid -> R25k
+     the success dropped entirely         -> R25n
+     the modal names no entry             -> R25g
+     no way back in the footer            -> R25i
+     the toast dropped, modal only        -> R25j
+
+   R25m IS A CONTROL NO MUTATION HERE CAN BREAK, and that is its correct
+   status: none of the seven touch the data path. It also carries a lesson -
+   it went red under four unrelated mutations until it stopped holding the
+   PRE-FLUSH entry object. _dnRefused's own comment says why: "_takeDisk has
+   replaced this template's array with the share's", which is why the function
+   re-finds the entry by accountingId. A check that reads a detached copy is
+   flaky, and the grid is what exposed it. */
+const R25_ALLOC = (which, dn) => `(async function () {
+  const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_E');
+  AppState.activeRecoId = 'TPL_E';
+  const hist = (AppState.entryHistory||{}).TPL_E || [];
+  const e = hist[${which}] || hist[hist.length - 1];
+  /* WHAT THIS WINDOW KNOWS BEFORE IT DECIDES - the premise that makes the
+     in-memory test pass and leaves only the intent to catch it. */
+  const knewBefore = Object.keys((AppState.docNumberMaster || {}).TPL_E || {});
+  window.__toasts = [];
+  Reco.openAllocateModal(e.accountingId);
+  const inp = document.getElementById('alloc_AED');
+  if (inp) inp.value = ${JSON.stringify(dn)};
+  Reco.saveAllocation();
+  /* DELIBERATELY NOT App.closeModal() HERE: saveAllocation closes it itself on
+     the success path, and whether anything REOPENS one is the measurement. */
+  const rightAfter = {
+    modalOpen: !!document.querySelector('#appModal.show'),
+    toasts: (window.__toasts||[]).map(t => t.kind + ': ' + String(t.msg).slice(0, 110))
+  };
+  await AppState.flush();
+  if (typeof Store.idle === 'function') { await Store.idle(); await Store.idle(); }
+  return { accountingId: e.accountingId, knewBefore: knewBefore, rightAfter: rightAfter,
+    afterFlush: {
+      modalOpen: !!document.querySelector('#appModal.show'),
+      modalTitle: (document.getElementById('appModalTitle')||{}).textContent || '',
+      modalBody: ((document.getElementById('appModalBody')||{}).textContent || '').slice(0, 400),
+      modalFooter: ((document.getElementById('appModalFooter')||{}).innerHTML || '').slice(0, 300),
+      toasts: (window.__toasts||[]).map(t => t.kind + ': ' + String(t.msg).slice(0, 150))
+    },
+    /* RE-FOUND BY accountingId, NOT held by reference - see the note in this
+       section's header about why a pre-flush object reads flaky here. */
+    docNumbers: (function () {
+      const li = (AppState.entryHistory || {}).TPL_E || [];
+      const now = li.find(x => x && x.accountingId === e.accountingId) || e;
+      return JSON.parse(JSON.stringify(now.docNumbers || {}));
+    })()
+  };
+})`;
+
+section(94, 'R25 T-S10-13 — the refused document number is a MODAL, and the success waits for the merge');
+{
+  const DN = makeRoot('share-r25');
+  const brDN = await startBridge(DN.root, PORT_R25); procs.push(brDN.proc);
+  const dnA = await openReco(browser, brDN);
+  await dnA.page.evaluate(S101_SETUP + '()');
+  const dnAp = await dnA.page.evaluate(S101_POST + `([['INV-1','INV-2']])`);
+  const dnB = await openReco(browser, brDN);
+  const dnBp = await dnB.page.evaluate(S101_POST + `([['INV-3','INV-4']])`);
+  note('R25 the two entries', { a: dnAp.accountingId, b: dnBp.accountingId });
+
+  /* B FIRST, and settled, so the share really holds GL-7000 before A tries. */
+  const bAl = await dnB.page.evaluate(R25_ALLOC(1, 'GL-7000') + '()');
+  note('R25 B allocated first', bAl.afterFlush.toasts);
+  const mAfterB = (diskJson(DN.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  check(mAfterB['GL-7000'] === dnBp.accountingId,
+    'R25a PREMISE: B\'s GL-7000 is on the share, under B\'s entry', mAfterB);
+
+  const aAl = await dnA.page.evaluate(R25_ALLOC(0, 'GL-7000') + '()');
+  note('R25 A allocated the same number', aAl);
+
+  check(aAl.knewBefore.indexOf('GL-7000') === -1,
+    'R25b PREMISE, AND IT IS WHAT PUTS THIS ON THE INTENT PATH: A\'s own copy of the master does '
+    + 'not know GL-7000, so saveAllocation\'s immediate test passes and only the merge intent can '
+    + 'catch it. The in-memory refusal is MR-7 and [58] covers it', aAl.knewBefore);
+  check(!aAl.rightAfter.toasts.some(t => /Document numbers saved/.test(t)),
+    'R25c THE CHEAPER HALF: "Document numbers saved" is no longer said BEFORE the merge has run. '
+    + 'It used to fire on this tick, so the operator\'s last unambiguous signal was a success for '
+    + 'a number that was taken straight back off both files', aAl.rightAfter.toasts);
+  check(aAl.rightAfter.modalOpen === false,
+    'R25d AND THE TAIL IS UNCHANGED: the dialog still closes on THIS tick. saveAllocation is still '
+    + 'synchronous, which is the constraint the whole round is built around - two callers do not '
+    + 'await it, and making it async took run_reverse_e2e 254 -> 236', aAl.rightAfter);
+  check(aAl.afterFlush.modalOpen === true,
+    'R25e THE FIX: a MODAL, which will not scroll away in four seconds. The same precedence '
+    + '_confirmEntryOnShare uses for a journal entry that may not have landed, and for the same '
+    + 'reason: this number resolves rows for everybody, for every future re-upload',
+    aAl.afterFlush);
+  check(/GL-7000/.test(aAl.afterFlush.modalTitle) && /was NOT saved/.test(aAl.afterFlush.modalTitle),
+    'R25f ...and its TITLE names the number and says it was not saved, so the one line that cannot '
+    + 'be missed carries the fact', aAl.afterFlush.modalTitle);
+  check(new RegExp(dnBp.accountingId).test(aAl.afterFlush.modalBody)
+        && new RegExp(dnAp.accountingId).test(aAl.afterFlush.modalBody)
+        && /GL-7000/.test(aAl.afterFlush.modalBody),
+    'R25g ...and the BODY names the number, the entry that HOLDS it and the entry it was taken '
+    + 'OFF, which is what the ticket\'s Test asks for', aAl.afterFlush.modalBody);
+  check(/docNumberMaster\.json/.test(aAl.afterFlush.modalBody),
+    'R25h ...and the file, so somebody can go and look', aAl.afterFlush.modalBody);
+  check(/openAllocateModal/.test(aAl.afterFlush.modalFooter)
+        && new RegExp(dnAp.accountingId).test(aAl.afterFlush.modalFooter),
+    'R25i AND THE WAY BACK IS ON IT: a button reopening the allocate dialog for THIS entry, with '
+    + 'the refused number already cleared off it, so the next thing on screen is the box to type a '
+    + 'different one into rather than a hunt for it', aAl.afterFlush.modalFooter);
+  check(aAl.afterFlush.toasts.some(t => /^error/.test(t) && /was NOT saved/.test(t)),
+    'R25j THE TOAST STAYS TOO - it is what reaches somebody looking at the grid rather than the '
+    + 'dialog. The modal is what does not scroll away', aAl.afterFlush.toasts);
+  check(!aAl.afterFlush.toasts.some(t => /^success/.test(t)),
+    'R25k AND NO SUCCESS WAS EVER SAID on this path. The deferred toast checks _dnSaid, which '
+    + '_dnRefused sets BEFORE either of its sentences, so the success cannot slip out between the '
+    + 'modal and the toast even if its flush resolves first', aAl.afterFlush.toasts);
+
+  const mEnd = (diskJson(DN.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  const claim = ((diskJson(DN.root, 'reco/entryHistory.json') || {}).TPL_E || [])
+    .filter(e => e && e.docNumbers && e.docNumbers.AED === 'GL-7000').map(e => e.accountingId);
+  note('R25 the share at the end', { master: mEnd['GL-7000'], claimants: claim });
+  check(mEnd['GL-7000'] === dnBp.accountingId && claim.length === 1
+        && claim[0] === dnBp.accountingId,
+    'R25l CONTROL: the share is UNCHANGED by this round - the master names B\'s entry and exactly '
+    + 'one entry claims it. The files were always right; what was missing was the operator knowing',
+    { master: mEnd['GL-7000'], claimants: claim });
+  check(!aAl.docNumbers.AED,
+    'R25m CONTROL: and the entry A holds in memory does not carry it either', aAl.docNumbers);
+
+  /* THE CONTROL THAT KEEPS THE SUCCESS HONEST. */
+  const okAl = await dnA.page.evaluate(R25_ALLOC(0, 'GL-7001') + '()');
+  note('R25 A allocates a free number', okAl.afterFlush.toasts);
+  check(okAl.afterFlush.toasts.some(t => /^success/.test(t) && /Document numbers saved/.test(t)),
+    'R25n CONTROL: a free number is still confirmed - "Document numbers saved" arrives after the '
+    + 'merge instead of before it. A deferred sentence that never arrives would be a worse bug '
+    + 'than the one this round fixes', okAl.afterFlush.toasts);
+  check(okAl.afterFlush.modalOpen === false,
+    'R25o CONTROL: and no modal, so the refusal dialog is not permanent furniture', okAl.afterFlush);
+  const mOk = (diskJson(DN.root, 'reco/docNumberMaster.json') || {}).TPL_E || {};
+  check(mOk['GL-7001'] === dnAp.accountingId && okAl.docNumbers.AED === 'GL-7001',
+    'R25p CONTROL, ON THE FILES: the free number really landed, on the share and on the entry - so '
+    + 'the success above is a save and not just a sentence',
+    { master: mOk['GL-7001'], onEntry: okAl.docNumbers.AED });
+
+  check([...dnA.errors, ...dnB.errors]
+          .filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R25q no page or console error across the whole section',
+    [...dnA.errors, ...dnB.errors].slice(0, 5));
+  await dnB.ctx.close();
+  await dnA.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

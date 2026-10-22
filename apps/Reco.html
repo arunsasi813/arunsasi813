@@ -28323,7 +28323,35 @@ renderCustomReport(tpl, sess, rpt, idx) {
     AppState.save();
     App.closeModal();
     App.navigate('reco');
-    U.toast('Document numbers saved','success');
+    /* ---- T-S10-13. THE SUCCESS WAITS FOR THE MERGE, AND THE TAIL DOES NOT.
+       The authoritative test is inside the intent above, so it resolves after
+       this point - and saying "Document numbers saved" here meant the
+       operator's LAST unambiguous signal was a success for a number that was
+       then taken back off both files by Reco._dnRefused, one error toast
+       later (measured: scratchpad/dn/probes/d1_repro.mjs D1c-D1f).
+       NOT BY AWAITING, which is the whole lesson recorded at the head of this
+       function: two callers do not await saveAllocation, and making it async
+       moved App.closeModal/App.navigate to a later tick and closed a dialog
+       the caller had opened in the meantime (run_reverse_e2e 254 -> 236). So
+       the TAIL stays on this tick, synchronous, exactly as it was; only the
+       SENTENCE is deferred, in a promise nothing waits on. A UI entry point
+       other code drives must not become async quietly - but it may speak late.
+       `_dnSaid` is the handshake: _dnRefused sets it when it has spoken for
+       this entry, and a refusal has already opened a modal, so the success
+       stays quiet rather than contradicting it. Keyed by accountingId, so two
+       allocations on different entries cannot silence each other. */
+    const sayFor = String(accountingId);
+    Reco._dnSaid = Reco._dnSaid || Object.create(null);
+    delete Reco._dnSaid[sayFor];
+    Promise.resolve().then(() => AppState.flush()).then(() => {
+      if (Reco._dnSaid && Reco._dnSaid[sayFor]) { delete Reco._dnSaid[sayFor]; return; }
+      U.toast('Document numbers saved','success');
+    }).catch(() => {
+      /* The folder could not be reached. The claim is owed and retried on
+         every save (Store._flushMergeTimers), and the share-write machinery
+         has its own sentence for that - so this does not invent a second
+         one, and it does not claim success either. */
+    });
   },
 
   /* ---- MR-7. A NUMBER THE SHARED MASTER WOULD NOT GIVE US. Reached from
@@ -28350,6 +28378,48 @@ renderCustomReport(tpl, sess, rpt, idx) {
       gone.forEach(l => { if (en.docNumbers[l.cur] === l.v) delete en.docNumbers[l.cur]; });
     });
     Reco._postedIdxReset();
+    /* ---- T-S10-13. A MODAL, NOT ONLY A TOAST, and the same precedence
+       Reco._confirmEntryOnShare already uses for a journal entry that may not
+       have landed - for the same reason: a document number the operator
+       believes is theirs is a RESOLVER for every future re-upload, so a row
+       carrying it resolves to somebody else's accounting reference.
+       THE TOAST STAYS AS WELL. It is what reaches somebody looking at the
+       grid rather than the dialog; the modal is what will not scroll away in
+       four seconds, which is the shape MR-6 was raised about and the whole of
+       this ticket. The operator's last unambiguous signal used to be the
+       SUCCESS this correction contradicts, and saveAllocation now holds that
+       success back until the merge has run (`_dnSaid`, set just below BEFORE
+       either sentence, so the deferred success cannot slip out between them
+       even if its flush resolves first). */
+    Reco._dnSaid = Reco._dnSaid || Object.create(null);
+    Reco._dnSaid[String(accountingId)] = true;
+    const sayLost = l => '<li><b>' + U.esc(l.v) + '</b> (' + U.esc(l.cur)
+      + ') belongs to entry <b>' + U.esc(l.by) + '</b></li>';
+    const dnTpl = (AppState.recoTemplates || []).find(t => t && t.id === tplId);
+    /* THE BOX TO TYPE A DIFFERENT ONE INTO, which is the ticket's own ask: the
+       next thing on screen is the allocate dialog for THIS entry with the
+       refused number already cleared off it (the correction above took it out
+       of entry.docNumbers, and openAllocateModal reads that), so the operator
+       is not left hunting for the way back. Guarded, because this can run
+       after the window has navigated away or the template has gone. */
+    const dnAgain = dnTpl && typeof Reco.openAllocateModal === 'function'
+      ? '<button class="primary" onclick="Reco.openAllocateModal(\''
+        + U.jsq(String(accountingId)) + '\')">Allocate a different number—</button>'
+        + '<button onclick="App.closeModal()">Later</button>'
+      : '<button class="primary" onclick="App.closeModal()">Close</button>';
+    App.openModal(
+      'Document number ' + lost[0].v + ' was NOT saved',
+      '<div class="help">The shared folder already holds '
+      + (lost.length > 1 ? 'these numbers' : 'this number') + ' against another entry, so '
+      + (lost.length > 1 ? 'they were' : 'it was') + ' taken back off entry <b>'
+      + U.esc(String(accountingId)) + '</b> — on this screen and on '
+      + '<code>reco/docNumberMaster.json</code>.<br><br><ul>'
+      + lost.slice(0, 8).map(sayLost).join('')
+      + (lost.length > 8 ? '<li>—and ' + (lost.length - 8) + ' more</li>' : '')
+      + '</ul>Two entries under one document number resolve a row to the WRONG accounting '
+      + 'reference, for everybody and for every future re-upload — which is why this is '
+      + 'refused rather than merged. Use a different number, or reverse the entry that holds '
+      + 'it.</div>', dnAgain);
     U.toast('Document number ' + lost[0].v + ' already belongs to entry ' + lost[0].by
       + ' on the shared folder, so it was NOT saved'
       + (lost.length > 1 ? ' — nor were ' + lost.slice(1, 4).map(l => l.v).join(', ') : '')

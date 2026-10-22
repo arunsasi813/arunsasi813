@@ -2477,6 +2477,50 @@ later: assert A sees a **modal** naming the number and the entry that holds it, 
 `reco/docNumberMaster.json` names B's entry, and that A's `entry.docNumbers` does not carry it.
 `run_store_e2e` `[58]` has the fixture and currently asserts the files only.
 
+**CLOSED — BOTH HALVES, AND `saveAllocation` IS STILL SYNCHRONOUS.** That last part is the
+constraint the ticket is built around, and it holds: the **tail** (`App.closeModal`,
+`App.navigate`) still runs on the same tick, so no caller that drives this entry point without
+awaiting it can have a dialog closed out from under it. Only the **sentence** moved.
+
+- **`_dnRefused` opens a modal**, with the same precedence `_confirmEntryOnShare` uses for a
+  journal entry that may not have landed. Its title names the number and says it was not saved;
+  its body names the number, the entry that holds it, the entry it was taken off, and
+  `reco/docNumberMaster.json` so somebody can go and look. **The toast stays as well** — it is
+  what reaches somebody looking at the grid rather than the dialog, and the modal is what will not
+  scroll away in four seconds.
+- **The footer carries the way back**: a button that reopens the allocate dialog for *this* entry,
+  with the refused number already cleared off it (the correction removed it from
+  `entry.docNumbers`, which `openAllocateModal` reads). So the next thing on screen is the box to
+  type a different one into.
+- **The success waits for the merge** — the ticket's "cheaper half". `U.toast('Document numbers
+  saved')` now fires from a promise nothing awaits, after `AppState.flush()`, and only if
+  `Reco._dnSaid[accountingId]` is unset. `_dnRefused` sets that flag **before** either of its
+  sentences, so the success cannot slip out between the modal and the toast even if its flush
+  resolves first. A folder that cannot be reached claims nothing: the `.catch` is deliberately
+  silent, because the claim is owed and retried on every save and the share-write machinery has
+  its own sentence for that.
+
+**Measured before the fix** (`scratchpad/dn/probes/d1_repro.mjs`, with the ordering that forces the
+intent path — B writes `GL-7000` to the share, then A allocates it while A's in-memory master still
+does not know, so A's immediate test passes): `success: Document numbers saved`, dialog closed,
+then `error: ... was NOT saved`, and `#appModal.show` absent throughout. Reaching the in-memory
+refusal instead would have measured MR-7, not this.
+
+**Gated by `[94] R25a–R25q` in `run_store_e2e`** (17 checks). **R25n–R25p** are the control that
+keeps the deferral honest: a number nobody holds still lands on the share and on the entry **and**
+is still confirmed — a deferred sentence that never arrives would be a worse bug than the one this
+round fixes. **`[58]` still covers the other side**, the in-memory refusal (MR-7), and `R25b` is
+what keeps these two apart: it asserts A's own copy of the master does *not* know the number, so
+only the intent can catch it.
+
+**Mutation grid 7 × 16** in `scratchpad/dn/mut/run.py` against the round's own probe
+(`scratchpad/dn/probes/d2_fix.mjs`), each turning exactly the checks it should — and it earned its
+keep by catching a flaky check of **mine**: `R25m` went red under four mutations that touch nothing
+but the toasts, because the probe was holding the entry object from *before* the flush.
+`_dnRefused`'s own comment says why that is wrong (`_takeDisk` replaces the array, which is why the
+function re-finds the entry by `accountingId`). It now re-finds it the same way, and is a control
+no mutation in this grid can break — which is the correct status for a control.
+
 ---
 
 ## T-S10-14  A re-minted reversal MIRROR gets no notice, so the toast and the log name a reference it does not have

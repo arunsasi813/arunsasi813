@@ -5695,3 +5695,94 @@ were read separately. And the pass-count arm runs after the control reverted the
 is back to its formula values — the first version of `R24n` expected the overridden figures. Both
 are the same lesson: a check that encodes an assumption about state the previous arm left behind
 has to say so, and `R24n`'s comment now does.
+
+## 25. T-S10-13 — "Document numbers saved", and then one toast later "it was NOT saved"
+
+### 25.1 The harm, and the ordering that produces it
+
+`Reco.saveAllocation` tests the number against **this window's** copy of the shared master and
+refuses properly when it is taken there. But the authoritative test lives inside the merge intent,
+because it is the only one that runs on the file the merge has just read — so it resolves **after**
+the function has closed the dialog and said *"Document numbers saved"*. When the share disagrees,
+`Reco._dnRefused` takes the claim back off both files and said so in an **error toast**, which is
+the exact shape MR-6 was raised about: *"the one toast that did fire scrolled away in four
+seconds"*.
+
+Measured (`scratchpad/dn/probes/d1_repro.mjs`): B writes `GL-7000` to the share, then A allocates
+the same number while A's in-memory master still does not know it, so A's immediate test passes:
+
+```
+knewBefore:  [D1, D2]              <- no GL-7000: only the intent can catch this
+right after: success: Document numbers saved      modalOpen: false
+after flush: error: ... was NOT saved             modalOpen: false
+```
+
+The ordering is the whole fixture. Reaching the **in-memory** refusal instead measures MR-7, not
+this.
+
+### 25.2 The constraint this is built around
+
+`saveAllocation` must stay **synchronous**. The comment at its head records why, and it cost a
+suite run to learn: two existing callers do not await it, so when its tail moved to a later tick it
+closed a dialog the caller had opened in the meantime — `run_reverse_e2e` went **254 → 236**, with
+`Reco.reverseEntry()` finding `_reverseState` already null and silently minting no mirror. *A UI
+entry point that other code drives must not become async quietly.*
+
+So the tail (`App.closeModal`, `App.navigate`) still runs on the same tick, unchanged. Only the
+**sentence** moved. A UI entry point may not become async — but it may speak late.
+
+### 25.3 What was built
+
+- **`_dnRefused` opens a modal**, the same precedence `_confirmEntryOnShare` uses for a journal
+  entry that may not have landed, and for the same reason: a document number the operator believes
+  is theirs is a **resolver** for every future re-upload, so a row carrying it resolves to somebody
+  else's accounting reference. The title names the number and says it was not saved; the body names
+  the number, the entry that holds it, the entry it was taken off, and
+  `reco/docNumberMaster.json`.
+- **The toast stays as well.** It is what reaches somebody looking at the grid rather than the
+  dialog; the modal is what will not scroll away.
+- **The footer carries the way back** — a button reopening the allocate dialog for *this* entry
+  with the refused number already cleared (the correction removed it from `entry.docNumbers`, which
+  `openAllocateModal` reads), so the next thing on screen is the box to type a different one into.
+- **The success waits for the merge**, from a promise nothing awaits, and only if
+  `Reco._dnSaid[accountingId]` is unset. `_dnRefused` sets that flag **before** either of its
+  sentences, so the success cannot slip out between them even if its flush resolves first. A folder
+  that cannot be reached claims nothing: the `.catch` is deliberately silent, because the claim is
+  owed and retried on every save and the share-write machinery has its own sentence for it.
+
+### 25.4 The control that keeps the deferral honest
+
+A deferred sentence that never arrives would be a worse bug than the one this round fixes, so
+`D2n`–`D2p` allocate a number nobody holds and assert that it lands **on the share and on the
+entry** and is still confirmed. The success is a save, not just a sentence.
+
+### 25.5 The mutation grid caught a flaky check of my own
+
+`D2m` ("A's entry does not carry the number in memory either") went red under four mutations that
+touch nothing but the toasts. That is not a finding about the code — it is a flaky check, and the
+explanation was already written in `_dnRefused`'s own comment: *"by the time it runs, `_takeDisk`
+has replaced this template's array with the share's and `entry` above is a detached copy"*, which
+is why the function re-finds the entry by `accountingId`. The probe was holding the **pre-flush
+object**, so it read whichever copy it happened to get. It now re-finds the entry the same way the
+code does.
+
+Worth keeping as a lesson in both directions: a mutation that turns a check red for no reason
+related to the mutation is the grid telling you about the **test**, and the fix was in a comment
+the code already carried. After the repair `R25m` is red under no mutation at all, which is the
+correct status for a control — none of the seven touch the data path.
+
+The grid as it stands, named by the `[94]` check carrying each assertion:
+
+| mutation | red |
+| --- | --- |
+| no modal (the pre-round toast only) | `R25e/f/g/h/i` |
+| the success fires on this tick again | `R25c`, `R25k` |
+| the deferred success ignores `_dnSaid` | `R25k` |
+| the success dropped entirely | `R25n` |
+| the modal names no entry | `R25g` |
+| no way back in the footer | `R25i` |
+| the toast dropped, modal only | `R25j` |
+
+(Also, for the third time in this project: a **backtick inside a page-side template literal closes
+it**. The repaired comment quoted `entry` in backticks and the probe threw `SyntaxError: missing )
+after argument list` at parse time.)
