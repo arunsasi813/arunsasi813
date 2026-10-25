@@ -6347,3 +6347,113 @@ fill at the paste door.
 **The general lesson, which this project keeps paying for in a new place each time: a comment that
 names functions is a comment that rots.** The ones that have survived name a CHOKEPOINT and say
 what it decides. Both corrected notes are written that way.
+
+## 30. T-24R2-3 — a renamed column keeps its place
+
+### 30.1 The five lists did not behave alike
+
+Renaming the added column `Ref` to `Ref2` on a template that names it in all five stored lists,
+measured (`scratchpad/rn/probes/n1_repro.mjs`):
+
+| list | before | after | |
+| --- | --- | --- | --- |
+| `primaryKeys` | `['Doc','Ref']` | `['Doc']` | **pruned** by `_pkEligible` |
+| `displayOrder` | `[Doc,Ref,Other,Amount]` | `[Doc,Other,Amount]` | **pruned** |
+| `correctionContextCols` | `['Ref']` | `[]` | **pruned** |
+| `aggregateBy` | `['Ref']` | `['Ref']` | **dangling** |
+| `editableColumns` | `['Ref']` | `['Ref']` | **dangling** |
+
+The ticket lists the last four as wanting "the same treatment", which assumes they share a
+behaviour. They don't: two lose the setting and two go on naming a column that no longer exists —
+a report grouped by nothing, an editability rule pointing at nothing. One carry-over fixes both
+shapes.
+
+### 30.2 The pairing was already in the file, 160 lines too late
+
+The ticket proposes pairing by POSITION, guarded by "same length and same types in the same
+order", and its own *Why it is only a ticket* paragraph explains why that is dangerous: a
+positional pairing carries the key to the **wrong column** whenever the editor also added, removed
+or reordered something, which is worse than dropping it.
+
+T-S10-5 had already solved this with a stable `_cid` per added column, and `saveTemplate` already
+held a `_cid`-first pairing — for migrating typed values, 160 lines **below** the prune that needed
+it. This round lifted it:
+
+```js
+_renamedExtras(before, after)   // _cid first, the editor's slot as fallback
+```
+
+Both questions now ask it once: the carry-over before the prune, and the value migration where it
+always was. The four guards are unchanged — the old name is still a column; the new name was
+already in use (round 5 refuses that, it would merge two columns' records); the type changed; no
+pair at all.
+
+### 30.3 One before-list, after shipping two
+
+The first version asked the carry-over against `RecoTemplate._openedWith` — *"did **this operator**
+rename it"*, which `_openedWith` answers exactly and the stored template only approximates — and
+the value migration against the stored template. Two before-lists, with a paragraph justifying
+the difference.
+
+**The mutation that swapped one for the other turned nothing red.** T-S10-7 re-reads the share at
+the head of `saveTemplate` and merges field by field against `_openedWith`, so by that line the two
+coincide in every state a single window can produce. The distinction was real in principle and
+unobservable in practice.
+
+Both now read the stored template. **A distinction that cannot be measured is not worth two
+code paths and the paragraph explaining them** — and the grid is what said so, not an argument.
+
+### 30.4 The question
+
+```
+"Ref" is now called "Ref2".
+
+It is part of the row key, the team column order and the correction tab's context columns.
+
+Keep it there under the new name?
+
+Cancel leaves it out — and a reconciliation whose key loses a component identifies its
+rows differently from every row already stored.
+```
+
+One per renamed column and not one per list, which is what `RecoTemplate._listsNaming` and
+`_LIST_SAY` are for. Asked rather than assumed: it is the operator's key, and a rename is not by
+itself a statement about it. On **no**, the behaviour is exactly what it was — the rename lands,
+the key drops, and round 2's dropped-component sentence is still said.
+
+### 30.5 Neither signature stays put, and that is right
+
+The ticket's Test asks for `tplSignature` **unmoved** on yes. Measured:
+
+```
+XlSchema.tplSignature   3b3d60b4           -> a37c864c
+Reco.keyRuleSig         1:a92838e8a2ca7b65 -> 1:70eb016047ef1a77
+```
+
+`tplSignature` hashes the column **names**, so any rename moves it — and it should, because a
+linked workbook's header row really has changed. `keyRuleSig` moves because the key rule now names
+`Ref2` and the definition hashed under it is a different one, which is exactly what T-S10-19's
+refusal exists to notice. **What the carry-over protects is the key, not either hash**, and the
+ticket conflated the two.
+
+### 30.6 A mutation that measured nothing until the fixture grew
+
+| mutation | turns red |
+| --- | --- |
+| the carry-over never runs | ten checks |
+| it carries over without asking | `R30c`, `R30d`, `R30k`, `R30l`, `R30p` |
+| the answer is ignored (always no) | `R30e/f/g/h/j/m/q` |
+| only `primaryKeys` is carried | `R30f`, `R30g`, `R30q` |
+| the question names no list | `R30d` |
+| ...and does not say what the key costs | `R30d` |
+| **the pairing is positional only** | `R30p`, `R30q` |
+| the type-change guard is removed | `R30n` |
+| one question per LIST, not per column | `R30c`, `R30p` |
+
+The seventh came back `red=NONE` on the first pass, and the `_cid` arm looked decorative: with a
+rename that does not MOVE the column, a positional pairing gives the same answer. `R30o`–`R30q`
+are what make it load-bearing — one press of the Eval arrow renames and reorders in one save, and
+slot 0 then holds a different column, so a positional pairing carries the key to `Other`.
+
+**Same lesson as 28.6 and 27.7, from a third direction: when a mutation measures nothing, suspect
+the fixture before the grid.** Three rounds running, that has been the answer.

@@ -10730,6 +10730,7 @@ const PORT_R26  = 21514;   // R26 T-S10-14: the re-minted reversal mirror says s
 const PORT_R27  = 21518;   // R27 T-C27-7/T-C27-9: two added columns with one name
 const PORT_R28  = 21522;   // R28 T-24R2-4: a custom master's own id
 const PORT_R29  = 21526;   // R29 T-24R2-2: a hand-added row's frozen business key
+const PORT_R30  = 21530;   // R30 T-24R2-3: a renamed column keeps its place
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -16663,6 +16664,322 @@ section(98, 'R29 T-24R2-2 \u2014 a hand-added row freezes its business key, and 
   check(rw.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R29t no page or console error across the whole section', rw.errors.slice(0, 5));
   await rw.ctx.close();
+}
+
+/* ============================================================ [99] ====
+   R30. T-24R2-3. Renaming a key component dropped it from the key.
+
+   The name input in RecoTemplate._renderAdditionalColumnsEditor assigns
+   straight into _editing.additionalColumns[i].name, and saveTemplate's prune
+   then filters primaryKeys against _pkEligible - which answers "there is no
+   column with this name" for the OLD name. Since round 2 the operator IS told
+   what was dropped and why; they are told about a deletion they did not ask
+   for, and the obvious intent - the same key, under the new name - was not
+   offered.
+
+   THE TICKET SAYS FOUR MORE LISTS "WANT THE SAME TREATMENT". They did not
+   behave alike, measured (scratchpad/rn/probes/n1_repro.mjs) by renaming Ref
+   to Ref2 on a template that names Ref in all five:
+
+     primaryKeys            ['Doc','Ref']          -> ['Doc']        PRUNED
+     displayOrder           [Doc,Ref,Other,Amount] -> [Doc,Other,Amount]  PRUNED
+     correctionContextCols  ['Ref']                -> []             PRUNED
+     aggregateBy            ['Ref']                -> ['Ref']        DANGLING
+     editableColumns        ['Ref']                -> ['Ref']        DANGLING
+
+   Two settings lost and two pointing at a column that no longer exists, from
+   one gesture. One carry-over fixes both shapes (R30f, R30g).
+
+   WHAT WAS BUILT: RecoTemplate._renamedExtras, and ONE question per renamed
+   column before the prune.
+
+   THE PAIRING IS NOT THE TICKET'S. It proposes pairing old and new
+   additionalColumns "by position ONLY when the two lists have the same length
+   and the same types in the same order", and warns - correctly - that a
+   positional pairing "carries the key over to the wrong column, which is
+   worse than dropping it". T-S10-5 already solved that with a stable _cid per
+   added column, and saveTemplate already had the pairing 160 lines below the
+   prune, for migrating typed values. T-24R2-3 LIFTED IT into
+   RecoTemplate._renamedExtras so both questions ask it once. So a rename made
+   in the same save as a REORDER (R30o-R30q) or a DELETE (R30m) is still
+   recognised exactly - the two cases the ticket's own negative asks to be
+   given up on.
+
+   ONE "BEFORE" LIST, after trying two. The first version asked the carry-over
+   against RecoTemplate._openedWith ("did THIS OPERATOR rename it") and the
+   value migration against the stored template ("whose values move"). The
+   mutation that swapped one for the other turned NOTHING red: T-S10-7
+   re-reads the share at the head of saveTemplate and merges field by field
+   against _openedWith, so by that line the two coincide in every state a
+   single window can produce. A distinction that cannot be measured is not
+   worth two before-lists and the paragraph explaining them, so both now read
+   the stored template.
+
+   THE TICKET'S TEST IS WRONG ABOUT THE SIGNATURE (R30i, R30j). It asks for
+   "tplSignature unmoved" on yes. XlSchema.tplSignature hashes the column
+   NAMES, so a rename moves it whatever happens to the key - and it SHOULD,
+   because a linked workbook's header row really has changed. Reco.keyRuleSig
+   moves too, because the key rule now names Ref2 and the definition hashed
+   under it is a different one; that is what T-S10-19's refusal exists to
+   notice. What the carry-over protects is the KEY, not either hash.
+
+   ON NO, NOTHING CHANGED (R30k, R30l): the rename lands, the key loses the
+   component, and round 2's dropped-component sentence is still said. The
+   question is the only new thing.
+
+   MUTATION GRID: scratchpad/rn/mut/run.py, 9 mutations x the 17 checks of
+   this section's own probe (scratchpad/rn/probes/n2_fix.mjs):
+
+     the carry-over never runs              -> ten checks
+     it carries over without asking         -> R30c, R30d, R30k, R30l, R30p
+     the answer is ignored (always no)      -> R30e/f/g/h/j/m/q
+     only primaryKeys is carried            -> R30f, R30g, R30q
+     the question names no list             -> R30d
+     ...and does not say what the key costs -> R30d
+     the pairing is positional only         -> R30p, R30q
+     the type-change guard is removed       -> R30n
+     one question per LIST, not per column  -> R30c, R30p
+
+   THE SEVENTH ONLY MEASURED ANYTHING ONCE THE REORDER ARM EXISTED. With a
+   rename that does not move the column, a positional pairing gives the same
+   answer as a _cid one, so it came back red=NONE on the first pass - and the
+   _cid arm looked decorative. R30o-R30q are what make it load-bearing: one
+   press of the Eval arrow in the Additional Columns editor renames and moves
+   in one save, and slot 0 then holds a different column.
+   ==================================================================== */
+const R30_MK = `(async function (ID) {
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = ID; t.name = ID;
+  t.columns = ['Doc','Amount'].map(n => ({
+    name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+  t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Amount'];
+  t.enableCorrections = true;
+  t.additionalColumns = [
+    { name: 'Ref', type: 'formula', formula: 'CONCAT("R-",{Doc})', _cid: U.uid() },
+    { name: 'Other', type: 'formula', formula: 'CONCAT("O-",{Doc})', _cid: U.uid() }];
+  t.primaryKeys = ['Doc','Ref'];
+  t.displayOrder = ['Doc','Ref','Other','Amount'];
+  t.correctionContextCols = ['Ref'];
+  t.aggregateBy = ['Ref'];
+  t.editableColumns = ['Ref'];
+  RecoTemplate.saveTemplate();
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  if (!live) return { FAILED: 'not stored' };
+  return { xlSig: String(XlSchema.tplSignature(live) || ''),
+           keySig: String(Reco.keyRuleSig(live) || ''),
+           pks: (live.primaryKeys||[]).slice(),
+           order: (live.displayOrder||[]).slice(),
+           ctx: (live.correctionContextCols||[]).slice(),
+           agg: (live.aggregateBy||[]).slice(),
+           edit: (live.editableColumns||[]).slice(),
+           extras: (live.additionalColumns||[]).map(a => a.name) };
+})`;
+
+/* The rename, through the editor: edit(), change the name in place the way
+   the name input does, then save. */
+const R30_RENAME = `(async function (arg) {
+  const [ID, from, to, alsoDelete, answer] = arg;
+  window.__toasts = [];
+  window.__confirms = [];
+  const realConfirm = window.confirm;
+  /* The carry-over question is answered with the arg; EVERY OTHER confirm is
+     accepted, so a "no" arm measures the carry-over refusal and not some
+     other dialog being declined. (No backticks in here: this comment lives
+     inside a page-side template literal and one would close it - the fourth
+     time this project has walked into that.) */
+  window.confirm = (m) => {
+    const msg = String(m);
+    window.__confirms.push(msg);
+    if (/Keep it there under the new name/.test(msg)) return !!answer;
+    return true;
+  };
+  try {
+    RecoTemplate.edit(ID);
+    const ed = RecoTemplate._editing;
+    const col = (ed.additionalColumns || []).find(a => a && a.name === from);
+    if (!col) return { FAILED: 'no such column in the editor' };
+    col.name = to;                      // exactly what the name input assigns
+    if (alsoDelete) {
+      /* The negative case the ticket asks for: a save that ALSO deletes a
+         column, where a positional pairing would be wrong. */
+      const i = (ed.additionalColumns || []).findIndex(a => a && a.name === alsoDelete);
+      if (i >= 0) ed.additionalColumns.splice(i, 1);
+    }
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+  } finally { window.confirm = realConfirm; }
+  await new Promise(r => setTimeout(r, 300));
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  return { toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg),
+           xlSig: String(XlSchema.tplSignature(live) || ''),
+           keySig: String(Reco.keyRuleSig(live) || ''),
+           confirms: (window.__confirms||[]).slice(),
+           pks: (live.primaryKeys||[]).slice(),
+           order: (live.displayOrder||[]).slice(),
+           ctx: (live.correctionContextCols||[]).slice(),
+           agg: (live.aggregateBy||[]).slice(),
+           edit: (live.editableColumns||[]).slice(),
+           extras: (live.additionalColumns||[]).map(a => a.name) };
+})`;
+section(99, 'R30 T-24R2-3 \u2014 a renamed column keeps its place in the five lists that name it');
+{
+  const RN = makeRoot('share-r30');
+  const brRN = await startBridge(RN.root, PORT_R30); procs.push(brRN.proc);
+  const rn = await openReco(browser, brRN);
+  const before = await rn.page.evaluate(R30_MK + "('TPL_RN')");
+  note('the template as saved', before);
+  check(before.pks.join(',') === 'Doc,Ref' && before.ctx.join(',') === 'Ref'
+        && before.agg.join(',') === 'Ref' && before.edit.join(',') === 'Ref'
+        && before.order.join(',') === 'Doc,Ref,Other,Amount',
+    'R30a PREMISE: the key names the added column "Ref", and so do displayOrder, '
+    + 'correctionContextCols, aggregateBy and editableColumns', before);
+
+  /* ---- YES: carried over in all five lists. */
+  const r = await rn.page.evaluate(R30_RENAME + '(' + JSON.stringify(['TPL_RN', 'Ref', 'Ref2', null, true]) + ')');
+  note('yes \u2014 after renaming Ref -> Ref2', r);
+  const asked = r.confirms.filter(m => /Keep it there under the new name/.test(m));
+  check(r.extras.join(',') === 'Ref2,Other',
+    'R30b PREMISE: the rename itself landed - the column is called Ref2 now', r.extras);
+  check(asked.length === 1,
+    'R30c THE QUESTION IS ASKED, ONCE for the column and not once per list. It is the operator\'s '
+    + 'key, and a rename is not by itself a statement about it',
+    asked.map(m => m.slice(0, 300)));
+  check(asked[0] && /"Ref" is now called "Ref2"/.test(asked[0])
+        && /the row key/.test(asked[0]) && /the team column order/.test(asked[0])
+        && /identifies its rows differently/.test(asked[0]),
+    'R30d ...and it names BOTH names, every list that mentions the column, and what losing a key '
+    + 'component costs', asked[0] && asked[0].slice(0, 400));
+  check(r.pks.join(',') === 'Doc,Ref2',
+    'R30e THE FIX: on yes the key carries over under the new name. It became [\'Doc\'] before - a '
+    + 'reconciliation identifying its rows differently from every row already stored', r.pks);
+  check(r.order.join(',') === 'Doc,Ref2,Other,Amount' && r.ctx.join(',') === 'Ref2',
+    'R30f ...and so do the two lists that used to PRUNE the name: the column keeps its place in the '
+    + 'team column order, so it does not fall to the end of every export, and the correction tab '
+    + 'keeps it as a context column', { order: r.order, ctx: r.ctx });
+  check(r.agg.join(',') === 'Ref2' && r.edit.join(',') === 'Ref2',
+    'R30g ...and the two that used to keep a DANGLING name now name the real column. The ticket '
+    + 'lists all four as wanting "the same treatment"; they did not behave alike - two pruned and '
+    + 'two dangled - and one carry-over fixes both shapes', { agg: r.agg, edit: r.edit });
+  check(!r.confirms.some(m => /no column with this name/.test(m)),
+    'R30h AND ROUND 2\'s DROPPED-COMPONENT SENTENCE IS NOT SAID, because nothing was dropped. It was '
+    + 'the only thing the operator used to get', r.confirms.map(m => m.slice(0, 80)));
+
+  /* ---- THE SIGNATURES. The ticket's Test asks for "tplSignature unmoved" on
+     yes; whether that is true is measured rather than asserted. */
+  note('the signatures', { before: { xl: before.xlSig, key: before.keySig },
+                           after:  { xl: r.xlSig,      key: r.keySig } });
+  check(before.xlSig !== '' && r.xlSig !== '' && before.xlSig !== r.xlSig,
+    'R30i AND THE TICKET\'s TEST IS WRONG ABOUT THE SIGNATURE: it asks for tplSignature UNMOVED on '
+    + 'yes. XlSchema.tplSignature hashes the column NAMES, so renaming a column moves it whatever '
+    + 'happens to the key - and it SHOULD, because a linked workbook\'s header row really has '
+    + 'changed. What the carry-over protects is the KEY, not the schema hash',
+    { before: before.xlSig, after: r.xlSig });
+  check(before.keySig !== '' && r.keySig !== '' && before.keySig !== r.keySig,
+    'R30j ...and Reco.keyRuleSig moves too, because the key rule now names Ref2 and the definition '
+    + 'hashed under it is a different one. That is the correct answer and not a regression: rows '
+    + 'minted under the old rule ARE minted under a different rule, which is exactly what T-S10-19\'s '
+    + 'refusal exists to notice', { before: before.keySig, after: r.keySig });
+
+  /* ---- NO: the drop stands, with round 2's sentence. */
+  await rn.page.evaluate(R30_MK + "('TPL_RN_NO')");
+  const no = await rn.page.evaluate(R30_RENAME + '(' + JSON.stringify(['TPL_RN_NO', 'Ref', 'Ref2', null, false]) + ')');
+  note('no \u2014 the drop stands', no);
+  check(no.pks.join(',') === 'Doc' && no.extras.join(',') === 'Ref2,Other',
+    'R30k ON NO THE BEHAVIOUR IS EXACTLY WHAT IT WAS: the rename lands and the key loses the '
+    + 'component. Nothing about the old path was taken away - the question is the only new thing',
+    no);
+  check(no.confirms.some(m => /no column with this name/.test(m)),
+    'R30l ...and round 2\'s dropped-component sentence is still said, naming the column and the '
+    + 'reason, which is what it was built for', no.confirms.filter(m => /no column/.test(m))
+      .map(m => m.slice(0, 200)));
+
+  /* ---- RENAME PLUS DELETE IN ONE SAVE. The ticket's negative case. */
+  await rn.page.evaluate(R30_MK + "('TPL_RN_DEL')");
+  const del = await rn.page.evaluate(R30_RENAME + '(' + JSON.stringify(['TPL_RN_DEL', 'Ref', 'Ref2', 'Other', true]) + ')');
+  note('rename + delete in one save', del);
+  check(del.extras.join(',') === 'Ref2' && del.pks.join(',') === 'Doc,Ref2',
+    'R30m AND THE TICKET\'s NEGATIVE CASE IS BETTER THAN IT ASKS FOR. It says the same rename in a '
+    + 'save that also DELETES a column should ask "nothing and drop as it does today", because its '
+    + 'proposed pairing is POSITIONAL and a positional pairing is wrong whenever the list also '
+    + 'changed length. The pairing here is _cid-first (T-S10-5), so the rename is recognised '
+    + 'exactly and carried over while the other column really is deleted', del);
+
+  /* ---- RENAME PLUS REORDER IN ONE SAVE, which is what makes the _cid arm of
+     the pairing load-bearing rather than decorative: the Eval arrows in the
+     Additional Columns editor make this one gesture, and a POSITIONAL pairing -
+     which is what the ticket proposes - pairs the renamed column with whatever
+     now sits in its old slot and carries the key over to the WRONG column. */
+  await rn.page.evaluate(R30_MK + "('TPL_RN_MOVE')");
+  const mv = await rn.page.evaluate(`(async function () {
+    const ID = 'TPL_RN_MOVE';
+    window.__confirms = [];
+    const realConfirm = window.confirm;
+    window.confirm = (m) => { window.__confirms.push(String(m)); return true; };
+    try {
+      RecoTemplate.edit(ID);
+      const ed = RecoTemplate._editing;
+      const i = ed.additionalColumns.findIndex(a => a && a.name === 'Ref');
+      ed.additionalColumns[i].name = 'Ref2';
+      /* ...and dragged below Other, so slot 0 now holds a DIFFERENT column. */
+      const moved = ed.additionalColumns.splice(i, 1)[0];
+      ed.additionalColumns.push(moved);
+      RecoTemplate.saveTemplate();
+      App.closeModal();
+    } finally { window.confirm = realConfirm; }
+    await new Promise(r => setTimeout(r, 300));
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    return { extras: (live.additionalColumns||[]).map(a => a.name),
+             pks: (live.primaryKeys||[]).slice(),
+             agg: (live.aggregateBy||[]).slice(),
+             asked: (window.__confirms||[]).filter(m => /Keep it there under the new name/.test(m))
+               .map(m => m.slice(0, 120)) };
+  })()`);
+  note('rename + reorder in one save', mv);
+  check(mv.extras.join(',') === 'Other,Ref2',
+    'R30o PREMISE: the column was renamed AND dragged, so slot 0 now holds a different column - one '
+    + 'press of the Eval arrow does this, which is why the ticket itself warns that a positional '
+    + 'pairing "carries the key over to the wrong column, which is worse than dropping it"', mv.extras);
+  check(mv.asked.length === 1 && /"Ref" is now called "Ref2"/.test(mv.asked[0]),
+    'R30p AND THE PAIRING STILL GETS IT RIGHT, because it pairs by _cid and not by slot. The question '
+    + 'names Ref -> Ref2 and not Ref -> Other', mv.asked);
+  check(mv.pks.join(',') === 'Doc,Ref2' && mv.agg.join(',') === 'Ref2',
+    'R30q ...and the key and the grouping carry over to Ref2 - not to Other, which is what a slot '
+    + 'pairing would have done', { pks: mv.pks, agg: mv.agg });
+
+  /* ---- THE GUARD: a name change that comes WITH a type change is not a
+     rename, and T-S10-5's guard says so. */
+  await rn.page.evaluate(R30_MK + "('TPL_RN_TYPE')");
+  const guards2 = await rn.page.evaluate(`(async function () {
+    const out = {};
+    const run = (ID, mutate) => {
+      window.__confirms = [];
+      const realConfirm = window.confirm;
+      window.confirm = (m) => { window.__confirms.push(String(m)); return true; };
+      try { RecoTemplate.edit(ID); mutate(RecoTemplate._editing); RecoTemplate.saveTemplate(); App.closeModal(); }
+      finally { window.confirm = realConfirm; }
+      const live = AppState.recoTemplates.find(x => x.id === ID);
+      return { pks: (live.primaryKeys||[]).slice(),
+               extras: (live.additionalColumns||[]).map(a => a.name),
+               asked: (window.__confirms||[]).filter(m => /Keep it there under the new name/.test(m)).length };
+    };
+    out.typed = run('TPL_RN_TYPE', ed => {
+      const c = (ed.additionalColumns||[]).find(a => a && a.name === 'Ref');
+      c.name = 'Ref2'; c.type = 'custom'; c.formula = '';
+    });
+    return out;
+  })()`);
+  note('the guards', { typeChange: guards2.typed });
+  check(guards2.typed.asked === 0 && guards2.typed.pks.join(',') === 'Doc',
+    'R30n CONTROL: a name change that comes WITH a type change is not a rename and is not asked '
+    + 'about - it is a different column, and T-S10-5\'s guard says so. The key drops as it always '
+    + 'did, and a custom column could not be in it anyway', guards2.typed);
+
+
+  check(rn.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R30r no page or console error across the whole section', rn.errors.slice(0, 5));
+  await rn.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

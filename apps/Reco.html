@@ -14417,6 +14417,94 @@ defaultTemplate() {
     return moved.length ? moved : null;
   },
 
+  /* ---- T-24R2-3 / T-S10-5. WHICH ADDED COLUMNS WERE RENAMED, between two
+     lists, as [{from, to}].
+
+     ONE DEFINITION OF THE PAIRING, AND ONE "BEFORE" LIST. saveTemplate asks
+     it twice - once before the prune, to carry a renamed column's references
+     over (T-24R2-3), and once lower down, to migrate its typed values
+     (T-S10-5) - and both ask it against the STORED template.
+     _openedWith WAS TRIED FOR THE FIRST ONE and taken back out. The argument
+     for it was "did THIS OPERATOR rename it", which _openedWith answers and
+     the stored template only approximates; but T-S10-7 re-reads the share at
+     the head of saveTemplate and merges field by field against _openedWith,
+     so by this line the two coincide in every state a single window can
+     produce - the mutation that swapped one for the other turned nothing red.
+     A distinction that cannot be measured is not worth two before-lists and
+     the paragraph explaining them.
+
+     _cid FIRST AND THE SLOT AS FALLBACK, which is T-S10-5's rule and the
+     reason the ticket's "pair by position ONLY when the two lists have the
+     same length and the same types in the same order" is not what was built:
+     a stable id pairs exactly however the column has been dragged, so a
+     rename made in the same save as an add, a remove or a reorder is still
+     recognised. The positional fallback is for columns written before the id.
+
+     The four guards are T-S10-5's and round 5's, unchanged:
+       the old name is still a column  -> not a rename, something took it
+       the new name was already in use -> a rename onto an occupied name,
+                                          which would merge two columns'
+                                          records (round 5 refuses it)
+       the type changed                -> a different column, not a rename
+       no pair at all                  -> removed, not renamed */
+  _renamedExtras(before, after) {
+    const bef = before || [], aft = after || [];
+    const nameNow = new Set(aft.filter(a => a && a.name).map(a => String(a.name)));
+    const pairOf = was => {
+      if (was && was._cid) {
+        const byCid = aft.find(a => a && a._cid && String(a._cid) === String(was._cid));
+        /* It HAD an id and nothing carries it: removed. Falling back to the
+           slot would pair it with whatever sits there now. */
+        return byCid || null;
+      }
+      return aft[bef.indexOf(was)];
+    };
+    const out = [];
+    bef.forEach(was => {
+      if (!was || !was.name) return;
+      const now = pairOf(was);
+      if (!now || !now.name || String(now.name) === String(was.name)) return;
+      if (nameNow.has(String(was.name))) return;
+      if (bef.some(a => a && String(a.name) === String(now.name))) return;
+      if (String(was.type || '') !== String(now.type || '')) return;
+      out.push({ from: String(was.name), to: String(now.name) });
+    });
+    return out;
+  },
+
+  /* T-24R2-3. THE FIVE STORED LISTS THAT NAME AN ADDED COLUMN, and what each
+     one did to a renamed name before this round - measured
+     (scratchpad/rn/probes/n1_repro.mjs), and they did NOT all behave alike,
+     which the ticket assumes when it says all four "want the same treatment":
+
+       primaryKeys            PRUNED by _pkEligible ("there is no column with
+                              this name"), so a keyed reconciliation silently
+                              became one keyed by the remaining components
+       displayOrder           PRUNED, so the column falls to the end of every
+                              CSV and workbook exported from this template
+       correctionContextCols  PRUNED, so the correction tab forgets it
+       aggregateBy            NOT PRUNED - a DANGLING name that matches no
+                              column, so a report groups by nothing
+       editableColumns        NOT PRUNED - dangling the same way
+
+     Two settings lost and two pointing at nothing, from one gesture. */
+  _KEY_NAME_LISTS: ['primaryKeys', 'displayOrder', 'correctionContextCols',
+                    'aggregateBy', 'editableColumns'],
+
+  /* Which of those lists name this column, for the question below. */
+  _listsNaming(t, name) {
+    const hits = [];
+    RecoTemplate._KEY_NAME_LISTS.forEach(k => {
+      const v = t && t[k];
+      if (Array.isArray(v) && v.some(x => String(x) === String(name))) hits.push(k);
+    });
+    return hits;
+  },
+
+  _LIST_SAY: { primaryKeys: 'the row key', displayOrder: 'the team column order',
+               correctionContextCols: 'the correction tab\'s context columns',
+               aggregateBy: 'a report\'s grouping', editableColumns: 'the editable columns' },
+
   /* One added column, matched between two lists. Paired by _cid where both
      sides carry one (T-S10-5's stable id), by NAME otherwise - which is what
      every stored record is filed under, so it is the right fallback for a
@@ -14860,6 +14948,47 @@ defaultTemplate() {
        the natural answer and every later upload minted '_auto_' uids. The
        reason is already computed on this line; it is now carried to the
        confirm below. */
+    /* ---- T-24R2-3. A RENAMED COLUMN KEEPS ITS PLACE, if the operator says so.
+       BEFORE THE PRUNE, because the prune is what drops it: _pkEligible
+       answers "there is no column with this name" for the old name, and by
+       then the intent is unrecoverable.
+       ASKED, NOT ASSUMED. It is the operator's key, and a rename is not by
+       itself a statement about it - PLAN2's S18 lists rename detection as
+       part of this one validation gate and the question is the gate. ONE
+       question per renamed column, naming every list that mentions it, so a
+       column in the key AND the column order AND the correction context is
+       one confirm and not three. On "no" the behaviour is exactly what it was:
+       the key drops with round 2's sentence, which the confirm below still
+       carries.
+       MEASURED (scratchpad/rn/probes/n1_repro.mjs) before this: renaming Ref
+       to Ref2 took primaryKeys from ['Doc','Ref'] to ['Doc'], took Ref out of
+       displayOrder and correctionContextCols, and left aggregateBy and
+       editableColumns naming a column that no longer exists. */
+    const storedForRename = RecoTemplate._isNew ? null
+      : AppState.recoTemplates.find(x => x.id === t.id);
+    const renamedKeyCols = RecoTemplate._renamedExtras(
+      storedForRename && storedForRename.additionalColumns, t.additionalColumns);
+    renamedKeyCols.forEach(rn => {
+      const lists = RecoTemplate._listsNaming(t, rn.from);
+      if (!lists.length) return;
+      const says = lists.map(k => RecoTemplate._LIST_SAY[k] || k);
+      const where = says.length === 1 ? says[0]
+        : says.slice(0, -1).join(', ') + ' and ' + says[says.length - 1];
+      const ask = '"' + rn.from + '" is now called "' + rn.to + '".\n\n'
+        + 'It is part of ' + where + '.\n\n'
+        + 'Keep it there under the new name?\n\n'
+        + 'Cancel leaves it out' + (lists.indexOf('primaryKeys') !== -1
+            ? ' \u2014 and a reconciliation whose key loses a component identifies its rows '
+              + 'differently from every row already stored'
+            : '') + '.';
+      if (!confirm(ask)) return;
+      lists.forEach(k => {
+        if (!Array.isArray(t[k])) return;
+        t[k] = t[k].map(x => (String(x) === String(rn.from) ? rn.to : x));
+      });
+      rn.carried = lists.slice();
+    });
+
     const pkDropped = [];
     t.primaryKeys = RecoTemplate._canonicalPrimaryKeys(t,
       (t.primaryKeys || []).filter(k => {
@@ -15009,28 +15138,16 @@ defaultTemplate() {
          wherever the column has been dragged to. THE SLOT RULE STAYS as the
          fallback, because every column written before the id has no _cid and
          a rename in place has to go on migrating its values (X3a-X3c). */
-      const pairOf = was => {
-        if (was && was._cid) {
-          const byCid = extraNow.find(a => a && a._cid && String(a._cid) === String(was._cid));
-          if (byCid) return byCid;
-          /* It HAD an id and nothing on the new list carries it: the column
-             really was removed. Falling back to the slot here would pair it
-             with whatever column happens to sit in that position now and
-             migrate one column's values onto another. */
-          return null;
-        }
-        return extraNow[(prevExtras || []).indexOf(was)];
-      };
-      const renamedCols = [];
-      (prevExtras || []).forEach((was, idx) => {
-        if (!was || !was.name) return;
-        const now = pairOf(was);
-        if (!now || !now.name || String(now.name) === String(was.name)) return;
-        if (nameNow.has(String(was.name))) return;       // the old name is still a column
-        if ((prevExtras || []).some(a => a && String(a.name) === String(now.name))) return;
-        if (String(was.type || '') !== String(now.type || '')) return;
-        renamedCols.push({ from: String(was.name), to: String(now.name) });
-      });
+      /* T-24R2-3 LIFTED THIS INTO RecoTemplate._renamedExtras so the key
+         carry-over 160 lines above could ask the same question. The rule is
+         unchanged - _cid first, the editor's slot as the fallback, and the
+         four guards - and the long note here is now on the helper.
+         THE "BEFORE" LIST IS THE STORED TEMPLATE, not _openedWith, and that
+         difference is deliberate: this question is "whose typed values move",
+         which is about the records on the share. The carry-over above asks
+         "did THIS OPERATOR rename it", which only the editor's own starting
+         point can answer. */
+      const renamedCols = RecoTemplate._renamedExtras(prevExtras, extraNow);
       /* ---- ROUND 5. A RENAME THAT TAKES A NAME ANOTHER ADDED COLUMN IS
          GIVING UP IN THE SAME SAVE IS REFUSED, and it is refused for the same
          reason as the three name checks above: every typed value is filed

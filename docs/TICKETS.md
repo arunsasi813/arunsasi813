@@ -1246,6 +1246,83 @@ On no, keep the drop and the reason the confirm already carries.
 `['Doc','Look']` with the dropped-component sentence. Plus a negative: the same rename in a save
 that also deletes a column asks nothing and drops as it does today.
 
+**CLOSED — and three things in the paragraphs above are wrong, which is the more useful half of
+the round.**
+
+**The harm, measured** (`scratchpad/rn/probes/n1_repro.mjs`), on a template that names the added
+column `Ref` in all five lists, renaming it to `Ref2`:
+
+```
+primaryKeys            ['Doc','Ref']          -> ['Doc']               PRUNED
+displayOrder           [Doc,Ref,Other,Amount] -> [Doc,Other,Amount]    PRUNED
+correctionContextCols  ['Ref']                -> []                    PRUNED
+aggregateBy            ['Ref']                -> ['Ref']               DANGLING
+editableColumns        ['Ref']                -> ['Ref']               DANGLING
+```
+
+**Correction 1 — the four other lists do NOT "want the same treatment", because they did not
+behave alike.** Two prune the name (so the setting is silently lost — the column falls to the end
+of every export, and the correction tab forgets it) and two are **not pruned at all**, so a report
+grouping and an editability rule go on naming a column that no longer exists. Two different
+defects from one gesture. One carry-over fixes both shapes (`R30f`, `R30g`).
+
+**Correction 2 — the pairing is not the one this ticket proposes, and does not need to be.** The
+Fix says to pair old and new `additionalColumns` "by position ONLY when the two lists have the same
+length and the same types in the same order", and the *Why it is only a ticket* paragraph warns —
+correctly — that a positional pairing "carries the key over to the wrong column, which is worse
+than dropping it". **T-S10-5 already solved that**: every added column carries a stable `_cid`, and
+`saveTemplate` already had a `_cid`-first pairing 160 lines below the prune, for migrating typed
+values. This round **lifted it** into `RecoTemplate._renamedExtras` so both questions ask it once.
+So a rename made in the same save as a **reorder** (`R30o`–`R30q`) or a **delete** (`R30m`) is
+recognised exactly — the two cases the ticket's own negative asks to be given up on. Its negative
+test ("the same rename in a save that also deletes a column asks nothing and drops as it does
+today") is therefore a test for a weaker fix than the one the codebase can support.
+
+**Correction 3 — the Test's signature claim is wrong.** It asks for `tplSignature` **unmoved** on
+yes. `XlSchema.tplSignature` hashes the column **names**, so a rename moves it whatever happens to
+the key — and it should, because a linked workbook's header row really has changed (`R30i`).
+`Reco.keyRuleSig` moves too, because the key rule now names `Ref2` and the definition hashed under
+it is a different one; that is precisely what T-S10-19's refusal exists to notice (`R30j`). What
+the carry-over protects is the **key**, not either hash.
+
+**What was built.** `RecoTemplate._renamedExtras(before, after)` — `_cid` first, the editor's slot
+as the fallback for columns written before the id, and T-S10-5's four guards unchanged (the old
+name is still a column; the new name was already in use; the type changed; no pair at all). Then,
+**before the prune**, one question per renamed column naming every list that mentions it:
+
+> `"Ref" is now called "Ref2".`
+> `It is part of the row key, the team column order and the correction tab's context columns.`
+> `Keep it there under the new name?`
+> `Cancel leaves it out — and a reconciliation whose key loses a component identifies its rows differently from every row already stored.`
+
+**One question per column, not per list** (`R30c`), **asked and not assumed** — it is the
+operator's key, and a rename is not by itself a statement about it. `RecoTemplate._KEY_NAME_LISTS`
+and `_LIST_SAY` are the one table of which lists name an added column and what to call each in that
+sentence.
+
+**On no, nothing changed** (`R30k`, `R30l`): the rename lands, the key loses the component, and
+round 2's dropped-component sentence is still said. The question is the only new thing.
+
+**ONE "BEFORE" LIST, AFTER SHIPPING TWO AND TAKING ONE BACK OUT.** The first version asked the
+carry-over against `RecoTemplate._openedWith` ("did *this operator* rename it") and the value
+migration against the stored template ("whose values move"), with a paragraph justifying the
+difference. **The mutation that swapped one for the other turned nothing red:** T-S10-7 re-reads
+the share at the head of `saveTemplate` and merges field by field against `_openedWith`, so by that
+line the two coincide in every state a single window can produce. A distinction that cannot be
+measured is not worth two before-lists and the paragraph explaining them, so both read the stored
+template and the paragraph now records why.
+
+**Gated by `[99] R30` in `run_store_e2e`** (18 checks). **Mutation grid of 9** in
+`scratchpad/rn/mut/run.py` against the round's own probe (`scratchpad/rn/probes/n2_fix.mjs`).
+
+**THE `_cid` MUTATION ONLY MEASURED ANYTHING ONCE THE REORDER ARM EXISTED.** With a rename that
+does not move the column, a positional pairing gives the same answer as a `_cid` one, so
+"the pairing is positional only" came back `red=NONE` on the first pass and the `_cid` arm looked
+decorative. `R30o`–`R30q` are what make it load-bearing: one press of the Eval arrow renames and
+moves in one save, and slot 0 then holds a different column.
+
+---
+
 
 ## T-24R2-4  Custom masters are identified by their position in the list, so they cannot be key sources
 
