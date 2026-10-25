@@ -4749,6 +4749,93 @@ const Store = {
    Corrections (per template), and Custom Masters.
    ================================================================ */
 const Masters = {
+  /* ---- T-24R2-4. A CUSTOM MASTER'S OWN ID, minted once and kept.
+
+     `custom:<idx>` was a POSITION. A master_lookup stored it as
+     masterCfg.source, so deleting a DIFFERENT custom master re-pointed every
+     later lookup at another table - with additionalColumns byte-identical, so
+     neither the definition-change confirm nor either signature could fire.
+     Measured (scratchpad/cm/probes/c1_repro.mjs): three masters answering
+     FROM-VENDORS / FROM-CENTRES / FROM-REGIONS for one match value, a lookup
+     on custom:1 reading FROM-CENTRES, Home.deleteCustomMaster(0) accepted in
+     silence, and the same cell then reading FROM-REGIONS.
+
+     WHERE THE UID COMES FROM. AppState.load mints any that are missing AFTER
+     its _snap loop, so the migration is dirty against the snapshot and the
+     next legitimate AppState.save persists it - the same shape
+     ensureSessionShape's `_autoLoadAttempted` deletion uses. customMasters is
+     in PERSIST_KEYS, so a template saved with a custom:<uid> source and the
+     uid itself land in the same save and cannot be durable apart.
+
+     THE `|| idx` IS NOT A SECOND SCHEME. It is what this function answers if
+     something assigns AppState.customMasters without going through load or
+     ensureCustomUids; Masters._customAt resolves either form, so a legacy
+     stored config keeps working exactly as it did. */
+  ensureCustomUids() {
+    const list = AppState.customMasters || [];
+    const seen = new Set();
+    let minted = 0;
+    list.forEach(cm => {
+      if (!cm) return;
+      /* A DUPLICATE UID IS RE-MINTED TOO, not just a missing one: merging two
+         backups can bring the same uid in twice, and two masters with one id
+         is the bug this ticket is about wearing a different hat. */
+      if (!cm.uid || seen.has(String(cm.uid))) { cm.uid = U.uid(); minted++; }
+      seen.add(String(cm.uid));
+    });
+    return minted;
+  },
+
+  /* The custom master a `custom:...` token names, or null. A uid is matched by
+     SEARCH and a bare index by POSITION, which is what keeps a config written
+     by any earlier build reading the table it has always read. */
+  _customAt(token) {
+    const t = String(token == null ? '' : token);
+    if (t.indexOf('custom:') !== 0) return null;
+    const key = t.slice(7);
+    const list = AppState.customMasters || [];
+    if (/^\d+$/.test(key)) return list[parseInt(key, 10)] || null;
+    return list.find(cm => cm && String(cm.uid) === key) || null;
+  },
+
+  /* Is this token the stable form? T-24R2-4's key-source arm turns on it: a
+     uid cannot be moved by a deletion, a bare index can. */
+  _customIsStable(token) {
+    const t = String(token == null ? '' : token);
+    return t.indexOf('custom:') === 0 && !/^\d+$/.test(t.slice(7)) && t.length > 7;
+  },
+
+  /* ---- T-24R2-4. EVERY STORED `custom:<digits>` SOURCE, REWRITTEN TO THE
+     UID OF THE MASTER IT NAMES TODAY. Returns how many it changed.
+
+     CALLED ONLY FROM Home.deleteCustomMaster, deliberately. It is a write to
+     recoTemplates - the shared file - so it belongs to a gesture the operator
+     chose, not to a render or a load: a background rewrite of a shared
+     template file is the shape T-24R2-1 is about. The delete is also the only
+     moment it MATTERS, because a position only moves when the list does, and
+     it is the last moment the index is still right.
+
+     A token naming nothing is left alone: an index past the end of the list
+     already reads no rows, and rewriting it to a uid would invent a table it
+     never had. */
+  _rewriteLegacyCustomSources() {
+    let n = 0;
+    (AppState.recoTemplates || []).forEach(t => {
+      (t.additionalColumns || []).forEach(ac => {
+        if (!ac || ac.type !== 'master_lookup') return;
+        const cfg = ac.masterCfg;
+        if (!cfg) return;
+        const src = String(cfg.source || '');
+        if (src.indexOf('custom:') !== 0 || !/^\d+$/.test(src.slice(7))) return;
+        const cm = Masters._customAt(src);
+        if (!cm || !cm.uid) return;
+        cfg.source = 'custom:' + cm.uid;
+        n++;
+      });
+    });
+    return n;
+  },
+
   /* Returns the catalog of masters available in this app instance. */
   catalog(tplId) {
     const out = [
@@ -4757,7 +4844,7 @@ const Masters = {
       { id: 'corrections',label: '✏️ Correction Master (this template)',     columns: ['PrimaryKey','Column','OldValue','NewValue'] }
     ];
     (AppState.customMasters || []).forEach((cm, idx) => {
-      out.push({ id: 'custom:' + idx, label: '📋 ' + cm.name, columns: cm.columns || [] });
+      out.push({ id: 'custom:' + (cm.uid || idx), label: '📋 ' + cm.name, columns: cm.columns || [] });
     });
     return out;
   },
@@ -4785,8 +4872,8 @@ const Masters = {
       return out;
     }
     if (typeof sourceId === 'string' && sourceId.indexOf('custom:') === 0) {
-      const idx = parseInt(sourceId.split(':')[1], 10);
-      return (AppState.customMasters[idx] || {}).rows || [];
+      // T-24R2-4: a uid by search, a legacy bare index by position.
+      return (Masters._customAt(sourceId) || {}).rows || [];
     }
     return [];
   },
@@ -10200,6 +10287,14 @@ const AppState = {
       catch (e) { AppState._snap[k] = null; }
     });
 
+    /* T-24R2-4. CUSTOM MASTER IDS, AFTER THE SNAPSHOT ON PURPOSE. Minting
+       before it would make the snapshot match the minted bytes and the uids
+       would never reach the file; after it they are dirty, so the next
+       legitimate AppState.save writes them. customMasters is in PERSIST_KEYS,
+       so a template saved with a custom:<uid> source and the uid itself land
+       in the same save. See Masters.ensureCustomUids. */
+    try { Masters.ensureCustomUids(); } catch (e) { console.error('customMaster uids', e); }
+
     if (!AppState.aegTemplates.length) {
       AppState.aegTemplates = [AEG.makeDefaultTemplate('Default DR/CR')];
     }
@@ -11980,7 +12075,11 @@ const App = {
           });
         }
         if (d.manualOffsetMaster) AppState.manualOffsetMaster = d.manualOffsetMaster;
-        if (d.customMasters) AppState.customMasters = d.customMasters;
+        if (d.customMasters) {
+          AppState.customMasters = d.customMasters;
+          // T-24R2-4: a backup may carry none, or two with one uid.
+          try { Masters.ensureCustomUids(); } catch (e) {}
+        }
         if (d.correctionMaster) AppState.correctionMaster = d.correctionMaster;
         /* S10. The whole-suite restore replaces the map and then writes it
            through S13, because this key is not in PERSIST_KEYS and the
@@ -12173,9 +12272,13 @@ const Home = {
     AppState.customMasters.push({
       name: name.trim(),
       icon: '📋',
+      // T-24R2-4: its own id from the start, so a lookup stored against it is
+      // never a position.
+      uid: U.uid(),
       columns: cols.split(',').map(s => s.trim()).filter(Boolean),
       rows: []
     });
+    Masters.ensureCustomUids();
     AppState.save();
     App.navigate('home');
   },
@@ -12204,10 +12307,77 @@ const Home = {
     AppState.save();
     Home.editCustomMaster(idx);
   },
+  /* ---- T-24R2-4. THE DANGEROUS MOMENT, and the one place that can see every
+     side of it.
+
+     A splice moves every later position, so this is where a `custom:<idx>`
+     config silently starts reading a different table. Three things happen
+     before anything is removed, in this order:
+
+       1  UIDS ARE MINTED. Identity has to exist before it can be written
+          into a config.
+       2  EVERY LEGACY `custom:<digits>` SOURCE IS REWRITTEN to that master's
+          uid, resolved against the list AS IT STILL IS. This is the last
+          moment the index is correct, and the operator is already performing
+          a deliberate admin action, so no surprise shared write is added to
+          anybody's render path. After this, no stored config anywhere names a
+          position, and the splice cannot move any of them.
+       3  WHAT READS THE MASTER BEING DELETED IS NAMED. A lookup in a
+          template's KEY is a REFUSAL - the key would stop computing and
+          every row already minted under it is refused at every door
+          (T-S10-19's machinery). Any other lookup is a warning listing the
+          templates and columns, because the column will read blank and the
+          operator should know which screens change.
+
+     The confirm is asked after the scan, not before, so its text can name
+     what is about to break rather than asking about "this master". */
   deleteCustomMaster(idx) {
-    if (!confirm('Delete this master?')) return;
+    const list = AppState.customMasters || [];
+    const victim = list[idx];
+    if (!victim) return;
+    Masters.ensureCustomUids();
+    const rewrites = Masters._rewriteLegacyCustomSources();
+    const vid = 'custom:' + victim.uid;
+    const keyUsers = [], otherUsers = [];
+    (AppState.recoTemplates || []).forEach(t => {
+      let dep = null;
+      try { dep = Reco._keyDepNames(t); } catch (e) { dep = null; }
+      (t.additionalColumns || []).forEach(ac => {
+        if (!ac || ac.type !== 'master_lookup') return;
+        if (String((ac.masterCfg || {}).source || '') !== vid) return;
+        const inKey = !!(dep && dep.has(ac.name))
+                      || (t.primaryKeys || []).indexOf(ac.name) !== -1;
+        (inKey ? keyUsers : otherUsers).push(t.name + ' — "' + ac.name + '"');
+      });
+    });
+    if (keyUsers.length) {
+      /* The rewrites above are kept: they are a correction in their own right
+         and leave every config naming a uid, which is what makes this refusal
+         possible a second time. */
+      if (rewrites) AppState.save();
+      App.openModal('"' + victim.name + '" is part of how a reconciliation identifies its rows',
+        '<p>It is not deleted. These reconciliations build their <b>row key</b> from a lookup into '
+        + 'it:</p><ul><li>' + keyUsers.map(U.esc).join('</li><li>') + '</li></ul>'
+        + '<p>Deleting it would stop those keys computing, and every row already filed under one '
+        + 'would be refused at every door until the key definition is changed. Change the key in '
+        + 'the template editor first, then delete this master.</p>',
+        '<button class="primary" onclick="App.closeModal()">Close</button>');
+      U.toast('"' + victim.name + '" was NOT deleted — a reconciliation\'s row key reads it', 'error');
+      return;
+    }
+    const warn = otherUsers.length
+      ? '\n\nThese columns read it and will go blank:\n  ' + otherUsers.join('\n  ')
+      : '';
+    if (!confirm('Delete the master "' + victim.name + '"?' + warn)) {
+      if (rewrites) AppState.save();     // the rewrites stand on their own
+      return;
+    }
     AppState.customMasters.splice(idx, 1);
     AppState.save();
+    if (otherUsers.length) {
+      U.toast('"' + victim.name + '" was deleted. ' + otherUsers.length
+        + ' lookup column(s) read it and now read blank: ' + otherUsers.join(', '), 'error');
+    }
     App.navigate('home');
   }
 };
@@ -13389,11 +13559,27 @@ defaultTemplate() {
       if (src === 'corrections')
         return { ok: false, reason: 'the Correction Master is itself keyed BY the row key, so a '
                + 'key built from it would define itself' };
-      if (src.indexOf('custom:') === 0)
-        return { ok: false, reason: 'a custom master is identified by its position in the list, so '
-               + 'deleting a different one would silently re-point this lookup at another table' };
-      if (src !== 'accounts')
-        return { ok: false, reason: 'only a lookup into the Accounts Master can be part of the key' };
+      /* T-24R2-4. A CUSTOM MASTER IS NOW A KEY SOURCE, but only in its stable
+         form. The refusal below was right about the POSITION and wrong about
+         the master: once a list has its own uid, a deletion elsewhere cannot
+         move it, and nothing else separates it from the Accounts Master -
+         both are shared tables anyone may edit, both are frozen into _pk at
+         mint by decision G, both mark a recalculated cell with keyDrift, and
+         Masters.indexFor builds an index for any source, so there is no
+         per-row scan of the kind the legacy `type:'master'` arm refuses.
+         A BARE INDEX IS STILL REFUSED, with the same sentence: a stored
+         config written by an earlier build names a position until
+         Home.deleteCustomMaster rewrites it, and a key must not be built on
+         one in the meantime. */
+      if (src.indexOf('custom:') === 0 && !Masters._customIsStable(src))
+        return { ok: false, reason: 'this custom master is identified by its position in the list, '
+               + 'so deleting a different one would silently re-point this lookup at another '
+               + 'table \u2014 open the column and choose the master again to give it a stable id' };
+      if (src.indexOf('custom:') === 0 && !Masters._customAt(src))
+        return { ok: false, reason: 'the custom master this lookup reads no longer exists' };
+      if (src !== 'accounts' && src.indexOf('custom:') !== 0)
+        return { ok: false, reason: 'only a lookup into the Accounts Master or a custom master can '
+               + 'be part of the key' };
       if (!Masters._lookupCfg(t, ac))
         return { ok: false, reason: 'this lookup is not finished — choose the column to match '
                + 'on, the master column to match it against and the column to bring back' };

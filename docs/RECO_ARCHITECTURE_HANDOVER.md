@@ -6108,3 +6108,137 @@ asserts the arm rendered that way; `R27v` is what it buys.
 that measures nothing is usually the ARM's fault, not the grid's. Two of the eleven came back
 `red=NONE` on the first pass here — one legitimately (27.4) and one because the fixture rendered
 the pane that hid the defect.
+
+## 28. T-24R2-4 — a custom master's own id
+
+### 28.1 The harm
+
+`Masters.catalog` pushed `{ id: 'custom:' + idx }`. A `master_lookup` stored that as
+`masterCfg.source`, and `Home.deleteCustomMaster` did `AppState.customMasters.splice(idx, 1)`.
+Nothing re-pointed anything.
+
+Measured (`scratchpad/cm/probes/c1_repro.mjs`):
+
+```
+three masters:   Vendors / Centres / Regions, each answering a different
+                 Val for Code=K1
+the lookup:      masterCfg.source = 'custom:1'   ->  FROM-CENTRES
+delete master 0: allowed, no toast, no confirm beyond "Delete this master?"
+the same cell:   FROM-REGIONS
+additionalColumns:  byte-identical
+XlSchema.tplSignature:  unmoved
+Reco.keyRuleSig:        unmoved
+```
+
+The ticket named only `tplSignature`. **The second signature matters more**, because
+`Reco.keyRuleSig` is what is stamped on every row as `_pksig` and what the dead-key refusals read:
+a key rule that silently reads a different table keeps the same signature, so nothing is refused
+and nothing is said.
+
+### 28.2 The four parts
+
+| part | where |
+| --- | --- |
+| mint `cm.uid`, re-minting duplicates | `Masters.ensureCustomUids` |
+| emit and resolve the uid | `Masters.catalog`, `Masters._customAt`, `Masters._customIsStable` |
+| repair at the dangerous moment | `Home.deleteCustomMaster`, `Masters._rewriteLegacyCustomSources` |
+| allow it in a row key | `RecoTemplate._pkEligible1` |
+
+### 28.3 Why the mint is AFTER the `_snap` loop
+
+`AppState.load` snapshots every `PERSIST_KEYS` value so the first save writes only real changes.
+Minting uids **before** that loop would make the snapshot match the minted bytes, and the uids
+would never reach the file — a different uid every session, and a template naming
+`custom:<uid>` would resolve nothing. Minting **after** leaves them dirty, so the next legitimate
+`AppState.save` writes them. It is the same shape `ensureSessionShape`'s `_autoLoadAttempted`
+deletion uses.
+
+`customMasters` is in `PERSIST_KEYS`, which is what makes this safe: a template saved with a
+`custom:<uid>` source and the uid itself go out in **one** save and cannot be durable apart.
+
+### 28.4 The legacy resolver is kept for good
+
+```js
+_customAt(token) {
+  const key = String(token).slice(7);
+  if (/^\d+$/.test(key)) return list[parseInt(key, 10)] || null;   // legacy, by position
+  return list.find(cm => cm && String(cm.uid) === key) || null;    // stable, by search
+}
+```
+
+A config written by any earlier build still reads the table it always read (`R28c`), and that
+back-compatibility is the whole risk of this change, so it is asserted rather than assumed.
+
+The rewrite to a uid happens **only in `Home.deleteCustomMaster`**, for two reasons:
+
+- it writes `recoTemplates`, the shared file, so it belongs to a gesture the operator chose — a
+  background rewrite of a shared template file is the shape T-24R2-1 is about;
+- the delete is the only moment it matters, because a position only moves when the list does, and
+  it is the **last** moment the index is still correct.
+
+### 28.5 A custom master as a key source — the decision the ticket left open
+
+Nothing separated it from the Accounts Master except the identity:
+
+| | Accounts Master | custom master |
+| --- | --- | --- |
+| shared table anyone may edit | yes | yes |
+| frozen into `_pk` at mint (decision G) | yes | yes |
+| a recalculated cell marked by `keyDrift` | yes | yes |
+| indexed by `Masters.indexFor` | yes | yes — it is generic over `cfg.source` |
+
+So the refusal was about the **position**, not the master, and it now reads that way: the stable
+form is allowed, a bare index is refused with the same sentence plus what to do about it, and a uid
+naming nothing is refused for what it is. `docNumbers` and `corrections` stay refused for reasons
+that do not apply to a custom list — one grows as the team posts, the other is keyed **by** the row
+key.
+
+### 28.6 The grid caught two faults in its own mutations
+
+| mutation | turns red |
+| --- | --- |
+| the catalog emits positions again | `R28b` |
+| `ensureCustomUids` mints nothing | twelve checks |
+| `_customAt` drops the legacy index arm | `R28c` and nine more |
+| the delete does not rewrite the sources | `R28e`, `R28f` and seven more |
+| the rewrite is MOVED after the splice | the same nine |
+| the key-user scan is skipped | `R28m`–`R28p` |
+| nothing counts as being in the key | `R28m`–`R28p` |
+| the warning is dropped from the CONFIRM | `R28i` |
+| ...and from the TOAST | `R28j` |
+| `_customIsStable` calls an index stable | `R28r` |
+| `_pkEligible` refuses every custom again | `R28q`, `R28s` |
+| a duplicate uid is not re-minted | `R28u` |
+
+Two were wrong on the first pass, and `red=NONE` is what said so — the grid auditing the test
+rather than the code:
+
+- *"the rewrite happens after the splice"* **added** a second call instead of moving the first, so
+  the original still did the right thing. The runner now takes a **list** of edits for one
+  mutation, which is what moving a call needs.
+- the warning mutation was named for the confirm **and** the toast while only emptying the confirm.
+  The toast has a mutation of its own now.
+
+### 28.7 A probe fault that cost four runs, and will happen again
+
+A probe that throws before its own `bridge.proc.kill()` leaves the bridge **listening**. The next
+run then dies with
+
+```
+OSError: [Errno 98] Address already in use
+```
+
+which is a port complaint standing in front of the real error. Moving to a "free" port does not
+help, because the next failure leaves a bridge there too. Two genuine faults hid behind it:
+
+- **`AppState.recoSessions` is the per-pane VIEW table** (MODULE 4b) and is repointed at whichever
+  template the owning pane shows. A fixture built in one `page.evaluate` and read in a later one
+  can find it `undefined`; the read must use `AppState.recoSessionsOwned`.
+- **`page.evaluate(STRING, arg)` ignores `arg`.** A string first argument is an *expression*, not a
+  function to call with the second, so `evaluate(SETUP, [id, src, inKey])` evaluated to the
+  function object and never ran it. The house idiom in `run_store_e2e` is concatenation —
+  `SETUP + '(' + JSON.stringify(args) + ')'` — and that is why.
+
+`scratchpad/cm/probes/lib.mjs` now frees the port before spawning, by finding the listening socket
+in `/proc/net/tcp` and the process holding its inode. **Any probe copied from another round's
+directory should take that change with it.**

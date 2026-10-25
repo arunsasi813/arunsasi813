@@ -1201,6 +1201,89 @@ assert the key still resolves to the same table (the stored config now names a u
 minted `_pk` is unchanged across the delete, and that deleting the master the key DOES read is
 refused by name.
 
+**CLOSED — all four parts, and the decision the ticket left open is taken: a custom master IS a
+legitimate key source once its id is stable.**
+
+**The harm, measured** (`scratchpad/cm/probes/c1_repro.mjs`): three custom masters answering
+`FROM-VENDORS` / `FROM-CENTRES` / `FROM-REGIONS` for one match value, a template whose
+`master_lookup` names `custom:1` reading `FROM-CENTRES`, `Home.deleteCustomMaster(0)` accepted in
+**total silence**, and the same cell of the same row then reading `FROM-REGIONS`.
+`additionalColumns` byte-identical throughout, and **both** signatures unmoved —
+`XlSchema.tplSignature`, which a linked workbook compares against, and `Reco.keyRuleSig`, stamped
+on every row as `_pksig`. The ticket named only `tplSignature`; the second one matters more,
+because it is what the dead-key refusals read.
+
+**What was built**
+
+1. **`Masters.ensureCustomUids`** mints `cm.uid` on any master without one, **and re-mints a
+   duplicate**: merging two backups can bring one uid in twice, which is this ticket's bug wearing
+   a different hat. The first holder keeps it, so a config already naming it still resolves
+   (`R28u`). `AppState.load` calls it **after** its `_snap` loop, deliberately — minting before
+   would make the snapshot match the minted bytes and the uids would never reach the file. Since
+   `customMasters` is in `PERSIST_KEYS`, a template saved with a `custom:<uid>` source and the uid
+   itself land in **one** save and cannot be durable apart.
+2. **`Masters.catalog` emits `custom:<uid>`** (`R28b`), and **`Masters._customAt` resolves either
+   form** — a uid by search, a bare index by position — so a config written by any earlier build
+   still reads the table it always read (`R28c`). That back-compatibility is the whole risk of this
+   change, and it is asserted rather than assumed. The `|| idx` in `catalog` is not a second
+   scheme: it is what the function answers if something assigns `AppState.customMasters` without
+   going through load.
+3. **`Home.deleteCustomMaster` is the dangerous moment**, and does three things before anything is
+   removed: mints uids; **rewrites every legacy `custom:<digits>` source to that master's uid
+   against the list as it still is** (`R28f` — the last moment the index is correct); then names
+   what reads the master going away. A lookup in a template's **key** is a **refusal** with a
+   modal naming the reconciliation, the column and the consequence (`R28m`–`R28p`); any other
+   lookup is a warning in the confirm **before** the delete and a toast after it (`R28i`, `R28j`),
+   because a column going blank is the operator's business and not something to refuse.
+4. **`_pkEligible` allows a custom-master lookup in the row key, in its stable form only**
+   (`R28q`). A bare index is still refused with the same sentence plus what to do about it
+   (`R28r`), and a uid naming nothing is refused for what it is (`R28s`).
+
+**Why a custom master is a legitimate key source — the decision this ticket left open.** Nothing
+separated it from the Accounts Master except the identity. Both are shared tables anyone may edit;
+both are frozen into `_pk` at mint by decision G; both mark a recalculated cell with `keyDrift`;
+and `Masters.indexFor` builds an index for **any** source, so there is no per-row scan of the kind
+the legacy `type:'master'` arm refuses by name. The two sources that stay refused are refused for
+reasons that genuinely do not apply here: `docNumbers` grows as the team posts, and `corrections`
+is keyed **by** the row key. `R28t` is the control over all four.
+
+**Why the rewrite lives only in the delete, and not in a load or a render.** It writes
+`recoTemplates`, the shared file, so it belongs to a gesture the operator chose — a background
+rewrite of a shared template file is the shape T-24R2-1 is about. The delete is also the only
+moment it matters, because a position only moves when the list does. The `custom:<digits>` resolver
+is therefore kept for good, not as a one-run migration.
+
+**The index-based `Home.editCustomMaster(idx)` / `deleteCustomMaster(idx)` call sites are left as
+they are.** Those indexes are minted and consumed inside one render and never stored; the ticket is
+about an index that reaches a stored template config.
+
+**The repro probe is kept as the before/after.** Run against this build, `c1_repro.mjs` goes red on
+exactly three of its eight checks — the wrong value, the unmoved definition, and the refusal of the
+feature. Its `C1a` still passes, for a different reason worth recording: that fixture assigns
+`customMasters` directly without the migration, so `catalog` falls back to `|| idx`. That is the
+documented fallback, not the old scheme.
+
+**Gated by `[97] R28` in `run_store_e2e`** (22 checks). **Mutation grid of 12** in
+`scratchpad/cm/mut/run.py` against the round's own probe (`scratchpad/cm/probes/c2_fix.mjs`).
+
+**TWO OF THOSE TWELVE MUTATIONS WERE WRONG ON THE FIRST PASS AND THE GRID SAID SO**, which is the
+grid earning its keep against the test rather than the code: *"the rewrite happens after the
+splice"* **added** a second call instead of moving the first, so the original still did the right
+thing and nothing went red; and the warning mutation was named for the confirm **and** the toast
+while only emptying the confirm. The runner now takes a **list** of edits for one mutation, which
+is what moving a call needs, and the toast has a mutation of its own.
+
+**AND A PROBE FAULT THAT COST FOUR RUNS, recorded because it will happen again.** A probe that
+throws before its own `bridge.proc.kill()` leaves the bridge listening, and the next run then dies
+with `OSError: Address already in use` — which masks the real error behind a port complaint. Two
+genuine faults were hidden that way: `AppState.recoSessions` is the per-pane **view** table and can
+be repointed between two `page.evaluate` calls (the read must use `AppState.recoSessionsOwned`),
+and **`page.evaluate(STRING, arg)` ignores `arg`** — a string first argument is an expression, not
+a function to call with the second, so the whole fixture never ran. `scratchpad/cm/probes/lib.mjs`
+now frees the port before spawning.
+
+---
+
 
 ## T-24R2-5  A key component whose value contains `'||'` cannot be split back out of `_pk`
 

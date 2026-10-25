@@ -10728,6 +10728,7 @@ const PORT_R24  = 21506;   // R24 T-26-10: the report summary cards' own silence
 const PORT_R25  = 21510;   // R25 T-S10-13: the refused document number says so in a modal
 const PORT_R26  = 21514;   // R26 T-S10-14: the re-minted reversal mirror says so
 const PORT_R27  = 21518;   // R27 T-C27-7/T-C27-9: two added columns with one name
+const PORT_R28  = 21522;   // R28 T-24R2-4: a custom master's own id
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -15896,6 +15897,334 @@ section(96, 'R27 T-C27-7 + T-C27-9 — two added columns with one name, and ever
   check(dp.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R27s no page or console error across the whole section', dp.errors.slice(0, 5));
   await dp.ctx.close();
+}
+
+/* ============================================================ [97] ====
+   R28. T-24R2-4. A custom master was identified by its POSITION in the list.
+
+   Masters.catalog pushed `{ id: 'custom:' + idx }`, a master_lookup stored
+   that as masterCfg.source, and Home.deleteCustomMaster did
+   `AppState.customMasters.splice(idx, 1)`. Nothing re-pointed anything, so
+   deleting a DIFFERENT custom master silently moved every later lookup onto
+   another table - with additionalColumns byte-identical, so neither the
+   definition-change confirm nor EITHER signature (XlSchema.tplSignature, the
+   workbook manifest's, and Reco.keyRuleSig, stamped on every row as _pksig)
+   could fire. Measured (scratchpad/cm/probes/c1_repro.mjs): three masters
+   answering FROM-VENDORS / FROM-CENTRES / FROM-REGIONS for one match value, a
+   lookup on custom:1 reading FROM-CENTRES, deleteCustomMaster(0) accepted in
+   total silence, and the same cell then reading FROM-REGIONS.
+
+   THE SECOND HALF was a feature the user asked for and could not have:
+   RecoTemplate._pkEligible refused a custom-master lookup as a key component
+   outright, with exactly this instability as the stated reason (decision B).
+
+   WHAT WAS BUILT, in four parts:
+
+   1  Masters.ensureCustomUids mints `cm.uid` on any master without one - and
+      re-mints a DUPLICATE too (R28u), because merging two backups can bring
+      one uid in twice, which is this ticket's bug wearing a different hat.
+      The FIRST holder keeps it, so a config already naming it still resolves.
+      AppState.load calls it AFTER its _snap loop on purpose: minting before
+      would make the snapshot match the minted bytes and the uids would never
+      reach the file. customMasters is in PERSIST_KEYS, so a template saved
+      with a custom:<uid> source and the uid itself land in one save and
+      cannot be durable apart.
+   2  Masters.catalog emits `custom:<uid>` (R28b). Masters._customAt resolves
+      EITHER form - a uid by search, a bare index by position - so a config
+      written by any earlier build still reads the table it always read
+      (R28c). That back-compatibility is the whole risk of this change and it
+      is asserted, not assumed.
+   3  Home.deleteCustomMaster is the dangerous moment and does three things
+      before anything is removed: mints uids, rewrites every legacy
+      `custom:<digits>` source to that master's uid against the list AS IT
+      STILL IS (R28f - the last moment the index is correct), and then names
+      what reads the master going away. A lookup in a template's KEY is a
+      REFUSAL (R28m-R28p); any other is a warning in the confirm BEFORE the
+      delete and a toast after it (R28i, R28j).
+   4  _pkEligible allows a custom-master lookup in the row key, but only in
+      its STABLE form (R28q). A bare index is still refused with the same
+      sentence plus what to do about it (R28r), and a uid naming nothing is
+      refused for what it is (R28s).
+
+   WHY A CUSTOM MASTER IS A LEGITIMATE KEY SOURCE once its id is stable, which
+   is the decision the ticket left open: nothing else separated it from the
+   Accounts Master. Both are shared tables anyone may edit, both are frozen
+   into _pk at mint by decision G, both mark a recalculated cell with keyDrift,
+   and Masters.indexFor builds an index for ANY source - so there is no
+   per-row scan of the kind the legacy `type:'master'` arm refuses. The two
+   sources that stay refused are refused for reasons that do not apply:
+   docNumbers grows as the team posts, and corrections is keyed BY the row key
+   (R28t).
+
+   WHY THE REWRITE IS ONLY IN THE DELETE. It is a write to recoTemplates - the
+   shared file - so it belongs to a gesture the operator chose, not to a render
+   or a load: a background rewrite of a shared template file is the shape
+   T-24R2-1 is about. The delete is also the only moment it MATTERS, because a
+   position only moves when the list does.
+
+   MUTATION GRID: scratchpad/cm/mut/run.py, 12 mutations x the 21 checks of
+   this section's own probe (scratchpad/cm/probes/c2_fix.mjs):
+
+     the catalog emits positions again       -> R28b
+     ensureCustomUids mints nothing          -> 12 checks
+     _customAt drops the legacy index arm    -> R28c and nine more
+     the delete does not rewrite the sources -> R28e, R28f and seven more
+     the rewrite is MOVED after the splice   -> the same nine
+     the key-user scan is skipped            -> R28m-R28p
+     nothing counts as being in the key      -> R28m-R28p
+     the warning is dropped from the CONFIRM -> R28i
+     ...and from the TOAST                   -> R28j
+     _customIsStable calls an index stable   -> R28r
+     _pkEligible refuses every custom again  -> R28q, R28s
+     a duplicate uid is not re-minted        -> R28u
+
+   TWO OF THOSE TWELVE WERE WRONG ON THE FIRST PASS and the grid said so:
+   "the rewrite happens after the splice" ADDED a second call rather than
+   moving the first, so the original still did the right thing and nothing
+   went red; and the warning mutation was named for the confirm and the toast
+   while only emptying the confirm. The runner now takes a LIST of edits for
+   one mutation, which is what moving a call needs.
+
+   THE REPRO PROBE IS KEPT AS THE BEFORE/AFTER: run against this build,
+   c1_repro.mjs goes red on exactly three of its eight checks - the wrong
+   value, the unmoved definition, and the refusal of the feature. Its C1a
+   still passes, but for a different reason: that fixture assigns
+   customMasters directly without the migration, so Masters.catalog falls
+   back to `|| idx`, which is the documented fallback and not the old scheme.
+   ==================================================================== */
+const R28_SETUP = `(async function (arg) {
+  const [ID, srcToken, inKey] = arg;
+  AppState.customMasters = [
+    { name: 'Vendors', icon: '\u{1F4CB}', columns: ['Code','Val'], rows: [{ Code:'K1', Val:'FROM-VENDORS' }] },
+    { name: 'Centres', icon: '\u{1F4CB}', columns: ['Code','Val'], rows: [{ Code:'K1', Val:'FROM-CENTRES' }] },
+    { name: 'Regions', icon: '\u{1F4CB}', columns: ['Code','Val'], rows: [{ Code:'K1', Val:'FROM-REGIONS' }] }
+  ];
+  /* THE MIGRATION AS AppState.load RUNS IT, because this fixture assigns the
+     list directly rather than booting with it on the share. */
+  Masters.ensureCustomUids();
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = ID; t.name = ID;
+  t.columns = ['Doc','Code','Amount'].map(n => ({
+    name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+  t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Code','Amount'];
+  t.additionalColumns = [{ name: 'Look', type: 'master_lookup',
+    masterCfg: { source: srcToken, matchColumn: 'Code', matchKey: 'Code', returnKey: 'Val' } }];
+  t.primaryKeys = inKey ? ['Doc','Look'] : ['Doc'];
+  window.__toasts = [];
+  RecoTemplate.saveTemplate();
+  const saveToasts = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+  const stored = !!AppState.recoTemplates.find(x => x.id === ID);
+  RecoTemplate.open(ID); App.closeModal();
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  if (!live) return { FAILED: 'template not stored', saveToasts: saveToasts, stored: stored };
+  /* saveTemplate may refuse a key it does not like; the arm asserts what it
+     got rather than assuming the key landed. */
+  if (inKey) live.primaryKeys = ['Doc','Look'];
+  const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+  if (!sess) return { FAILED: 'no session after open', saveToasts: saveToasts, stored: stored,
+                      owned: Object.keys(AppState.recoSessionsOwned || {}) };
+  Reco.ensureSessionShape(sess, live);
+  sess.data = [{ _id: ID+'_r0', _pk: 'D1', _ver: 'upload', Doc: 'D1', Code: 'K1', Amount: '5' }];
+  AppState.activeRecoId = ID;
+  return { saveToasts: saveToasts, stored: stored,
+           sessExists: !!(AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID]),
+           uids: AppState.customMasters.map(m => m.uid),
+           catalogIds: Masters.catalog(ID).map(c => c.id),
+           storedSource: String((live.additionalColumns[0].masterCfg||{}).source),
+           primaryKeys: (live.primaryKeys||[]).slice() };
+})`;
+
+const R28_READ = `(function (ID) {
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  /* THE OWNED TABLE, NOT AppState.recoSessions. recoSessions is the per-pane
+     VIEW table (MODULE 4b) and is repointed at whichever template the owning
+     pane shows, so a read in a LATER page.evaluate than the one that built the
+     fixture can find it undefined. The first version of this probe did, and
+     the bridge left behind by each failed run then masked the real error
+     behind "Address already in use" for four runs. */
+  AppState.activeRecoId = ID;
+  if (typeof Panes !== 'undefined' && Panes.syncViewTable) Panes.syncViewTable();
+  let s = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+  if (!s) return { FAILED: 'no session at read', owned: Object.keys(AppState.recoSessionsOwned || {}),
+                   view: Object.keys(AppState.recoSessions || {}),
+                   panes: (typeof Panes !== 'undefined' ? Panes.panes().map(p => p.key + ':' + p.tplId) : []) };
+  Reco._fullPass();
+  try { return { look: String(Reco.rowFull(live, s, s.data[0]).Look),
+                 source: String((live.additionalColumns[0].masterCfg||{}).source) }; }
+  finally { Reco._fullEnd(); }
+})`;
+section(97, 'R28 T-24R2-4 \u2014 a custom master carries its own id, and the delete is where a position moves');
+{
+  const CM = makeRoot('share-r28');
+  const brCM = await startBridge(CM.root, PORT_R28); procs.push(brCM.proc);
+  const cm = await openReco(browser, brCM);
+  const setup = (id, src, inKey) =>
+    cm.page.evaluate(R28_SETUP + '(' + JSON.stringify([id, src, inKey]) + ')');
+  const read = (id) => cm.page.evaluate(R28_READ + '(' + JSON.stringify(id) + ')');
+
+  /* ---- ARM 1: uids exist, the catalog uses them, a LEGACY token still reads
+     the table it always read. */
+  const a1 = await setup('TPL_U1', 'custom:1', false);
+  const r1 = await read('TPL_U1');
+  note('R28 arm 1 \u2014 the fixture', { uids: a1.uids, catalog: a1.catalogIds, stored: a1.storedSource });
+  note('R28 arm 1 \u2014 the lookup', r1);
+  check(a1.uids.length === 3 && a1.uids.every(u => u && !/^\d+$/.test(String(u)))
+        && new Set(a1.uids.map(String)).size === 3,
+    'R28a THE FIX, PART 1: every custom master has its own uid, none of them a bare number and all '
+    + 'three distinct', a1.uids);
+  check(a1.catalogIds.slice(3).join(',') === a1.uids.map(u => 'custom:' + u).join(','),
+    'R28b ...and Masters.catalog offers those uids instead of positions, so anything stored from '
+    + 'the editor from now on names a master and not a slot', a1.catalogIds);
+  check(r1.look === 'FROM-CENTRES' && r1.source === 'custom:1',
+    'R28c BACK-COMPATIBILITY, WHICH IS THE WHOLE RISK OF THIS CHANGE: a config written by an '
+    + 'earlier build still says custom:1 and still reads the SECOND master. Masters._customAt '
+    + 'resolves a bare index by position exactly as before', r1);
+
+  /* ---- ARM 2: the harm. Delete an unrelated master. */
+  const a2 = await setup('TPL_U2', 'custom:1', false);
+  const before2 = await read('TPL_U2');
+  const del2 = await cm.page.evaluate(`(async function () {
+    window.confirm = () => true;
+    window.__toasts = [];
+    Home.deleteCustomMaster(0);
+    await new Promise(r => setTimeout(r, 300));
+    return { toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg),
+             left: (AppState.customMasters||[]).map(m => m.name),
+             modalTitle: (document.getElementById('appModalTitle')||{}).textContent || '' };
+  })()`);
+  const after2 = await read('TPL_U2');
+  note('R28 arm 2 \u2014 the delete', del2);
+  note('R28 arm 2 \u2014 before / after', { before: before2, after: after2 });
+  check(before2.look === 'FROM-CENTRES' && del2.left.join(',') === 'Centres,Regions',
+    'R28d PREMISE: the lookup reads the second master, and the FIRST one \u2014 which it does not '
+    + 'read \u2014 is deleted', { before: before2, left: del2.left });
+  check(after2.look === 'FROM-CENTRES',
+    'R28e THE FIX, PART 2: the lookup STILL reads FROM-CENTRES. It read FROM-REGIONS before this '
+    + 'round \u2014 re-pointed at a different table by the deletion of an unrelated one', after2);
+  check(after2.source === 'custom:' + a2.uids[1],
+    'R28f AND HOW: the legacy positional source was rewritten to that master\'s uid BEFORE the '
+    + 'splice, at the last moment the index was still right. After this no stored config names a '
+    + 'position, so the next deletion cannot move it either',
+    { source: after2.source, uids: a2.uids });
+  check(!del2.toasts.some(m => /NOT deleted/.test(m)) && !/identifies its rows/.test(del2.modalTitle),
+    'R28g CONTROL: and the deletion was ALLOWED, because no key reads it \u2014 the repair is not a '
+    + 'refusal of ordinary admin work', del2);
+
+  /* ---- ARM 3: a NON-KEY lookup reads the master being deleted. */
+  await setup('TPL_U3', 'custom:1', false);
+  const del3 = await cm.page.evaluate(`(async function () {
+    window.confirm = (msg) => { window.__lastConfirm = String(msg); return true; };
+    window.__toasts = [];
+    Home.deleteCustomMaster(1);
+    await new Promise(r => setTimeout(r, 300));
+    return { confirmText: String(window.__lastConfirm || ''),
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg),
+             left: (AppState.customMasters||[]).map(m => m.name) };
+  })()`);
+  const after3 = await read('TPL_U3');
+  note('R28 arm 3 \u2014 the delete', del3);
+  check(del3.left.join(',') === 'Vendors,Regions',
+    'R28h PREMISE: the master the lookup DOES read is deleted, and that is allowed \u2014 a column '
+    + 'going blank is the operator\'s business, not a refusal', del3.left);
+  check(/go blank/.test(del3.confirmText) && /TPL_U3/.test(del3.confirmText)
+        && /Look/.test(del3.confirmText),
+    'R28i AND THE CONFIRM NAMES WHAT BREAKS, before anything is removed: the template and the '
+    + 'column, not "this master"', del3.confirmText);
+  check(del3.toasts.some(m => /now read blank/.test(m) && /Look/.test(m)),
+    'R28j ...and it is said again afterwards, for somebody who clicked through', del3.toasts);
+  check(after3.look === '',
+    'R28k CONTROL, ON THE VALUE: the column really does read blank now \u2014 the warning is about '
+    + 'something that happened', after3);
+
+  /* ---- ARM 4: a KEY lookup reads it. */
+  const a4 = await setup('TPL_U4', 'custom:1', true);
+  const del4 = await cm.page.evaluate(`(async function () {
+    window.confirm = () => true;
+    window.__toasts = [];
+    Home.deleteCustomMaster(1);
+    await new Promise(r => setTimeout(r, 300));
+    return { toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg),
+             left: (AppState.customMasters||[]).map(m => m.name),
+             modalTitle: (document.getElementById('appModalTitle')||{}).textContent || '',
+             modalBody: ((document.getElementById('appModalBody')||{}).textContent || '').slice(0,400),
+             modalOpen: !!document.querySelector('#appModal.show') };
+  })()`);
+  note('R28 arm 4 \u2014 the refusal', del4);
+  check(a4.primaryKeys.join(',') === 'Doc,Look',
+    'R28l PREMISE: the template\'s row key is built from the lookup', a4.primaryKeys);
+  check(del4.left.join(',') === 'Vendors,Centres,Regions',
+    'R28m THE REFUSAL: nothing was deleted', del4.left);
+  check(del4.modalOpen === true && /identifies its rows/.test(del4.modalTitle)
+        && /Centres/.test(del4.modalTitle),
+    'R28n ...and it is a MODAL naming the master, not a toast that scrolls away. Deleting it would '
+    + 'stop the key computing and every row already filed under one would be refused at every door',
+    del4);
+  check(/TPL_U4/.test(del4.modalBody) && /Look/.test(del4.modalBody)
+        && /refused at every door/.test(del4.modalBody),
+    'R28o ...and the body names the reconciliation, the column and the consequence', del4.modalBody);
+  check(del4.toasts.some(m => /NOT deleted/.test(m) && /row key reads it/.test(m)),
+    'R28p ...with the toast as well, for somebody looking at the grid', del4.toasts);
+
+  /* ---- ARM 5: _pkEligible, all four sources. */
+  const el = await cm.page.evaluate(`(function () {
+    const t = AppState.recoTemplates.find(x => x.id === 'TPL_U4');
+    const mk = (src) => {
+      const c = JSON.parse(JSON.stringify(t));
+      c.additionalColumns = [{ name: 'Look', type: 'master_lookup',
+        masterCfg: { source: src, matchColumn: 'Code', matchKey: 'Code', returnKey: 'Val' } }];
+      return RecoTemplate._pkEligible(c, 'Look');
+    };
+    const uid = AppState.customMasters[1].uid;
+    return { stable: mk('custom:' + uid), positional: mk('custom:1'),
+             missing: mk('custom:no-such-uid-at-all'),
+             accounts: (function () {
+               const c = JSON.parse(JSON.stringify(t));
+               c.additionalColumns = [{ name: 'Look', type: 'master_lookup',
+                 masterCfg: { source: 'accounts', matchColumn: 'Code', matchKey: 'Reference',
+                              returnKey: 'Nominal' } }];
+               return RecoTemplate._pkEligible(c, 'Look'); })(),
+             docNumbers: mk('docNumbers'), corrections: mk('corrections') };
+  })()`);
+  note('R28 _pkEligible by source', el);
+  check(el.stable.ok === true,
+    'R28q THE FIX, PART 3 \u2014 THE FEATURE: a lookup into a custom master by UID may now be part '
+    + 'of the row key. Nothing else separated it from the Accounts Master: both are shared tables '
+    + 'anyone may edit, both are frozen into _pk at mint by decision G, and Masters.indexFor '
+    + 'indexes any source, so there is no per-row scan', el.stable);
+  check(el.positional.ok === false && /position in the list/.test(el.positional.reason)
+        && /stable id/.test(el.positional.reason),
+    'R28r AND A BARE INDEX IS STILL REFUSED, with the same reason plus what to do about it. A '
+    + 'config from an earlier build names a position until a delete rewrites it, and a key must '
+    + 'not be built on one in the meantime', el.positional);
+  check(el.missing.ok === false && /no longer exists/.test(el.missing.reason),
+    'R28s ...and a uid naming nothing is refused for what it is, rather than being accepted as '
+    + '"stable"', el.missing);
+  check(el.accounts.ok === true && el.docNumbers.ok === false && el.corrections.ok === false
+        && /posted/.test(el.docNumbers.reason) && /define itself/.test(el.corrections.reason),
+    'R28t CONTROLS: the other three sources are unchanged \u2014 accounts allowed, and the two '
+    + 'kinds this reconciliation itself writes still refused for their own reasons (decision B)', el);
+
+  /* ---- ARM 6: a DUPLICATE uid is re-minted, not just a missing one. */
+  const dup = await cm.page.evaluate(`(function () {
+    AppState.customMasters = [
+      { name: 'A', columns: ['Code'], rows: [], uid: 'SAME' },
+      { name: 'B', columns: ['Code'], rows: [], uid: 'SAME' },
+      { name: 'C', columns: ['Code'], rows: [] }
+    ];
+    const minted = Masters.ensureCustomUids();
+    return { minted: minted, uids: AppState.customMasters.map(m => String(m.uid)) };
+  })()`);
+  note('R28 duplicate uids', dup);
+  check(dup.minted === 2 && new Set(dup.uids).size === 3 && dup.uids[0] === 'SAME',
+    'R28u AND A DUPLICATE UID IS RE-MINTED TOO, not just a missing one: merging two backups can '
+    + 'bring the same uid in twice, which is this ticket\'s bug wearing a different hat. The FIRST '
+    + 'holder keeps it, so a config already naming it still resolves', dup);
+
+  check(cm.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R28v no page or console error across the whole section', cm.errors.slice(0, 5));
+  await cm.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
