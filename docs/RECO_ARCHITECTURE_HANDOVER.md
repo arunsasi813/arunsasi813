@@ -6538,3 +6538,106 @@ label, which the ticket itself records. Left as it is.
 No save-time gate was added either. A template already in the conflicting state is not made worse
 by an unrelated save, and refusing one would block an import; the journal door is the backstop the
 ticket names.
+
+---
+
+## 32. T-24R2-5 — a one-component key is its own frozen value
+
+### 32.1 Three shapes, not one harm
+
+`Reco.getRowPK` is `primaryKeys.map(…).join('||')` and escapes nothing, so a key component whose
+own value holds `'||'` makes `Reco._keyFrozenPart`'s `parts.length === pks.length` guard fail.
+The ticket treats that as one harm. It is three, and only one of them costs anything
+(`scratchpad/pp/probes/p1_repro.mjs`):
+
+| the key | minted `_pk` | parts / components | `_keyFrozenPart` | the cell | what is lost |
+| --- | --- | --- | --- | --- | --- |
+| **A** one component, an added column | `A\|\|B` | 2 / 1 | `null` | ⚠ recalculated | **nothing — the key IS the component** |
+| **B** two components | `D1\|\|A\|\|B` | 3 / 2 | `null` | ⚠ recalculated | the frozen component, genuinely |
+| **C** one component, a STANDARD column | `A\|\|B` | 2 / 1 | `null` | nothing marked | nothing — the value is on the row |
+
+**Arm A is the common case, not the corner.** A single-component key is the shape every template
+that existed before #24 has (`Reco._pkLabel`'s own note). The ticket's claim that "every fix is a
+storage-format change … a migration across every file on the share" is true of arm B and false of
+the shape most shares hold: with ONE component there is nothing to split, so the whole `_pk` is
+the answer.
+
+### 32.2 What shipped, both lines on the READ side
+
+```js
+/* Reco._keyFrozenPart, before any split is attempted */
+if (pks.length === 1) return String(pk);
+
+/* the mint's pipe counter */
+else if (a.multi && a.pkIsExtra[c] && s.indexOf('||') !== -1) { pipes++; a.pipes[pks[c]]++; }
+```
+
+The `a.multi` guard is the other half of the same thought: a one-component key is no longer
+**asked** about at ingest, because with one component nothing is lost and the question was asking
+the operator to accept a loss that does not happen.
+
+**`Reco._pkLabel` already had this shortcut** — `if (pks.length < 2) return s;`, with the note that
+a single-column key "is every template that existed before #24" — so the two functions that read the
+same `_pk` disagreed about the same key shape, and the one the operator sees was the correct one.
+That is the cheapest tell this round had, and it was sitting forty lines away.
+
+**No byte of storage moved.** `run_store_e2e` R32e reads the day files and all four arms' rows
+carry the same unescaped `'||'` the pre-round build wrote. No migration, no new gate, **no
+baseline to pin** — which is why this round added none of the four byte-identity gates §12.4 lists.
+
+### 32.3 `pkIsExtra` on the counter is correct, and arm C is why
+
+A standard template column's value is **on the row**, so `Reco.keyCellValue`'s fallback returns it
+whatever `_pk` looks like. Nothing is recovered from storage because nothing needs to be, and
+nothing is marked. Counting those rows would produce a question about a loss that cannot happen —
+the same mistake the `a.multi` guard removes, on the other axis. The ticket lists this shape
+nowhere.
+
+### 32.4 Arm B is left as filed, and the question IS the answer
+
+`D1||A` + `B` cannot be told from `D1` + `A||B` without changing what is written, and that change
+round-trips the CSV control column, the four pk-keyed masters, the Special JV claims and the
+posted-JV index. So the ticket's own second option is taken, and the existing warning was
+**checked for honesty rather than assumed**: `Reco._keyIngestCheck` names the separator, says the
+stored key "cannot be split back into its parts", says the column will show a freshly worked-out
+value "marked ⚠ recalculated", and carries `hard: false`. It is a question, so the row is still
+written when the operator says yes — which R32i reads off the disk rather than off a toast. The
+⚠ badge stays on arm B too, which is right: there the cell really is printing a recalculation.
+
+**And the ticket's Test paragraph specifies the mechanism it assumed, not the outcome it wanted.**
+"Assert the minted `_pk` splits back into exactly `primaryKeys.length` parts" can only be true
+after the storage change, and is false on the build that closes the harm. R32a–R32d assert the
+outcome instead: the component is recovered, the printed value is unchanged, and the ⚠ badge is
+gone — a badge on a cell showing the stored value being a false alarm about the one thing that
+badge exists to report.
+
+### 32.5 The fifth consecutive round where `red=NONE` was the fixture
+
+Dropping the `pkIsExtra` guard from the counter measured nothing, and the grid was right:
+
+| why it looked unmeasurable | the arm that fixed it |
+| --- | --- |
+| on arm C the key has ONE component, so `a.multi` short-circuits and the counter is never reached | **arm D** — a MULTI-component key whose pipe-carrying part is a standard COLUMN (`['Doc','Ref']`): `a.multi` is true, so the counter is reachable, and `pkIsExtra` is the only thing stopping the question |
+
+Arm D also made the "shortcut fires for every key shape" mutation measure two further checks.
+See 28.6, 30.6, 31.4 — the rule stated there held for the fifth round running: **when a mutation
+measures nothing, the first question is what state the arms never reach, not whether the mutation
+was wrong.**
+
+### 32.6 The fix silenced a question another section's fixture was standing on
+
+`run_store_e2e` **R11g** went red, and it was right to. R11g/R11h are about the dead-key latch —
+a load the operator ABORTED re-keys nothing, so it cannot lift the latch — and the fixture reached
+that abort by ingesting one row whose key value held `'||'`, declining the question. TPL_L's key is
+a single derived component, so after this round there is no question to decline and the load simply
+succeeded: 1 row loaded, `asked: 0`.
+
+The fixture now reaches the abort through the **duplicate** arm (two rows minting the same derived
+key), which `_keyIngestCheck` still asks about on a derived key. **R11g names which arm asked**, so
+a later change to that arm fails on the premise instead of leaving R11h green on a load that was
+never aborted — which is the shape of failure the premise exists to prevent, and is exactly what
+would have happened here if R11g had only counted `asked > 0` against a question of any kind.
+
+The lesson is narrower than "check the suite": a premise that reaches its subject through an
+unrelated guard inherits that guard's lifetime. R11h's subject is the latch; the pipe question was
+scaffolding, and scaffolding needs to say what it is standing on.

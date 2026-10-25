@@ -1467,6 +1467,97 @@ NOT painted when nothing has drifted (today it is, correctly, because the value 
 recovered).
 
 
+**CLOSED for the common key shape as a READ-SIDE change with no migration at all, and LEFT AS
+FILED for the multi-component one — and the "Why it is only a ticket" paragraph above is wrong
+about the half that matters.**
+
+**It is not one harm, it is three shapes, and the cost of each is different.** The ticket writes
+about "a component's own value" as though every key behaved alike. Measured separately
+(`scratchpad/pp/probes/p1_repro.mjs`, 10/10):
+
+| the key | minted `_pk` | parts / components | `_keyFrozenPart` | the cell |
+|---|---|---|---|---|
+| A — ONE component, an added column (`['Mix']`) | `A\|\|B` | 2 / 1 | `null` | ⚠ recalculated |
+| B — TWO components (`['Doc','Mix']`) | `D1\|\|A\|\|B` | 3 / 2 | `null` | ⚠ recalculated |
+| C — ONE component, a STANDARD column (`['Ref']`) | `A\|\|B` | 2 / 1 | `null` | **nothing marked, nothing lost** |
+
+**Arm A needs no storage change, and arm A is the common case.** With ONE key component the whole
+`_pk` IS the component: there is nothing to split, and the value is recoverable separator and all.
+`_keyFrozenPart` answered `null` only because it reached its `parts.length === pks.length` guard
+before noticing it had nothing to do. That is the key shape **every template that existed before
+#24 has** (`Reco._pkLabel`'s own note), so the ticket's "every fix is a storage-format change …
+a migration across every file on the share" is true of arm B and false of the shape most shares
+actually hold.
+
+**Arm C is why the mint's counter is guarded by `pkIsExtra`, and the guard is correct.** A
+standard template column's value is ON the row, so `Reco.keyCellValue`'s fallback returns it
+whatever `_pk` looks like: nothing is recovered from storage because nothing needs to be. The
+ticket lists this shape nowhere.
+
+**What shipped — two lines, both on the read side:**
+
+```js
+Reco._keyFrozenPart   if (pks.length === 1) return String(pk);     // before any split
+the mint's counter    else if (a.multi && a.pkIsExtra[c] && s.indexOf('||') !== -1) { … }
+```
+
+The second line is the other half: a one-component key is **no longer asked about at ingest**,
+because with one component nothing is lost and the question was asking the operator to accept a
+loss that does not happen.
+
+**And `Reco._pkLabel` already had that shortcut** — `if (pks.length < 2) return s;`, with the note
+that a single-column key "is every template that existed before #24". Two functions reading the
+same `_pk` disagreed about the same key shape, and the one the operator sees was the correct one.
+
+**NOTHING ABOUT STORAGE MOVED, which is the point.** `run_store_e2e` R32e reads the day files and
+the four arms' rows carry exactly the `_pk` bytes the pre-round build wrote — unescaped `'||'`,
+no migration, no new gate, and no baseline to pin. The ticket's own **Fix** paragraph offers
+"escape at mint and unescape at split … or decide the warning is the answer and say so in the
+handover doc"; the answer is neither in full. Escaping is refused for arm B, the warning IS the
+answer for arm B, and arm A turns out to need no decision at all.
+
+**Arm B is left exactly as filed, and `_keyIngestCheck`'s question is the answer to it.** `D1||A`
++ `B` is genuinely indistinguishable from `D1` + `A||B`, so every fix there does round-trip the
+CSV control column, the four pk-keyed masters, the Special JV claims and the posted-JV index. The
+existing warning was checked for honesty rather than assumed: it names the separator, says the
+stored key "cannot be split back into its parts", says the column will show a freshly worked-out
+value "marked ⚠ recalculated", and carries `hard: false` — a question, not a refusal, so the row
+is still written when the operator says yes (R32i reads that off the disk). The ⚠ badge also
+stays on arm B, which is right: there the cell really is printing a recalculation.
+
+**The ticket's Test paragraph specifies the mechanism it assumed, not the outcome it wanted.** It
+asks to "assert the minted `_pk` splits back into exactly `primaryKeys.length` parts" — which can
+only be true after the storage change, and is false on the build that closes the harm. What
+R32a–R32d assert instead is the outcome: the frozen component is recovered, the value on screen
+is unchanged, and **the ⚠ badge is gone** (which the ticket does ask for). A badge on a cell that
+is showing the stored value is a false alarm about the one thing that badge exists to report.
+
+**Tests** `run_store_e2e` `[101] R32`, 19 checks over four arms: A recovered (R32b) with the badge
+gone (R32c) and the printed value unchanged (R32d); B still `null` (R32g) with the badge kept
+(R32h); C recovered the same way (R32j) with nothing marked either way (R32k); D the `pkIsExtra`
+arm (R32l, R32m); the day-file control that no byte of `_pk` changed (R32e, R32i); and the four
+ingest-question arms (R32n–R32q) plus the warning's own wording (R32r).
+
+**Mutation grid** `scratchpad/pp/mut/run.py`, 6 mutations × the 15 checks of
+`scratchpad/pp/probes/p2_fix.mjs` — all six measure. **One measured nothing on the first pass, and
+for the fifth consecutive round the answer was that the fixture was too narrow rather than the
+grid being wrong:** dropping the `pkIsExtra` guard from the counter is invisible on arm C, because
+a one-component key fails `a.multi` first and never reaches the counter at all. **Arm D** is the
+only shape that sees it — a MULTI-component key whose pipe-carrying part is a standard COLUMN, so
+`a.multi` is true and `pkIsExtra` is what stops the question. Adding it also made the
+"shortcut fires for every key shape" mutation measure two further checks.
+
+**AND IT SILENCED A QUESTION ANOTHER SECTION'S FIXTURE WAS STANDING ON.** `run_store_e2e` R11g
+went red on the full net, correctly: R11g/R11h are about the dead-key latch — a load the operator
+ABORTED re-keys nothing, so it cannot lift the latch — and the fixture reached that abort by
+ingesting one row whose key value held `'||'` and declining the question. TPL_L's key is a single
+derived component, so after this round there is nothing to decline and the load succeeded
+(`asked: 0`, "Loaded 1 rows"). The fixture now reaches the abort through the DUPLICATE arm, which
+`_keyIngestCheck` still asks about on a derived key, and **R11g now names which arm asked** — so a
+later change to that arm fails on the premise rather than leaving R11h green on a load that was
+never aborted.
+
+
 ## T-24R2-6  (LANDED with #26) The AEG editor's input-column RENAME is the one arm of S11 still ungated
 
 **LANDED in the same commit as #26's `allowOverride` box, which is what this ticket asked for.**

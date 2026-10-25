@@ -9711,9 +9711,22 @@ const R11_ADD_DATA = `(async function (arg) {
            pks: (sess.data||[]).map(r=>r._pk), stale: !!(Reco._keyStale||{}).TPL_L };
 })`;
 
-/* A load the OPERATOR DECLINES at the key question: one row whose key value
-   holds '||', which _keyIngestCheck asks about before anything is written
-   (KEY_BAD_FLOOR is 1). Nothing is loaded, so nothing was re-keyed. */
+/* A load the OPERATOR DECLINES at the key question: two rows that mint the
+   SAME derived key, which _keyIngestCheck asks about before anything is
+   written (KEY_BAD_FLOOR is 1). Nothing is loaded, so nothing was re-keyed.
+
+   WHICH arm asks is not the subject here - R11g/R11h are about a load the
+   operator ABORTED re-keying nothing, so it cannot lift the latch - but it has
+   to be an arm that still asks. This fixture used one row whose key value held
+   '||', and T-24R2-5 stopped asking about that on a ONE-component key ([101]
+   R32: with one component the whole _pk IS the component, so nothing is lost
+   and the question was asking the operator to accept a loss that does not
+   happen). TPL_L's key is one component, so the question went away and R11g
+   went red - correctly. The DUPLICATE arm replaces it, and is on here because
+   TPL_L's key is DERIVED, which `Reco._keyIngestCheck` requires for that arm
+   and R11_SETUP guarantees by construction. R11g pins WHICH question was put,
+   so a later change to that arm fails here loudly rather than leaving R11h
+   green on a load that was never aborted. */
 const R11_DECLINED_LOAD = `(async function () {
   window.__toasts = [];
   const asks = []; const real = window.confirm;
@@ -9721,12 +9734,15 @@ const R11_DECLINED_LOAD = `(async function () {
   const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_L');
   try {
     RecoTemplate.open(tpl.id);
-    await Reco.ingestData(tpl, [{ Doc:'A||B', Line:'L0', Amount:'1' }], ['Doc','Line','Amount']);
+    await Reco.ingestData(tpl, [{ Doc:'W9', Line:'L0', Amount:'1' },
+                                { Doc:'W9', Line:'L1', Amount:'2' }],
+                          ['Doc','Line','Amount']);
   } finally { window.confirm = real; }
   App.closeModal();
   const sess = AppState.recoSessions.TPL_L;
   await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
-  return { asked: asks.length, said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
+  return { asked: asks.length, ask: String(asks[0] || '').slice(0, 240),
+           said: (window.__toasts||[]).map(x=>x.kind+': '+x.msg),
            pks: (sess.data||[]).map(r=>r._pk), stale: !!(Reco._keyStale||{}).TPL_L };
 })`;
 
@@ -9840,9 +9856,12 @@ section(79, 'R11 T-S10-16 — THE LATCH MUST NOT LIFT WHILE A ROW ON SCREEN STIL
   /* A load the operator DECLINES re-keys nothing, so it cannot lift either. */
   const dec = await lb.page.evaluate(R11_DECLINED_LOAD + '()');
   note('R11 a declined load', dec);
-  check(dec.asked > 0 && dec.said.some(s => /Nothing was loaded/.test(s)) && dec.pks.length === 4,
-    'R11g premise: the key question was put and the operator said no, so nothing was loaded',
-    { asked: dec.asked, said: dec.said, pks: dec.pks });
+  check(dec.asked > 0 && /share a row key/.test(dec.ask)
+        && dec.said.some(s => /Nothing was loaded/.test(s)) && dec.pks.length === 4,
+    'R11g premise: the key question was put - the DUPLICATE arm, named here so a later change to '
+    + 'which arm asks fails on this premise rather than leaving R11h green on a load that was '
+    + 'never aborted - and the operator said no, so nothing was loaded',
+    { asked: dec.asked, ask: dec.ask, said: dec.said, pks: dec.pks });
   check(dec.stale === true,
     'R11h ...AND THE LATCH IS STILL UP. The old clear site ran at the head of the mint, which is '
     + 'BEFORE _keyIngestCheck can refuse the whole load, so a load the operator aborted lifted the '
@@ -10732,6 +10751,7 @@ const PORT_R28  = 21522;   // R28 T-24R2-4: a custom master's own id
 const PORT_R29  = 21526;   // R29 T-24R2-2: a hand-added row's frozen business key
 const PORT_R30  = 21530;   // R30 T-24R2-3: a renamed column keeps its place
 const PORT_R31  = 21534;   // R31 T-24R2-7: the AEG link asks the role matrix
+const PORT_R32  = 21538;   // R32 T-24R2-5: a one-component key holding '||'
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -17448,6 +17468,282 @@ section(100, 'R31 T-24R2-7 \u2014 the AEG link asks the role matrix, and says so
   check(ag.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R31s no page or console error across the whole section', ag.errors.slice(0, 5));
   await ag.ctx.close();
+}
+
+/* ====================================================================
+   T-24R2-5. A KEY COMPONENT HOLDING '||' CANNOT BE SPLIT OUT OF _pk.
+
+   Decision G froze a key extra's value INTO _pk, and Reco._keyFrozenPart
+   recovers it by splitting on '||' and checking that the number of parts
+   equals the number of key components. Reco.getRowPK escapes nothing, so a
+   component whose own value holds '||' makes that guard fail and the frozen
+   value is unreadable: Reco.keyCellValue recalculates instead, and
+   Reco.keyDrift marks the cell as a recalculation.
+
+   Round 2 made that HONEST rather than silent - the mint counts such rows,
+   _keyIngestCheck asks before the day file is written, and the cell carries
+   a badge - but not RECOVERABLE, and the ticket proposed escaping the
+   separator in _pk: a storage-format change, with a migration gate, for
+   every pk-keyed master and the posted-JV index.
+
+   MEASURED (scratchpad/pp/probes/p1_repro.mjs), and the measurement is what
+   changed the answer. The ticket treats one harm; there are THREE SHAPES and
+   the cost of each is different:
+
+     A  a SINGLE-component key over an added column. _pk is 'A||B', which
+        splits into TWO parts for a ONE-part key, so the length guard could
+        never be satisfied -> frozen value null, cell badged. And this is the
+        key shape every template that existed before #24 has (Reco._pkLabel's
+        own note), so it is the common case, not the corner.
+     B  a MULTI-component key. _pk is 'D1||A||B': three parts from a two-part
+        key, and D1||A + B is genuinely indistinguishable from D1 + A||B.
+        Here the ticket is right that every fix rewrites what is stored.
+     C  a STANDARD template column holding the separator. Equally
+        unrecoverable from _pk, and NOTHING IS LOST: keyCellValue's fallback
+        returns row[k], because a template column's value is on the row. That
+        is why the mint's counter is guarded by pkIsExtra.
+
+   WHAT WAS BUILT, and it is a READ-SIDE CHANGE ONLY:
+
+     Reco._keyFrozenPart  - with ONE key component the whole _pk IS the
+                            component, so it is returned separator and all,
+                            before any split is attempted.
+     the mint's counter   - guarded by a.multi as well as pkIsExtra, because
+                            arm A is no longer a loss and asking the operator
+                            to accept one that does not happen is worse than
+                            not asking.
+
+   NOTHING ABOUT STORAGE MOVED: R32e reads the day files and the four rows
+   carry exactly the _pk bytes the pre-round build wrote. There is no
+   migration, no new gate, and no baseline to pin - which is the opposite of
+   what the ticket assumed any fix would cost.
+
+   ARM B IS LEFT AS THE TICKET DESCRIBES IT, with _keyIngestCheck's question
+   as the answer (R32q, R32r): it names the separator, says the stored key
+   cannot be split back into its parts, says the column will show a value
+   marked recalculated, and it is a question - hard false - so the row is
+   still written when the operator says yes (R32i).
+
+   MUTATION GRID: scratchpad/pp/mut/run.py, 6 mutations x the 15 checks of
+   this section's own probe (scratchpad/pp/probes/p2_fix.mjs):
+
+     the one-component shortcut is gone    -> R32b, R32c, R32j
+     it fires for EVERY key shape          -> R32g, R32l, R32m
+     the mint asks about one component again -> R32n
+     the mint stops asking about MULTI too -> R32q
+     the counter drops the pkIsExtra guard -> R32p
+     the shortcut drops the separator      -> R32b/c/d/j/k
+
+   THE LAST OF THOSE MEASURED NOTHING ON THE FIRST PASS - the fifth round
+   running where a red=NONE meant the fixture was too narrow rather than the
+   grid being wrong. Dropping the pkIsExtra guard is invisible on arm C,
+   because a one-component key fails a.multi first and never reaches the
+   counter. ARM D is the only shape that sees it: a MULTI-component key whose
+   pipe-carrying part is a standard COLUMN. a.multi is true, so the counter is
+   reachable, and pkIsExtra is what stops it asking about a value that is
+   sitting on the row (R32l, R32m, R32p).
+   ==================================================================== */
+
+section(101, 'R32 T-24R2-5 — a one-component key holding the separator is read back whole');
+{
+  const PP = makeRoot('share-r32');
+  const brPP = await startBridge(PP.root, PORT_R32); procs.push(brPP.proc);
+  const pp = await openReco(browser, brPP);
+
+  /* A template keyed on `pks`, with `extras` as its added columns, ingesting
+     one row whose Ref cell holds 'A||B' - so a formula over Ref carries the
+     separator into whatever the key is made of. Through Reco.ingestData, so
+     the mint runs and the audit is the app's own rather than a hand-built one. */
+  const MKP = `(async function (arg) {
+    const [ID, pks, extras] = arg;
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Ref','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc','Ref','Amount'];
+    t.additionalColumns = extras;
+    t.primaryKeys = pks;
+    RecoTemplate.saveTemplate();
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    if (!live) return { FAILED: 'not stored' };
+    live.primaryKeys = pks.slice();
+    RecoTemplate.open(ID); App.closeModal();
+    AppState.activeRecoId = ID;
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    Reco.ensureSessionShape(sess, live);
+    window.__toasts = [];
+    window.__asked = [];
+    window.confirm = (m) => { window.__asked.push(String(m)); return true; };
+    await Reco.ingestData(live, [{ Doc: 'D1', Ref: 'A||B', Amount: '10' }],
+                          ['Doc','Ref','Amount']);
+    await new Promise(r => setTimeout(r, 300));
+    await AppState.flush();
+    if (typeof Store.idle === 'function') { await Store.idle(); }
+    const s2 = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    const row = (s2.data || [])[0] || {};
+    const last = pks[pks.length - 1];
+    let grid = {}, drift = null;
+    Reco._fullPass();
+    try {
+      grid = JSON.parse(JSON.stringify(Reco.rowFull(live, s2, row)));
+      drift = JSON.parse(JSON.stringify(Reco.keyDrift(live, s2, row)));
+    } finally { Reco._fullEnd(); }
+    return { pks: (live.primaryKeys||[]).slice(),
+             pk: String(row._pk || ''),
+             parts: String(row._pk || '').split('||').length,
+             frozenKey: (function () {
+               const r = Reco._keyFrozenPart(live, row, last);
+               return r === null ? null : String(r); })(),
+             cellValue: (function () {
+               const r = Reco.keyCellValue(live, s2, row, last);
+               return r === null ? null : String(r); })(),
+             grid: grid[last] === undefined ? '(absent)' : String(grid[last]),
+             drift: drift,
+             asked: (window.__asked||[]).slice(),
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 110)) };
+  })`;
+  const KXP = [{ name: 'Mix', type: 'formula', formula: '{Ref}', _cid: 'c1' }];
+  const armP = (id, pks, extras) =>
+    pp.page.evaluate(MKP + '(' + JSON.stringify([id, pks, extras]) + ')');
+
+  /* ---- ARM A: a SINGLE-component key over an added column. */
+  const pA = await armP('TPL_P1', ['Mix'], KXP);
+  note('arm A — one component, an added column', pA);
+  check(pA.pk === 'A||B' && pA.parts === 2 && pA.pks.length === 1,
+    'R32a PREMISE: the key has ONE component and the minted _pk is "A||B", which splits into TWO '
+    + 'parts - so the length guard _keyFrozenPart used could never be satisfied for this shape, '
+    + 'which is the shape every template that existed before #24 has', pA);
+  check(pA.frozenKey === 'A||B',
+    'R32b THE FIX: _keyFrozenPart recovers the component separator and all, because with ONE key '
+    + 'component the whole _pk IS the component and nothing needs splitting. It answered null before',
+    pA.frozenKey);
+  check(pA.drift && pA.drift.drifted === false && (pA.drift.cols || []).length === 0,
+    'R32c AND THE RECALCULATED BADGE IS GONE, which is what the ticket\'s own Test asks for: nothing '
+    + 'had drifted, the frozen value simply could not be read, and a badge on a cell showing the '
+    + 'stored value is a false alarm about the one thing that badge exists to report', pA.drift);
+  check(pA.cellValue === 'A||B' && pA.grid === 'A||B',
+    'R32d ...and the value on screen is unchanged, because the recalculation happened to agree. The '
+    + 'fix is about what the app KNOWS, not what it prints today - which is exactly why the badge '
+    + 'mattered: it told the operator not to trust a value that was right',
+    { cell: pA.cellValue, grid: pA.grid });
+
+  /* ---- ARM B: a MULTI-component key, left as the ticket describes it. */
+  const pB = await armP('TPL_P2', ['Doc', 'Mix'], KXP);
+  note('arm B — two components', pB);
+  check(pB.pk === 'D1||A||B' && pB.parts === 3 && pB.pks.length === 2,
+    'R32f PREMISE: two components joined with the separator one of them contains give three parts '
+    + 'from a two-part key', pB);
+  check(pB.frozenKey === null,
+    'R32g ARM B IS LEFT AS THE TICKET DESCRIBES IT: still unrecoverable, because there is no way to '
+    + 'tell D1||A + B from D1 + A||B without changing what is written - and that change round-trips '
+    + 'the CSV control column, four pk-keyed masters, the Special JV claims and the posted-JV index',
+    pB.frozenKey);
+  check(pB.drift && (pB.drift.cols || []).indexOf('Mix') !== -1,
+    'R32h ...and the badge STAYS on arm B, which is right: here the cell really is printing a '
+    + 'recalculation and not the stored component', pB.drift);
+
+  /* ---- ARM C: a STANDARD template column in a one-component key. */
+  const pC = await armP('TPL_P3', ['Ref'], []);
+  note('arm C — one component, a STANDARD column', pC);
+  check(pC.pk === 'A||B' && pC.frozenKey === 'A||B',
+    'R32j A STANDARD COLUMN IN A ONE-COMPONENT KEY IS RECOVERED THE SAME WAY: the fix is about the '
+    + 'key SHAPE, not about what kind of column the component is', pC);
+  check(pC.cellValue === 'A||B' && (!pC.drift.cols || pC.drift.cols.length === 0),
+    'R32k AND NOTHING WAS MARKED HERE EITHER WAY, which is why the mint counts only key EXTRAS: a '
+    + 'template column\'s value is ON THE ROW, so keyCellValue\'s fallback returns it whatever the '
+    + 'key looks like. The pkIsExtra guard on the counter is correct and not a gap',
+    { cell: pC.cellValue, drift: pC.drift });
+
+  /* ---- ARM D: a MULTI-component key whose pipe-carrying part is a STANDARD
+     column. The only shape where the pkIsExtra guard on the mint's counter is
+     visible - a.multi is true, so the counter is reachable, and the guard is
+     what stops it firing. Arm C cannot show it, because a one-component key
+     fails a.multi first; the mutation that removes the guard measured nothing
+     until this arm existed. */
+  const pD = await armP('TPL_P4', ['Doc', 'Ref'], []);
+  note('arm D — two components, the pipe one a STANDARD column', pD);
+  check(pD.pk === 'D1||A||B' && pD.pks.length === 2 && pD.frozenKey === null,
+    'R32l PREMISE: a.multi is true and the component holding the separator is a template COLUMN, so '
+    + 'the split is ambiguous and _keyFrozenPart answers null', pD);
+  check(pD.cellValue === 'A||B',
+    'R32m ...and NOTHING IS LOST ANYWAY: keyCellValue\'s fallback returns row[k], because a template '
+    + 'column\'s value is on the row. That is what the pkIsExtra guard on the counter is for',
+    pD.cellValue);
+
+  /* ---- AND WHAT IS ON DISK, which is the whole reason this round shipped no
+     migration: the fix reads _pk differently, it does not write it
+     differently. Read by COLUMN INDEX off each day file's own header. */
+  const dayPks = (() => {
+    const out = [];
+    const walk = d => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+      for (const e of es) { const q = path.join(d, e.name);
+        if (e.isDirectory()) walk(q);
+        else if (/\.csv$/.test(e.name)) {
+          const lines = fs.readFileSync(q, 'utf8').split(/\r?\n/).filter(x => x.length);
+          if (lines.length < 2) continue;
+          const idx = lines[0].split(',').indexOf('_pk');
+          if (idx < 0) continue;
+          for (const ln of lines.slice(1)) out.push(String(ln.split(',')[idx] || ''));
+        } } };
+    walk(path.join(PP.root, 'reco_data')); return out;
+  })();
+  note('the _pk column, as written', dayPks);
+  check(dayPks.length === 4 && dayPks.filter(x => x === 'A||B').length === 2
+        && dayPks.filter(x => x === 'D1||A||B').length === 2,
+    'R32e AND NOTHING ABOUT STORAGE MOVED: all four arms wrote a row, and every stored _pk is still '
+    + 'the components joined with an UNESCAPED "||" - the same bytes the pre-round build wrote. The '
+    + 'ticket assumed any fix would be a storage-format change needing a migration gate across four '
+    + 'pk-keyed masters and the posted-JV index; for the one-component key, which is the common '
+    + 'shape, the answer was on the read side and costs none of that', dayPks);
+  check(dayPks.filter(x => x === 'D1||A||B').length === 2,
+    'R32i AND THE MULTI-COMPONENT ROWS ARE ON DISK TOO: _keyIngestCheck is a QUESTION, not a '
+    + 'refusal, so answering yes still writes the day file. An arm that measured only the absence of '
+    + 'a badge would pass on a build that refused the ingest outright', dayPks);
+
+  /* ---- THE SECOND HALF OF THE FIX: THE QUESTION AT THE MINT. */
+  const pipeAsk = (asked) => (asked || []).filter(m => /holds '\|\|'/.test(m));
+  note('what the ingest asked', { armA: pipeAsk(pA.asked).length, armB: pipeAsk(pB.asked).length,
+                                  armC: pipeAsk(pC.asked).length, armD: pipeAsk(pD.asked).length });
+  check(pipeAsk(pA.asked).length === 0,
+    'R32n THE FIX, AT THE MINT: a ONE-component key is no longer asked about. The counter is guarded '
+    + 'by a.multi now, because with one component nothing is lost - so the question was asking the '
+    + 'operator to accept a loss that does not happen', pA.asked);
+  check(pipeAsk(pC.asked).length === 0,
+    'R32o ...nor is a one-component key over a standard column, for the same reason twice over: one '
+    + 'component, and the value is on the row', pC.asked);
+  check(pipeAsk(pD.asked).length === 0,
+    'R32p ...NOR ARM D, which is the pkIsExtra half: a MULTI-component key whose pipe-carrying part '
+    + 'is a standard COLUMN is not asked about either, because its value is on the row. This is the '
+    + 'only arm that measures that guard - on arm C the a.multi test short-circuits first',
+    pD.asked);
+  check(pipeAsk(pB.asked).length === 1 && /cannot be split back/.test(pipeAsk(pB.asked)[0]),
+    'R32q AND THE MULTI-COMPONENT KEY IS STILL ASKED ABOUT, with the same specific sentence. That is '
+    + 'the half where the loss is real, and the question is the answer to it',
+    pipeAsk(pB.asked).map(m => m.slice(0, 200)));
+
+  const pAsk = await pp.page.evaluate(`(function () {
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_P1');
+    /* The audit shape the mint builds, with one ambiguous row - asked directly,
+       because the confirm itself is answered before anything can read it. */
+    const audit = { partial: 0, errRows: 0, badBlank: 0, ambig: 1, allBlank: 0, keyed: 1,
+                    dupRows: 0, dupKeys: new Set(), multi: false,
+                    empty: {}, errs: {}, pipes: { Mix: 1 } };
+    const r = Reco._keyIngestCheck(live, [{}], audit);
+    return r ? { hard: !!r.hard, msg: String(r.msg) } : null;
+  })()`);
+  note('what _keyIngestCheck says about a pipe row', pAsk && pAsk.msg.slice(0, 320));
+  check(pAsk && /holds '\|\|'/.test(pAsk.msg) && /cannot be split back/.test(pAsk.msg)
+        && /recalculated/.test(pAsk.msg) && pAsk.hard === false,
+    'R32r AND THE WARNING IS ALREADY SPECIFIC AND HONEST: it names the separator, says the stored key '
+    + 'cannot be split back into its parts, and says the column will show a freshly worked-out value '
+    + 'marked recalculated. hard is false, so it is a question and not a refusal - which is what '
+    + 'R32i reads off the disk', pAsk && pAsk.msg.slice(0, 400));
+
+  check(pp.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R32s no page or console error across the whole section', pp.errors.slice(0, 5));
+  await pp.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

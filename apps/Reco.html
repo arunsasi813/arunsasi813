@@ -22045,6 +22045,31 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     if (i < 0) return null;
     const pk = Reco.rowKey(tpl, row);
     if (!pk || String(pk).indexOf('_auto_') === 0 || String(pk).indexOf('_added_') === 0) return null;
+    /* ---- T-24R2-5. A ONE-COMPONENT KEY NEEDS NO SPLIT, and that is the
+       whole of this ticket's reachable half.
+       _pk is the components joined with '||' and getRowPK escapes nothing, so
+       a component whose own value contains the separator made the length
+       guard below unsatisfiable - and the frozen value was then unrecoverable
+       for EVERY key shape, including the one where the key IS the component.
+       MEASURED (scratchpad/pp/probes/p1_repro.mjs): a single-component key on
+       a formula column reading 'A||B' minted _pk='A||B', which splits into
+       two parts against a one-part key, so this answered null and keyDrift
+       marked the cell recalculated although nothing had drifted.
+       A SINGLE-COLUMN KEY IS EVERY TEMPLATE THAT EXISTED BEFORE #24 (see
+       _pkLabel's note), so this is the common shape, and it costs no storage
+       change at all: when there is one component, the key is that component,
+       separator and all.
+       THE MULTI-COMPONENT CASE IS LEFT AS THE TICKET DESCRIBES IT. 'D1||A||B'
+       is three parts for a two-part key and genuinely cannot be told from
+       'D1||A' + 'B'; every fix for it rewrites _pk, which round-trips the CSV
+       control column, four pk-keyed masters, the Special JV claims and the
+       posted-JV index. _keyIngestCheck's question is the answer there, and it
+       is already specific: it names the separator, says the stored key cannot
+       be split back, and says the column will show a recalculation.
+       Tests: run_store_e2e [101] R32, four arms; R32e reads the day files and
+       shows no byte of _pk moved, which is why this round added no migration
+       gate. */
+    if (pks.length === 1) return String(pk);
     const parts = String(pk).split('||');
     return parts.length === pks.length ? parts[i] : null;
   },
@@ -22509,7 +22534,16 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
           parts[c] = s;
           if (s === '') { blanks++; a.empty[pks[c]]++; if (a.pkIsExtra[c]) blankExtra = true; }
           else if (s === '#ERR') { errs++; a.errs[pks[c]]++; }
-          else if (a.pkIsExtra[c] && s.indexOf('||') !== -1) { pipes++; a.pipes[pks[c]]++; }
+          /* T-24R2-5: AND ONLY WHEN THE KEY HAS MORE THAN ONE COMPONENT.
+             A one-component key needs no split, so _keyFrozenPart recovers
+             the value separator and all and there is nothing to warn about -
+             warning anyway would ask the operator to accept a loss that does
+             not happen. `pkIsExtra` stays because a template COLUMN's value
+             is on the row, so keyCellValue's fallback returns it whatever the
+             key looks like (run_store_e2e R32k) - and arm D, a multi-component
+             key whose pipe-carrying part is a standard column, is the only
+             shape that measures that guard (R32l, R32m, R32p). */
+          else if (a.multi && a.pkIsExtra[c] && s.indexOf('||') !== -1) { pipes++; a.pipes[pks[c]]++; }
         }
         if (errs) a.errRows++;
         if (pipes) a.ambig++;
