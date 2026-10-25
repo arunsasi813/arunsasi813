@@ -7248,6 +7248,13 @@ const XlSchema = {
     return raw.map(XlSchema._opt).filter(o => o.value !== '' && !seen.has(o.value) && seen.add(o.value));
   },
 
+  /* T-26-7. The live-key Set, per rows array. Declared out here and not on the
+     session, because build's `rows` is opts.rows when a caller passes one (a
+     filtered or selected export is a different array with the same answer
+     shape) and sess.data otherwise. See livePkSet inside build for why the
+     array plus its length is a sound key. */
+  _livePkMemo: new WeakMap(),
+
   /* Column model.
      opts: { scope:'template'|'allStandard'|'readonly', allowPkEdit, includeHidden,
              showStatus (true), showExtras:'all'|'inputs'|'none', rows (for kind detection) } */
@@ -7275,14 +7282,44 @@ const XlSchema = {
        template with no records still walks no rows, which is every template
        today. Scoped to `rows` and not to sess.data, because a filtered or
        selected export is a different question with the same answer shape. */
+    /* ---- T-26-7. MEMOISED ACROSS BUILDS, not only within one.
+       The closure above makes the walk once per BUILD and throws it away with
+       the build, so one record cost a full O(rows) pass every time anything
+       rebuilt the schema. MEASURED (scratchpad/xs/probes/p1_repro.mjs, as
+       operation counts per handover 16.4a): at 5,000 rows a build with no
+       records reads row._pk 4,000 times; ONE record makes it 9,000, and three
+       builds over an UNCHANGED sess.data make it 27,000 against 12,000 - three
+       full passes. The ticket's wall clock was 60.8ms against 3.4ms at 200,000
+       rows.
+
+       THE KEY IS THE ROWS ARRAY AND ITS LENGTH, and that is sound because no
+       path re-keys rows IN PLACE on an array that keeps both:
+         sess.data is REPLACED (a new array) by ingestData's concat, by
+         Reco.loadVersionedFile, by App.restoreSession and by every delete,
+         which are all .filter() or .map();
+         it is mutated in place only by Reco.ssAddRow's push, which changes
+         the length;
+         and row._pk itself is written only on rows that are NOT YET in
+         sess.data - _mintKeysSync's only caller is ingestData (see
+         Reco._keyStale's note), ingestData reserves it on the mapped rows, and
+         Versioning.appendUpload only fills one that is absent.
+       A FUTURE CHANGE THAT RE-KEYS ROWS IN PLACE must invalidate here, and the
+       cheapest correct way is to replace the array rather than add a signature:
+       every existing writer already does.
+
+       WeakMap, so the Set dies with the rows array it is about. */
     let _livePks = null;
     const livePkSet = () => {
       if (_livePks) return _livePks;
+      let memo = null;
+      try { memo = XlSchema._livePkMemo.get(rows); } catch (x) { memo = null; }
+      if (memo && memo.len === rows.length) { _livePks = memo.set; return _livePks; }
       _livePks = new Set();
       for (let i = 0; i < rows.length; i++) {
         const k = rows[i] && rows[i]._pk;
         if (k) _livePks.add(k);
       }
+      try { XlSchema._livePkMemo.set(rows, { len: rows.length, set: _livePks }); } catch (x) {}
       return _livePks;
     };
     const cols = [];
@@ -18565,7 +18602,15 @@ _ssCommitFill(fd) {
   AppState.save();
   App.navigate('reco');
   if (storeEdits.length) {
-    Reco.applyEdits(tpl, sess, storeEdits, { source: 'grid', trusted: true })
+    /* T-26-7. THE CACHED SCHEMA, like the other three grid doors. Without it
+       applyEdits builds its own, and one fill drag was a whole XlSchema.build -
+       the 2,000-row kind scan per formula extra and, once the template holds
+       one override record, a full pass over every loaded row. Reco._ovSchema
+       builds with { scope:'template', includeHidden:true, showExtras:'all' },
+       which is byte for byte what applyEdits builds for itself when opts
+       carries no scope and no allowPkEdit - and this call carries neither. */
+    Reco.applyEdits(tpl, sess, storeEdits,
+      { source: 'grid', trusted: true, schema: Reco._ovSchema(tpl, sess) })
       .then(res => { saySo((res && res.applied) || 0, (res && res.rejected) || []); App.navigate('reco'); })
       .catch(err => { console.error('_ssCommitFill applyEdits', err); saySo(0, []); });
   } else saySo(0, []);

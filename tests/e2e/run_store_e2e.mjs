@@ -10752,6 +10752,7 @@ const PORT_R29  = 21526;   // R29 T-24R2-2: a hand-added row's frozen business k
 const PORT_R30  = 21530;   // R30 T-24R2-3: a renamed column keeps its place
 const PORT_R31  = 21534;   // R31 T-24R2-7: the AEG link asks the role matrix
 const PORT_R32  = 21538;   // R32 T-24R2-5: a one-component key holding '||'
+const PORT_R33  = 21542;   // R33 T-26-7: the live-key Set is memoised
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -17744,6 +17745,355 @@ section(101, 'R32 T-24R2-5 — a one-component key holding the separator is read
   check(pp.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R32s no page or console error across the whole section', pp.errors.slice(0, 5));
   await pp.ctx.close();
+}
+
+/* ====================================================================
+   T-26-7. ONE OVERRIDE RECORD MADE EVERY XlSchema.build WALK EVERY ROW.
+
+   F6 scoped Decision J.8's store walk to the keys of the rows being exported:
+   one orphan record, from a key nobody had loaded since April, was downgrading
+   a whole numeric column to text, so 2,000 good numbers reached a colleague's
+   workbook as strings and their SUM read 0. The Set that answers "is this
+   record about a row in front of me?" is lazy and built at most once per
+   BUILD - a template with no records never builds it - but one record arms it,
+   and the Set was then thrown away with the build.
+
+   MEASURED AS OPERATION COUNTS, never a wall clock (16.4a). The ticket's own
+   Test asks for "builds two and three within noise of the no-record cost",
+   which is a wall clock and is not what shipped. At 5,000 rows
+   (scratchpad/xs/probes/p1_repro.mjs), counting reads of row._pk:
+
+     one build, no records                4,000
+     one build, ONE record                9,000   <- the walk is one read/row
+     three builds, unchanged sess.data   27,000 against 12,000
+
+   The record is an ORPHAN on purpose. A record on a LOADED key adds exactly
+   one more read - Reco._extraOverride, inside the kind scan, once per row that
+   holds a record - measured at 200 rows as 600 / 801 / 802 for none / one /
+   two. An orphan isolates the walk to the row count exactly, and it is also
+   F6's own hazard shape: the walk exists to DISCOVER that the record is about
+   a row nobody has loaded, and is paid in full to find that out.
+
+   WHAT WAS BUILT, two changes:
+
+     XlSchema._livePkMemo   a WeakMap keyed on the rows array, with its LENGTH
+                            in the entry. Repeated builds over an unchanged
+                            sess.data pay the walk once (R33c, R33d).
+     Reco._ssCommitFill     passes Reco._ovSchema(tpl, sess), like the grid's
+                            other three override doors, so the fill drag makes
+                            applyEdits build nothing (R33k, R33l, R33m).
+
+   WHY ARRAY IDENTITY PLUS LENGTH IS SOUND, and it is provable from the code
+   rather than assumed: no path re-keys rows IN PLACE on an array that keeps
+   both. sess.data is REPLACED - a new array - by ingestData's concat, by
+   Reco.loadVersionedFile, by App.restoreSession and by every delete, all of
+   which are .filter() or .map(); it is mutated in place only by
+   Reco.ssAddRow's push, which changes the length (R33f, R33g, R33h); and
+   row._pk itself is written only on rows NOT YET in sess.data, because
+   _mintKeysSync's only caller is ingestData (Reco._keyStale's own note walks
+   that), ingestData reserves the property on the mapped rows, and
+   Versioning.appendUpload only fills one that is absent.
+
+   THE CORRECTNESS GATE MATTERS MORE THAN THE COUNT, and finding the arm that
+   carries it took the grid. The Set is what scopes the store walk, so a memo
+   holding the wrong keys would silently undo F6 or J.8. Three arms:
+     R33i  an ORPHAN holding TEXT must NOT downgrade the column (F6).
+     R33j  a LOADED key INSIDE the 2,000-row kind scan DOES downgrade it - but
+           NOT through the Set: Reco._extraValueForRow returns the override for
+           a row that has one, so the scan consumes it directly. The mutation
+           that builds the Set from the wrong rows left this GREEN, which is
+           how that was found.
+     R33n  a LOADED key BEYOND the cap - row 3,000 of 5,001 - is the only shape
+           whose answer comes from the Set and nothing else. That is J.8's own
+           reason for existing: an override typed on row 50,000 never enters
+           the scan, so the sparse store is walked instead of more rows.
+   And R33m2: with the rows array unchanged and the memo warm, changing the
+   store between builds still flips the answer - the memo holds which KEYS are
+   loaded, a fact about the rows; what the store says about them is asked fresh.
+
+   MUTATION GRID: scratchpad/xs/mut/run.py, 9 mutations x the 16 checks of
+   this section's own probe (scratchpad/xs/probes/p2_fix.mjs):
+
+     the memo is never read / never written -> R33d, R33f, R33h
+     the LENGTH is dropped from the key     -> R33h
+     keyed on the SESSION, not the array    -> R33d, R33f
+     the Set skips a row                    -> R33c, R33d, R33f, R33h
+     the Set holds only the first 2,000     -> R33n
+     F6's own orphan filter removed         -> R33i, R33m2
+     the fill drag passes NO schema         -> R33k, R33l
+     ...passes a FRESHLY BUILT one          -> R33l
+   ==================================================================== */
+
+section(102, 'R33 T-26-7 — one override record no longer makes every build walk every row');
+{
+  const XS = makeRoot('share-r33');
+  const brXS = await startBridge(XS.root, PORT_R33); procs.push(brXS.proc);
+  const xs = await openReco(browser, brXS);
+  const NX = 2500;
+
+  const pre = await xs.page.evaluate(`(async function () {
+    const ID = 'TPL_XS', n = ${NX};
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(c => ({
+      name: c, label: c, formats: [], isValue: c === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc','Amount'];
+    /* Calc is the FORMULA column whose numeric kind scan arms the walk. Note is
+       a CUSTOM one, because the fill drag refuses a computed column ("that
+       column is computed in Reco, so there is nothing to copy into it") - so a
+       formula column produces no storeEdits and never reaches applyEdits at
+       all, which is what the first version of this probe measured by accident. */
+    t.additionalColumns = [{ name: 'Calc', type: 'formula', formula: 'NUM({Amount})*2',
+                             allowOverride: true, _cid: U.uid() },
+                           { name: 'Note', type: 'custom', _cid: U.uid() }];
+    t.primaryKeys = ['Doc'];
+    t.editableColumns = [];
+    RecoTemplate.saveTemplate();
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    RecoTemplate.open(ID); App.closeModal();
+    AppState.activeRecoId = ID;
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push({ Doc: 'D' + i, Amount: String(i + 1) });
+    const real = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, rows, ['Doc','Amount']); } finally { window.confirm = real; }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    const S = XlSchema.build(live, sess, { scope: 'template' });
+    const d = (S.cols||[]).find(c => c.name === 'Calc');
+    return { rows: (sess.data||[]).length, pk0: String((sess.data[0]||{})._pk || ''),
+             kind: d ? d.kind : 'NO Calc' };
+  })()`);
+  note('fixture', pre);
+  check(pre.rows === NX && pre.pk0 === 'D0',
+    'R33a PREMISE: ' + NX + ' rows loaded and keyed', pre);
+  check(pre.kind === 'value',
+    'R33b PREMISE: the added formula column scans as NUMERIC (allNum), the only shape whose kind '
+    + 'scan reaches _overrideValuesFor and so the only one that can arm the walk', pre.kind);
+
+  /* THE COUNTER. Every row's _pk becomes a counting accessor and the value is
+     kept aside, so the restore never reads back through the getter. livePkSet
+     reads each row's _pk exactly once per build, so the DIFFERENCE between a
+     window with records and one without is the walk; the other readers inside
+     build are in both numbers and cancel.
+     store: none | orphan | loaded | orphanText | loadedText | farText.
+     `fresh` hands build a brand-new array, which the memo can never have seen -
+     what a filtered or selected export does. */
+  const MEASURE = `(async function (arg) {
+    const [store, builds, between, fresh] = arg;
+    const ID = 'TPL_XS';
+    const tpl = AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    const put = (which) => {
+      const num = { Calc: { k: 'override', v: '7', by: 'x', ts: '' } };
+      const txt = { Calc: { k: 'override', v: 'NOT-A-NUMBER', by: 'x', ts: '' } };
+      AppState.extraValueMaster = AppState.extraValueMaster || {};
+      AppState.extraValueMaster[ID] =
+          which === 'none'       ? {}
+        : which === 'orphan'     ? { 'NOBODY-LOADED-THIS': num }
+        : which === 'loaded'     ? { 'D0': num }
+        : which === 'orphanText' ? { 'NOBODY-LOADED-THIS': txt }
+        : which === 'loadedText' ? { 'D0': txt }
+        : which === 'farText'    ? { 'D2200': txt }
+        : {};
+    };
+    put(store);
+    const data = sess.data || [];
+    const keep = new Array(data.length);
+    let reads = 0;
+    for (let i = 0; i < data.length; i++) {
+      const r = data[i]; const v = r._pk; keep[i] = v;
+      Object.defineProperty(r, '_pk', {
+        configurable: true, enumerable: true,
+        get: function () { reads++; return v; },
+        set: function (x) { keep[i] = x; Object.defineProperty(r, '_pk',
+          { configurable: true, enumerable: true, writable: true, value: x }); } });
+    }
+    let builtSchemas = 0;
+    const realBuild = XlSchema.build;
+    XlSchema.build = function () { builtSchemas++; return realBuild.apply(XlSchema, arguments); };
+    const kinds = [];
+    try {
+      for (let b = 0; b < builds; b++) {
+        if (between && b === builds - 1) put(between);
+        const o = { scope: 'template', includeHidden: true, showExtras: 'all' };
+        if (fresh) o.rows = data.slice();
+        const S = XlSchema.build(tpl, sess, o);
+        const d = (S.cols || []).find(c => c.name === 'Calc');
+        kinds.push(d ? d.kind : 'NO Calc');
+      }
+    } finally {
+      XlSchema.build = realBuild;
+      for (let i = 0; i < data.length; i++) Object.defineProperty(data[i], '_pk',
+        { configurable: true, enumerable: true, writable: true, value: keep[i] });
+    }
+    return { reads: reads, builtSchemas: builtSchemas, rows: data.length, kinds: kinds };
+  })`;
+  const M = (store, builds, between, fresh) => xs.page.evaluate(
+    MEASURE + '(' + JSON.stringify([store, builds, between || null, !!fresh]) + ')');
+
+  const zf = await M('none', 1, null, true);
+  const of1 = await M('orphan', 1, null, true);
+  note('one build on a FRESH array: none / one orphan record', [zf, of1]);
+  check(zf.builtSchemas === 1 && of1.builtSchemas === 1 && of1.reads - zf.reads === NX,
+    'R33c THE FIRST BUILD OVER AN ARRAY THE MEMO HAS NEVER SEEN STILL PAYS THE WALK IN FULL - '
+    + 'exactly ' + NX + ' reads of row._pk, one per row. Nothing was cheated: the walk is the only '
+    + 'way to know which keys are loaded, and this is the cost the fix does not remove',
+    { none: zf.reads, orphan: of1.reads, delta: of1.reads - zf.reads });
+
+  const o3 = await M('orphan', 3);
+  const z3 = await M('none', 3);
+  note('three builds on sess.data: one orphan record / none', [o3, z3]);
+  check(o3.reads - z3.reads === NX,
+    'R33d THE FIX: three builds over an UNCHANGED sess.data pay the walk ONCE between them - ' + NX
+    + ' reads in total, not three times that. Before this round the Set was memoised inside one '
+    + 'build\'s closure and thrown away with it, so every build walked every row again',
+    { orphan: o3.reads, none: z3.reads, delta: o3.reads - z3.reads });
+  check(o3.kinds.length === 3 && o3.kinds.every(k => k === 'value'),
+    'R33e ...and all three builds answer the SAME THING. The memo caches which keys are loaded, '
+    + 'not what the schema concluded from them', o3.kinds);
+
+  await xs.page.evaluate(`(function () {
+    const sess = AppState.recoSessionsOwned.TPL_XS || AppState.recoSessions.TPL_XS;
+    /* A NEW ARRAY, which is what every replace in the app does. */
+    sess.data = sess.data.slice(); return sess.data.length;
+  })()`);
+  const rp = await M('orphan', 3);
+  const rpz = await M('none', 3);
+  note('three builds after sess.data was REPLACED', [rp, rpz]);
+  check(rp.reads - rpz.reads === NX,
+    'R33f REPLACING sess.data WALKS AGAIN - a new array is a cache miss, and that is the whole '
+    + 'invalidation: every path that changes which rows are loaded replaces the array (ingestData\'s '
+    + 'concat, loadVersionedFile, restoreSession, every delete\'s filter). One walk for the new '
+    + 'array, then none', { orphan: rp.reads, none: rpz.reads, delta: rp.reads - rpz.reads });
+
+  const pushed = await xs.page.evaluate(`(function () {
+    const sess = AppState.recoSessionsOwned.TPL_XS || AppState.recoSessions.TPL_XS;
+    const before = sess.data.length;
+    /* Reco.ssAddRow's own mutation: SAME array, one row longer. */
+    sess.data.push({ _id: U.uid(), _pk: 'PUSHED-1', Doc: 'PUSHED-1', Amount: '1' });
+    return { before: before, after: sess.data.length };
+  })()`);
+  const ph = await M('orphan', 3);
+  const phz = await M('none', 3);
+  note('a push, then three builds', [pushed, ph, phz]);
+  check(pushed.after === pushed.before + 1,
+    'R33g PREMISE: Reco.ssAddRow pushes onto sess.data - the SAME array, one row longer, and the '
+    + 'one in-place mutation of it in the app', pushed);
+  check(ph.reads - phz.reads === pushed.after,
+    'R33h ...AND THE LENGTH IN THE KEY IS WHAT CATCHES IT: the push is a cache miss, so the next '
+    + 'build walks all ' + pushed.after + ' rows. Keying on array identity alone would have '
+    + 'answered from a Set that did not know about the added row',
+    { orphan: ph.reads, none: phz.reads, delta: ph.reads - phz.reads, rows: pushed.after });
+
+  /* ---- THE CORRECTNESS GATE: what the Set is FOR. */
+  const ot = await M('orphanText', 2);
+  note('two builds, an ORPHAN record holding TEXT', ot);
+  check(ot.kinds.length === 2 && ot.kinds.every(k => k === 'value'),
+    'R33i F6\'s CONTROL: an ORPHAN record holding a non-numeric value still does NOT downgrade the '
+    + 'column to text - on the memoised build as well as the first. That orphan is the bug F6 '
+    + 'fixed: 2,000 good numbers reached a colleague\'s workbook as strings and their SUM read 0',
+    ot.kinds);
+
+  const lt = await M('loadedText', 2);
+  note('two builds, a LOADED-KEY record holding TEXT, inside the scan', lt);
+  check(lt.kinds.length === 2 && lt.kinds.every(k => k !== 'value'),
+    'R33j A RECORD ON A LOADED KEY INSIDE THE 2,000-ROW KIND SCAN DOES change the column kind - but '
+    + 'NOT through the Set: Reco._extraValueForRow returns the override for a row that has one, so '
+    + 'the scan consumes it directly. The mutation that builds the Set from the wrong rows left '
+    + 'this check GREEN, which is how that was found. R33n is the arm that measures the Set',
+    lt.kinds);
+
+  const ft = await M('farText', 2);
+  note('two builds, a LOADED-KEY record holding TEXT BEYOND the scan', ft);
+  check(ft.kinds.length === 2 && ft.kinds.every(k => k !== 'value'),
+    'R33n THE CORRECTNESS GATE ON THE MEMO: a record on the key of row 2,200 - loaded, but past the '
+    + 'kind scan cap of 2,000 - still downgrades the column, on the memoised build as well as the '
+    + 'first. This answer can only come through the Set, which is Decision J.8\'s own reason for '
+    + 'existing: an override typed on row 50,000 never enters the scan, so the sparse store is '
+    + 'walked instead of more rows. A memo holding the wrong keys loses exactly that - one cell '
+    + 'written as text inside a numeric column, with a quiet load-back because the baseline '
+    + 'recorded the same text', ft.kinds);
+
+  const flip = await M('orphanText', 2, 'loadedText');
+  note('build one orphan-text, build two loaded-text, SAME rows array', flip);
+  check(flip.kinds.length === 2 && flip.kinds[0] === 'value' && flip.kinds[1] !== 'value',
+    'R33m2 AND THE STORE IS STILL READ ON EVERY BUILD: with the rows array unchanged and the memo '
+    + 'warm, changing the store between builds flips the answer. The memo holds which KEYS are '
+    + 'loaded, a fact about the rows; what the store says about them is asked fresh each time',
+    flip.kinds);
+
+  /* ---- THE FILL DRAG, measured AT THE SEAM that changed - the drag also
+     renders, and a render builds a schema of its own that is not this round's. */
+  const fill = await xs.page.evaluate(`(async function () {
+    const ID = 'TPL_XS';
+    const tpl = AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    AppState.extraValueMaster = AppState.extraValueMaster || {};
+    AppState.extraValueMaster[ID] = { 'NOBODY-LOADED-THIS':
+      { Calc: { k: 'override', v: '7', by: 'x', ts: '' } } };
+    /* Type the source cell the drag copies DOWN, through the real door. */
+    await Reco.applyEdits(tpl, sess, [{ row: sess.data[0], col: 'Note', value: 'COPY-ME' }],
+                          { source: 'grid', trusted: true });
+    if (!sess.spreadsheetMode) Reco.toggleSpreadsheetMode();
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 200));
+    const out = { calls: [] };
+    let builds = 0;
+    const realBuild = XlSchema.build;
+    const realApply = Reco.applyEdits;
+    XlSchema.build = function () { builds++; return realBuild.apply(XlSchema, arguments); };
+    /* THE SPY: did the drag hand applyEdits a schema, was it the memoised one,
+       and how many schemas were built INSIDE applyEdits? */
+    Reco.applyEdits = function (t2, s2, edits, opts) {
+      const before = builds;
+      const warm = Reco._ovSchema(t2, s2);
+      const rec = { hadSchema: !!(opts && opts.schema),
+                    isTheMemoisedOne: !!(opts && opts.schema === warm),
+                    source: (opts && opts.source) || '' };
+      const p = realApply.call(Reco, t2, s2, edits, opts);
+      return Promise.resolve(p).then(r => {
+        rec.buildsInside = builds - before; out.calls.push(rec); return r; });
+    };
+    try {
+      window.__toasts = [];
+      /* The handle's own mouseup handler calls this with the drag it recorded;
+         a 20-pixel drag of a floating handle cannot be expressed from the DOM
+         reliably, so the gesture's own commit is called with the rectangle a
+         drag down three rows of Note produces. Everything downstream is real. */
+      Reco._ssCommitFill({ srcCol: 'Note', curCol: 'Note', srcFidx: 0, curFidx: 2 });
+      await new Promise(r => setTimeout(r, 700));
+      out.toasts = (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 110));
+    } finally { XlSchema.build = realBuild; Reco.applyEdits = realApply; }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 300));
+    if (typeof Store.idle === 'function') await Store.idle();
+    const recs = (AppState.extraValueMaster[ID] || {});
+    out.filled = ['D1','D2'].map(k => ((recs[k] || {}).Note || {}).v || null);
+    return out;
+  })()`);
+  note('the fill drag', fill);
+  const fc = (fill.calls || []).filter(c => c.source === 'grid').pop() || {};
+  check(fc.hadSchema === true,
+    'R33k THE FIX, AT THE SEAM: Reco._ssCommitFill now hands applyEdits a schema. It passed none, '
+    + 'so applyEdits built its own - the 2,000-row kind scan per formula extra, plus the full row '
+    + 'walk once the template held one record, on every fill drag', fc);
+  check(fc.isTheMemoisedOne === true && fc.buildsInside === 0,
+    'R33l ...AND IT IS THE MEMOISED SCHEMA Reco._ovSchema holds - the same object the grid\'s other '
+    + 'three override doors pass - so applyEdits builds NOTHING inside. Handing it a freshly built '
+    + 'schema would have moved the cost rather than removed it', fc);
+  check((fill.toasts || []).some(t => /^success/.test(t) && /Filled/.test(t))
+        && fill.filled[0] === 'COPY-ME' && fill.filled[1] === 'COPY-ME',
+    'R33m AND THE GESTURE STILL WORKS: two cells filled and both records reached the store under '
+    + 'the own keys of those rows. Reco._ovSchema builds with scope template, includeHidden true '
+    + 'and showExtras all - byte for byte what applyEdits builds for itself when opts carries no '
+    + 'scope and no allowPkEdit, and this call carries neither, which is why the other three grid '
+    + 'doors can pass it too', { toasts: fill.toasts, filled: fill.filled });
+
+  check(xs.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R33o no page or console error across the whole section', xs.errors.slice(0, 5));
+  await xs.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

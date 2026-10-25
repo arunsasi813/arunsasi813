@@ -2392,6 +2392,77 @@ assert the Set is built once (count it), that builds two and three are within no
 no-record cost, and that mutating `sess.data` rebuilds it. Keep F6's own control beside it: the
 orphan record must still not turn a numeric column into text.
 
+**CLOSED — and two things in the paragraphs above are wrong: the Test asks for a wall clock, which
+this repo's own rule forbids, and the "cheaper where it applies" aside turns out to be the half
+that removes a whole build rather than a walk.**
+
+**Measured as OPERATION COUNTS** (`scratchpad/xs/probes/p1_repro.mjs`), because handover §16.4a is
+explicit that a performance gate is a count of operations and never a wall clock. The ticket's
+**Test** asks to assert "that builds two and three are within noise of the no-record cost" — that
+is a wall clock, and it is not what shipped. Counting reads of `row._pk` at 5,000 rows:
+
+| | reads of `row._pk` |
+|---|---|
+| one build, no records | 4,000 |
+| one build, **one** record | 9,000 — the walk is exactly one read per row |
+| three builds over an unchanged `sess.data` | 27,000 against 12,000 — three full passes |
+
+**The record is an ORPHAN on purpose.** A record on a LOADED key costs the same walk *plus exactly
+one more read* — `Reco._extraOverride`, inside the kind scan, once per row that holds a record
+(measured at 200 rows: 600 / 801 / 802 for none / one / two). An orphan isolates the walk to the
+row count exactly, and it is also F6's own hazard shape, which states the harm in one line: **the
+walk exists to discover that the record is about a row nobody has loaded, and it is paid in full to
+find that out.**
+
+**What shipped, two changes:**
+
+```js
+XlSchema._livePkMemo    // a WeakMap keyed on the rows array, with its LENGTH in the entry
+Reco._ssCommitFill      // passes Reco._ovSchema(tpl, sess), like the other three grid doors
+```
+
+**The invalidation is array identity plus length, and that is provable from the code rather than
+assumed.** The ticket proposes "`Reco._ovSchema`'s signature as the invalidation"; that signature
+covers the column shape and the row count, not the `_pk` values, so it would be both more
+expensive and less exact. What the code actually guarantees: `sess.data` is REPLACED — a new array
+— by `ingestData`'s concat, `Reco.loadVersionedFile`, `App.restoreSession` and every delete (all
+`.filter()` / `.map()`); it is mutated in place only by `Reco.ssAddRow`'s `push`, which changes the
+length; and `row._pk` is written only on rows NOT YET in `sess.data`, because `_mintKeysSync`'s only
+caller is `ingestData` (`Reco._keyStale`'s own note walks that), `ingestData` reserves the property
+on the mapped rows, and `Versioning.appendUpload` only fills one that is absent.
+
+**The fill drag was the bigger half, not the aside.** The ticket calls handing the cached schema
+down "cheaper where it applies". It removes a whole `XlSchema.build` per drag — the 2,000-row kind
+scan *per formula extra*, plus the row walk — where the memo removes only the walk. `Reco._ovSchema`
+builds with `{ scope:'template', includeHidden:true, showExtras:'all' }`, which is byte for byte
+what `applyEdits` builds for itself when `opts` carries no `scope` and no `allowPkEdit`, and
+`_ssCommitFill`'s call carries neither; that is why the grid's other three override doors can pass
+it too. Verified at the seam: the drag hands over a schema, it is the *same object* `_ovSchema`
+holds, and `applyEdits` builds nothing inside.
+
+**THE CORRECTNESS GATE WAS THE HARD PART, AND THE GRID IS WHAT FOUND THE RIGHT ARM.** The Set is
+what scopes Decision J.8's store walk, so a memo holding the wrong keys would silently undo F6 or
+J.8. The obvious arm — a record on a LOADED key whose value is text must downgrade the column —
+**does not measure the Set at all**: `Reco._extraValueForRow` returns the override for a row that
+has one, so the kind scan consumes it directly. The mutation that builds the Set from the wrong
+rows left that check GREEN. The arm that does measure it is a record on a loaded key **beyond the
+2,000-row cap** (row 2,200 of 2,501 in the suite), which is J.8's own reason for existing: an
+override typed on row 50,000 never enters the scan, so the sparse store is walked instead of more
+rows. R33n is that arm; the mutation that builds the Set from only the first 2,000 rows is what
+proves it measures.
+
+**Tests** `run_store_e2e` `[102] R33`, 16 checks: the walk still paid in full on a cold array
+(R33c), once for three warm builds (R33d), the same answer from all three (R33e), both
+invalidations (R33f replace, R33g/R33h push-by-length), F6's control (R33i), the arm that is NOT
+the Set (R33j), the arm that IS (R33n), the store still read per build (R33m2), and the fill drag
+at the seam plus the gesture still working (R33k, R33l, R33m).
+
+**Mutation grid** `scratchpad/xs/mut/run.py`, 9 mutations × those 16 checks — all nine measure.
+
+**And the handover's §5c cost argument is no longer standing on a stale number**, which the ticket
+names as the thing that is "NOT tolerable": §33 records the counts.
+
+
 ## T-26-8  An AEG left holding keyword VALUES with no keyword COLUMN posts EVERY row
 
 **Where** `apps/Reco.html` `Reco.previewEntryFromSelection` —

@@ -203,7 +203,7 @@ means re-reading the stored template from the share at save time, which makes
 | `Reco._setOverride` / `_clearOverride` (added with §5c) | the two writers of a `k:'override'` record, each returning `{ok}` or `{ok:false, reason, message}` | an override is **refused** on a pk-less row, on a key shared by more than one loaded row (it would multiply money into a journal entry) and on a row already posted to the ledger. The revert **deletes** the record: writing the computed value back would freeze it |
 | `Reco.isRowPosted(tpl, sess, row)` (S12) | the ONE answer to "is this number in the general ledger" | there were two, and they disagreed: this read the raw row while `ExcelLink._isPosted` read the enriched one, so a post-entry value typed into an added column made the grid say *open* and the Excel review say *posted*. #26's posted-row refusal **is** this function |
 | `Reco._dupPkCountFor(tpl, sess, pk)` | how many loaded rows share a key, from `ingestData`'s own pass (memoised on the row array, never on `sess`) | a duplicate `_pk` is a tolerated state, and an override keyed on it would be read by every row with that key |
-| `Reco._ovSchema(tpl, sess)` | the grid's **cached** `XlSchema` for override edits | routing an override through `applyEdits` with no `schema` re-runs `XlSchema.build` — its 2,000-row numeric-kind scan per formula extra, **and now F6's O(rows) key Set** — on every keystroke-blur. Re-measured on this tree: **2.893 ms per override** with the cached schema at 200k rows, and `XlSchema.build` alone is **60.8 ms** at that size once the template holds one record (§5c, Cost) |
+| `Reco._ovSchema(tpl, sess)` | the grid's **cached** `XlSchema` for override edits | routing an override through `applyEdits` with no `schema` re-runs `XlSchema.build` — its 2,000-row numeric-kind scan per formula extra, and F6's O(rows) key Set (**memoised per rows array since T-26-7, §33**) — on every keystroke-blur. `Reco._ssCommitFill` was the last grid caller passing no schema and now passes this one. Re-measured on this tree: **2.893 ms per override** with the cached schema at 200k rows, and `XlSchema.build` alone is **60.8 ms** at that size once the template holds one record (§5c, Cost) |
 | `Reco._extraCarried(tpl, sess, row, name)` (added with §5d) | the record when the value in this cell came from **another** file, else null | carried-ness is **derived** (`rec.ds` against `Reco.dataSetOf`), never stored, so the mark clears by itself — which is why `Reco.setTag` has to pass `{force:true}` on a carried cell, or re-entering the value is a no-op and the mark is unclearable |
 | `Reco._carryColumn(tpl, name)` | the added column with the carry box ticked, or null | the twin of `_overrideColumn`, and the same two questions kept apart: `_extraTyped` answers *scope*, this answers *may this column be carried at all* (`custom`/`dropdown`, persisted, not `_ssSingleUse`) |
 | `Reco._promoteCarryForward(tpl, prevExtras)` | moves legacy `sess.manualTags` values of a newly-carried column into the store, in ONE S13 write | without it the operator ticks the box and gets nothing until the period after next. It leaves an existing record byte-identical, which is what makes a second save promote nothing |
@@ -582,8 +582,14 @@ template holding even one record pays an O(rows) `Set` build once per build.
 | any **`applyEdits`** caller that does not pass a `schema` | **yes** |
 
 60 ms on a one-off action is tolerable, and nothing here is on a keystroke path — but this
-section's whole cost argument was written while that function was 2 ms, so it has one —
-**T-26-7**, which names the paying callers by function — and this line.
+section's whole cost argument was written while that function was 2 ms. **T-26-7 is CLOSED (§33)**
+and the table above is the state before it: the Set is now memoised per rows array in
+`XlSchema._livePkMemo`, so repeated builds over an unchanged `sess.data` pay the walk **once**
+(counted: 5,000 rows, three builds, 5,000 reads of `row._pk` between them rather than 15,000), and
+`Reco._ssCommitFill` — the fill drag, the one paying caller that fires on a gesture rather than a
+one-off action — now passes the cached `Reco._ovSchema` like the grid's other three override doors,
+so it builds no schema at all. A **cold** build still pays the walk in full: that cost is the only
+way to know which keys are loaded, and the fix does not pretend otherwise.
 
 **The header count is an honest map-key count** — *"N override(s) stored for this column (some keys
 may not be in the loaded data)"*. Counting the overrides on the loaded rows would need a Set over
@@ -2364,7 +2370,9 @@ three taking the minimum.
 | `XlSchema.build`, 200k rows, template holds **no** records | 3.7 ms vs 3.0 ms — unchanged |
 
 **The `XlSchema.build` regression is in this table because §5c's cost argument rests on that
-function being cheap, and it no longer is.** F6 scoped the store walk to the keys of the rows being
+function being cheap, and it no longer was.** *(Closed by T-26-7 — §33. The rows above are the
+measurement that opened it; the walk is now paid once per rows array rather than once per build,
+and the fill drag pays none.)* F6 scoped the store walk to the keys of the rows being
 exported, which fixed a real money bug — one stale record under an unloaded key had been
 downgrading a whole numeric column to text, so 2,000 good numbers reached a colleague's workbook as
 strings and their SUM read 0 — but the key `Set` is O(rows) and `rows = opts.rows || sess.data`, so
@@ -6641,3 +6649,91 @@ would have happened here if R11g had only counted `asked > 0` against a question
 The lesson is narrower than "check the suite": a premise that reaches its subject through an
 unrelated guard inherits that guard's lifetime. R11h's subject is the latch; the pipe question was
 scaffolding, and scaffolding needs to say what it is standing on.
+
+---
+
+## 33. T-26-7 — the live-key Set outlives its build
+
+### 33.1 What one record cost, counted
+
+F6 scoped Decision J.8's store walk to the keys of the rows being exported, with a lazy Set built
+at most once per **build**. A template with no records never builds it; one record arms it, and the
+Set then died with the build. Counted as operations, never a wall clock (§16.4a), at 5,000 rows:
+
+| | reads of `row._pk` |
+| --- | --- |
+| one build, no records | 4,000 |
+| one build, **one** record | 9,000 — the walk is one read per row, exactly |
+| three builds, unchanged `sess.data` | 27,000 against 12,000 — **three full passes** |
+
+The record measured is an **orphan**. A record on a loaded key costs the same walk plus exactly one
+more read — `_extraOverride`, inside the kind scan, once per row holding a record (200 rows: 600 /
+801 / 802 for none / one / two). The orphan isolates the walk to the row count, and states the harm
+in one line: **the walk exists to discover the record is about a row nobody loaded, and is paid in
+full to learn that.**
+
+### 33.2 The invalidation is provable, not chosen
+
+```js
+XlSchema._livePkMemo = new WeakMap();   // rows array -> { len, set }
+```
+
+The ticket proposed `Reco._ovSchema`'s signature as the invalidation. That signature covers the
+column shape and the row count, not the `_pk` values — more expensive and less exact. What the code
+guarantees instead:
+
+| how `sess.data` changes | effect on the key |
+| --- | --- |
+| `ingestData`'s concat, `loadVersionedFile`, `restoreSession`, every delete | a **new array** — all are `.filter()` / `.map()` |
+| `Reco.ssAddRow`'s `push` | same array, **length + 1** |
+| `row._pk` written in place | **never on a row already in `sess.data`** — `_mintKeysSync`'s only caller is `ingestData` (see `Reco._keyStale`'s note), `ingestData` reserves the property on the mapped rows, `appendUpload` only fills an absent one |
+
+So array identity plus length is exact. A future change that re-keys rows in place must invalidate
+here, and the cheapest correct way is to replace the array rather than add a signature — every
+existing writer already does.
+
+### 33.3 The fill drag was the bigger half, not the aside
+
+The ticket calls handing the cached schema down "cheaper where it applies". It is the larger saving:
+`Reco._ssCommitFill` passing no `schema` made `applyEdits` build a whole schema per drag — the
+2,000-row kind scan **per formula extra**, plus the walk — where the memo removes only the walk.
+`Reco._ovSchema` builds with `{ scope:'template', includeHidden:true, showExtras:'all' }`, byte for
+byte what `applyEdits` builds for itself when `opts` carries no `scope` and no `allowPkEdit`, and
+this call carries neither. That is why the grid's other three override doors can pass it too.
+
+Measured **at the seam**, not at the drag: the drag renders, and a render builds a schema of its own
+that has nothing to do with this round. The spy records that `opts.schema` was present, that it is
+the *same object* `_ovSchema` holds, and that `applyEdits` built nothing inside.
+
+### 33.4 The obvious correctness arm measured nothing, and the grid is what said so
+
+The Set scopes the store walk, so a memo holding the wrong keys would silently undo F6 or J.8.
+
+| arm | does it measure the Set? |
+| --- | --- |
+| an **orphan** holding text must not downgrade the column (R33i) | yes, for F6's direction |
+| a **loaded** key *inside* the 2,000-row scan does downgrade it (R33j) | **no** — `_extraValueForRow` returns the override for a row that has one, so the kind scan consumes it directly |
+| a **loaded** key *beyond* the cap, row 2,200 of 2,501 (R33n) | **yes, and only this one** |
+
+The mutation that builds the Set from the wrong rows left R33j green. That is what sent me looking,
+and R33n is the arm it produced — which is J.8's own reason for existing: an override typed on row
+50,000 never enters the scan, so the sparse store is walked instead of more rows. The mutation that
+builds the Set from only the first 2,000 rows is what proves R33n measures.
+
+**Sixth round running where the fixture, not the grid, was the thing at fault** (see 28.6, 30.6,
+31.4, 32.5) — but with a twist worth keeping: here the grid reported "all mutations measured
+something", and the check that was weak was weak in its *sentence*, not its outcome. R33j claimed
+to measure the Set and did not. A grid that goes all-red can still leave a check asserting the
+wrong reason, and the only tell was one mutation turning fewer things red than its name predicted.
+
+### 33.5 What was deliberately not done
+
+No cache on `_overrideValuesFor` itself. F6's note is explicit that `onlyPks` is optional on purpose
+— the role matrix and the override untick ask what a COLUMN still holds, where a record on an
+unloaded key is precisely the hazard they guard — so narrowing or caching that function would make
+both answer "nothing to worry about" about a stale record that applies the day its key comes back.
+
+The other paying callers (`ExcelLink.schemaFor`, `ExcelLink.diff`, `Reco._xlInit`,
+`Reco._reversePlan`) were left as they are. Each is a one-off action that builds once, and after
+this round the second and later builds over the same loaded rows cost nothing extra; handing each a
+cached schema would be four more call sites for no measured gain.
