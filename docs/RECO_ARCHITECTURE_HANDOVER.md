@@ -6242,3 +6242,108 @@ help, because the next failure leaves a bridge there too. Two genuine faults hid
 `scratchpad/cm/probes/lib.mjs` now frees the port before spawning, by finding the listening socket
 in `/proc/net/tcp` and the process holding its inode. **Any probe copied from another round's
 directory should take that change with it.**
+
+## 29. T-24R2-2 — a hand-added row's frozen business key
+
+### 29.1 Three arms, and the third is not in the ticket
+
+`Reco._ssBlankRow` writes no `_pk` on purpose, so `Reco.rowKey`'s `_ssAdded` branch answered
+`Reco.getRowPK(tpl, row)` **live**, off the cells, every time.
+
+| arm | what `rowKey` answered | the harm |
+| --- | --- | --- |
+| A — a typed key | `NEW-1`, then `NEW-2` once the key cell was edited | the correction stayed under `NEW-1`, unreachable from its own row, silently |
+| B — one DERIVED component | `null` | every door refused the row, while the grid showed `L-D9` for the same column |
+| C — a MULTI-component key with a derived part | `'D9||'` | truthy, accepted everywhere, and not what the extract computes (`D9||L-D9`) |
+
+Arm C is the one the ticket misses, and the screen made it worse rather than better: decision G
+recovers a key extra's value **out of the key**, `'D9||'` splits into exactly `primaryKeys.length`
+parts, and the part for `Look` was `''` — so the derived cell rendered **blank**. Arm B shows
+`L-D9` for the identical formula only because its key is null, so there is nothing to recover and
+the value is computed.
+
+### 29.2 `_bk`, not `_pk` — and why the chokepoint is the assertion that matters
+
+```js
+if (row && row._ssAdded) return row._bk || Reco.getRowPK(tpl, row) || null;
+```
+
+`Reco.writeVerKey` returns `row._pk` and is the key a version row in the shared day file goes
+under. A `_pk` on a session-only row would therefore start appending change rows for a row the
+operator chose **not** to persist, erasing the difference between **+ Row** and **+ Persistent
+Row**. `_bk` carries the business key and nothing else.
+
+Two assertions, deliberately:
+
+- **`R29l2`** — `writeVerKey` answers `null` for all three frozen rows while `_bk` is set. This is
+  the property.
+- **`R29l`** — not one version row reached `reco_data/` across every arm. This is the consequence.
+
+The mutation that freezes into `_pk` turns `R29l2` red and leaves `R29l` **green**, which is
+precisely why both exist: an empty day file would also pass on a build that never wrote one, and
+T-S10-20's point is that the question is asked at the **write**, not at the gesture.
+
+### 29.3 The derived columns ARE computed — the ticket's open decision
+
+```js
+const upto = Reco._keyClosureUpto(tpl);
+const src = upto >= 0 ? Reco._keyScratch(tpl, sess, row, upto, Reco._fullCtx(), {}) : row;
+```
+
+The same machinery the upload mint uses. A hand-added invoice is keyed by the rule the file would
+have keyed it by, so the correction filed on it is applied when the extract next contains that key
+— which is the whole point of letting the row have a key. Nothing new appears on screen: the grid
+already showed those values, which is arm B's premise.
+
+### 29.4 When it refuses to freeze
+
+| condition | why |
+| --- | --- |
+| any component blank | the row is still being typed in; it keeps answering off its cells and its key still **moves** (round 2's behaviour) |
+| any component `#ERR` | an immovable key minted from a broken formula is one no later correction of the formula could undo |
+
+The freeze is the **last** thing that happens to such a row, not the first.
+
+### 29.5 The re-key, and which entry wins
+
+A partial multi-component key is truthy, so a correction can be filed under `'D9||'` before the key
+is complete. `Reco._reKeyRowMasters` re-files the four pk-keyed masters the ticket names —
+`manualOffsetMaster`, `correctionMaster`, `groupMaster`, `commentMaster`.
+
+**An entry already under the frozen key wins** (`R29o2`). The frozen key is the one the extract
+carries, so what is already there belongs to the real row; the hand-added row's partial-key entry
+is the one to drop. The mutation that clobbers it is in the grid.
+
+### 29.6 `_pksig` is absent on a plain-column key, and that is right
+
+`Reco.keyRuleSig` returns `null` unless `Reco._keyExtraSet` is non-empty, because only an **added
+column's definition** can be redefined — a template column's value is on the row. An uploaded row
+on such a template carries no signature either, so the hand-added row matches it. `R29p` asserts
+the absence and `R29p2` the presence on a key that names an extra; read apart, the first looks like
+a gap.
+
+### 29.7 Two faults of this round's own
+
+**The pre-freeze key was read too late.** The freeze first used `Reco.getRowPK` for the "previous"
+answer — which reads the cells **as they are now**, i.e. the new key — so `was === key` and the
+move never happened. `R29o` was red with the correction left under `'D9||'`. `applyEdits` now
+captures the answer **before** the edit lands and passes it in, because only the caller can know
+it:
+
+```js
+const preKey = new Map();
+edits.forEach(e => { const r = e && e.row;
+  if (r && r._ssAdded && !r._bk && !r._pk && !preKey.has(r)) preKey.set(r, String(Reco.rowKey(tpl, r) || '')); });
+```
+
+**A stale comment, found by copying it.** `_ssBlankRow`'s note named *"_ssFillColumn's two,
+_ssCommitCell and _ssClearCell"* as the four writers guarded by `if (row._pk)`. **None of those
+three functions exists.** T-S10-20 folded them into `Reco.writeVerKey` and the list was never
+corrected; I copied it into my own comment before checking, and found it only when the day-file
+control would not go red under the `_pk` mutation. Both notes now name the chokepoint and its real
+callers: `_ssCommit`'s two (`'filled'`, `'changed'`), `_ssClearActive`'s (`'cleared'`), and the
+fill at the paste door.
+
+**The general lesson, which this project keeps paying for in a new place each time: a comment that
+names functions is a comment that rots.** The ones that have survived name a CHOKEPOINT and say
+what it decides. Both corrected notes are written that way.

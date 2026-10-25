@@ -10729,6 +10729,7 @@ const PORT_R25  = 21510;   // R25 T-S10-13: the refused document number says so 
 const PORT_R26  = 21514;   // R26 T-S10-14: the re-minted reversal mirror says so
 const PORT_R27  = 21518;   // R27 T-C27-7/T-C27-9: two added columns with one name
 const PORT_R28  = 21522;   // R28 T-24R2-4: a custom master's own id
+const PORT_R29  = 21526;   // R29 T-24R2-2: a hand-added row's frozen business key
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -16225,6 +16226,443 @@ section(97, 'R28 T-24R2-4 \u2014 a custom master carries its own id, and the del
   check(cm.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R28v no page or console error across the whole section', cm.errors.slice(0, 5));
   await cm.ctx.close();
+}
+
+/* ============================================================ [98] ====
+   R29. T-24R2-2. A row added with + Row had no FROZEN key.
+
+   Reco._ssBlankRow writes no _pk, deliberately: a session-only row has no
+   STORAGE identity because the operator chose + Row over + Persistent Row.
+   Reco.rowKey's _ssAdded branch therefore answered Reco.getRowPK(tpl, row)
+   LIVE, off the cells, every time - and three things followed that are true of
+   no other row shape. All three are measured in
+   scratchpad/ar/probes/a1_repro.mjs:
+
+     A  THE KEY MOVED. File a correction on a row keyed NEW-1, then edit the
+        key cell to NEW-2: rowKey answered NEW-2 and the correction stayed
+        under NEW-1, unreachable from the row that owns it, with nothing said.
+        #24 made every other row's key immovable; this was the one shape where
+        it still moved.
+     B  A SINGLE DERIVED KEY COMPONENT GAVE NO KEY AT ALL. getRowPK reads
+        row[k] and a formula value is not on the row, so rowKey answered null
+        and every door refused the row - "Row has no primary key" - on exactly
+        the templates #24 was about. The GRID showed L-D9 for the same column,
+        so the value existed and the operator could see it.
+     C  AND THE ARM THE TICKET DOES NOT MENTION: on a MULTI-component key the
+        row got a TRUTHY key with the derived part BLANK ('D9||'), which
+        Reco.storeKey accepts - so every door took a key that is not what the
+        extract computes for the same invoice (D9||L-D9), and two invented rows
+        sharing a Doc shared it. Worse, the SCREEN agreed with the wrong key
+        rather than with the formula: decision G recovers a key extra's value
+        out of the key, 'D9||' splits into exactly primaryKeys.length parts,
+        and the part for Look was ''.
+
+   WHAT WAS BUILT: Reco._freezeAddedRowKey, called from Reco.applyEdits over
+   the rows that edit TOUCHED.
+
+   IT FREEZES INTO `_bk`, NOT `_pk`, and that is the whole care of the fix.
+   Reco.writeVerKey returns row._pk and is the key a version row in the shared
+   day file goes under, so a _pk here would start appending change rows for a
+   row the operator chose not to persist - erasing the difference between the
+   two buttons. R29l2 asserts the CHOKEPOINT (writeVerKey answers null for all
+   three frozen rows) and R29l the consequence (not one version row in
+   reco_data/ across every arm). The chokepoint assertion is the one that
+   matters: an empty day file alone would also pass on a build that never
+   wrote one, and T-S10-20's whole point is that the question is asked at the
+   write.
+
+   THE DECISION THE TICKET LEFT OPEN - whether the derived columns are
+   computed at all for a row the operator is inventing - is YES, with
+   Reco._keyScratch over Reco._keyClosureUpto: the SAME machinery the upload
+   mint uses. So a hand-added invoice is keyed by the rule the file would have
+   keyed it by, and the correction filed on it is applied when the extract next
+   contains that key. That is the whole point of letting the row have one.
+
+   WHEN IT FREEZES: every component non-blank, and none of them '#ERR'
+   (R29q, R29s). A half-filled row keeps answering off its cells and its key
+   still MOVES (R29r) - round 2's behaviour, and what keeps a row being typed
+   in answerable at all. The freeze is the last thing that happens to such a
+   row, not the first.
+
+   AND IT MOVES WHAT WAS ALREADY FILED (R29o). Arm C's shape is reachable: a
+   partial multi-component key is truthy, so a correction can be filed under
+   'D9||' before the key is complete. The four pk-keyed masters the ticket
+   names are re-filed under the frozen key - and an entry ALREADY under that
+   key WINS (R29o2), because the frozen key is the one the extract carries, so
+   what is already there belongs to the real row.
+
+   R29p AND R29p2 ARE A PAIR, and the first looks like a gap until the second
+   is read: a key of plain TEMPLATE columns gets NO _pksig, because
+   Reco.keyRuleSig returns null unless the key names an ADDED column - only a
+   definition can be redefined, and an uploaded row on such a template carries
+   no signature either. On a key that DOES name an added column the row
+   carries it, equal to keyRuleSig for the template, so T-S10-19's machinery
+   reads this row exactly as it reads an uploaded one.
+
+   A STALE COMMENT THIS ROUND FOUND BY COPYING IT. _ssBlankRow's note named
+   "_ssFillColumn's two, _ssCommitCell and _ssClearCell" as the four writers
+   guarded by `if (row._pk)`. None of those three functions exists: T-S10-20
+   folded them into Reco.writeVerKey and the list was never corrected. Both
+   notes now name the chokepoint and its real callers.
+
+   MUTATION GRID: scratchpad/ar/mut/run.py, 10 mutations x the 23 checks of
+   this section's own probe (scratchpad/ar/probes/a2_fix.mjs):
+
+     the freeze is never called            -> ten checks
+     frozen into _pk instead of _bk        -> R29a/c/d/h/i/j/l2/n
+     rowKey ignores the frozen answer      -> R29e/h/i/j/k
+     the closure is never computed         -> R29h/i/j/k/l2/p2
+     a blank component does not stop it    -> R29m/n/o/o2/q/r
+     an #ERR component does not stop it    -> R29s
+     the four masters are not re-keyed     -> R29o
+     the pre-edit key is read too late     -> R29o
+     the signature is not stamped          -> R29p2
+     the re-key clobbers what is there     -> R29o2
+
+   THE EIGHTH IS A BUG THIS ROUND HAD AND THE PROBE CAUGHT: the freeze first
+   read the pre-freeze answer with getRowPK, which reads the cells as they are
+   NOW - i.e. the new key - so the move never happened and R29o was red with
+   the correction left under 'D9||'. applyEdits now captures the answer BEFORE
+   the edit lands and passes it in, because only the caller can know it.
+   ==================================================================== */
+const R29_MK = `(async function (arg) {
+  const [ID, pks, extras] = arg;
+  RecoTemplate.create();
+  const t = RecoTemplate._editing;
+  t.id = ID; t.name = ID;
+  t.columns = ['Doc','Amount'].map(n => ({
+    name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+  t.valueColumn = 'Amount';
+  t.displayColumns = ['Doc','Amount'];
+  t.additionalColumns = extras;
+  t.primaryKeys = pks;
+  t.enableCorrections = true;
+  RecoTemplate.saveTemplate();
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  if (!live) return { FAILED: 'template not stored' };
+  /* The editor may prune a key it does not like; set it back so the arm
+     measures the STATE it is about and reports what the editor thought. */
+  const prunedTo = (live.primaryKeys || []).slice();
+  live.primaryKeys = pks.slice();
+  RecoTemplate.open(ID); App.closeModal();
+  AppState.activeRecoId = ID;
+  const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+  if (!sess) return { FAILED: 'no session' };
+  Reco.ensureSessionShape(sess, live);
+  sess.data = [];
+  sess.spreadsheetMode = true;
+  return { prunedTo: prunedTo, pks: (live.primaryKeys||[]).slice() };
+})`;
+
+/* + Row, then type into a column through the real cell door. */
+const R29_ADD = `(async function (arg) {
+  const [ID, col, val] = arg;
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+  AppState.activeRecoId = ID;
+  window.__toasts = [];
+  Reco.ssAddRow(false);
+  const row = sess.data[sess.data.length - 1];
+  await Reco.applyEdits(live, sess, [{ row: row, col: col, value: val }],
+                        { source: 'grid', trusted: true });
+  await AppState.flush();
+  if (typeof Store.idle === 'function') { await Store.idle(); }
+  return { rowId: row._id, hasPk: !!row._pk, pk: String(row._pk || ''),
+           bk: String(row._bk || ''), pksig: String(row._pksig || ''),
+           ssAdded: !!row._ssAdded,
+           rowKey: (function () { const k = Reco.rowKey(live, row); return k == null ? null : String(k); })(),
+           cells: JSON.parse(JSON.stringify(Object.keys(row).filter(k => k[0] !== '_')
+             .reduce((o, k) => { o[k] = row[k]; return o; }, {}))),
+           toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+})`;
+
+const R29_STATE = `(function (ID) {
+  const live = AppState.recoTemplates.find(x => x.id === ID);
+  const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+  const row = sess.data[sess.data.length - 1];
+  let grid = {};
+  Reco._fullPass();
+  try { grid = JSON.parse(JSON.stringify(Reco.rowFull(live, sess, row))); }
+  finally { Reco._fullEnd(); }
+  const k = Reco.rowKey(live, row);
+  return { rowKey: k == null ? null : String(k),
+           bk: String(row._bk || ''), hasPk: !!row._pk,
+           gridLook: grid.Look === undefined ? '(absent)' : String(grid.Look),
+           corrMaster: JSON.parse(JSON.stringify((AppState.correctionMaster||{})[ID] || {})),
+           storeKey: (function () {
+             try { const s = Reco.storeKey(live, row); return s == null ? null : String(s); }
+             catch (e) { return 'threw: ' + String(e && e.message); } })() };
+})`;
+section(98, 'R29 T-24R2-2 \u2014 a hand-added row freezes its business key, and gains no storage identity');
+{
+  const RW = makeRoot('share-r29');
+  const brRW = await startBridge(RW.root, PORT_R29); procs.push(brRW.proc);
+  const rw = await openReco(browser, brRW);
+  /* ---- ARM A: a TYPED key, and the key cell edited after a correction. */
+  await rw.page.evaluate(R29_MK + '(' + JSON.stringify(['TPL_A2', ['Doc'], []]) + ')');
+  const a = await rw.page.evaluate(R29_ADD + '(' + JSON.stringify(['TPL_A2', 'Doc', 'NEW-1']) + ')');
+  note('arm A — the added row', a);
+  const aCorr = await rw.page.evaluate(`(async function () {
+    const ID = 'TPL_A2';
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    const row = sess.data[sess.data.length - 1];
+    window.__toasts = [];
+    /* The correction door, by row id, as the panel calls it. */
+    Reco.applyCorrection(sess.data.indexOf(row), 'Amount', '99', null, row._id);
+    await new Promise(r => setTimeout(r, 250));
+    await AppState.flush();
+    if (typeof Store.idle === 'function') { await Store.idle(); }
+    return { toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg),
+             keyNow: String(Reco.rowKey(live, row) || ''),
+             corrMaster: JSON.parse(JSON.stringify((AppState.correctionMaster||{})[ID] || {})) };
+  })()`);
+  note('arm A — after the correction', aCorr);
+  const aMoved = await rw.page.evaluate(`(async function () {
+    const ID = 'TPL_A2';
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    const row = sess.data[sess.data.length - 1];
+    window.__toasts = [];
+    await Reco.applyEdits(live, sess, [{ row: row, col: 'Doc', value: 'NEW-2' }],
+                          { source: 'grid', trusted: true });
+    await AppState.flush();
+    if (typeof Store.idle === 'function') { await Store.idle(); }
+    const keyNow = String(Reco.rowKey(live, row) || '');
+    const cm = (AppState.correctionMaster||{})[ID] || {};
+    return { toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg),
+             keyNow: keyNow, filedUnder: Object.keys(cm),
+             reachable: !!cm[keyNow], pk: String(row._pk || '(none)'),
+             bk: String(row._bk || ''), cellNow: String(row.Doc || '') };
+  })()`);
+  note('arm A — after editing the key cell', aMoved);
+
+  check(a.ssAdded === true && a.hasPk === false,
+    'R29a PREMISE: + Row gives a row with _ssAdded and NO _pk - deliberately, because four version '
+    + 'writers are guarded by nothing but `if (row._pk)`', { ssAdded: a.ssAdded, pk: a.pk });
+  check(a.rowKey === 'NEW-1',
+    'R29b PREMISE: and Reco.rowKey answers NEW-1 for it', a.rowKey);
+  check(aCorr.corrMaster['NEW-1'] && aCorr.corrMaster['NEW-1'].Amount,
+    'R29b2 PREMISE: a correction filed on it really reaches the correction master, under NEW-1',
+    aCorr.corrMaster);
+  check(a.bk === 'NEW-1',
+    'R29c THE FIX, ARM A: the key FROZE into _bk on the edit that completed it', a.bk);
+  check(a.hasPk === false,
+    'R29d AND NOT INTO _pk, which is the whole care of this fix: writeVerKey returns row._pk and four '
+    + 'writers are guarded by nothing but `if (row._pk)`, so a _pk here would start appending change '
+    + 'rows for a session-only row to the SHARED day file and erase the difference between + Row and '
+    + '+ Persistent Row', { pk: a.pk, bk: a.bk });
+  check(aMoved.keyNow === 'NEW-1' && aMoved.filedUnder.join(',') === 'NEW-1'
+        && aMoved.reachable === true,
+    'R29e THE HARM IS GONE: the key cell was edited to NEW-2 and the row\'s key STAYED NEW-1, so the '
+    + 'correction filed on it is still reachable from the row that owns it. It answered NEW-2 before, '
+    + 'leaving the correction orphaned with nothing said', aMoved);
+  check(aMoved.cellNow === 'NEW-2',
+    'R29f ...and the CELL still shows what the operator typed. The key is frozen, not the data - the '
+    + 'same arrangement every uploaded row has', aMoved.cellNow);
+
+  /* ---- ARM B: a SINGLE derived key component. */
+  await rw.page.evaluate(R29_MK + '(' + JSON.stringify(['TPL_B2', ['Look'],
+    [{ name: 'Look', type: 'formula', formula: 'CONCAT("L-",{Doc})' }]]) + ')');
+  const b = await rw.page.evaluate(R29_ADD + '(' + JSON.stringify(['TPL_B2', 'Doc', 'D9']) + ')');
+  const bState = await rw.page.evaluate(R29_STATE + "('TPL_B2')");
+  note('arm B — the added row', b); note('arm B — the state', bState);
+  check(bState.gridLook === 'L-D9',
+    'R29g PREMISE: the GRID shows the derived column for a hand-added row - the value exists and the '
+    + 'operator can see it', bState.gridLook);
+  check(bState.rowKey === 'L-D9' && bState.bk === 'L-D9',
+    'R29h THE FIX, ARM B: a SINGLE derived key component now gives the row a key, equal to the '
+    + 'formula\'s own value. It answered NULL before, and every door refused the row - "Row has no '
+    + 'primary key" - on exactly the templates #24 was about. Reco._keyScratch over '
+    + 'Reco._keyClosureUpto is the SAME machinery the upload mint uses, so this invented invoice is '
+    + 'keyed by the rule the file would have keyed it by', bState);
+  check(bState.storeKey === 'L-D9' && bState.hasPk === false,
+    'R29i ...and Reco.storeKey accepts it, so the offset, the correction, the group and the comment '
+    + 'doors all take the row - while _pk is still absent', bState);
+
+  /* ---- ARM C: a MULTI-component key with a derived part. */
+  await rw.page.evaluate(R29_MK + '(' + JSON.stringify(['TPL_C2', ['Doc', 'Look'],
+    [{ name: 'Look', type: 'formula', formula: 'CONCAT("L-",{Doc})' }]]) + ')');
+  const c = await rw.page.evaluate(R29_ADD + '(' + JSON.stringify(['TPL_C2', 'Doc', 'D9']) + ')');
+  const cState = await rw.page.evaluate(R29_STATE + "('TPL_C2')");
+  const cPk = await rw.page.evaluate(`(function () {
+    const t = AppState.recoTemplates.find(x => x.id === 'TPL_C2');
+    const sig = Reco.keyRuleSig(t);
+    return { sig: sig == null ? '' : String(sig) };
+  })()`);
+  note('arm C — the added row', c); note('arm C — the state', cState);
+  check(cState.rowKey === 'D9||L-D9' && cState.bk === 'D9||L-D9',
+    'R29j THE FIX, ARM C - THE ARM THE TICKET DOES NOT MENTION: the multi-component key now carries '
+    + 'the derived part. It was \'D9||\' before - truthy, accepted by every door, and not what the '
+    + 'extract computes for the same invoice, so two invented rows sharing a Doc shared it', cState);
+  check(c.pksig !== '' && c.pksig === cPk.sig,
+    'R29p2 AND ON A KEY THAT NAMES AN ADDED COLUMN THE ROW CARRIES THE RULE\'S SIGNATURE, equal to '
+    + 'Reco.keyRuleSig for the template - so T-S10-19\'s machinery reads this row exactly as it '
+    + 'reads an uploaded one, and a later key-rule change refuses it rather than silently keeping '
+    + 'a key the rule no longer computes', { row: c.pksig, tpl: cPk.sig });
+  check(cState.gridLook === 'L-D9',
+    'R29k AND THE SCREEN NOW AGREES WITH THE FORMULA: decision G recovers a key extra\'s value out of '
+    + 'the key, and the key finally has that part in it. The cell rendered BLANK before, because '
+    + '\'D9||\' split into exactly primaryKeys.length parts and the part for Look was empty',
+    cState.gridLook);
+
+  /* ---- ARM D: NOTHING REACHED THE SHARED DAY FILE. G19's assertion, kept:
+     the freeze gives the row a business key and no storage identity, so the
+     version writers stay off for it. */
+  /* Inlined rather than imported: this suite has no dayText helper, and the
+     one assertion that needs it is right here. */
+  const dayTextOf = (root) => { const out = [];
+    const walk = d => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+      for (const e of es) { const q = path.join(d, e.name);
+        if (e.isDirectory()) walk(q); else if (/\.csv$/.test(e.name)) out.push(fs.readFileSync(q, 'utf8')); } };
+    walk(path.join(root, 'reco_data')); return out.join('\n'); };
+  const dayD = dayTextOf(RW.root);
+  note('arm D \u2014 the day files', dayD);
+  /* AND THE CHOKEPOINT ITSELF, which is what actually decides this: T-S10-20
+     moved the question to the WRITE, so asserting writeVerKey is stronger than
+     driving one of its callers - and an empty day file alone would also pass on
+     a build that simply never wrote one. */
+  const verKey = await rw.page.evaluate(`(function () {
+    const out = {};
+    [['TPL_A2','the typed key'], ['TPL_B2','the single derived key'],
+     ['TPL_C2','the multi-component key']].forEach(pair => {
+      const ID = pair[0];
+      const live = AppState.recoTemplates.find(x => x.id === ID);
+      const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+      const row = sess.data[sess.data.length - 1];
+      const vk = Reco.writeVerKey(live, sess, row, 'test');
+      out[ID] = { verKey: vk == null ? null : String(vk),
+                  bk: String(row._bk || ''), pk: String(row._pk || '') };
+    });
+    return out;
+  })()`);
+  note('arm D \u2014 the write chokepoint', verKey);
+  check(Object.keys(verKey).every(k => verKey[k].verKey === null && verKey[k].bk !== ''),
+    'R29l2 CONTROL, AT THE CHOKEPOINT: Reco.writeVerKey answers NULL for all three frozen rows while '
+    + '_bk is set - so no caller of it can append a version row for a row the operator chose not to '
+    + 'persist. This is the assertion the design actually rests on; the empty day file below is the '
+    + 'consequence', verKey);
+  check(dayD.length === 0,
+    'R29l CONTROL, ON THE FILES: NOT ONE version row was appended to reco_data/ across every arm '
+    + 'above - three hand-added rows, a correction, and four key-cell edits. This is G19\'s '
+    + 'assertion and it is what _pk would have broken', dayD);
+
+  /* ---- ARM E: THE RE-KEY. A partial multi-component key is truthy, so a
+     correction can be filed before the key is complete. */
+  await rw.page.evaluate(R29_MK + '(' + JSON.stringify(['TPL_E2', ['Doc', 'Ref'], []]) + ')');
+  const e = await rw.page.evaluate(`(async function () {
+    const ID = 'TPL_E2';
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    live.columns.push({ name: 'Ref', label: 'Ref', formats: [], isValue: false, isDate: false });
+    live.displayColumns = ['Doc','Ref','Amount'];
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    AppState.activeRecoId = ID;
+    Reco.ssAddRow(false);
+    const row = sess.data[sess.data.length - 1];
+    /* STEP 1: Doc only. Ref is blank, so the key is partial - and truthy. */
+    await Reco.applyEdits(live, sess, [{ row: row, col: 'Doc', value: 'D9' }],
+                          { source: 'grid', trusted: true });
+    const partial = { key: String(Reco.rowKey(live, row) || ''), bk: String(row._bk || '') };
+    /* A correction filed under the partial key, which every door accepts. */
+    Reco.applyCorrection(sess.data.indexOf(row), 'Amount', '77', null, row._id);
+    await new Promise(r => setTimeout(r, 250));
+    const filedPartial = Object.keys((AppState.correctionMaster||{})[ID] || {});
+    /* AND SOMETHING ALREADY UNDER THE KEY THE FREEZE IS ABOUT TO TAKE - the
+       real invoice, from a file somebody loaded earlier. The frozen key is the
+       one the extract carries, so this entry belongs to the real row and must
+       WIN over the hand-added row's partial-key one. */
+    const cmPre = AppState.correctionMaster[ID] = AppState.correctionMaster[ID] || {};
+    cmPre['D9||R1'] = { Amount: { oldVal: '0', newVal: 'FROM-THE-FILE' } };
+    /* STEP 2: Ref, which completes it. */
+    await Reco.applyEdits(live, sess, [{ row: row, col: 'Ref', value: 'R1' }],
+                          { source: 'grid', trusted: true });
+    await AppState.flush();
+    if (typeof Store.idle === 'function') { await Store.idle(); }
+    const cm = (AppState.correctionMaster||{})[ID] || {};
+    const keyNow = String(Reco.rowKey(live, row) || '');
+    return { partial: partial, filedPartial: filedPartial, keyNow: keyNow,
+             bk: String(row._bk || ''), filedNow: Object.keys(cm),
+             reachable: !!(cm[keyNow] && cm[keyNow].Amount),
+             newVal: String(((cm[keyNow]||{}).Amount||{}).newVal || ''),
+             pksig: String(row._pksig || '') };
+  })()`);
+  note('arm E \u2014 the re-key', e);
+  check(e.partial.key === 'D9||' && e.partial.bk === '' && e.filedPartial.join(',') === 'D9||',
+    'R29m PREMISE: a PARTIAL multi-component key is truthy, nothing is frozen yet, and a correction '
+    + 'filed on the row really goes under it. This is the shape that makes a re-key necessary', e);
+  check(e.keyNow === 'D9||R1' && e.bk === 'D9||R1',
+    'R29n the second edit completed the key and froze it', e);
+  check(e.filedNow.join(',') === 'D9||R1' && e.reachable === true,
+    'R29o THE RE-KEY: the correction filed under the partial key was MOVED to the frozen one, so it '
+    + 'is still reachable from the row. Leaving it would be the same orphaning arm A is about',
+    { filedNow: e.filedNow, reachable: e.reachable });
+  check(e.newVal === 'FROM-THE-FILE',
+    'R29o2 CONTROL, AND IT IS THE RIGHT WAY ROUND: where something was ALREADY filed under the key '
+    + 'the freeze takes, that entry WINS and the hand-added row\'s partial-key one is dropped. The '
+    + 'frozen key is the one the extract carries, so what is already there belongs to the real row',
+    { newVal: e.newVal, filedNow: e.filedNow });
+  check(e.pksig === '',
+    'R29p AND NO SIGNATURE ON THIS ONE, which is right rather than a gap: arm E\'s key is two plain '
+    + 'TEMPLATE columns, and Reco.keyRuleSig returns null unless the key names an ADDED column - '
+    + 'only a definition can be redefined. An uploaded row on this template carries none either. '
+    + 'Arm C, whose key has an extra, is where the signature is asserted', e.pksig);
+
+  /* ---- ARM F: the two refusals. A half-filled key does not freeze, and a
+     broken formula does not freeze a key minted from an error. */
+  await rw.page.evaluate(R29_MK + '(' + JSON.stringify(['TPL_F2', ['Doc', 'Ref'], []]) + ')');
+  const f1 = await rw.page.evaluate(`(async function () {
+    const ID = 'TPL_F2';
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    live.columns.push({ name: 'Ref', label: 'Ref', formats: [], isValue: false, isDate: false });
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    AppState.activeRecoId = ID;
+    Reco.ssAddRow(false);
+    const row = sess.data[sess.data.length - 1];
+    await Reco.applyEdits(live, sess, [{ row: row, col: 'Doc', value: 'D1' }],
+                          { source: 'grid', trusted: true });
+    const half = { bk: String(row._bk || ''), key: String(Reco.rowKey(live, row) || '') };
+    /* And it still MOVES while half-filled, which is round 2's behaviour and is
+       what keeps a row being typed in answerable. */
+    await Reco.applyEdits(live, sess, [{ row: row, col: 'Doc', value: 'D2' }],
+                          { source: 'grid', trusted: true });
+    return { half: half, afterSecond: String(Reco.rowKey(live, row) || ''),
+             bkAfter: String(row._bk || '') };
+  })()`);
+  await rw.page.evaluate(R29_MK + '(' + JSON.stringify(['TPL_G2', ['Doc', 'Look'],
+    [{ name: 'Look', type: 'formula', formula: 'NOSUCHFUNCTION({Doc})' }]]) + ')');
+  const f2 = await rw.page.evaluate(`(async function () {
+    const ID = 'TPL_G2';
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    AppState.activeRecoId = ID;
+    Reco.ssAddRow(false);
+    const row = sess.data[sess.data.length - 1];
+    await Reco.applyEdits(live, sess, [{ row: row, col: 'Doc', value: 'D1' }],
+                          { source: 'grid', trusted: true });
+    let computed = '';
+    Reco._fullPass();
+    try { computed = String(Reco._extraComputedValue(live, sess, row, live.additionalColumns[0])); }
+    finally { Reco._fullEnd(); }
+    return { bk: String(row._bk || ''), computed: computed,
+             key: String(Reco.rowKey(live, row) || '') };
+  })()`);
+  note('arm F \u2014 half-filled', f1); note('arm F \u2014 a broken formula', f2);
+  check(f1.half.bk === '' && f1.half.key === 'D1||',
+    'R29q CONTROL: a HALF-FILLED key does not freeze - Ref is still blank, so there is nothing to '
+    + 'freeze yet and the row keeps answering off its cells', f1.half);
+  check(f1.afterSecond === 'D2||' && f1.bkAfter === '',
+    'R29r ...and it still MOVES while half-filled, which is round 2\'s behaviour and is what keeps a '
+    + 'row being typed in answerable at all. The freeze is the LAST thing that happens to it, not '
+    + 'the first', f1);
+  check(f2.computed === '#ERR' && f2.bk === '',
+    'R29s CONTROL: a BROKEN FORMULA in a key component does not freeze either. The operator would '
+    + 'otherwise be left with an immovable key minted from an error, which no later correction of '
+    + 'the formula could undo', f2);
+
+
+  check(rw.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R29t no page or console error across the whole section', rw.errors.slice(0, 5));
+  await rw.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

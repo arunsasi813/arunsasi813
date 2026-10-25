@@ -17326,12 +17326,19 @@ _ssBlankRow(tpl) {
   (tpl.columns || []).forEach(c => { row[c.name] = ''; });
   /* NO _pk HERE, deliberately, and round 2 tried the other way and took it
      back out. A session-only row has no storage identity because the operator
-     chose + Row over + Persistent Row, and FOUR version writers are guarded
-     by nothing but `if (row._pk)` (_ssFillColumn's two, _ssCommitCell and
-     _ssClearCell), so giving it one starts appending change rows for it to the
-     SHARED day file and quietly erases the difference between the two
-     buttons. What such a row needs is a BUSINESS key, and Reco.rowKey works
-     one out from its key cells - see the note there. */
+     chose + Row over + Persistent Row, and giving it one starts appending
+     change rows for it to the SHARED day file, which quietly erases the
+     difference between the two buttons.
+     THE CHOKEPOINT IS Reco.writeVerKey, which returns row._pk and is the key
+     a version row in the day file goes under (T-S10-20 moved the question to
+     the write). Its sheet-mode callers are _ssCommit's two ('filled' and
+     'changed'), _ssClearActive's ('cleared') and the fill at the paste door.
+     (This note used to name "_ssFillColumn's two, _ssCommitCell and
+     _ssClearCell", three functions that no longer exist: T-S10-20 folded them
+     into the chokepoint and the list was never corrected. T-24R2-2 found it
+     while copying it.)
+     What such a row needs is a BUSINESS key, and Reco.rowKey works one out
+     from its key cells and freezes it into _bk - see the note there. */
   return row;
 },
 
@@ -21575,7 +21582,18 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
          behaviour and what the no-op promise requires here, so it is left
          alone. Reco.storeKey is the reader that refuses it; do not add that
          refusal to this one without re-reading decision N. */
-      if (row && row._ssAdded) return Reco.getRowPK(tpl, row) || null;
+      /* T-24R2-2. THE FROZEN ANSWER FIRST, and it is `_bk` and NOT `_pk`.
+         A session-only row must not gain a STORAGE identity: Reco.writeVerKey
+         returns `row._pk` and is the key a version row in the shared day file
+         goes under, so putting the key there would start appending change
+         rows for a row the operator chose not to persist - and quietly erase
+         the difference between + Row and + Persistent Row. `_bk` is the
+         BUSINESS key only - frozen once by Reco._freezeAddedRowKey when every
+         component is filled in, and from then on immovable like every other
+         row's.
+         Still falls back to the live cells while _bk is unset, which is what
+         keeps a half-filled row answerable the way round 2 made it. */
+      if (row && row._ssAdded) return row._bk || Reco.getRowPK(tpl, row) || null;
       return null;
     }
     /* ROUND 2. '_auto_' IS NOT A BUSINESS KEY, IT IS THE ABSENCE OF ONE, and
@@ -21687,6 +21705,104 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     const ac = Reco._extraDef(tpl, k);
     if (ac) { try { return Reco._extraComputedValue(tpl, sess, row, ac); } catch (e) { return ''; } }
     return row && row[k] != null ? row[k] : '';
+  },
+
+  /* ---- T-24R2-2. THE BUSINESS KEY OF A HAND-ADDED ROW, FROZEN ONCE.
+
+     THE HARM, measured (scratchpad/ar/probes/a1_repro.mjs), in three arms:
+       A  a TYPED key moved. File a correction on a + Row row keyed NEW-1,
+          then edit the key cell to NEW-2: rowKey answered NEW-2 and the
+          correction stayed under NEW-1, unreachable from the row that owns
+          it, with nothing said. Every other row's key is immovable; this was
+          the one shape where it was not.
+       B  a SINGLE DERIVED key component gave NO key. getRowPK reads row[k]
+          and a formula value is not on the row, so rowKey answered null and
+          every door refused the row - "Row has no primary key" - on exactly
+          the templates #24 was about. The GRID showed L-D9 for the same
+          column, so the value existed and the operator could see it.
+       C  a MULTI-component key with a derived part gave a TRUTHY key with
+          that part BLANK ('D9||'), which Reco.storeKey accepts, so every
+          door took a key that is not what the extract computes for the same
+          invoice (D9||L-D9) - and two invented rows sharing a Doc shared it.
+          The ticket does not mention this third arm. Worse, the SCREEN agreed
+          with the wrong key rather than with the formula: decision G recovers
+          a key extra's value out of the key, 'D9||' splits into exactly
+          primaryKeys.length parts, and the part for Look is ''.
+
+     WHAT IT COMPUTES, and this is the decision the ticket left open - whether
+     the derived columns are computed at all for a row the operator is
+     inventing. They are, with Reco._keyScratch over Reco._keyClosureUpto:
+     the SAME machinery the upload mint uses, so a hand-added invoice is keyed
+     by the rule the file would have keyed it by, and the correction filed on
+     it is applied when the extract next contains it. That is the whole point
+     of letting the row have a key.
+
+     WHEN IT FREEZES: every component non-blank, and none of them '#ERR'. A
+     half-filled row keeps answering off its cells (round 2's behaviour), and
+     a broken formula must not freeze a key - the operator would be left with
+     an immovable key minted from an error.
+
+     AND IT MOVES WHAT WAS ALREADY FILED. Arm C's shape is reachable: a
+     partial multi-component key is truthy, so a correction can be filed under
+     'D9||' before the key is complete. The four pk-keyed masters the ticket
+     names are re-filed under the frozen key, because leaving them is the same
+     unreachability arm A is about. */
+  _freezeAddedRowKey(tpl, sess, row, wasKey) {
+    if (!row || !row._ssAdded || row._bk || row._pk) return false;
+    const pks = (tpl && tpl.primaryKeys) || [];
+    if (!pks.length) return false;
+    const upto = Reco._keyClosureUpto(tpl);
+    const src = upto >= 0 ? Reco._keyScratch(tpl, sess, row, upto, Reco._fullCtx(), {}) : row;
+    const parts = new Array(pks.length);
+    for (let i = 0; i < pks.length; i++) {
+      const v = src[pks[i]];
+      const str = v == null ? '' : String(v);
+      if (str === '' || str === '#ERR') return false;
+      parts[i] = str;
+    }
+    /* `wasKey` is the answer from BEFORE the edit that completed the key, which
+       only the caller can know - see the note in applyEdits. getRowPK here
+       would read the cells as they are NOW, i.e. the new key, and the move
+       would never happen: measured, A2o red with the correction left under
+       'D9||'. The fallback is for a caller that does not track it, where the
+       cells have not changed and the two are the same thing anyway. */
+    const was = (wasKey == null ? (Reco.getRowPK(tpl, row) || '') : String(wasKey));
+    const key = parts.join('||');
+    row._bk = key;
+    /* The SIGNATURE of the rule that minted it, so T-S10-19's machinery reads
+       this row exactly as it reads an uploaded one. Without it the row is in
+       the no-signature migration class for ever, and a later key-rule change
+       would never refuse it.
+       NULL FOR A KEY OF PLAIN TEMPLATE COLUMNS, and that is right rather than
+       a gap: Reco.keyRuleSig returns null unless Reco._keyExtraSet is
+       non-empty, because only an ADDED column's definition can be redefined -
+       a template column's value is on the row. An uploaded row on such a
+       template carries no signature either, so this matches it. */
+    try { const sig = Reco.keyRuleSig(tpl); if (sig) row._pksig = sig; } catch (e) {}
+    if (was && was !== key) Reco._reKeyRowMasters(tpl, was, key);
+    return true;
+  },
+
+  /* T-24R2-2. The four pk-keyed shared masters the ticket names, re-filed
+     from one key to another for ONE row. Only called by the freeze above, and
+     only when the pre-freeze answer was truthy and different - which needs a
+     partial multi-component key, because a single-component one answers '' and
+     nothing can be filed under it.
+
+     DELIBERATELY NOT MERGED with an entry already under the new key: the
+     frozen key is the one the extract will carry, so anything already there
+     belongs to the real row and must win. A hand-added row's partial-key
+     entry losing to it is the right way round. */
+  _reKeyRowMasters(tpl, was, now) {
+    const id = tpl.id;
+    [['manualOffsetMaster', 1], ['correctionMaster', 1],
+     ['groupMaster', 0], ['commentMaster', 0]].forEach(pair => {
+      const name = pair[0];
+      const m = (AppState[name] || {})[id];
+      if (!m || !Object.prototype.hasOwnProperty.call(m, was)) return;
+      if (!Object.prototype.hasOwnProperty.call(m, now)) m[now] = m[was];
+      delete m[was];
+    });
   },
 
   /* The frozen component as _pk holds it, or NULL when it cannot be
@@ -25524,6 +25640,20 @@ renderRecoTable(tpl, sess) {
        lets the trailing AppState.save() be skipped when an override was the
        only thing that changed - see the end of this function. */
     const ovTouched = []; let ovApplied = 0;
+    /* T-24R2-2. THE KEY A HAND-ADDED ROW ANSWERS BEFORE THIS EDIT. The freeze
+       at the end needs it: anything already filed on the row is filed under
+       the key that was live AT THE TIME, and once the edit has landed
+       getRowPK answers the new value, so the old one is unrecoverable. Only
+       for a row that is _ssAdded and not yet frozen - every other row pays
+       one property read. */
+    const preKey = new Map();
+    edits.forEach(e => {
+      const r = e && e.row;
+      if (r && r._ssAdded && !r._bk && !r._pk && !preKey.has(r)) {
+        let k = null; try { k = Reco.rowKey(tpl, r); } catch (x) { k = null; }
+        preKey.set(r, k == null ? '' : String(k));
+      }
+    });
     const fullCache = new Map();
     const fullOf = row => {
       if (!fullCache.has(row)) fullCache.set(row, extras.length ? Reco._rowWithExtras(tpl, sess, row) : row);
@@ -25721,6 +25851,10 @@ renderRecoTable(tpl, sess) {
       res.sessionOnly.push({ row: s.row, col: s.col, reason: s.reason });
     });
     res.rows = touched.size;
+    /* T-24R2-2. FREEZE THE BUSINESS KEY OF A HAND-ADDED ROW, once its key
+       components are all filled in. Over the rows this edit TOUCHED, so a
+       20,000-row fill pays one property read per row and nothing else. */
+    touched.forEach(r => { try { Reco._freezeAddedRowKey(tpl, sess, r, preKey.get(r)); } catch (e) {} });
     // The render-scoped enriched rows are no longer true for anything this
     // edit touched. The next pass rebuilds the memo from scratch anyway; this
     // covers a caller that reads rowFull between passes.

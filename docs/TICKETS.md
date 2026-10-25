@@ -1139,6 +1139,81 @@ and assert `Reco.rowKey` answers with the formula's value and that the offset re
 `manualOffsetMaster.json` — today it answers null. Keep G19's assertion that nothing is appended
 to `reco_data/<folder>/` for a session-only row.
 
+**CLOSED — and the decision the ticket left open is taken (yes, the derived columns are computed),
+plus a third arm the ticket does not mention and a stale comment found by copying it.**
+
+**Three arms, all measured** (`scratchpad/ar/probes/a1_repro.mjs`):
+
+| arm | the key a `+ Row` row answered | the harm |
+| --- | --- | --- |
+| A — a typed key | `NEW-1`, then `NEW-2` after the key cell was edited | the correction stayed under `NEW-1`, unreachable from the row that owns it, with nothing said |
+| B — a single DERIVED key component | `null` | every door refused the row — *"Row has no primary key"* — while the grid showed `L-D9` for the same column |
+| C — a MULTI-component key with a derived part | `'D9||'` | truthy, so `Reco.storeKey` accepts it and every door takes a key that is **not** what the extract computes (`D9||L-D9`); two invented rows sharing a `Doc` share it |
+
+**Arm C is not in the ticket, and it is worse than it looks:** the SCREEN agreed with the wrong key
+rather than with the formula. Decision G recovers a key extra's value out of the key, `'D9||'`
+splits into exactly `primaryKeys.length` parts, and the part for `Look` was `''` — so the derived
+cell rendered **blank**. Arm B shows `L-D9` for the identical formula only because there the key is
+null, so there is nothing to recover and the value is computed.
+
+**What was built:** `Reco._freezeAddedRowKey`, called from `Reco.applyEdits` over the rows that edit
+touched.
+
+**It freezes into `_bk`, not `_pk`, and that is the whole care of the fix.** `Reco.writeVerKey`
+returns `row._pk` and is the key a version row in the shared day file goes under, so a `_pk` here
+would start appending change rows for a row the operator chose *not* to persist — erasing the
+difference between **+ Row** and **+ Persistent Row**. `R29l2` asserts the **chokepoint**
+(`writeVerKey` answers null for all three frozen rows) and `R29l` the consequence (not one version
+row in `reco_data/` across every arm). The chokepoint assertion is the one that carries the
+weight: an empty day file alone would also pass on a build that never wrote one, and T-S10-20's
+whole point is that the question is asked at the write. The mutation that freezes into `_pk` turns
+`R29l2` red and left `R29l` green, which is exactly why both exist.
+
+**The decision the ticket left open.** *"a hand-added row with a derived key is a row the operator
+is inventing, so the app has to say whether the derived columns are computed for it at all"* — they
+are, through `Reco._keyScratch` over `Reco._keyClosureUpto`: the **same machinery the upload mint
+uses**. So a hand-added invoice is keyed by the rule the file would have keyed it by, and the
+correction filed on it is applied when the extract next contains that key. That is the whole point
+of letting the row have a key, and the grid already showed those values (arm B's premise), so
+nothing new is put on screen.
+
+**When it freezes:** every component non-blank and none of them `#ERR`. A half-filled row keeps
+answering off its cells and its key still **moves** (`R29q`, `R29r`) — round 2's behaviour, and
+what keeps a row being typed in answerable at all. A broken formula does not freeze a key minted
+from an error (`R29s`), which no later correction of the formula could undo.
+
+**And it moves what was already filed.** Arm C's shape is reachable, so a correction can be filed
+under `'D9||'` before the key is complete; the four pk-keyed masters the ticket names are re-filed
+under the frozen key (`R29o`). **An entry already under that key wins** (`R29o2`): the frozen key is
+the one the extract carries, so what is already there belongs to the real row and the hand-added
+row's partial-key entry is the one to drop.
+
+**`R29p` and `R29p2` are a pair, and the first looks like a gap until the second is read.** A key of
+plain template columns gets **no** `_pksig`, because `Reco.keyRuleSig` returns null unless the key
+names an added column — only a *definition* can be redefined, and an uploaded row on such a
+template carries no signature either. On a key that does name an added column the row carries it,
+equal to `keyRuleSig` for the template, so T-S10-19's machinery reads this row exactly as it reads
+an uploaded one.
+
+**A BUG THIS ROUND HAD, AND THE PROBE CAUGHT IT.** The freeze first read the pre-freeze answer with
+`Reco.getRowPK`, which reads the cells **as they are now** — i.e. the new key — so `was === key`
+and the move never happened: `R29o` red with the correction left under `'D9||'`. `applyEdits` now
+captures the answer **before** the edit lands and passes it in, because only the caller can know
+it. The mutation that puts `getRowPK` back is in the grid.
+
+**A STALE COMMENT FOUND BY COPYING IT.** `_ssBlankRow`'s note named *"_ssFillColumn's two,
+_ssCommitCell and _ssClearCell"* as the four writers guarded by `if (row._pk)`. **None of those
+three functions exists** — T-S10-20 folded them into `Reco.writeVerKey` and the list was never
+corrected. I copied it into my own comment before checking, found it when the day-file control
+would not go red, and both notes now name the chokepoint and its real callers (`_ssCommit`'s two,
+`_ssClearActive`'s, and the fill at the paste door).
+
+**Gated by `[98] R29` in `run_store_e2e`** (24 checks). **Mutation grid of 10** in
+`scratchpad/ar/mut/run.py` against the round's own probe (`scratchpad/ar/probes/a2_fix.mjs`), every
+one measuring.
+
+---
+
 
 ## T-24R2-3  Renaming a key component drops it from the key instead of carrying it over
 
