@@ -6457,3 +6457,84 @@ slot 0 then holds a different column, so a positional pairing carries the key to
 
 **Same lesson as 28.6 and 27.7, from a third direction: when a mutation measures nothing, suspect
 the fixture before the grid.** Three rounds running, that has been the answer.
+
+## 31. T-24R2-7 — the AEG link is S11's third direction
+
+### 31.1 Why the matrix could not see it
+
+`XlSchema.aegTemplateFor` returns null unless `aegIntegration.enabled`. So with the integration off
+— the default for a new template — `_exclusiveRoleConflict` has no linked template to consult and
+answers null for every column. And `enabled` / `aegTemplateId` were **raw inline assignments** in
+the editor's own HTML:
+
+```html
+onchange="RecoTemplate._editing.aegIntegration.enabled=this.checked; RecoTemplate.renderEditor()"
+onchange="RecoTemplate._editing.aegIntegration.aegTemplateId=this.value; RecoTemplate.renderEditor()"
+```
+
+Two clicks in the order a person works — tick the override box while off, then switch on and link —
+and the matrix is never asked again. Measured (`scratchpad/ag/probes/g1_repro.mjs`): null before,
+a refusal after, nothing said either time, and the template stored with the integration on, the
+link made, and an AEG control column carrying a manual override.
+
+### 31.2 The gate asks about the template AS IT WOULD BE
+
+```js
+_aegLinkGate(t, what, revert) {
+  const bad = RecoTemplate._aegLinkConflicts(t);
+  if (!bad.length) return true;
+  const hard = bad.filter(b => b.clearable);
+  if (hard.length) { revert(); /* name the columns and the remedy */ return false; }
+  /* warn, listing the columns and their counts */ return true;
+}
+```
+
+Both handlers **apply** the change, then ask, then put it back on a refusal. Predicting the answer
+from the change would mean a second copy of the matrix's reasoning; applying it first means the
+existing matrix answers unchanged.
+
+`_aegLinkConflicts` asks only about roles the column actually **holds** — `allowOverride` is held
+by the box **or** by stored records (RC-7's rule), `carryForward` by its own flag. Asking about a
+role a column does not hold answers about some other clash, which is not this gate's business.
+
+### 31.3 The decision the ticket leaves open, taken as a split
+
+The ticket proposes one answer — allow and warn — because it worries a template already in the
+state could never turn its integration on. That gives up the refusal where it is most useful:
+
+| conflict | outcome | why |
+| --- | --- | --- |
+| **clearable** (box ticked) | refused, naming columns + remedy | the fix is one click away in this editor |
+| **unclearable** (box off, records remain) | allowed, warned | nothing to untick; refusing is a dead end |
+
+MR-1 refuses the posting either way, which is what makes the warning sufficient.
+
+### 31.4 Three mutations that measured nothing, and why each was the fixture
+
+| mutation | why it looked unmeasurable | the arm that fixed it |
+| --- | --- | --- |
+| the ENABLE handler does not gate | enabling comes first, so nothing is linked yet and only the link handler can refuse | `R31l`/`R31m`: a stored `aegTemplateId` with the integration off — what linking and then unticking leaves behind |
+| the refusal does not list the columns | with ONE conflicting column the matrix's own sentence quotes it anyway | `R31n`/`R31o`: two columns, where the list says both and the matrix says one |
+| turning it OFF is gated too | turning off makes `aegTemplateFor` null, so the AEG roles vanish and there is nothing to refuse | `R31q`/`R31r`: see below |
+
+**The third one is the interesting one, and the grid is what found it.** Gating the off-direction
+looks free. It is not, for a reason that has nothing to do with the AEG link:
+`_aegLinkConflicts` asks the matrix, and the matrix **also** answers about the
+`{ key component, allowOverride, carryForward }` triple. A column that is both a key component and
+override-flagged — a state the pk matrix prevents today and an older build could have stored —
+would then make turning the integration **off** the one thing refused. That is what the `on &&`
+guard buys, and nothing else in the round would have told me.
+
+**Fourth round running where `red=NONE` meant the fixture, not the grid** (see 28.6, 30.6). The
+rule is now reliable enough to state as one: when a mutation measures nothing, the first question
+is what state the arms never reach.
+
+### 31.5 What was deliberately not done
+
+The ticket's second route — "the matrix matches input columns by `name` only while the AEG loop
+falls back to `r[ic.label]`" — needs no S11 gap: MR-1's read set already covers it by adding the
+label, which the ticket itself records. Left as it is.
+
+No save-time gate was added either. A template already in the conflicting state is not made worse
+by an unrelated save, and refusing one would block an import; the journal door is the backstop the
+ticket names.

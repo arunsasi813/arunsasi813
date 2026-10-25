@@ -13246,11 +13246,11 @@ defaultTemplate() {
     let h = '';
     // AEG Integration
     h += '<div class="editor-section"><div class="section-head"><strong>AEG Integration</strong></div>';
-    h += '<label class="inline"><input type="checkbox" '+(t.aegIntegration.enabled?'checked':'')+' onchange="RecoTemplate._editing.aegIntegration.enabled=this.checked; RecoTemplate.renderEditor()"> Enable AEG entry generation from this template</label>';
+    h += '<label class="inline"><input type="checkbox" '+(t.aegIntegration.enabled?'checked':'')+' onchange="RecoTemplate.setAegEnabled(this.checked)"> Enable AEG entry generation from this template</label>';
     if (t.aegIntegration.enabled) {
       h += '<div class="grid-2" style="margin-top:8px;">';
       h += '<label class="field"><span class="label-text">Linked AEG Template</span>';
-      h += '<select onchange="RecoTemplate._editing.aegIntegration.aegTemplateId=this.value; RecoTemplate.renderEditor()">';
+      h += '<select onchange="RecoTemplate.setAegTemplate(this.value)">';
       h += '<option value="">— select AEG template —</option>';
       AppState.aegTemplates.forEach(at => {
         h += '<option value="'+U.escAttr(at.id)+'"'+(t.aegIntegration.aegTemplateId===at.id?' selected':'')+'>'+U.esc(at.name)+'</option>';
@@ -13815,6 +13815,110 @@ defaultTemplate() {
         + ', so its value belongs to the journal, not to a person. It cannot also be '
         + (role === 'allowOverride' ? 'overridable by hand' : 'carried forward') + '.';
     return null;
+  },
+
+  /* ---- T-24R2-7. S11'S THIRD DIRECTION: THE LINK ITSELF.
+
+     The matrix was consulted when a column's allowOverride / carryForward box
+     was ticked, when a key component was chosen, and when an AEG input column
+     was renamed (T-24R2-6) - but aegIntegration.enabled and aegTemplateId
+     were RAW INLINE ASSIGNMENTS in the editor's own HTML with no gate. And
+     XlSchema.aegTemplateFor returns null unless `enabled`, so with the
+     integration off - the default for a new template - the matrix had nothing
+     to consult and answered null for every column.
+
+     MEASURED (scratchpad/ag/probes/g1_repro.mjs), two ordinary clicks in the
+     order a person works: tick "Allow manual override per row" with the
+     integration off (allowed, and correctly so - there is no linked template
+     to disagree with), then switch it on and link the AEG template that reads
+     that column. _exclusiveRoleConflict(tpl,'AED','allowOverride') answered
+     null before and a refusal after; nothing was said either time, and the
+     template stored with the integration on, the link made, and an AEG
+     control column carrying a manual override.
+
+     THIS ANSWERS THE TEMPLATE AS IT WOULD BE, which is why both handlers
+     below apply the change, ask, and put it back on a refusal - rather than
+     trying to predict the answer from the change. */
+  _aegLinkConflicts(t) {
+    const out = [];
+    (t.additionalColumns || []).forEach(ac => {
+      if (!ac || !ac.name) return;
+      const n = String(ac.name).trim();
+      /* ONLY WHERE THE COLUMN ACTUALLY HOLDS THE ROLE. Asking the matrix
+         about a role a column does not hold answers about some other clash,
+         which is not this gate's business.
+         `allowOverride` is held by the BOX or by stored RECORDS - RC-7's
+         rule, and the distinction is the whole of the decision below. */
+      const recs = ac.allowOverride ? 0 : Reco._overrideCount(t, n);
+      [['allowOverride', !!ac.allowOverride || recs > 0],
+       ['carryForward',  !!ac.carryForward]].forEach(pair => {
+        if (!pair[1]) return;
+        let msg = null;
+        try { msg = RecoTemplate._exclusiveRoleConflict(t, n, pair[0]); } catch (e) { msg = null; }
+        if (!msg) return;
+        out.push({ name: n, role: pair[0], msg: String(msg),
+                   /* CLEARABLE means there is a box in this editor the
+                      operator can untick to resolve it. A column whose box is
+                      already OFF and which still holds override records has
+                      no such box - unticking is what it already is - so a
+                      refusal there would be a dead end. */
+                   clearable: pair[0] === 'carryForward' ? !!ac.carryForward : !!ac.allowOverride,
+                   records: recs });
+      });
+    });
+    return out;
+  },
+
+  /* The two halves of the decision the ticket leaves open: what should happen
+     to a template that is ALREADY in the conflicting state.
+
+     A CLEARABLE conflict is REFUSED, because the remedy is one click away in
+     the same editor and letting the link through would store a state S11
+     exists to prevent. An UNCLEARABLE one - a column whose override box is
+     off and which still holds records, which RC-7 says keeps applying - is
+     ALLOWED WITH A WARNING, because there is nothing the operator can untick
+     and refusing would leave a template saved by an older build unable to
+     turn its integration on at all. The journal door refuses the posting
+     either way (MR-1), which is what makes the warning sufficient. */
+  _aegLinkGate(t, what, revert) {
+    const bad = RecoTemplate._aegLinkConflicts(t);
+    if (!bad.length) return true;
+    const hard = bad.filter(b => b.clearable);
+    if (hard.length) {
+      revert();
+      const names = hard.map(b => '"' + b.name + '"').join(', ');
+      U.toast(what + ' was not changed: ' + names + ' would be in two roles at once. '
+        + hard[0].msg + ' Untick that box first, then link the template.', 'error');
+      RecoTemplate.renderEditor();
+      return false;
+    }
+    const soft = bad.map(b => '"' + b.name + '" (' + b.records + ' stored override(s))').join(', ');
+    U.toast(what + ' was changed, but ' + soft + ' still hold overrides typed against row keys, '
+      + 'and a stored override keeps applying whatever the box says. The journal will refuse to '
+      + 'post a row whose AEG column reads from one. Revert them under Manual Overrides.', 'info');
+    return true;
+  },
+
+  setAegEnabled(on) {
+    const t = RecoTemplate._editing;
+    t.aegIntegration = t.aegIntegration || {};
+    const was = !!t.aegIntegration.enabled;
+    t.aegIntegration.enabled = !!on;
+    /* Only turning it ON can create a conflict: with it off the matrix has no
+       linked template to consult, so there is nothing to protect. */
+    if (on && !RecoTemplate._aegLinkGate(t, 'AEG entry generation',
+                () => { t.aegIntegration.enabled = was; })) return;
+    RecoTemplate.renderEditor();
+  },
+
+  setAegTemplate(id) {
+    const t = RecoTemplate._editing;
+    t.aegIntegration = t.aegIntegration || {};
+    const was = t.aegIntegration.aegTemplateId;
+    t.aegIntegration.aegTemplateId = id;
+    if (id && !RecoTemplate._aegLinkGate(t, 'The linked AEG template',
+                () => { t.aegIntegration.aegTemplateId = was; })) return;
+    RecoTemplate.renderEditor();
   },
 
   /* DECISION H. THE BOXES ARE ALWAYS ENABLED AND THIS IS WHERE A COMPONENT IS

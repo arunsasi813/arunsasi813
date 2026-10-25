@@ -3153,6 +3153,74 @@ link on a template with no flagged column is silent. Then the end-to-end one, wh
 passes: `run_store_e2e` [54] MR1b, where the posting is refused even though the editor allowed
 the state.
 
+**CLOSED — and the decision the ticket leaves open is taken as a SPLIT, not as the single answer
+it proposes.**
+
+**The harm, measured** (`scratchpad/ag/probes/g1_repro.mjs`), two ordinary clicks in the order a
+person works — tick "Allow manual override per row" with the integration off, then switch it on and
+link the AEG template whose `inputColumns` name that column:
+
+```
+_exclusiveRoleConflict(tpl,'AED','allowOverride')   before the link:  null
+                                                    after the link:   a refusal
+toasts on the change:  none
+toasts on the save:    "Template saved to database"
+stored:                enabled true, linked AEG_AG, allowOverride true
+```
+
+`aegIntegration.enabled` and `aegIntegration.aegTemplateId` were raw inline assignments in the
+editor's own HTML with no gate, and `XlSchema.aegTemplateFor` returns null unless `enabled` — so
+with the integration off, which is the default, the matrix had nothing to consult and answered null
+for every column.
+
+**What was built.** `RecoTemplate.setAegEnabled` and `setAegTemplate` replace the two assignments,
+and both go through `RecoTemplate._aegLinkGate`, which **applies** the change, asks
+`RecoTemplate._aegLinkConflicts` about the template *as it would be*, and puts the change back on a
+refusal. Applying first rather than predicting is why it can simply ask the matrix.
+
+**THE SPLIT.** The ticket proposes one answer — "the kind answer is to allow the save and warn,
+listing the columns, since the journal door refuses anyway" — because it worries that a template
+already in the conflicting state "would be unable to turn its integration on at all". That gives up
+the refusal in the case where it is most useful, so the two cases are separated:
+
+| the conflict | what happens | why |
+| --- | --- | --- |
+| **clearable** — the box is ticked, and there IS a box in this editor to untick | **refused**, naming the columns and the remedy | the fix is one click away in the same editor, and letting it through stores a state S11 exists to prevent |
+| **unclearable** — the box is already off and the column still holds override **records**, which RC-7 says keep applying | **allowed, with a warning** naming the column, the count, and that the journal will refuse | there is nothing to untick, and refusing would leave a template saved by any earlier build unable to turn its integration on at all |
+
+MR-1's refusal at the journal door is what makes the warning sufficient rather than a shrug.
+
+**Turning the integration OFF is never gated** — the other half of the same thought: turning it off
+*is* the remedy, so gating it would make the way out the one thing refused.
+
+**Gated by `[100] R31` in `run_store_e2e`** (19 checks). **Mutation grid of 11** in
+`scratchpad/ag/mut/run.py` against the round's own probe (`scratchpad/ag/probes/g2_fix.mjs`).
+
+**THREE OF THOSE ELEVEN MEASURED NOTHING ON THE FIRST PASS, and all three were the fixture rather
+than the grid — the fourth round running where that was the answer:**
+
+- **The ENABLE gate is unreachable in the order a person clicks.** Enabling comes first and there
+  is nothing linked yet, so only the link handler can refuse. The state that reaches it is a stored
+  `aegTemplateId` with the integration off — what linking and then unticking the checkbox leaves
+  behind, since the select is only rendered while enabled. `R31l`/`R31m`.
+- **The refusal's column LIST is invisible with one conflicting column**, because the matrix's own
+  sentence quotes that column anyway. `R31n`/`R31o` use two, where the list says both and the
+  matrix's sentence says one — which is what tells the operator how many boxes to untick.
+- **Gating the OFF direction changes nothing even on a conflicted template**, because turning the
+  integration off makes `aegTemplateFor` answer null and the AEG roles vanish. What the `on &&`
+  guard actually buys is narrower, and finding it took the grid refusing to go red:
+  `_aegLinkConflicts` asks the matrix, and the matrix **also** answers about the
+  `{ key component, allowOverride, carryForward }` triple, which has nothing to do with the link.
+  Without the guard, a column that is both a key component and override-flagged — a state the pk
+  matrix prevents today and an older build could have stored — would make turning the integration
+  **off** the one thing refused. `R31q`/`R31r`.
+
+**The ticket's second route needs no gap at all and is left as it is:** "the matrix matches input
+columns by `name` only while the AEG loop falls back to `r[ic.label]`". MR-1's read set already
+covers that by adding the label, which the ticket itself records.
+
+---
+
 ---
 
 # From the review of the data-loss round

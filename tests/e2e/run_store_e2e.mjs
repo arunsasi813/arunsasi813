@@ -10731,6 +10731,7 @@ const PORT_R27  = 21518;   // R27 T-C27-7/T-C27-9: two added columns with one na
 const PORT_R28  = 21522;   // R28 T-24R2-4: a custom master's own id
 const PORT_R29  = 21526;   // R29 T-24R2-2: a hand-added row's frozen business key
 const PORT_R30  = 21530;   // R30 T-24R2-3: a renamed column keeps its place
+const PORT_R31  = 21534;   // R31 T-24R2-7: the AEG link asks the role matrix
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -16980,6 +16981,473 @@ section(99, 'R30 T-24R2-3 \u2014 a renamed column keeps its place in the five li
   check(rn.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R30r no page or console error across the whole section', rn.errors.slice(0, 5));
   await rn.ctx.close();
+}
+
+/* =========================================================== [100] ====
+   R31. T-24R2-7. S11's third direction: the AEG LINK itself.
+
+   RecoTemplate._exclusiveRoleConflict was consulted when a column's
+   allowOverride / carryForward box was ticked, when a key component was chosen
+   and when an AEG input column was renamed (T-24R2-6) - but
+   aegIntegration.enabled and aegIntegration.aegTemplateId were RAW INLINE
+   ASSIGNMENTS in the editor's own HTML with no gate at all. And
+   XlSchema.aegTemplateFor returns null unless `enabled`, so with the
+   integration off - the default for a new template - the matrix had nothing to
+   consult and answered null for every column.
+
+   MEASURED (scratchpad/ag/probes/g1_repro.mjs), two ordinary clicks in the
+   order a person works: tick "Allow manual override per row" with the
+   integration off, then switch it on and link the AEG template whose
+   inputColumns name that column.
+
+     _exclusiveRoleConflict(tpl,'AED','allowOverride')  before: null
+                                                        after:  a refusal
+     toasts on the change: none.  toasts on the save: "Template saved".
+     stored: enabled true, linked AEG_AG, allowOverride true.
+
+   The operator found out at posting time, where MR-1 refuses - which is what
+   keeps this a ticket and not a money bug, and also what makes the warning
+   arm below sufficient.
+
+   WHAT WAS BUILT: RecoTemplate.setAegEnabled and setAegTemplate replace the
+   two raw assignments, and both go through RecoTemplate._aegLinkGate, which
+   applies the change, asks RecoTemplate._aegLinkConflicts about the template
+   AS IT WOULD BE, and puts the change back on a refusal. Asking the template
+   as it would be is why the change is applied first rather than predicted.
+
+   THE DECISION THE TICKET LEAVES OPEN, TAKEN, AND IT IS A SPLIT. The ticket
+   worries that a template ALREADY in the conflicting state "would be unable
+   to turn its integration on at all, which is a worse first experience than a
+   late refusal", and proposes allowing the save with a warning. But that
+   gives up the refusal in the case where it is most useful. So:
+
+     a CLEARABLE conflict  - the box is ticked, and there IS a box in this
+                             editor to untick -> REFUSED, naming the columns
+                             and the remedy (R31c, R31d, R31o)
+     an UNCLEARABLE one    - the box is already OFF and the column still holds
+                             override RECORDS, which RC-7 says keep applying,
+                             so there is nothing to untick -> ALLOWED WITH A
+                             WARNING naming the column, the count and the fact
+                             that the journal will refuse (R31g, R31h)
+
+   AND TURNING THE INTEGRATION OFF IS NEVER GATED (R31k, R31p), which is the
+   other half of the same thought: turning it off IS the remedy, so gating it
+   would make the way out the one thing refused. R31p builds the already-
+   conflicted state directly - it is not reachable through the editor any more,
+   because toggleOverride refuses it - which is how any build before this round
+   could have stored it.
+
+   MUTATION GRID: scratchpad/ag/mut/run.py, 11 mutations x the 16 checks of
+   this section's own probe (scratchpad/ag/probes/g2_fix.mjs):
+
+     the link handler does not gate      -> R31c/d/e/h/i
+     the enable handler does not gate    -> R31m
+     a clearable conflict is only warned -> R31c/d/e/i
+     an unclearable one is refused       -> R31g, R31h
+     the refusal does not revert         -> R31c, R31e, R31i
+     the refusal does not list the columns -> R31o
+     ...does not name the remedy         -> R31d
+     the warning omits the journal       -> R31h
+     only the override flag is scanned   -> R31i
+     the scan asks about roles not held  -> R31b, R31j
+     turning it OFF is gated too         -> R31r
+
+   THREE OF THOSE ELEVEN MEASURED NOTHING ON THE FIRST PASS, all because the
+   fixture was too narrow rather than the grid being wrong - the fourth round
+   running where that was the answer:
+     - the ENABLE gate is unreachable in the order a person clicks, because
+       enabling comes first and there is nothing linked yet. R31l/R31m build
+       the state that reaches it: a stored aegTemplateId with the integration
+       off, which is what linking and then unticking leaves behind.
+     - the refusal's column LIST is invisible with one conflicting column,
+       because the matrix's own sentence quotes that column anyway. R31n/R31o
+       use two.
+     - gating the OFF direction changes nothing on a template with no
+       conflict, AND NOTHING ON ONE THAT HAS EITHER: turning the integration
+       off makes XlSchema.aegTemplateFor answer null, so the AEG roles vanish
+       and there is nothing left to refuse. What the `on &&` guard actually
+       buys is narrower and R31q/R31r are what measure it: _aegLinkConflicts
+       asks the matrix, and the matrix ALSO answers about the
+       { key component, allowOverride, carryForward } triple, which has
+       nothing to do with the link. Without the guard, a column that is both a
+       key component and override-flagged - a state the pk matrix prevents
+       today and an older build could have stored - would make turning the
+       integration OFF the one thing refused.
+   ==================================================================== */
+
+section(100, 'R31 T-24R2-7 \u2014 the AEG link asks the role matrix, and says so at the click');
+{
+  const AG = makeRoot('share-r31');
+  const brAG = await startBridge(AG.root, PORT_R31); procs.push(brAG.proc);
+  const ag = await openReco(browser, brAG);
+  const out = await ag.page.evaluate(async () => {
+    const o = {};
+    const ID = 'TPL_AG';
+    /* An AEG template that READS a column called AED (its valueColumn and one
+       of its inputColumns), which is makeDefaultTemplate's own shape. */
+    const aeg = AEG.makeDefaultTemplate('AG LINK');
+    aeg.id = 'AEG_AG';
+    AppState.aegTemplates = [aeg];
+
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = 'AG RECON';
+    t.columns = ['Doc','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc','Amount'];
+    t.additionalColumns = [
+      { name: 'AED', type: 'formula', formula: 'CONCAT("A-",{Doc})', _cid: U.uid() }];
+    t.primaryKeys = ['Doc'];
+    RecoTemplate.saveTemplate(); App.closeModal();
+
+    /* CLICK ONE: tick the override box, with the integration OFF. The matrix is
+       consulted here and allows it, which is correct for the template as it
+       stands - there is no AEG template linked to disagree with. */
+    window.__toasts = [];
+    RecoTemplate.edit(ID);
+    o.beforeLink = (function () {
+      const ed = RecoTemplate._editing;
+      const r = RecoTemplate._exclusiveRoleConflict(ed, 'AED', 'allowOverride');
+      return r == null ? null : String(r);
+    })();
+    RecoTemplate.toggleOverride(0, true);   /* an INDEX, not a name */
+    o.tickToasts = (window.__toasts||[]).map(x => x.kind + ': ' + x.msg);
+    o.flagAfterTick = !!(RecoTemplate._editing.additionalColumns[0] || {}).allowOverride;
+    RecoTemplate.saveTemplate(); App.closeModal();
+    await new Promise(r => setTimeout(r, 200));
+
+    /* CLICK TWO: switch the integration on and link that AEG template, exactly
+       as the editor's own HTML does it - two raw assignments. */
+    window.__toasts = [];
+    RecoTemplate.edit(ID);
+    const ed = RecoTemplate._editing;
+    ed.aegIntegration = ed.aegIntegration || {};
+    /* THE REAL DOORS the editor's HTML now calls, in the order a person clicks
+       them: the checkbox, then the select. */
+    RecoTemplate.setAegEnabled(true);
+    o.enableToasts = (window.__toasts||[]).map(x => x.kind + ': ' + x.msg);
+    o.enabledAfter = !!RecoTemplate._editing.aegIntegration.enabled;
+    window.__toasts = [];
+    RecoTemplate.setAegTemplate('AEG_AG');
+    o.linkToasts = (window.__toasts||[]).map(x => x.kind + ': ' + x.msg);
+    o.linkedAfter = String(RecoTemplate._editing.aegIntegration.aegTemplateId || '');
+    /* THE SAME QUESTION, now that the link exists. */
+    o.afterLink = (function () {
+      const r = RecoTemplate._exclusiveRoleConflict(RecoTemplate._editing, 'AED', 'allowOverride');
+      return r == null ? null : String(r);
+    })();
+    window.__toasts = [];
+    RecoTemplate.saveTemplate(); App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    o.saveToasts = (window.__toasts||[]).map(x => x.kind + ': ' + x.msg);
+
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    o.stored = { enabled: !!(live.aegIntegration||{}).enabled,
+                 linkedTo: String((live.aegIntegration||{}).aegTemplateId || ''),
+                 allowOverride: !!(live.additionalColumns[0]||{}).allowOverride };
+    /* And what the journal door says about the same state - MR-1's refusal,
+       which is what keeps this a ticket rather than a money bug. */
+    o.linked = (function () { const l = XlSchema.aegTemplateFor(live); return l ? l.id : null; })();
+    return o;
+  });
+  note('before the link', { conflict: out.beforeLink, tick: out.tickToasts, flag: out.flagAfterTick });
+  note('after the link', { conflict: out.afterLink && out.afterLink.slice(0, 180),
+                           linkToasts: out.linkToasts, saveToasts: out.saveToasts });
+  note('what was stored', out.stored);
+
+  check(out.beforeLink === null && out.flagAfterTick === true,
+    'R31a PREMISE: with the integration OFF the matrix allows the override box - correctly, because '
+    + 'XlSchema.aegTemplateFor answers null and there is no linked template to disagree with',
+    { conflict: out.beforeLink, toasts: out.tickToasts });
+  check(out.enabledAfter === true && out.enableToasts.length === 0,
+    'R31b TURNING IT ON IS STILL ALLOWED AND SILENT: with no template linked yet the matrix has '
+    + 'nothing to consult, so there is nothing to protect and the gate must not be furniture',
+    { enabled: out.enabledAfter, toasts: out.enableToasts });
+  check(out.linkedAfter === '',
+    'R31c THE FIX: linking the AEG template that READS that column is REFUSED - the assignment is put '
+    + 'back, so the select returns to "none" rather than showing a link the template does not have',
+    out.linkedAfter);
+  check(out.linkToasts.some(m => /^error/.test(m) && /"AED"/.test(m)
+          && /Untick that box first/.test(m)),
+    'R31d ...and it names the column and the remedy, which is one click away in the same editor. S11 '
+    + 'exists to prevent this state and now says so at the moment it would be created, rather than '
+    + 'at posting time three screens later', out.linkToasts);
+  check(out.stored.enabled === true && out.stored.linkedTo === ''
+        && out.stored.allowOverride === true && out.linked === null,
+    'R31e AND THE STORED TEMPLATE IS NOT IN THAT STATE: the integration is on, no link was made, and '
+    + 'XlSchema.aegTemplateFor answers null. Before this round it stored enabled + linked + an AEG '
+    + 'control column carrying a manual override, in silence',
+    { stored: out.stored, linked: out.linked });
+
+  /* A fixture builder for the remaining arms: one reco template with one added
+     column, flagged however the arm needs, and the same AEG template linked (or
+     not) through the real doors. */
+  const MK2 = `(async function (arg) {
+    const [ID, flag, records] = arg;
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc','Amount'];
+    t.additionalColumns = [
+      { name: 'AED', type: 'formula', formula: 'CONCAT("A-",{Doc})', _cid: U.uid() }];
+    t.primaryKeys = ['Doc'];
+    RecoTemplate.saveTemplate(); App.closeModal();
+    RecoTemplate.edit(ID);
+    if (flag === 'allowOverride') RecoTemplate.toggleOverride(0, true);
+    if (flag === 'carryForward') RecoTemplate.toggleCarry(0, true);
+    RecoTemplate.saveTemplate(); App.closeModal();
+    if (records) {
+      /* The RC-7 state: the box is OFF and records written while it was on keep
+         applying. extraValueMaster[tplId][pk][col] = { k:'override', v }. */
+      AppState.extraValueMaster = AppState.extraValueMaster || {};
+      AppState.extraValueMaster[ID] = { D1: { AED: { k: 'override', v: '999' } },
+                                        D2: { AED: { k: 'override', v: '888' } } };
+    }
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    return { flag: flag, allowOverride: !!(live.additionalColumns[0]||{}).allowOverride,
+             carryForward: !!(live.additionalColumns[0]||{}).carryForward,
+             records: Reco._overrideCount(live, 'AED') };
+  })`;
+
+  const LINK = `(async function (ID) {
+    RecoTemplate.edit(ID);
+    window.__toasts = [];
+    RecoTemplate.setAegEnabled(true);
+    const afterEnable = { enabled: !!RecoTemplate._editing.aegIntegration.enabled,
+                          toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+    window.__toasts = [];
+    RecoTemplate.setAegTemplate('AEG_AG');
+    const afterLink = { linkedTo: String(RecoTemplate._editing.aegIntegration.aegTemplateId || ''),
+                        toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+    RecoTemplate.saveTemplate(); App.closeModal();
+    await new Promise(r => setTimeout(r, 200));
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    return { afterEnable: afterEnable, afterLink: afterLink,
+             stored: { enabled: !!(live.aegIntegration||{}).enabled,
+                       linkedTo: String((live.aegIntegration||{}).aegTemplateId || '') } };
+  })`;
+
+  /* ---- THE UNCLEARABLE CASE: the box is OFF and records keep applying. This is
+     the decision the ticket leaves open. */
+  const recFix = await ag.page.evaluate(MK2 + '(' + JSON.stringify(['TPL_REC', null, true]) + ')');
+  const recLink = await ag.page.evaluate(LINK + "('TPL_REC')");
+  note('records, box off \u2014 the fixture', recFix);
+  note('records, box off \u2014 the link', recLink);
+  check(recFix.allowOverride === false && recFix.records === 2,
+    'R31f PREMISE: the override box is OFF and two records written while it was on are still stored - '
+    + 'RC-7\'s state, where a stored override keeps applying whatever the box says', recFix);
+  check(recLink.stored.linkedTo === 'AEG_AG' && recLink.stored.enabled === true,
+    'R31g THE DECISION THE TICKET LEAVES OPEN, TAKEN: this one is ALLOWED. There is no box the '
+    + 'operator can untick - unticking is what it already is - so refusing would leave a template '
+    + 'saved by any earlier build unable to turn its integration on at all, which the ticket calls '
+    + 'a worse first experience than a late refusal', recLink.stored);
+  check(recLink.afterLink.toasts.some(m => /^info/.test(m) && /"AED" \(2 stored override/.test(m)
+          && /journal will refuse/.test(m)),
+    'R31h ...AND IT IS WARNED, listing the column and the count, and saying that the journal will '
+    + 'refuse the posting - which is MR-1 and is what makes the warning sufficient rather than a '
+    + 'shrug', recLink.afterLink.toasts);
+
+  /* ---- carryForward: the same refusal through the other flag. */
+  const cfFix = await ag.page.evaluate(MK2 + '(' + JSON.stringify(['TPL_CF', 'carryForward', false]) + ')');
+  const cfLink = await ag.page.evaluate(LINK + "('TPL_CF')");
+  note('carryForward \u2014 the fixture and the link', { fix: cfFix, link: cfLink.afterLink });
+  check(cfFix.carryForward === true && cfLink.stored.linkedTo === ''
+        && cfLink.afterLink.toasts.some(m => /^error/.test(m) && /"AED"/.test(m)),
+    'R31i AND THE OTHER FLAG IS GATED THE SAME WAY: a carried-forward column is refused the link too, '
+    + 'because the matrix already covers both and this is a call rather than a second gate',
+    { fix: cfFix, stored: cfLink.stored, toasts: cfLink.afterLink.toasts });
+
+  /* ---- CONTROL: no flagged column, so the link is silent. The ticket asks for
+     exactly this one. */
+  const okFix = await ag.page.evaluate(MK2 + '(' + JSON.stringify(['TPL_OK', null, false]) + ')');
+  const okLink = await ag.page.evaluate(LINK + "('TPL_OK')");
+  note('no flagged column \u2014 the link', okLink);
+  check(okFix.allowOverride === false && okFix.records === 0
+        && okLink.stored.linkedTo === 'AEG_AG'
+        && okLink.afterEnable.toasts.length === 0 && okLink.afterLink.toasts.length === 0,
+    'R31j CONTROL, AND THE TICKET ASKS FOR IT BY NAME: the same link on a template with no flagged '
+    + 'column is SILENT and goes through. A gate that spoke here would be furniture on the ordinary '
+    + 'path', { fix: okFix, stored: okLink.stored,
+               toasts: okLink.afterEnable.toasts.concat(okLink.afterLink.toasts) });
+
+  /* ---- CONTROL: turning the integration OFF is never gated. */
+  const off = await ag.page.evaluate(`(async function () {
+    RecoTemplate.edit('TPL_OK');
+    window.__toasts = [];
+    RecoTemplate.setAegEnabled(false);
+    return { enabled: !!RecoTemplate._editing.aegIntegration.enabled,
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+  })()`);
+  note('turning it off', off);
+  check(off.enabled === false && off.toasts.length === 0,
+    'R31k CONTROL: turning the integration OFF is never gated and says nothing. With it off the matrix '
+    + 'has no linked template to consult, so there is nothing for the gate to protect', off);
+
+  /* ---- THE ENABLE HANDLER'S OWN PATH. In the order a person clicks, enabling
+     comes FIRST and there is no link yet, so only the link handler can refuse -
+     which is why the mutation that removed the ENABLE gate measured nothing on
+     the arms above. The state that reaches it: a template that already HAS a
+     stored aegTemplateId and whose integration was turned off, because the
+     select is only rendered while enabled and the id persists. */
+  const reEnable = await ag.page.evaluate(`(async function () {
+    const ID = 'TPL_REEN';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+    t.additionalColumns = [{ name: 'AED', type: 'formula', formula: 'CONCAT("A-",{Doc})', _cid: U.uid() }];
+    t.primaryKeys = ['Doc'];
+    /* The link is stored and the integration is OFF - which is what an operator
+       who linked it, then unticked the checkbox, leaves behind. */
+    t.aegIntegration = { enabled: false, aegTemplateId: 'AEG_AG', keywordColumn: '',
+                         keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate(); App.closeModal();
+    RecoTemplate.edit(ID);
+    RecoTemplate.toggleOverride(0, true);     // allowed: the matrix sees no link while disabled
+    const ticked = !!RecoTemplate._editing.additionalColumns[0].allowOverride;
+    window.__toasts = [];
+    RecoTemplate.setAegEnabled(true);
+    return { ticked: ticked,
+             enabled: !!RecoTemplate._editing.aegIntegration.enabled,
+             linkStillStored: String(RecoTemplate._editing.aegIntegration.aegTemplateId || ''),
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+  })()`);
+  note('re-enabling with a link already stored', reEnable);
+  check(reEnable.ticked === true && reEnable.linkStillStored === 'AEG_AG',
+    'R31l PREMISE: the link is stored and the integration is OFF, so the matrix sees nothing and the '
+    + 'override box is allowed - the state an operator leaves behind by linking and then unticking '
+    + 'the checkbox', reEnable);
+  check(reEnable.enabled === false
+        && reEnable.toasts.some(m => /^error/.test(m) && /"AED"/.test(m)),
+    'R31m AND THE ENABLE HANDLER REFUSES TOO, which is its own path and not the link handler\'s: in '
+    + 'the order a person clicks, enabling comes first and there is nothing linked yet. The mutation '
+    + 'that removed this gate measured nothing until this arm existed', reEnable);
+
+  /* ---- TWO CONFLICTING COLUMNS, so the refusal's list is more than the one
+     column the matrix's own sentence quotes. */
+  const two = await ag.page.evaluate(`(async function () {
+    const ID = 'TPL_TWO';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+    /* Both are input columns of AEG_AG (makeDefaultTemplate's own list). */
+    t.additionalColumns = [
+      { name: 'AED', type: 'formula', formula: 'CONCAT("A-",{Doc})', _cid: U.uid() },
+      { name: 'Cur', type: 'formula', formula: 'CONCAT("C-",{Doc})', _cid: U.uid() }];
+    t.primaryKeys = ['Doc'];
+    RecoTemplate.saveTemplate(); App.closeModal();
+    RecoTemplate.edit(ID);
+    RecoTemplate.toggleOverride(0, true);
+    RecoTemplate.toggleOverride(1, true);
+    RecoTemplate.setAegEnabled(true);
+    window.__toasts = [];
+    RecoTemplate.setAegTemplate('AEG_AG');
+    return { flags: RecoTemplate._editing.additionalColumns.map(a => !!a.allowOverride),
+             linkedTo: String(RecoTemplate._editing.aegIntegration.aegTemplateId || ''),
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+  })()`);
+  note('two conflicting columns', two);
+  check(two.flags.join(',') === 'true,true' && two.linkedTo === '',
+    'R31n PREMISE: TWO columns carry the override box and both are input columns of the AEG template, '
+    + 'and the link is refused', two);
+  check(two.toasts.some(m => /"AED", "Cur"/.test(m)),
+    'R31o AND THE REFUSAL LISTS BOTH. The matrix\'s own sentence quotes only the first column it was '
+    + 'asked about, so the list is what tells the operator how many boxes they have to untick - and '
+    + 'the mutation that emptied it measured nothing until this arm existed', two.toasts);
+
+  /* ---- CONTROL: turning the integration OFF on an ALREADY-conflicted template
+     is never gated. That state is not reachable through the editor any more -
+     toggleOverride refuses it - so it is assigned directly, which is how any
+     build before this round could have stored it. */
+  const offBad = await ag.page.evaluate(`(async function () {
+    const ID = 'TPL_OFFBAD';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+    t.additionalColumns = [{ name: 'AED', type: 'formula', formula: 'CONCAT("A-",{Doc})',
+                             allowOverride: true, _cid: U.uid() }];
+    t.primaryKeys = ['Doc'];
+    t.aegIntegration = { enabled: true, aegTemplateId: 'AEG_AG', keywordColumn: '',
+                         keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate(); App.closeModal();
+    RecoTemplate.edit(ID);
+    const conflicted = RecoTemplate._aegLinkConflicts(RecoTemplate._editing).length;
+    window.__toasts = [];
+    RecoTemplate.setAegEnabled(false);
+    return { conflicted: conflicted,
+             enabled: !!RecoTemplate._editing.aegIntegration.enabled,
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+  })()`);
+  note('turning it off on a conflicted template', offBad);
+  check(offBad.conflicted > 0 && offBad.enabled === false && offBad.toasts.length === 0,
+    'R31p CONTROL, AND IT IS THE REASON THE ENABLE GATE ASKS ONLY WHEN TURNING ON: a template already '
+    + 'in the conflicting state - which any build before this round could have stored - can still '
+    + 'turn its integration OFF, silently. Turning it off IS the remedy, so gating it would make the '
+    + 'way out the one thing refused', offBad);
+
+  /* ---- AND THE `on &&` GUARD IS LOAD-BEARING, which the grid had to be shown.
+     Gating the OFF direction looks free: turning the integration off makes
+     XlSchema.aegTemplateFor answer null, so the AEG roles vanish and there is
+     nothing to refuse. But _aegLinkConflicts asks the matrix, and the matrix
+     ALSO answers about the { key component, allowOverride, carryForward }
+     triple - which has nothing to do with the link. A column that is both a key
+     component and override-flagged is a state the pk matrix prevents today and
+     an older build could have stored; without the guard, turning the
+     integration off would be refused because of it. */
+  const offTriple = await ag.page.evaluate(`(async function () {
+    const ID = 'TPL_OFFTRI';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+    /* BOTH a key component and override-flagged, assigned directly. */
+    t.additionalColumns = [{ name: 'AED', type: 'formula', formula: 'CONCAT("A-",{Doc})',
+                             allowOverride: true, _cid: U.uid() }];
+    t.primaryKeys = ['Doc', 'AED'];
+    t.aegIntegration = { enabled: true, aegTemplateId: '', keywordColumn: '',
+                         keywordValues: '', postEntryColumn: '', postEntryValue: '' };
+    RecoTemplate.saveTemplate(); App.closeModal();
+    RecoTemplate.edit(ID);
+    const ed = RecoTemplate._editing;
+    ed.primaryKeys = ['Doc', 'AED'];
+    ed.additionalColumns[0].allowOverride = true;
+    const tripleClash = (function () {
+      const r = RecoTemplate._exclusiveRoleConflict(ed, 'AED', 'allowOverride');
+      return r == null ? null : String(r);
+    })();
+    window.__toasts = [];
+    RecoTemplate.setAegEnabled(false);
+    return { tripleClash: tripleClash && tripleClash.slice(0, 160),
+             enabled: !!RecoTemplate._editing.aegIntegration.enabled,
+             toasts: (window.__toasts||[]).map(x => x.kind + ': ' + x.msg) };
+  })()`);
+  note('turning it off with a pk/override clash', offTriple);
+  check(offTriple.tripleClash !== null && /part of the row key/.test(offTriple.tripleClash),
+    'R31q PREMISE: the column is BOTH a key component and override-flagged, so the matrix refuses '
+    + 'it on the triple - a refusal with nothing to do with the AEG link', offTriple.tripleClash);
+  check(offTriple.enabled === false && offTriple.toasts.length === 0,
+    'R31r AND TURNING THE INTEGRATION OFF IS STILL ALLOWED AND SILENT. This is what the `on &&` '
+    + 'guard buys: without it the AEG gate would refuse an untick because of a pre-existing triple '
+    + 'clash, making the way out of a bad state the one thing refused. The mutation that removes the '
+    + 'guard measured nothing until this arm existed', offTriple);
+
+  check(ag.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R31s no page or console error across the whole section', ag.errors.slice(0, 5));
+  await ag.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
