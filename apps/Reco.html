@@ -10675,6 +10675,9 @@ const Panes = {
     /* Fills the VIEW keys with today's defaults. Safe on this object: its
        `v.data = v.data || []` style assignments read and write through to the
        owner, which already has them. */
+    /* NO TEMPLATE ON PURPOSE (T-C27-9): extraColumns is a DATA key on this
+       proxy, so a rename here would write through to the owner and repeat the
+       work Reco.render does a moment later with the real template in hand. */
     Reco.ensureSessionShape(v);
     return v;
   },
@@ -19178,7 +19181,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
   },
 
   /* Transient UI state, lives on the session object */
-  ensureSessionShape(sess) {
+  ensureSessionShape(sess, tpl) {
     if (!sess) return;
     sess.data = sess.data || [];
     // Written to the shared folder by builds before the per-run state existed.
@@ -19238,7 +19241,139 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     sess.selRange   = sess.selRange   || null;     // { startFidx, endFidx, startCol, endCol }
     sess.extraColumns = sess.extraColumns || []; // [{ name, type:'custom', _ssAdded:true, _ssSingleUse?:bool }]
     sess.hiddenCols = sess.hiddenCols || [];
+    /* T-C27-9. A SESSION EXTRA WHOSE NAME THE TEMPLATE HAS SINCE TAKEN, which
+       is the one shape no existing check can refuse. See _dedupeSessionExtras
+       for what it does and why it is here and not in saveTemplate. */
+    if (tpl) Reco._dedupeSessionExtras(sess, tpl);
   },
+
+  /* ---- T-C27-9. TWO ADDED COLUMNS WITH ONE NAME, closed where a session IS
+     in scope.
+
+     THE STATE, from two ordinary gestures and no file import: "+ Col" adds a
+     session-only column called Dup (accepted - ssCommitAddCol checks all
+     three lists and the template has no such name), and then the template
+     editor adds an added column called Dup (accepted - saveTemplate has no
+     session in scope to look at, and refuses only its OWN duplicates, which
+     it does: "Added column "Dup" is defined twice").
+
+     WHAT IT COSTS, measured (scratchpad/dup/probes/p1_repro.mjs, arm A) with
+     extras [Mid, Dup(template formula), Dup(session)]:
+       the grid cell            ''      <- the walk's LAST writer wins
+       every helper reader      'xM'    <- _extraDef resolves the FIRST entry
+       filter "is empty"        0 rows  <- a filter hiding a row it should show
+       the slicer offers        ['xM']  <- a value no row on screen shows
+       Find/Replace             1 hit   <- in a column the screen shows blank
+     T-C27-7's entry-identity stop CANNOT move any of those: each reader
+     resolves the name through Reco._extraDef, which answers the first
+     TEMPLATE entry, and that entry answers its own value correctly. The state
+     itself is the defect, so this is the half that closes it.
+
+     WHY RENAME AND NOT DROP. The ticket offers either. The session entry is
+     the operator's own column and may already carry values they typed, so
+     dropping it discards their work to tidy a collision they were never told
+     about. Renaming keeps the column, keeps it distinguishable from the
+     template's, and re-keys what names it.
+
+     WHY HERE. ensureSessionShape is the only function that sees both lists on
+     every open, so this repairs a share ALREADY in that state rather than
+     only refusing new ones - and the template entry, which is the shared one,
+     is left untouched. The `tpl` parameter is optional: makeSession() has no
+     template and a fresh session has no extras to collide. */
+  _dedupeSessionExtras(sess, tpl) {
+    const extras = sess.extraColumns;
+    if (!extras || !extras.length) return;
+    const taken = new Set();
+    (tpl.columns || []).forEach(c => { if (c && c.name) taken.add(String(c.name)); });
+    (tpl.additionalColumns || []).forEach(a => { if (a && a.name) taken.add(String(a.name)); });
+    const renamed = [];
+    extras.forEach(a => {
+      if (!a || !a.name || !taken.has(String(a.name))) return;
+      const was = String(a.name);
+      /* ' (session)' first, then ' (session 2)' and up, so a second collision
+         on one template cannot land on the name the first one took. */
+      let to = was + ' (session)';
+      for (let n = 2; taken.has(to) || extras.some(x => x && x !== a && String(x.name) === to); n++) {
+        to = was + ' (session ' + n + ')';
+      }
+      a.name = to;
+      taken.add(to);
+      /* EVERY PANE'S VIEW, not just the one being rendered. extraColumns,
+         manualTags, cellFormats and cellFormulas are DATA, so renaming them
+         through this session reaches both panes; columnFilters, slicers,
+         columnWidths, hiddenCols and columnSorts are VIEW and live on each
+         pane's own object. Left alone, the OTHER pane's filter or hidden-column
+         setting would keep naming "Dup" - which now resolves to the TEMPLATE
+         column, so that pane would be filtering or hiding somebody else's
+         column. That is exactly what the mutation grid shows when the re-key
+         is removed altogether (R27h/i/j), one pane along.
+         THE OWNING PANE HAS NO `view` OBJECT: measured
+         (scratchpad/dup/probes/p3_split.mjs) - after openSplit() the panes
+         read p0:noview p1:view, because p0's VIEW keys live on the owner
+         session itself and only the second pane gets a proxy. So this asks
+         Panes.viewFor, which resolves `p.view || owner`, and not pn.view -
+         which would have missed the owning pane every time.
+         `sess` is included explicitly for the no-split case, where there is
+         no pane model to ask, and a Set keeps anything named twice from being
+         re-keyed twice (harmless either way: the re-key is idempotent, since
+         the second pass finds no key under the old name). */
+      const seen = new Set([sess]);
+      if (typeof Panes !== 'undefined' && typeof Panes.panesFor === 'function') {
+        try {
+          Panes.panesFor(tpl.id).forEach(pn => {
+            const v = pn && Panes.viewFor(pn.key, tpl.id);
+            if (v) seen.add(v);
+          });
+        } catch (e) { /* a pane model mid-rebuild must not stop the repair */ }
+      }
+      seen.forEach(target => Reco._reKeyColumnName(target, was, to));
+      renamed.push({ was: was, to: to });
+    });
+    if (!renamed.length) return;
+    /* SAID, not silent: the operator typed that name and the column they are
+       looking at has just changed its heading. One sentence per collision,
+       naming both names, and deferred so it does not fire inside a render
+       that has not drawn the new heading yet. */
+    setTimeout(() => renamed.forEach(r => U.toast('Your session-only column "' + r.was
+      + '" is now called "' + r.to + '" \u2014 this reconciliation\'s template now has a column '
+      + 'called "' + r.was + '" too, and two columns with one name read differently in the grid, '
+      + 'the filters and an export.', 'error')), 0);
+  },
+
+  /* ---- T-C27-9. THE PER-SESSION THINGS THAT NAME A COLUMN, moved with it.
+     Everything here is session-local view or typed state; nothing on the
+     SHARED pk-keyed masters is touched, because a session-only extra's value
+     never reaches them (decision P - only a persisted template column's
+     typed value becomes a durable shared record). sess.manualTags is keyed
+     row._id + '||' + name, so the suffix is what moves. */
+  _reKeyColumnName(sess, was, to) {
+    const tags = sess.manualTags;
+    if (tags) Object.keys(tags).forEach(k => {
+      const at = k.lastIndexOf('||');
+      if (at < 0 || k.slice(at + 2) !== was) return;
+      tags[k.slice(0, at + 2) + to] = tags[k];
+      delete tags[k];
+    });
+    ['columnFilters', 'columnWidths', 'slicers', 'cellFormats', 'cellFormulas'].forEach(key => {
+      const m = sess[key];
+      if (!m || typeof m !== 'object') return;
+      /* cellFormats / cellFormulas are keyed by ROW first and column second,
+         so the rename is one level down for those two. */
+      if (key === 'cellFormats' || key === 'cellFormulas') {
+        Object.keys(m).forEach(rk => {
+          const inner = m[rk];
+          if (inner && typeof inner === 'object' && was in inner) {
+            inner[to] = inner[was]; delete inner[was];
+          }
+        });
+      } else if (was in m) { m[to] = m[was]; delete m[was]; }
+    });
+    if (Array.isArray(sess.hiddenCols)) {
+      sess.hiddenCols = sess.hiddenCols.map(n => (String(n) === was ? to : n));
+    }
+    if (sess.columnSorts && String(sess.columnSorts.col) === was) sess.columnSorts.col = to;
+  },
+
   makeSession() {
     const s = {};
     Reco.ensureSessionShape(s);
@@ -19264,7 +19399,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
        when the session is missing, so a stray direct write to the view table
        is corrected here instead of persisting as a divergence. */
     const sess = Panes.ensureSession(id);
-    Reco.ensureSessionShape(sess);
+    // T-C27-9: with the template, so a session extra whose name the template
+    // has since taken is repaired on the open rather than diverging quietly.
+    Reco.ensureSessionShape(sess, tpl);
 
 
     const run = Reco._runState(id);
@@ -19478,7 +19615,7 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
        (pasting or uploading into a template never yet opened). Same door as
        Reco.render's — see MODULE 4b. */
     const sess = Panes.ensureSession(id);
-    Reco.ensureSessionShape(sess);
+    Reco.ensureSessionShape(sess, tpl);          // T-C27-9, as in Reco.render
     // An auto-load still in flight must not replace what the user just added.
     Reco._runState(id).loadGen++;
     const definedCols = tpl.columns.map(c => c.name);
@@ -19796,7 +19933,8 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
      recomputed value against itself and never report drift at all. */
   _extraComputedValue(tpl, sess, row, ac) {
     // Formulas / lookups may reference additional columns declared above this one.
-    const accum = Reco.rowFull(tpl, sess, row, ac.name);
+    // T-C27-7: the ENTRY, not its name - two added columns may share one.
+    const accum = Reco.rowFull(tpl, sess, row, ac);
     return Reco._extraOwnValue(tpl, sess, accum, row, ac, Reco._fullCtx());
   },
 
@@ -20641,7 +20779,9 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
     const ac = Reco._storeColumn(tpl, name);
     if (!ac) return '';
     if (ac.type !== 'formula' && ac.type !== 'master' && ac.type !== 'master_lookup') return '';
-    const accum = Reco.rowFull(tpl, sess, row, name);
+    // T-C27-7: stop at the entry _storeColumn actually resolved, so this
+    // function and the walk below it cannot disagree about which Dup is meant.
+    const accum = Reco.rowFull(tpl, sess, row, ac);
     const v = Reco._extraComputedBase(tpl, accum, ac, Reco._fullCtx());
     return v == null ? '' : v;
   },
@@ -21040,21 +21180,48 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
   },
 
   /* Copy of a row with every additional column (template + session) filled
-     in, in declaration order. Stops BEFORE `uptoName` when given a name, and
-     AFTER that index when given a number. */
-  _rowWithExtras(tpl, sess, row, uptoName, ctx) {
+     in, in declaration order. `upto` stops the walk and takes three forms:
+     a NUMBER (stop AFTER that index), an ENTRY from the list (stop BEFORE
+     that exact entry) or a NAME (stop BEFORE the first entry with it). */
+  _rowWithExtras(tpl, sess, row, upto, ctx) {
     const out = Object.assign({}, row);
     const extras = (tpl.additionalColumns || []).concat((sess && sess.extraColumns) || []);
-    /* THE NUMBER EXISTS BECAUSE A NAME IS AMBIGUOUS: two added columns may
-       share one, and the first of them then stopped a walk that was meant to
-       stop at the second. The name form is kept because _extraValueForRow
-       asks "everything declared before THIS column", which is a name
-       question - its own caller holds the definition, not an index. */
-    const byIdx = (typeof uptoName === 'number');
+    /* T-C27-7. THE STOP IS RESOLVED TO AN INDEX ONCE, HERE, because a NAME is
+       ambiguous: two added columns may share one, and the first of them then
+       stopped a walk that was meant to stop at the second. Measured
+       (scratchpad/dup/probes/p1_repro.mjs, P1g) on the ticket's own fixture
+       [Dup="A", Mid="M", Dup=CONCAT("x",{Mid})]: asking for the third entry
+       answered "x" where the whole-row walk answered "xM", because {Mid} was
+       never evaluated.
+       THE ENTRY FORM IS THE ONE CALLERS SHOULD USE. _extraValueForRow and
+       _extraBaseValue both hold the definition, not an index, and both now
+       pass it: identity cannot be ambiguous. The NAME form is kept for a
+       caller that genuinely has only a name, and the NUMBER form for
+       _corrUpto, which means "as far as the last chosen column".
+       AN ENTRY THAT IS NOT IN THE LIST falls back to its name rather than
+       throwing or walking everything, which is what a detached clone would
+       do; no caller in this file passes one (every def comes from
+       _extraDef / _storeColumn / the live list), and P1b is the gate that
+       says identity is what resolves the duplicate fixture. */
+    /* A NUMBER GOVERNS UNCONDITIONALLY, including a negative one, so the
+       number branch is byte for byte what it was. _corrUpto returns null
+       rather than {upto:-1} and its caller guards, so no negative index
+       reaches here today - but "walk everything" would be the wrong answer to
+       a nonsense index, and this keeps the old one. */
+    const byIdx = (typeof upto === 'number');
+    let stopAfter = -1, stopBefore = -1;
+    if (byIdx) stopAfter = upto;
+    else if (upto && typeof upto === 'object') {
+      stopBefore = extras.indexOf(upto);
+      if (stopBefore < 0) stopBefore = extras.findIndex(a => a && a.name === upto.name);
+    } else if (upto != null) stopBefore = extras.findIndex(a => a && a.name === upto);
     const kx = Reco._keyExtraSet(tpl);
     for (let i = 0; i < extras.length; i++) {
       const ac = extras[i];
-      if (uptoName != null && (byIdx ? i > uptoName : ac.name === uptoName)) break;
+      /* A name or entry that resolves to nothing leaves both at -1 and walks
+         the whole list, which is byte for byte what the name form did for a
+         name that was not in it. */
+      if (byIdx ? i > stopAfter : (stopBefore >= 0 && i >= stopBefore)) break;
       /* DECISION G, IN THE ONE PLACE. A key extra's value was frozen into
          row._pk when the data was loaded and nothing may recompute it: the
          grid, every export, every report, the Excel view and
@@ -21108,13 +21275,23 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
 
   /* The row enriched with its additional columns, memoised for this pass.
      With `uptoName` the walk stops early and is NOT memoised: a partial row
-     must never be handed to a caller that asked for the whole one. */
-  rowFull(tpl, sess, row, uptoName) {
+     must never be handed to a caller that asked for the whole one.
+     (Those two sentences describe a row memo this file does not have, which
+     is T-C27-8 and is left for it to correct.)
+
+     `upto` IS NOT A NAME ANY MORE, which is why the parameter was renamed:
+     T-C27-7 made the stop three-shaped - a NUMBER (stop after that index), an
+     ENTRY from the list (stop before that exact entry) or a NAME (stop before
+     the first entry carrying it). _rowWithExtras resolves it to an index once
+     and documents which form a caller should use. Anything written against
+     the old parameter name - `uptoName === someName` - was already wrong for
+     the number form _corrUpto passes. */
+  rowFull(tpl, sess, row, upto) {
     const c = Reco._fullCache;
     // No row, or no open pass: hand straight to the walker, so this is the
     // original call in every respect including how it treats a missing row.
-    if (!row || !c) return Reco._rowWithExtras(tpl, sess, row, uptoName);
-    return Reco._rowWithExtras(tpl, sess, row, uptoName, c.ctx);
+    if (!row || !c) return Reco._rowWithExtras(tpl, sess, row, upto);
+    return Reco._rowWithExtras(tpl, sess, row, upto, c.ctx);
   },
 
   // Returns the additionalColumn definition for a given column name, or null

@@ -735,6 +735,82 @@ a grid filter on that column, asserting the row it should match is matched. Keep
 `run_correction_e2e` `[R2-F12]`'s assertions as the guard that the correction path stays
 right whichever form the stop takes.
 
+**CLOSED — AND THE "What" PARAGRAPH ABOVE MISATTRIBUTES ITS OWN CONSEQUENCE,** which is the more
+useful half of the round. The entry stop is built and gated; the four surfaces named above are not
+what it fixes.
+
+**The correction.** "That helper feeds Find/Replace, the export type sniff, the grid filters and
+the slicer, so the consequence is a filter that hides a row it should show and a wrong value in an
+exported file" is true of the STATE but not of the name-matched stop. Every one of those readers
+resolves the column through `Reco._extraDef`, which searches `tpl.additionalColumns` and returns
+the **first** match — and asking `_extraValueForRow` about the first entry stops before the first
+entry, which is correct, so it answers that entry's own value either way. Measured
+(`scratchpad/dup/probes/p1_repro.mjs`, arm A) on the reachable collision, extras
+`[Mid, Dup(template formula), Dup(session)]`:
+
+```
+the grid cell            ''      <- the whole-row walk's LAST writer wins
+every helper reader      'xM'    <- _extraDef resolves the FIRST entry
+filter "is empty"        0 rows  <- a filter hiding a row it should show
+the slicer offered       ['xM']  <- a value no row on screen showed
+Find/Replace             1 hit   <- in a column the screen showed blank
+```
+
+Those five lines are the ticket's stated harm, and they are produced by **two entries with one
+name and last-writer-wins in the walk**, not by the stop. `R27f`/`R27n` are the checks that pin
+it: `_extraDef` still answers the template entry after the fix, and that entry still answers `'A'`
+on arm B's fixture. **T-C27-9 is what closes them**, and it is closed in the same commit.
+
+**What the entry stop DOES fix** is the ticket's own measurement, which is confirmed exactly
+(`R27m`, and `P1g` before the fix): on `[Dup="A", Mid="M", Dup=CONCAT("x",{Mid})]`, asking
+`_extraValueForRow` about the **third** entry answered `'x'` where the whole-row walk answered
+`'xM'`, because the walk stopped at the first entry sharing the name and `{Mid}` was never
+evaluated. That state is **not reachable through the editor** (`R27l`): `saveTemplate` refuses its
+own duplicate — *"Added column "Dup" is defined twice"* — so it arrives from a hand-edited
+`recoTemplates.json`, `App.importBackup` or a different build. Which is a smaller harm than the
+ticket thought, and still worth closing, because the ambiguity was in the CONTRACT of a helper
+with nine callers.
+
+**The shape, and it is not the ticket's one-liner.** `_rowWithExtras` resolves its stop to an
+**index once**, at the top, rather than testing three ways inside the loop:
+
+```js
+let stopAfter = -1, stopBefore = -1;
+if (typeof upto === 'number') stopAfter = upto;
+else if (upto && typeof upto === 'object') {
+  stopBefore = extras.indexOf(upto);
+  if (stopBefore < 0) stopBefore = extras.findIndex(a => a && a.name === upto.name);
+} else if (upto != null) stopBefore = extras.findIndex(a => a && a.name === upto);
+```
+
+A NUMBER stops **after** that index (`_corrUpto`), an ENTRY stops **before** that exact entry, a
+NAME stops before the first entry carrying it. An entry that is not in the list falls back to its
+name rather than throwing or walking everything, which is what a detached clone would do; no
+caller in the file passes one — every def comes from `_extraDef`, `_storeColumn` or the live list
+— and `R27f` is the gate that says identity, not the fallback, is what resolves the duplicate
+fixture.
+
+**Both name-form callers now pass the entry.** `_extraComputedValue` holds `ac`.
+`_extraBaseValue` holds the entry `_storeColumn` just resolved, and passing it means those two
+adjacent lines cannot disagree about which `Dup` is meant. **That second change is deliberately
+unmeasurable and is recorded as such:** `_storeColumn` searches `tpl.additionalColumns` only and
+returns the first match, and template entries come first in the concat, so the name stop and the
+entry stop resolve the same index for every input. The mutation grid reports `red=NONE` for it,
+which is the honest result rather than a probe fault — it is there so a future session-aware
+`_storeColumn` cannot silently desynchronise them.
+
+**`rowFull`'s parameter was renamed `uptoName` → `upto`**, which T-C27-8 asked for: it describes a
+single-shaped argument that stopped existing when `_corrUpto` began passing a number, and is now
+three-shaped. The two sentences above it about a row memo are still wrong and are still T-C27-8's,
+which the comment now says.
+
+**Gated by `[96] R27` in `run_store_e2e`** (24 checks) and one added check in
+`run_correction_e2e` `[R2-F12x]`. **Mutation grid 11** in `scratchpad/dup/mut/run.py` — nine
+against the round's own probe (`scratchpad/dup/probes/p2_fix.mjs`) and two pane ones against
+`scratchpad/dup/probes/p3_split.mjs`.
+
+---
+
 
 ## T-C27-10  An OVER-CAP chosen list can show chips and cells that are different sets
 
@@ -847,6 +923,89 @@ repairs an existing share on the next open rather than only refusing new ones.
 **Test** The two gestures of `[R2-F12]`: assert whichever refusal is chosen, with the toast
 naming the column, and keep `[R2-F12]`'s own assertions (the chosen context cell equals the
 grid's cell, character for character) as the guard for the state if it is allowed to stand.
+
+**CLOSED — as a repair on the open, which also fixes shares already in this state.**
+
+**The state is exactly as the ticket describes it** and is asserted rather than assumed (`R27a`):
+"+ Col" adds a session-only column called `Dup` — accepted, because `ssCommitAddCol` checks
+`tpl.columns`, `tpl.additionalColumns` **and** `sess.extraColumns`, and the template has no such
+name — and then the template editor adds an added column called `Dup`, accepted because
+`saveTemplate` has no session in scope. `saveTemplate` does refuse its OWN duplicates (`R27l`), so
+this one gesture pair is the whole reachable route.
+
+**AND IT IS THIS TICKET, NOT T-C27-7, THAT CLOSES THE HARM T-C27-7 CLAIMED.** Measured
+(`scratchpad/dup/probes/p1_repro.mjs`, arm A): the grid cell read `''` while every helper reader
+read `'xM'`, so filtering **"is empty"** on a visibly empty cell matched **nothing**, the slicer
+offered a value no row on screen showed, and Find/Replace matched inside a column the screen
+showed blank. T-C27-7's entry stop cannot move any of that, because each reader resolves the name
+through `Reco._extraDef` to the first TEMPLATE entry and that entry answers its own value
+correctly. T-C27-7's own closing block carries the correction.
+
+**`Reco._dedupeSessionExtras(sess, tpl)`, from `ensureSessionShape`.** The template is a new
+optional second parameter, passed by `Reco.render` and `Reco.ingestData` — the two callers that
+have one — and deliberately **not** by `Panes._viewFor`, whose `extraColumns` is a DATA key that
+would write through to the owner and repeat the work `Reco.render` does a moment later with the
+real template in hand. `makeSession()` passes none and a fresh session has no extras to collide.
+
+**RENAME, NOT DROP, AND THE OPERATOR'S WORK MOVES WITH IT.** The ticket offered either. The
+session entry is the operator's own column and may already carry values they typed, so dropping it
+discards their work to tidy a collision they were never told about. `<name> (session)`, then
+`<name> (session 2)` and up, so a second collision cannot land on the name the first rename wanted
+(`R27q` — and the other session extra, which does not collide, is left alone).
+`Reco._reKeyColumnName` moves `sess.manualTags` (keyed `row._id + '||' + name`, so the suffix is
+what moves), `columnFilters`, `columnWidths`, `slicers`, `hiddenCols`, `columnSorts.col`, and the
+inner keys of `cellFormats` / `cellFormulas`, which are keyed by row first. **Nothing on a shared
+pk-keyed master is touched**, because a session-only extra's value never reaches one — decision P,
+only a persisted template column's typed value becomes a durable shared record. `R27d` is the
+check, and the mutation that removes the re-key turns `R27d` red **and** `R27h`/`R27i`/`R27j`,
+because `hiddenCols` left naming `Dup` then hides the TEMPLATE column instead.
+
+**THE TEMPLATE ENTRY IS NEVER TOUCHED** (`R27e`). It is the shared one; a repair that renamed it
+would change what every colleague sees. The mutation that renames it instead turns ten checks red.
+
+**And it is said** (`R27c`, `R27p`), in one sentence per collision naming both names and why —
+the operator typed that name and the heading in front of them has just changed. One sentence for
+the one column that moved, not one per session extra (`R27r`). Deferred by a `setTimeout(0)` so it
+does not fire inside a render that has not drawn the new heading yet.
+
+**The standard columns count too** (`R27o`): a session extra whose name a template **column**
+holds is renamed on the same open. `ssCommitAddCol` checks that list at the gesture, so this is
+the shape a template that GAINS the column later produces, and it is the half of the `taken` set
+arm A cannot reach.
+
+**`run_correction_e2e` `[R2-F12]` builds this exact collision and is still green**, because it
+reads its extras list immediately after `saveTemplate` and before the first `App.navigate` — the
+one window in which the state exists. Its header now says so and `[R2-F12x]` asserts the rename,
+so nobody reads that fixture as evidence the duplicate survives an open.
+
+**AND THE PANE HALF, WHICH THE FIRST VERSION OF THE REPAIR GOT WRONG TWICE.** `extraColumns`,
+`manualTags`, `cellFormats` and `cellFormulas` are **DATA** keys — one copy, on the owner — so
+renaming them through the session Reco.render holds reaches both panes. `columnFilters`,
+`slicers`, `columnWidths`, `hiddenCols` and `columnSorts` are **VIEW** keys, one per pane. Left
+alone, the other pane's filter or hidden-column setting would keep naming `Dup`, which after the
+rename resolves to the **template** column — so that pane would be filtering and hiding somebody
+else's column. That is precisely what the grid shows when the re-key is dropped altogether, one
+pane along.
+
+So the repair walks `Panes.panesFor(tpl.id)` — and asks **`Panes.viewFor(pn.key, tpl.id)`, not
+`pn.view`**. Measured (`scratchpad/dup/probes/p3_split.mjs`): after `openSplit()` the panes read
+`p0:noview p1:view`, because the **owning** pane has no view object at all — its VIEW keys live on
+the owner session itself, and only the second pane gets a proxy. `pn.view` missed the owning pane
+every time.
+
+**And the mutation that proves `viewFor` is load-bearing rather than defensive only went red once
+the arm rendered the right thing.** With `App.navigate('reco')` the repair fires on p0's render,
+`sess` is then the owner — i.e. the owning pane's own object — and `pn.view` picks up p1, so both
+panes move and the mutation measured nothing. Three app sites render the **non-owner pane alone**,
+each guarded by `pane !== Panes.owner()`: `Reco._slicerRepaint`, `Reco._corrRepaint` and the
+virt-cols escalation in `refreshGrid`. On that render `sess` is p1's view and nothing but
+`Panes.viewFor` names p0's object. `R27u` asserts the arm rendered that way, which is what gives
+`R27v` its teeth.
+
+**Gated by `[96] R27`** (24 checks) plus `[R2-F12x]`, and a **mutation grid of 11** —
+nine mutations against `p2_fix.mjs` and two pane ones against `p3_split.mjs`.
+
+---
 
 
 ## T-24R2-1  ~~`saveTemplate`'s read-modify-write race now splits ROW IDENTITY~~  **FIXED** (and the refusal's own blind spot closed after the review)

@@ -10727,6 +10727,7 @@ const PORT_R23  = 21502;   // R23 T-26-8: the AEG keyword filter with half a pai
 const PORT_R24  = 21506;   // R24 T-26-10: the report summary cards' own silence
 const PORT_R25  = 21510;   // R25 T-S10-13: the refused document number says so in a modal
 const PORT_R26  = 21514;   // R26 T-S10-14: the re-minted reversal mirror says so
+const PORT_R27  = 21518;   // R27 T-C27-7/T-C27-9: two added columns with one name
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -15375,6 +15376,526 @@ section(95, 'R26 T-S10-14 — a re-minted reversal mirror says so, in the toast,
     [...rvA.errors, ...rvB.errors].slice(0, 5));
   await rvB.ctx.close();
   await rvA.ctx.close();
+}
+
+/* ============================================================ [96] ====
+   R27. T-C27-7 and T-C27-9. Two added columns with one name, and what every
+   reader of that column then said.
+
+   THE TWO TICKETS ARE TWO DIFFERENT DEFECTS IN ONE STATE, and separating them
+   is most of this round. The probe that established it is
+   scratchpad/dup/probes/p1_repro.mjs; both arms are reproduced here.
+
+   ARM A — THE REACHABLE STATE (T-C27-9). "+ Col" adds a session-only column
+   called Dup (accepted: ssCommitAddCol checks tpl.columns,
+   tpl.additionalColumns AND sess.extraColumns, and the template has no such
+   name), then the template editor adds an added column called Dup (accepted:
+   saveTemplate has no session in scope, and refuses only its OWN duplicates,
+   which it does — "Added column "Dup" is defined twice", R27l). Two ordinary
+   gestures, no file import. With extras [Mid, Dup(template formula),
+   Dup(session)] the readers disagreed:
+
+     the grid cell            ''      <- the walk's LAST writer wins
+     every helper reader      'xM'    <- _extraDef resolves the FIRST entry
+     filter "is empty"        0 rows  <- a filter hiding a row it should show
+     the slicer offered       ['xM']  <- a value no row on screen showed
+     Find/Replace             1 hit   <- in a column the screen showed blank
+
+   AND T-C27-7'S FIX CANNOT MOVE ANY OF THAT, which is the correction this
+   round makes to its ticket. Its What attributes the Find/Replace, export,
+   filter and slicer consequence to the name-matched early stop; but each of
+   those readers resolves the column through Reco._extraDef, which answers the
+   first TEMPLATE entry, and that entry answers its own value correctly
+   (R27n). The name stop is not what makes them disagree with the grid — two
+   entries with one name and last-writer-wins in the walk is. So arm A is
+   closed by removing the state, which is T-C27-9.
+
+   ARM B — THE TICKET'S LITERAL FIXTURE (T-C27-7). [Dup="A", Mid="M",
+   Dup=CONCAT("x",{Mid})], which the editor refuses (R27l) and which therefore
+   arrives only from a hand-edited recoTemplates.json, App.importBackup or a
+   different build. Asking _extraValueForRow about the THIRD entry answered
+   "x" where the whole-row walk answered "xM", because the walk stopped at the
+   first entry that happened to share the name and {Mid} was never evaluated.
+   That is the ticket's own measurement, confirmed, and it is what the
+   entry-identity stop fixes (R27m).
+
+   WHAT WAS BUILT. _rowWithExtras resolves its stop to an INDEX once: a NUMBER
+   stops after that index (_corrUpto), an ENTRY stops before that exact entry,
+   a NAME stops before the first entry carrying it. _extraValueForRow and
+   _extraBaseValue both hold the definition and both now pass it.
+   Reco._dedupeSessionExtras, called from ensureSessionShape with the template,
+   renames a colliding SESSION extra to "<name> (session)" and re-keys every
+   session key that named it.
+
+   WHY RENAME AND NOT DROP, and why on the open. The session entry is the
+   operator's own column and may carry values they typed, so dropping it
+   discards their work to tidy a collision they were never told about (R27d).
+   ensureSessionShape is the only function that sees both lists on every open,
+   so this repairs a share ALREADY in that state instead of only refusing new
+   ones — and the TEMPLATE entry, the shared one, is never touched (R27e).
+
+   MUTATION GRID: scratchpad/dup/mut/run.py, 9 mutations x the 18 checks of
+   this section's own probe (scratchpad/dup/probes/p2_fix.mjs):
+
+     the entry form treated as a name again -> R27m
+     _extraComputedValue passes the name    -> R27m
+     _extraBaseValue passes the name        -> NOTHING, and correctly so
+     the repair is never called             -> R27b/c/d/g/h/i/j/o/p/q/r
+     it renames in silence                  -> R27c, R27p, R27r
+     the rename carries nothing with it     -> R27d, R27h, R27i, R27j
+     the TEMPLATE entry is renamed instead  -> R27b/e/f/g/h/i/j/k/q/r
+     the standard columns are not "taken"   -> R27o, R27p
+     the rename does not seek a free name    -> R27q, R27r
+
+   THE THIRD MEASURES NOTHING AND THAT IS THE RIGHT ANSWER. _extraBaseValue
+   resolves its entry through Reco._storeColumn, which searches
+   tpl.additionalColumns only and returns the FIRST match — and template
+   entries come first in the concat, so the name stop and the entry stop
+   resolve the SAME index for every input. The change is there so the two
+   adjacent lines cannot disagree about which Dup is meant if _storeColumn is
+   ever made session-aware, and it is recorded as unmeasurable rather than
+   left looking gated.
+
+   `run_correction_e2e` [R2-F12] BUILDS THE SAME COLLISION and is still green:
+   it reads its extras list before the first App.navigate, so it captures the
+   state a moment before the repair. Its own assertion — the context cell is
+   character for character the grid's cell — is what gates the stop from the
+   correction tab's side, and it now has one more check saying the state does
+   not survive the open. */
+const R27_READERS = `(async function (ID) {
+  const live = () => AppState.recoTemplates.find(x => x.id === ID);
+  const tpl = live(), s = AppState.recoSessions[ID], row = s.data[0];
+  const extras = (tpl.additionalColumns || []).concat(s.extraColumns || []);
+  const out = {};
+  Reco._fullPass();
+  try {
+    out.wholeRow = String(Reco.rowFull(tpl, s, row).Dup);
+    out.viaExtraDef = String(Reco._extraValueForRow(tpl, s, row, Reco._extraDef(tpl, 'Dup')));
+    out.defIsIndex = extras.indexOf(Reco._extraDef(tpl, 'Dup'));
+  } finally { Reco._fullEnd(); }
+
+  s.activeSection = 'action';
+  App.navigate('reco');
+  await new Promise(r => setTimeout(r, 400));
+  const tr = document.querySelector('.reco-table-wrap tbody tr');
+  const cells = {};
+  [...(tr ? tr.querySelectorAll('td[data-col]') : [])].forEach(td => { cells[td.dataset.col] = td.textContent.trim(); });
+  out.grid = cells;
+
+  /* THE FILTER, through applyTableFiltersSort rather than off the DOM: the
+     rendered row count also moves with paging and the status filter, and this
+     must read the filter and nothing else. */
+  const rowsFor = (conds) => {
+    s.columnFilters = { Dup: conds };
+    let n; Reco._fullPass();
+    try { n = Reco.applyTableFiltersSort(tpl, s, s.data.slice()).length; }
+    finally { Reco._fullEnd(); s.columnFilters = {}; }
+    return n;
+  };
+  /* "is empty" is the honest question: the cell on screen WAS empty, so this
+     is the filter an operator looking at that screen would reach for. */
+  out.filterEmpty  = rowsFor([{ op: 'empty', enabled: true }]);
+  out.filterEqGrid = rowsFor([{ op: 'equals', val: cells.Dup, enabled: true }]);
+
+  Reco._fullPass();
+  try { out.slicerValues = (await Reco._slicerDistinct(tpl, s, 'Dup')).values.map(String); }
+  catch (e) { out.slicerValues = ['threw: ' + String(e && e.message)]; }
+  finally { Reco._fullEnd(); }
+
+  /* FIND/REPLACE through its own column resolver and its own matcher. */
+  try {
+    FindReplace.open();
+    await new Promise(r => setTimeout(r, 200));
+    FindReplace._state.column = 'extra:Dup';
+    FindReplace._state.find = out.grid.Dup;
+    FindReplace._state.useRegex = false; FindReplace._state.caseSensitive = false;
+    FindReplace._state.wholeCell = false;
+    const rx = FindReplace._buildMatcher();
+    const cs = FindReplace._columnsToSearch(tpl);
+    Reco._fullPass();
+    let hits = 0;
+    try {
+      s.data.forEach(r => cs.forEach(c => {
+        const v = c.isExtra ? Reco._extraValueForRow(tpl, s, r, c.def) : r[c.name];
+        if (v == null || v === '') return;
+        rx.lastIndex = 0;
+        if (rx.test(String(v))) hits++;
+      }));
+    } finally { Reco._fullEnd(); }
+    out.frHits = hits;
+    App.closeModal();
+  } catch (e) { out.frHits = 'threw: ' + String(e && e.message); }
+  return out;
+})`;
+
+section(96, 'R27 T-C27-7 + T-C27-9 — two added columns with one name, and every reader of it');
+{
+  const DUP = makeRoot('share-r27');
+  const brDUP = await startBridge(DUP.root, PORT_R27); procs.push(brDUP.proc);
+  const dp = await openReco(browser, brDUP);
+
+  /* ---- ARM A: the reachable collision, built from the two gestures. */
+  const a = await dp.page.evaluate(async () => {
+    const ID = 'TPL_DUP';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = 'DUP RECON';
+    t.columns = ['Doc', 'Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Amount'];
+    t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(ID); App.closeModal();
+    const live = () => AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessions[ID];
+    Reco.ensureSessionShape(sess);
+    sess.data = [{ _id: ID + '_r0', _pk: 'D1', _ver: 'upload', Doc: 'D1', Amount: '100' }];
+    AppState.activeRecoId = ID;
+    const out = {};
+
+    /* GESTURE 1 — "+ Col", session-only, called Dup. */
+    window.__toasts = [];
+    Reco.ssOpenAddColModal();
+    await new Promise(r => setTimeout(r, 140));
+    document.getElementById('ssNewColName').value = 'Dup';
+    const p = document.getElementById('ssNewColPersist'); if (p) p.checked = false;
+    Reco.ssCommitAddCol();
+    await new Promise(r => setTimeout(r, 250));
+    out.g1 = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+
+    /* GESTURE 2 — the template editor adds Mid and a Dup of its own. It
+       cannot see the session, so nothing refuses. Dup reads Mid, so the
+       walk's stop point is what decides its value. */
+    window.__toasts = [];
+    RecoTemplate.edit(ID);
+    RecoTemplate._editing.additionalColumns = [
+      { name: 'Mid', type: 'formula', formula: '"M"' },
+      { name: 'Dup', type: 'formula', formula: 'CONCAT("x",{Mid})' }];
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    out.g2 = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+    /* READ BEFORE THE FIRST OPEN, which is the only window in which the
+       collision exists — the same accident that keeps [R2-F12] green. */
+    out.extrasBeforeOpen = (live().additionalColumns || []).map(a => a.name)
+      .concat((AppState.recoSessions[ID].extraColumns || []).map(a => a.name));
+
+    /* A TYPED VALUE AND FOUR VIEW KEYS NAMING THE COLUMN, so whether the
+       operator's own work follows the rename is measured, not assumed. */
+    const s0 = AppState.recoSessions[ID];
+    s0.manualTags = s0.manualTags || {};
+    s0.manualTags[Reco._tagKey(s0.data[0], 'Dup')] = 'typed by AR';
+    s0.hiddenCols = ['Dup'];
+    s0.columnWidths = { Dup: 123 };
+    s0.columnSorts = { col: 'Dup', dir: 'asc' };
+
+    /* THE OPEN, which is where the repair happens. */
+    window.__toasts = [];
+    s0.activeSection = 'action';
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 450));
+    out.repairToasts = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+    out.extrasOrder = (live().additionalColumns || []).map(a => a.name)
+      .concat((AppState.recoSessions[ID].extraColumns || []).map(a => a.name));
+    const sR = AppState.recoSessions[ID];
+    out.carried = {
+      tag: Reco._manualTag(sR, sR.data[0], 'Dup (session)'),
+      tagOld: Reco._manualTag(sR, sR.data[0], 'Dup'),
+      hidden: (sR.hiddenCols || []).slice(),
+      width: Object.keys(sR.columnWidths || {}),
+      sort: (sR.columnSorts || {}).col };
+    out.tplExtras = (live().additionalColumns || []).map(a => a.name + ':' + (a.formula || a.type));
+    return out;
+  });
+  const ar = await dp.page.evaluate(R27_READERS + "('TPL_DUP')");
+  note('R27 arm A — the two gestures', { g1: a.g1, g2: a.g2, before: a.extrasBeforeOpen });
+  note('R27 arm A — after the open', { extras: a.extrasOrder, toasts: a.repairToasts,
+                                       carried: a.carried, tplExtras: a.tplExtras });
+  note('R27 arm A — what each reader says', ar);
+
+  check(a.extrasBeforeOpen.join(',') === 'Mid,Dup,Dup'
+        && a.g1.some(m => /session-only/.test(m)) && a.g2.some(m => /saved/i.test(m)),
+    'R27a REACHABILITY: two ordinary gestures and no file import reach the collision — "+ Col" '
+    + 'session-only, then the template editor, which has no session to check against. Nothing was '
+    + 'made to refuse a gesture, which is the point',
+    { extras: a.extrasBeforeOpen, g1: a.g1, g2: a.g2 });
+  check(a.extrasOrder.join(',') === 'Mid,Dup,Dup (session)',
+    'R27b THE FIX (T-C27-9): the next OPEN repairs it — the SESSION entry is renamed, so a share '
+    + 'already in this state is repaired rather than only new ones refused', a.extrasOrder);
+  check(a.repairToasts.some(m => /Dup \(session\)/.test(m) && /template now has a column/.test(m)),
+    'R27c AND IT IS SAID, naming BOTH names. The operator typed that name and the heading they are '
+    + 'looking at has just changed', a.repairToasts);
+  check(a.carried.tag === 'typed by AR' && a.carried.tagOld === ''
+        && a.carried.hidden.join(',') === 'Dup (session)'
+        && a.carried.width.join(',') === 'Dup (session)'
+        && a.carried.sort === 'Dup (session)',
+    'R27d AND THE OPERATOR\'S OWN WORK FOLLOWS IT: the value they typed, and every session key that '
+    + 'named the column, move with the rename. This is why the fix renames instead of dropping — a '
+    + 'drop discards their work to tidy a collision they were never told about', a.carried);
+  check(a.tplExtras.join(',') === 'Mid:"M",Dup:CONCAT("x",{Mid})',
+    'R27e CONTROL: the TEMPLATE entry is untouched — it is the shared one, and a repair that rewrote '
+    + 'it would change what every colleague sees', a.tplExtras);
+  check(ar.defIsIndex === 1,
+    'R27f PREMISE: Reco._extraDef resolves "Dup" to the TEMPLATE entry, not the session one. Every '
+    + 'reader T-C27-7 names goes through _extraDef, which is why the entry-identity stop could never '
+    + 'have fixed this arm', ar.defIsIndex);
+  check(ar.wholeRow === ar.viaExtraDef,
+    'R27g THE DIVERGENCE IS GONE: the whole-row walk and the helper agree about that column. They '
+    + 'answered \'\' and \'xM\' before', { wholeRow: ar.wholeRow, viaExtraDef: ar.viaExtraDef });
+  check(ar.grid.Dup === ar.wholeRow && ar.grid.Dup === 'xM',
+    'R27h ...and the GRID shows it too, so the screen, the walk and the helper are ONE value',
+    { grid: ar.grid.Dup, wholeRow: ar.wholeRow });
+  check(ar.filterEmpty === 0 && ar.filterEqGrid === 1,
+    'R27i THE FILTER MATCHES WHAT IS ON SCREEN: "equals" the rendered value finds the row, and "is '
+    + 'empty" finds none because the cell is no longer blank-looking. Before, "is empty" on a '
+    + 'visibly empty cell matched NOTHING — a filter hiding a row it should show',
+    { empty: ar.filterEmpty, eqGrid: ar.filterEqGrid });
+  check(ar.slicerValues.length === 1 && ar.slicerValues[0] === ar.grid.Dup,
+    'R27j AND THE SLICER OFFERS WHAT THE ROW SHOWS — it offered \'xM\' against a blank cell before, '
+    + 'the same shape as the Decision G comment at the head of _extraValueForRow from a different '
+    + 'cause', { offered: ar.slicerValues, onScreen: ar.grid.Dup });
+  check(ar.frHits === 1,
+    'R27k AND FIND/REPLACE MATCHES THE VALUE THE SCREEN SHOWS, through its own column resolver and '
+    + 'its own matcher, rather than one only the helper could see', ar.frHits);
+
+  /* ---- ARM B: the ticket's literal fixture. */
+  const b = await dp.page.evaluate(async () => {
+    const ID = 'TPL_DUP2';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = 'DUP RECON 2';
+    t.columns = ['Doc', 'Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Amount'];
+    t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(ID); App.closeModal();
+    const live = () => AppState.recoTemplates.find(x => x.id === ID);
+    const sess = AppState.recoSessions[ID];
+    Reco.ensureSessionShape(sess);
+    sess.data = [{ _id: ID + '_r0', _pk: 'E1', _ver: 'upload', Doc: 'E1', Amount: '100' }];
+    AppState.activeRecoId = ID;
+    const out = {};
+    const DUPS = [
+      { name: 'Dup', type: 'formula', formula: '"A"' },
+      { name: 'Mid', type: 'formula', formula: '"M"' },
+      { name: 'Dup', type: 'formula', formula: 'CONCAT("x",{Mid})' }];
+
+    /* THROUGH THE EDITOR FIRST, so whether the duplicate is refused is
+       measured rather than assumed. */
+    window.__toasts = [];
+    RecoTemplate.edit(ID);
+    RecoTemplate._editing.additionalColumns = DUPS.map(d => Object.assign({}, d));
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    out.saveToasts = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+    out.storedOrder = (live().additionalColumns || []).map(a => a.name);
+
+    /* Then by hand: the state T-C27-7's Fix is designed for, which reaches a
+       share through a hand-edited recoTemplates.json or App.importBackup. */
+    live().additionalColumns = DUPS.map(d => Object.assign({}, d));
+    const tpl = live(), s = AppState.recoSessions[ID], row = s.data[0];
+    const extras = (tpl.additionalColumns || []).concat(s.extraColumns || []);
+    Reco._fullPass();
+    try {
+      out.wholeRow = String(Reco.rowFull(tpl, s, row).Dup);
+      out.atIndex0 = String(Reco._extraValueForRow(tpl, s, row, extras[0]));
+      out.atIndex2 = String(Reco._extraValueForRow(tpl, s, row, extras[2]));
+    } finally { Reco._fullEnd(); }
+    return out;
+  });
+  note('R27 arm B', b);
+  check(b.storedOrder.join(',') !== 'Dup,Mid,Dup'
+        && b.saveToasts.some(m => /defined twice/.test(m)),
+    'R27l PREMISE: the editor refuses its OWN duplicate, so arm B\'s three-entry list is not '
+    + 'reachable through it — which is why T-C27-9 and not T-C27-7 is the half that closes arm A',
+    { stored: b.storedOrder, toasts: b.saveToasts });
+  check(b.atIndex2 === 'xM' && b.wholeRow === 'xM',
+    'R27m THE FIX (T-C27-7): _extraValueForRow for the THIRD entry answers "xM", the same as the '
+    + 'whole-row walk. It answered "x" before — the walk stopped at the first entry that happened to '
+    + 'share the name, so {Mid} was never evaluated', { extras2: b.atIndex2, wholeRow: b.wholeRow });
+  check(b.atIndex0 === 'A',
+    'R27n CONTROL: the FIRST entry still answers its own value, so asking about entry 0 stops before '
+    + 'entry 0 exactly as it did — and this is also why an entry stop cannot change arm A', b.atIndex0);
+
+  /* ---- ARMS C and D: lines of the repair arm A cannot reach. */
+  const cd = await dp.page.evaluate(async () => {
+    const mk = async (ID, cols, sessNames, tplExtras) => {
+      RecoTemplate.create();
+      const t = RecoTemplate._editing;
+      t.id = ID; t.name = ID;
+      t.columns = cols.map(n => ({ name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+      t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+      t.displayColumns = cols.slice();
+      t.additionalColumns = [];
+      RecoTemplate.saveTemplate(); RecoTemplate.open(ID); App.closeModal();
+      const sess = AppState.recoSessions[ID];
+      Reco.ensureSessionShape(sess);
+      sess.data = [{ _id: ID + '_r0', _pk: 'K1', _ver: 'upload', Doc: 'K1', Amount: '1' }];
+      AppState.activeRecoId = ID;
+      /* The session extras go on DIRECTLY, which is the state a share written
+         by any build before this one holds — the gesture path is arm A's job. */
+      sess.extraColumns = sessNames.map(n => ({ name: n, type: 'custom', _ssAdded: true }));
+      const live = AppState.recoTemplates.find(x => x.id === ID);
+      if (tplExtras) live.additionalColumns = tplExtras;
+      window.__toasts = [];
+      sess.activeSection = 'action';
+      App.navigate('reco');
+      await new Promise(r => setTimeout(r, 400));
+      return { extras: (live.additionalColumns || []).map(a => a.name)
+                 .concat((AppState.recoSessions[ID].extraColumns || []).map(a => a.name)),
+               cols: (live.columns || []).map(c => c.name),
+               toasts: (window.__toasts || []).map(x => x.kind + ': ' + x.msg) };
+    };
+    const out = {};
+    out.c = await mk('TPL_DUP_C', ['Doc', 'Ref', 'Amount'], ['Ref'], null);
+    /* AND A SECOND OPEN OF C, because the repair runs on EVERY render: an
+       error toast that fired each time an operator navigated would be worse
+       furniture than the collision it reports. */
+    AppState.activeRecoId = 'TPL_DUP_C';
+    window.__toasts = [];
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 400));
+    out.cAgain = {
+      extras: ((AppState.recoTemplates.find(x => x.id === 'TPL_DUP_C') || {}).additionalColumns || [])
+        .map(a => a.name)
+        .concat((AppState.recoSessions.TPL_DUP_C.extraColumns || []).map(a => a.name)),
+      toasts: (window.__toasts || []).map(x => x.kind + ': ' + x.msg) };
+    out.d = await mk('TPL_DUP_D', ['Doc', 'Amount'], ['Tag', 'Tag (session)'],
+      [{ name: 'Tag', type: 'custom' }]);
+    return out;
+  });
+  note('R27 arm C — collision with a STANDARD column', cd.c);
+  note('R27 arm D — two colliding session extras', cd.d);
+  check(cd.c.extras.join(',') === 'Ref (session)' && cd.c.cols.join(',') === 'Doc,Ref,Amount',
+    'R27o THE STANDARD COLUMNS COUNT TOO: a session extra whose name a template COLUMN holds is '
+    + 'renamed on the same open, and the column itself is left alone. ssCommitAddCol checks that '
+    + 'list at the gesture, so this is the shape a template that GAINS the column later produces',
+    cd.c);
+  check(cd.c.toasts.some(m => /Ref \(session\)/.test(m)),
+    'R27p ...and it is said, through the same sentence', cd.c.toasts);
+  check(cd.d.extras.join(',') === 'Tag,Tag (session 2),Tag (session)',
+    'R27q AND TWO COLLISIONS CANNOT LAND ON ONE NAME: "Tag" becomes "Tag (session 2)" because "Tag '
+    + '(session)" is already taken by the OTHER session extra, which does not collide and is left '
+    + 'alone. A rename that collided again would have been the same bug one step along', cd.d);
+  check(cd.d.toasts.filter(m => /is now called/.test(m)).length === 1,
+    'R27r CONTROL: exactly ONE sentence, for the one column that moved — not one per session extra',
+    cd.d.toasts);
+  note('R27 arm C — a second open', cd.cAgain);
+  check(cd.cAgain.extras.join(',') === 'Ref (session)'
+        && !cd.cAgain.toasts.some(m => /is now called/.test(m)),
+    'R27r2 CONTROL, AND IT MATTERS BECAUSE THE REPAIR RUNS ON EVERY RENDER: a SECOND open says '
+    + 'nothing, AND the column is still "Ref (session)" — so it is neither repeating nor undoing '
+    + 'itself. The absence on its own would also pass if the column had vanished, which is why the '
+    + 'name is asserted in the same breath', cd.cAgain);
+
+  /* ---- ARM E: THE SPLIT. columnFilters, slicers, columnWidths, hiddenCols
+     and columnSorts are VIEW keys - one copy per pane - while extraColumns,
+     manualTags, cellFormats and cellFormulas are DATA on the owner. A repair
+     that re-keyed only the session Reco.render holds would move the rendering
+     pane's settings and leave the OTHER pane's naming "Dup", which after the
+     rename resolves to the TEMPLATE column: that pane would be filtering and
+     hiding somebody else's column - the same harm the re-key mutation shows,
+     one pane along.
+     AND THE OWNING PANE HAS NO `view` OBJECT, which is the trap this arm
+     exists to pin: after openSplit() the panes read p0:noview p1:view,
+     because p0's VIEW keys live on the owner session itself. The first
+     version of the repair asked pane.view and missed the owning pane every
+     time; it asks Panes.viewFor, which resolves `p.view || owner`. */
+  const sp = await dp.page.evaluate(async () => {
+    const ID = 'TPL_SPL';
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = 'SPLIT RECON';
+    t.columns = ['Doc', 'Amount'].map(n => ({
+      name: n, label: n, formats: [], isValue: n === 'Amount', isDate: false }));
+    t.primaryKeys = ['Doc']; t.valueColumn = 'Amount';
+    t.displayColumns = ['Doc', 'Amount'];
+    t.additionalColumns = [];
+    RecoTemplate.saveTemplate(); RecoTemplate.open(ID); App.closeModal();
+    const live = () => AppState.recoTemplates.find(x => x.id === ID);
+    const o = {};
+    const sess = AppState.recoSessions[ID];
+    Reco.ensureSessionShape(sess);
+    sess.data = [{ _id: ID + '_r0', _pk: 'S1', _ver: 'upload', Doc: 'S1', Amount: '7' }];
+    sess.extraColumns = [{ name: 'Dup', type: 'custom', _ssAdded: true }];
+    AppState.activeRecoId = ID;
+    sess.activeSection = 'action';
+    App.navigate('reco');
+    await new Promise(r => setTimeout(r, 350));
+
+    o.opened = Panes.openSplit();
+    await new Promise(r => setTimeout(r, 400));
+    o.panes = Panes.panesFor(ID).map(p => p.key + (p.view ? ':view' : ':noview'));
+    const vs = Panes.panesFor(ID).map(p => Panes.viewFor(p.key, ID)).filter(Boolean);
+    vs.forEach((v, i) => {
+      v.hiddenCols = ['Dup'];
+      v.columnFilters = { Dup: [{ op: 'equals', val: 'v' + i, enabled: true }] };
+      v.columnWidths = { Dup: 100 + i };
+      v.columnSorts = { col: 'Dup', dir: 'asc' };
+      v.slicers = { Dup: ['x'] };
+    });
+    o.viewsWired = vs.length;
+
+    window.__toasts = [];
+    RecoTemplate.edit(ID);
+    RecoTemplate._editing.additionalColumns = [{ name: 'Dup', type: 'formula', formula: '"T"' }];
+    RecoTemplate.saveTemplate();
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 250));
+    /* THE REPAIR RUNS ON A RENDER OF THE NON-OWNER PANE ALONE, which is what
+       makes Panes.viewFor load-bearing rather than defensive: three app sites
+       render just that pane - Reco._slicerRepaint, Reco._corrRepaint and the
+       virt-cols escalation in refreshGrid, each guarded by
+       `pane !== Panes.owner()`. On that render `sess` is p1's VIEW, so the
+       owning pane's keys live on an object nothing else in the function
+       names. App.navigate renders p0 first and would hide the difference. */
+    const other = Panes.panesFor(ID).find(p => p !== Panes.owner());
+    o.renderedAlone = other ? other.key : null;
+    Panes.renderPane(other);
+    await new Promise(r => setTimeout(r, 500));
+    o.toasts = (window.__toasts || []).map(x => x.kind + ': ' + x.msg);
+    o.extras = (live().additionalColumns || []).map(a => a.name)
+      .concat((AppState.recoSessions[ID].extraColumns || []).map(a => a.name));
+    o.perPane = Panes.panesFor(ID).map(p => {
+      const v = Panes.viewFor(p.key, ID) || AppState.recoSessionsOwned[ID];
+      return { key: p.key, hidden: (v.hiddenCols || []).slice(),
+               filters: Object.keys(v.columnFilters || {}),
+               widths: Object.keys(v.columnWidths || {}),
+               slicers: Object.keys(v.slicers || {}),
+               sort: (v.columnSorts || {}).col };
+    });
+    Panes.closeSplit && Panes.closeSplit();
+    await new Promise(r => setTimeout(r, 250));
+    return o;
+  });
+  note('R27 arm E — the split', { opened: sp.opened, panes: sp.panes, wired: sp.viewsWired,
+                                 renderedAlone: sp.renderedAlone });
+  note('R27 arm E — per pane after the repair', sp.perPane);
+  check(sp.opened === true && sp.viewsWired === 2 && sp.panes.join(',') === 'p0:noview,p1:view',
+    'R27t PREMISE: two panes on ONE template, both carrying settings that name the session column - '
+    + 'and the OWNING pane has no view object of its own, which is why the repair asks '
+    + 'Panes.viewFor and not pane.view', { opened: sp.opened, panes: sp.panes, wired: sp.viewsWired });
+  check(sp.renderedAlone === 'p1' && sp.extras.join(',') === 'Dup,Dup (session)',
+    'R27u the repair ran under a split, on a render of the NON-OWNER pane ALONE — the idiom '
+    + '_slicerRepaint, _corrRepaint and the virt-cols escalation all use. On that render `sess` is '
+    + 'p1\'s view, so nothing but Panes.viewFor names the owning pane\'s object',
+    { renderedAlone: sp.renderedAlone, extras: sp.extras });
+  check(sp.perPane.length === 2
+        && sp.perPane.every(p => p.hidden.join(',') === 'Dup (session)'
+              && p.filters.join(',') === 'Dup (session)'
+              && p.widths.join(',') === 'Dup (session)'
+              && p.slicers.join(',') === 'Dup (session)'
+              && p.sort === 'Dup (session)'),
+    'R27v THE FIX, ACROSS PANES: EVERY pane\'s VIEW keys moved, not just the one being rendered. '
+    + 'Left alone the other pane would be filtering and hiding the TEMPLATE column', sp.perPane);
+  check(sp.toasts.filter(m => /is now called/.test(m)).length === 1,
+    'R27w CONTROL: still ONE sentence, not one per pane', sp.toasts);
+
+  check(dp.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R27s no page or console error across the whole section', dp.errors.slice(0, 5));
+  await dp.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

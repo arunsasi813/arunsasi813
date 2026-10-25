@@ -5931,3 +5931,180 @@ that ambiguity.
 Every id comparison in `[95]` is `===` against `e.reversal.reversalId`, and every field of
 `reversals.log.csv` is read by **column index** off the header row rather than by a regex over the
 line.
+
+## 27. T-C27-7 + T-C27-9 — two added columns with one name
+
+### 27.1 One state, two different defects
+
+The state: `tpl.additionalColumns` and `sess.extraColumns` both hold an entry called `Dup`.
+`_rowWithExtras` walks the concat of the two lists, so **the last writer wins** and that is what
+the grid draws. Every helper reader resolves the column name through `Reco._extraDef`, which
+searches `tpl.additionalColumns` only and returns the **first** match. The two answers are not
+the same object and need not be the same value.
+
+Measured (`scratchpad/dup/probes/p1_repro.mjs`, arm A) with extras
+`[Mid, Dup(template formula "xM"), Dup(session, typed)]`:
+
+```
+the grid cell            ''      <- the walk's LAST writer wins
+every helper reader      'xM'    <- _extraDef resolves the FIRST entry
+filter "is empty"        0 rows  <- a filter hiding a row it should show
+the slicer offered       ['xM']  <- a value no row on screen showed
+Find/Replace             1 hit   <- in a column the screen showed blank
+```
+
+### 27.2 The round's correction to T-C27-7
+
+T-C27-7 attributes those five lines to its own mechanism — `_extraValueForRow` passing `ac.name`
+to a walk that stops at the first entry carrying it. **It does not cause them.** Asking about the
+first entry stops before the first entry, which is correct, so that entry answers its own value
+whichever form the stop takes. `R27f` and `R27n` are the checks that pin it: after the fix
+`_extraDef` still answers the template entry, and that entry still answers `'A'` on the ticket's
+own fixture.
+
+What the entry stop does fix is the ticket's own **measurement**, which is confirmed exactly: on
+`[Dup="A", Mid="M", Dup=CONCAT("x",{Mid})]`, asking about the **third** entry answered `'x'`
+against the walk's `'xM'`, because `{Mid}` was never evaluated. That list is **not reachable
+through the editor** — `saveTemplate` refuses its own duplicate, *"Added column "Dup" is defined
+twice"* (`R27l`) — so it arrives from a hand-edited `recoTemplates.json`, `App.importBackup` or a
+different build.
+
+**So the two tickets split cleanly: T-C27-7 is a contract defect in a helper with nine callers,
+and T-C27-9 is the defect that produced the harm both tickets describe.**
+
+### 27.3 The stop is resolved to an index once
+
+```js
+let stopAfter = -1, stopBefore = -1;
+if (typeof upto === 'number') stopAfter = upto;             // _corrUpto: stop AFTER
+else if (upto && typeof upto === 'object') {                // an ENTRY: stop BEFORE it
+  stopBefore = extras.indexOf(upto);
+  if (stopBefore < 0) stopBefore = extras.findIndex(a => a && a.name === upto.name);
+} else if (upto != null) stopBefore = extras.findIndex(a => a && a.name === upto);
+```
+
+Both at `-1` walks the whole list, which is byte for byte what the name form did for a name that
+was not in it. **The entry form is the one callers should use**: `_extraValueForRow` and
+`_extraBaseValue` both hold the definition, not an index. The name fallback for an entry that is
+not in the list exists so a detached clone cannot throw or silently walk everything; no caller in
+the file passes one.
+
+`rowFull`'s parameter is now `upto`, not `uptoName` — T-C27-8 asked for that, because the name
+described a single-shaped argument that stopped existing when `_corrUpto` began passing a number.
+The two sentences above it about a row memo are still wrong and still T-C27-8's; the comment says
+so rather than leaving a reader to find out.
+
+### 27.4 `_extraBaseValue`'s change is unmeasurable, on purpose
+
+`_extraBaseValue` resolves its entry through `Reco._storeColumn`, which searches
+`tpl.additionalColumns` only and returns the first match — and template entries come first in the
+concat, so **the name stop and the entry stop resolve the same index for every input**. The
+mutation that reverts it reports `red=NONE`.
+
+That is the right result, not a probe fault. The change is there so those two adjacent lines
+cannot disagree about which `Dup` is meant if `_storeColumn` is ever made session-aware. **A
+change that cannot be gated is recorded as ungated**, in the ticket and here, rather than left
+sitting inside a grid that looks clean.
+
+### 27.5 The repair, and why it is a rename on the open
+
+`Reco._dedupeSessionExtras(sess, tpl)` from `ensureSessionShape`, whose `tpl` is a new optional
+second parameter:
+
+| caller | passes a template? | why |
+| --- | --- | --- |
+| `Reco.render` | yes | the open; this is where the repair happens |
+| `Reco.ingestData` | yes | the other path that brings a session into existence |
+| `Panes._viewFor` | **no** | `extraColumns` is a DATA key on that proxy, so a rename would write through to the owner and repeat `Reco.render`'s work |
+| `Reco.makeSession` | no | a fresh session has no extras to collide |
+
+**Rename, not drop.** The ticket offered either. The session entry is the operator's own column
+and may carry values they typed, so dropping it discards their work to tidy a collision nobody
+told them about. `<name> (session)`, then `(session 2)` and up, so a second collision cannot land
+on the name the first rename wanted (`R27q`).
+
+**`Reco._reKeyColumnName` moves what names the column**: `sess.manualTags` (keyed
+`row._id + '||' + name`, so the suffix moves), `columnFilters`, `columnWidths`, `slicers`,
+`hiddenCols`, `columnSorts.col`, and the **inner** keys of `cellFormats` / `cellFormulas`, which
+are keyed by row first. Nothing on a shared pk-keyed master is touched: a session-only extra's
+value never reaches one (decision P).
+
+**The template entry is never touched** (`R27e`) — it is the shared one, and renaming it would
+change what every colleague sees.
+
+**And it is said**, one sentence per collision naming both names, deferred by `setTimeout(0)` so
+it does not fire inside a render that has not drawn the new heading yet.
+
+### 27.6 Why `ensureSessionShape` and not `saveTemplate`
+
+`saveTemplate` has no session in scope **by design** — the same reason F3's prune could not be
+widened — and refusing at a third place would not help a share already in this state.
+`ensureSessionShape` is the only function that sees both lists on every open, so the repair is
+also a migration.
+
+### 27.7 The mutation grid, and the suite fixture that was already in this state
+
+| mutation | turns red |
+| --- | --- |
+| the entry form treated as a name again | `R27m` |
+| `_extraComputedValue` passes the name | `R27m` |
+| `_extraBaseValue` passes the name | **nothing** — see 27.4 |
+| the repair is never called | `R27b/c/d/g/h/i/j/o/p/q/r` |
+| it renames in silence | `R27c`, `R27p`, `R27r` |
+| the rename carries nothing with it | `R27d`, `R27h`, `R27i`, `R27j` |
+| the TEMPLATE entry is renamed instead | `R27b/e/f/g/h/i/j/k/q/r` |
+| the standard columns are not "taken" | `R27o`, `R27p` |
+| the rename does not seek a free name | `R27q`, `R27r` |
+| only the rendering pane is re-keyed | `R27v` (via `p3_split.mjs`) |
+| the pane walk asks `pane.view` | `R27v` (via `p3_split.mjs`) |
+
+The third row is the documented no-op. The re-key mutation is worth reading twice: removing it
+turns `R27h`/`R27i`/`R27j` red as well as `R27d`, because `hiddenCols` left naming `Dup` then
+hides the **template** column — the operator's own view setting applied to somebody else's
+column.
+
+**`run_correction_e2e` `[R2-F12]` builds this exact collision** and stayed green, because it
+captures its extras list immediately after `saveTemplate` and before the first `App.navigate` —
+the one window in which the state exists. That is luck of ordering, not a property, so its header
+now says so and `[R2-F12x]` asserts the rename. A fixture that silently stops testing what its
+name claims is worse than one that fails.
+
+### 27.8 The pane half, and two wrong versions of it
+
+`Reco._dedupeSessionExtras` renames entries in `sess.extraColumns`, which is a **DATA** key — one
+copy on the owner, reached through either pane. So are `manualTags`, `cellFormats` and
+`cellFormulas`. But `columnFilters`, `slicers`, `columnWidths`, `hiddenCols` and `columnSorts` are
+**VIEW** keys: one copy per pane. Re-keying only the session `Reco.render` is holding leaves the
+other pane's settings naming `Dup`, which after the rename resolves to the **template** column —
+that pane then filters and hides somebody else's column.
+
+**Wrong version 1: `pn.view`.** Measured (`scratchpad/dup/probes/p3_split.mjs`): after
+`Panes.openSplit()` the panes read
+
+```
+p0:noview   p1:view
+```
+
+The **owning pane has no view object**. Its VIEW keys live on the owner session itself and only
+the second pane gets a proxy, which `Panes.viewFor` encodes as `p.view || owner`. Asking
+`pn.view` missed the owning pane every time.
+
+**Wrong version 2: an arm that could not see the difference.** With `App.navigate('reco')` the
+repair fires on **p0's** render, so `sess` is already the owner — the owning pane's own object —
+and `pn.view` picks up p1. Both panes move, and the mutation reported `red=NONE`. The arm had to
+render the **non-owner pane alone**, which is a real idiom and not a test contrivance: three sites
+do it, each guarded by `pane !== Panes.owner()`.
+
+| site | why it renders one pane |
+| --- | --- |
+| `Reco._slicerRepaint` | a slicer applied in the non-owner pane |
+| `Reco._corrRepaint` | the correction panel's own repaint |
+| the virt-cols escalation in `refreshGrid` | `#recoTableArea` only exists on the owner pane |
+
+On that render `sess` is p1's view, and nothing but `Panes.viewFor` names p0's object. `R27u`
+asserts the arm rendered that way; `R27v` is what it buys.
+
+**The lesson is the one this project keeps relearning from a different direction:** a mutation
+that measures nothing is usually the ARM's fault, not the grid's. Two of the eleven came back
+`red=NONE` on the first pass here — one legitimately (27.4) and one because the fixture rendered
+the pane that hid the defect.

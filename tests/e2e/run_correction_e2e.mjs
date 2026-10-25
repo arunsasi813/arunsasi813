@@ -2088,6 +2088,18 @@ try {
      shape — a session-only column, then a template column of the same name
      — because saveTemplate has no session and cannot see the collision.
      That is the reachability half, and it is asserted, not assumed.
+
+     T-C27-9 HAS SINCE MADE THAT STATE TRANSIENT, and this section is still
+     green only because of WHEN it reads: `extrasOrder` is captured
+     immediately after saveTemplate and before the first App.navigate, which
+     is the one window in which the collision exists.
+     Reco._dedupeSessionExtras, called from ensureSessionShape with the
+     template, renames the SESSION entry to "Note (session)" on the next open.
+     R2-F12x below asserts that, so nobody reads this fixture as evidence that
+     two added columns with one name survive an open. The assertions above it
+     still gate the early stop from the correction tab's side, which is this
+     section's own subject: `run_store_e2e` [96] R27 covers the stop itself
+     and the repair.
      ==================================================================== */
   section('R2-F12', 'R2-F12: two added columns sharing a name do not stop the walk before the chosen one');
   try {
@@ -2209,6 +2221,20 @@ try {
   check(r2f12.typed === 'Approved by AR',
     'R2-F12: and a value the operator TYPED into that column reads back in the context cell — an empty '
     + '"Approved by" beside a bad reference says nobody signed it off', r2f12.typed);
+
+  /* T-C27-9: the state this fixture builds does not survive an open. */
+  const r2f12x = await page.evaluate((tplId) => {
+    const live = AppState.recoTemplates.find(x => x.id === tplId);
+    return { extras: (live.additionalColumns || []).map(a => a.name)
+               .concat((AppState.recoSessions[tplId].extraColumns || []).map(a => a.name)) };
+  }, F12TPL);
+  note('R2-F12x the extras after the opens above', r2f12x);
+  check(r2f12x.extras.join(',') === 'Note,Reviewer,Note (session)',
+    'R2-F12x AND THE COLLISION DID NOT SURVIVE THE OPEN: T-C27-9\'s repair renamed the SESSION entry '
+    + 'on the first App.navigate above, so the list this section captured before it is the only '
+    + 'window in which two added columns share a name. The template entry is untouched — '
+    + 'run_store_e2e [96] R27 is where that is gated',
+    r2f12x.extras);
 
   } catch (e) { check(false, '[R2-F12] the duplicate added-column name could not be exercised at all',
     String((e && e.message) || e).split('\n')[0].slice(0, 300)); }
