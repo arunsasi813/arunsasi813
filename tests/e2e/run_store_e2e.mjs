@@ -10755,6 +10755,7 @@ const PORT_R32  = 21538;   // R32 T-24R2-5: a one-component key holding '||'
 const PORT_R33  = 21542;   // R33 T-26-7: the live-key Set is memoised
 const PORT_R34  = 21546;   // R34 T-S10-31: recoSessions written per template id
 const PORT_R35  = 21550;   // R35 T-S10-3: move a template's values to their own file
+const PORT_R36  = 21554;   // R36 T-F1-1: the row-id memo is verified
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -19000,6 +19001,251 @@ section(104, 'R35 T-S10-3 — a template\'s typed values can be moved into their
     'R35zz no page or console error beyond the failures this section injects on purpose',
     vxErrs.slice(0, 5));
   for (const w of [A, B, C, D, E]) { try { await w.ctx.close(); } catch (e) {} }
+}
+
+/* ====================================================================
+   T-F1-1. Reco._rowById HANDED BACK THE WRONG ROW AFTER AN IN-PLACE
+   RE-ORDER OF sess.data.
+
+   The id -> index map is memoised on the row array's IDENTITY AND LENGTH:
+
+       if (c && c.len === data.length) return c.map;        // keyed by `data`
+
+   so sess.data.reverse() or .sort() - same array, same length - leaves the
+   memo pointing at the wrong index. Everything that addresses a row by id
+   comes through it: setTag, bulkMarkOffset, smartUnmark, _repaintRow,
+   _replaceOne, applyCorrection. A wrong row here is a wrong number on the
+   share.
+
+   MEASURED (scratchpad/rx/probes/p2_fix.mjs), 2,000 rows, in-place reverse:
+
+     _rowById(sess, <the _id of the row whose Doc is D0>)   ->  D1999
+     Reco.setTag(<that same _id>, 'Note', ...)              ->  filed under
+                                                                row key D1999
+
+   A value on the wrong row, on the shared folder, with nothing said.
+
+   LATENT, and re-checked on this tree rather than taken from the ticket:
+   nothing re-orders sess.data in place (.data.sort( / .data.reverse( /
+   .data.splice( / .data.unshift( are all absent), because every real route
+   that invalidates an index - ingest, the Excel load-back, Clear, Restore -
+   REPLACES the array, and the one in-place mutation (Reco.ssAddRow's push)
+   changes the length. This makes the next one safe instead of relying on that
+   staying true.
+
+   WHAT WAS BUILT: both readers verify the memo at the mapped index and
+   rebuild ONCE on a disagreement.
+
+   AND IT IS NOT THE TICKET'S OWN SNIPPET, which hangs the rebuild off the ROW
+   being falsy:
+
+       const r = (i === undefined) ? null : data[i];
+       if (r && r._id === rowId) return r;      // a MISS falls through here
+
+   That rebuilds for every absent id, which makes a loop over a stale
+   selection O(selected x rows) again - the exact cost _rowById exists to
+   remove (10,000 of 200,000 rows was two billion comparisons). An in-place
+   re-order does not change WHICH ids are present, so a missing id is
+   genuinely absent and only a DISAGREEMENT signals a stale order. R36g/R36h
+   pin that, and the ticket's snippet is M2 in the grid.
+
+   THE TICKET NAMES ONLY _rowById. Reco._rowsByIds has the identical defect
+   and is the reader the bulk offset paths use, so it is the one that would
+   have marked forty wrong rows at once (R36i, R36j).
+
+   MUTATION GRID: scratchpad/rx/mut/run.py, 4 mutations x the 13 checks of
+   this section's own probe - all four measure:
+
+     the verification is removed           -> R36d, R36e, R36f, R36l
+     the rebuild hangs off a falsy row     -> R36g, R36h
+     the stale memo is not dropped first   -> R36d, R36e, R36f, R36l
+     the bulk reader does not verify       -> R36i, R36j
+
+   AND ONE EDIT IS RECORDED THERE AS NOT A MUTATION: removing the `rebuilt`
+   flag that used to guard the bulk reader's rebuild. It measured nothing
+   because the flag was redundant - after the first rebuild the map is right
+   for every id after it, and nothing in that loop mutates the array, so the
+   branch cannot fire twice either way. The flag was removed from the code
+   rather than kept with a grid entry that reddens nothing.
+   ==================================================================== */
+
+section(105, 'R36 T-F1-1 — the row-id memo is verified, not trusted');
+{
+  const N = 2000;
+  const RX = makeRoot('share-r36');
+  const brRX = await startBridge(RX.root, PORT_R36); procs.push(brRX.proc);
+  const rx = await openReco(browser, brRX);
+  const SETUP = `(async function (arg) {
+    const [ID, n] = arg;
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(c => ({
+      name: c, label: c, formats: [], isValue: c === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount']; t.primaryKeys = ['Doc'];
+    /* A CUSTOM added column, because Reco.setTag writes one of those - without
+       it the door below does nothing at all, which is what the first run of
+       this probe measured. */
+    t.additionalColumns = [{ name: 'Note', type: 'custom', _cid: U.uid() }];
+    RecoTemplate.saveTemplate();
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    RecoTemplate.open(ID); App.closeModal(); AppState.activeRecoId = ID;
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push({ Doc: 'D' + i, Amount: String(i + 1) });
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, rows, ['Doc','Amount']); } finally { window.confirm = rc; }
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    return { rows: (sess.data||[]).length,
+             firstId: sess.data[0]._id, lastId: sess.data[sess.data.length-1]._id };
+  })`;
+  const pre = await rx.page.evaluate(SETUP + '(' + JSON.stringify(['TPL_R', N]) + ')');
+  note('fixture', { rows: pre.rows });
+  check(pre.rows === N,
+    'R36a PREMISE: ' + N + ' rows loaded, each with its own _id', pre.rows);
+
+  /* A rebuild is one Reco._idxCache.set. The spy wraps the WeakMap so the count
+     is exact rather than inferred from timings. */
+  const MEASURE = `(function (arg) {
+    const [mode] = arg;
+    const sess = AppState.recoSessionsOwned.TPL_R || AppState.recoSessions.TPL_R;
+    const real = Reco._idxCache;
+    let sets = 0;
+    Reco._idxCache = { get: k => real.get(k), delete: k => real.delete(k),
+                       set: (k, v) => { sets++; return real.set(k, v); } };
+    const out = {};
+    try {
+      const first = sess.data[0], last = sess.data[sess.data.length - 1];
+      const firstId = first._id, lastId = last._id;
+      /* Warm the map, so the counts below are about the READ and not the build. */
+      Reco._rowById(sess, firstId);
+      sets = 0;
+      if (mode === 'warm') {
+        out.got = Reco._rowById(sess, lastId)._id === lastId;
+        out.rebuilds = sets;
+      } else if (mode === 'reordered') {
+        /* IN PLACE: same array object, same length - the one case the key
+           cannot see. */
+        sess.data.reverse();
+        out.sameArray = sess.data[0] === last;
+        const r = Reco._rowById(sess, firstId);
+        out.got = !!(r && r._id === firstId);
+        out.gotDoc = r ? r.Doc : null;
+        out.wantDoc = first.Doc;
+        out.rebuilds = sets;
+        /* And the NEXT read is free again. */
+        sets = 0;
+        const r2 = Reco._rowById(sess, lastId);
+        out.second = !!(r2 && r2._id === lastId);
+        out.secondRebuilds = sets;
+        sess.data.reverse();
+        Reco._invalidateIdx(sess);
+      } else if (mode === 'miss') {
+        out.got = Reco._rowById(sess, 'NO-SUCH-ID') === null;
+        out.rebuilds = sets;
+        sets = 0;
+        for (let i = 0; i < 50; i++) Reco._rowById(sess, 'NO-SUCH-' + i);
+        out.fiftyMissRebuilds = sets;
+      } else if (mode === 'bulkReordered') {
+        const ids = sess.data.slice(0, 40).map(r => r._id);
+        sess.data.reverse();
+        sets = 0;
+        const got = Reco._rowsByIds(sess, ids);
+        out.n = got.length;
+        out.allRight = got.every((r, k) => r._id === ids[k]);
+        out.rebuilds = sets;
+        sess.data.reverse();
+        Reco._invalidateIdx(sess);
+      } else if (mode === 'bulkMiss') {
+        const ids = []; for (let i = 0; i < 50; i++) ids.push('NO-SUCH-' + i);
+        sets = 0;
+        out.n = Reco._rowsByIds(sess, ids).length;
+        out.rebuilds = sets;
+      }
+    } finally { Reco._idxCache = real; }
+    return out;
+  })`;
+  const M = (mode) => rx.page.evaluate(MEASURE + '(' + JSON.stringify([mode]) + ')');
+
+  const warm = await M('warm');
+  note('a warm read', warm);
+  check(warm.got === true && warm.rebuilds === 0,
+    'R36b THE COMMON PATH IS STILL FREE: a read against a map that is already right rebuilds nothing. '
+    + 'That is what _rowById exists for - the old sess.data.find() in a loop over the selection was '
+    + 'O(selected x rows), two billion comparisons to mark 10,000 of 200,000 rows', warm);
+
+  const reord = await M('reordered');
+  note('after an IN-PLACE reverse', reord);
+  check(reord.sameArray === true,
+    'R36c PREMISE: sess.data.reverse() keeps the SAME array object and the same length, which is '
+    + 'exactly what the memo is keyed on - so the key cannot see that the order moved', reord);
+  check(reord.got === true && reord.gotDoc === reord.wantDoc,
+    'R36d THE FIX: _rowById hands back THE ROW WITH THAT _id after an in-place re-order. It used to '
+    + 'return whatever now sits at the remembered index - a different row, and a wrong row here is a '
+    + 'wrong number on the share, because setTag, bulkMarkOffset, smartUnmark, _repaintRow, '
+    + '_replaceOne and applyCorrection all address rows this way', reord);
+  check(reord.rebuilds === 1,
+    'R36e ...and it costs ONE rebuild, not a scan per call: the id at the remembered index disagrees, '
+    + 'so the memo is dropped and rebuilt once', reord);
+  check(reord.second === true && reord.secondRebuilds === 0,
+    'R36f ...and the read after it is free again, because the rebuilt map is cached the same way. '
+    + 'O(n) once when the memo is wrong, nothing on every common-path call', reord);
+
+  const miss = await M('miss');
+  note('a genuine miss', miss);
+  check(miss.got === true && miss.rebuilds === 0,
+    'R36g AND A MISS IS NOT A STALE ORDER: an id the map does not hold costs NO rebuild. An in-place '
+    + 're-order does not change which ids are present, so a missing id is genuinely absent', miss);
+  check(miss.fiftyMissRebuilds === 0,
+    'R36h ...WHICH IS THE WHOLE POINT, and the ticket\'s own fix snippet gets it wrong: hanging the '
+    + 'rebuild off the row being falsy rather than off the id DISAGREEING rebuilds for every absent '
+    + 'id, so a loop over a stale selection is O(selected x rows) again - 50 absent ids here, and '
+    + '10,000 against 200,000 rows in the case this function was written for',
+    miss.fiftyMissRebuilds);
+
+  const bulk = await M('bulkReordered');
+  note('the bulk reader after an in-place reverse', bulk);
+  check(bulk.n === 40 && bulk.allRight === true,
+    'R36i Reco._rowsByIds HAD THE SAME DEFECT and is fixed the same way - it is the reader the bulk '
+    + 'offset paths use, so it is the one that would have marked forty wrong rows. The ticket names '
+    + 'only _rowById', bulk);
+  check(bulk.rebuilds === 1,
+    'R36j ...and the whole list costs ONE rebuild rather than one per id: a stale order is a property '
+    + 'of the ARRAY, so the first disagreement is enough to know the map is wrong', bulk);
+  const bulkMiss = await M('bulkMiss');
+  check(bulkMiss.n === 0 && bulkMiss.rebuilds === 0,
+    'R36k ...and a list of ids that are all genuinely absent still rebuilds nothing', bulkMiss);
+
+  /* ---- AND THROUGH A REAL DOOR, so the fix is not just true of the helper. */
+  const door = await rx.page.evaluate(`(async function () {
+    const tpl = AppState.recoTemplates.find(x => x.id === 'TPL_R');
+    const sess = AppState.recoSessionsOwned.TPL_R || AppState.recoSessions.TPL_R;
+    const target = sess.data[0];
+    const targetId = target._id, targetDoc = target.Doc;
+    sess.data.reverse();                       /* IN PLACE */
+    window.__toasts = [];
+    Reco.setTag(targetId, 'Note', 'TAGGED-THE-RIGHT-ROW');
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 300));
+    if (typeof Store.idle === 'function') await Store.idle();
+    const byTpl = (AppState.extraValueMaster || {}).TPL_R || {};
+    const keys = Object.keys(byTpl);
+    sess.data.reverse(); Reco._invalidateIdx(sess);
+    return { targetDoc: targetDoc, keys: keys,
+             said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 90)) };
+  })()`);
+  note('setTag after an in-place reverse', door);
+  check(door.keys.length === 1 && door.keys[0] === door.targetDoc,
+    'R36l AND THROUGH A REAL DOOR: Reco.setTag after an in-place re-order files the value against the '
+    + 'row key of the row the operator named. Before the fix it would have been filed against '
+    + 'whatever row now sat at the remembered index - a value on the wrong row, on the shared folder, '
+    + 'with a green toast', door);
+
+
+  check(rx.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
+    'R36m no page or console error across the whole section', rx.errors.slice(0, 5));
+  await rx.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

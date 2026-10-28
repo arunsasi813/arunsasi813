@@ -6910,3 +6910,68 @@ happen, which is what R35q2 asserts — nothing asked, nothing written.
 The pattern from 28.6 / 30.6 / 31.4 / 32.5 / 33.4 holds, with 34.5's exception noted: when a
 mutation measures nothing, the question is **which of the two is redundant — the arm or the line**.
 Three times here it was the arm; twice it was the line.
+
+---
+
+## 36. T-F1-1 — the row-id memo is verified, not trusted
+
+### 36.1 The wrong row, measured
+
+`Reco._buildRowIdxMap` memoises `_id -> index` against the row array's **identity and length**, so
+an in-place `sess.data.reverse()` or `.sort()` keeps both and the map points at the wrong index.
+At 2,000 rows, one reverse:
+
+| asked | got |
+| --- | --- |
+| `_rowById(sess, <the _id whose Doc is D0>)` | the row whose Doc is **D1999** |
+| `Reco.setTag(<that same _id>, …)` | filed under row key **D1999** |
+
+Everything that addresses a row by id comes through it — `setTag`, `bulkMarkOffset`, `smartUnmark`,
+`_repaintRow`, `_replaceOne`, `applyCorrection` — so this is a value on the wrong row, on the
+shared folder, with nothing said.
+
+**Latent, re-checked on this tree:** no `.data.sort(`, `.data.reverse(`, `.data.splice(` or
+`.data.unshift(` anywhere. Every route that invalidates an index replaces the array; the one
+in-place mutation, `ssAddRow`'s `push`, changes the length. The fix makes the next one safe rather
+than relying on that.
+
+### 36.2 A miss is not a stale order
+
+The ticket's own fix snippet hangs the rebuild off the row being falsy, so **every absent id costs
+a full rebuild** — O(selected × rows) again, the two billion comparisons `_rowById` exists to
+remove. An in-place re-order does not change which ids are present, so only a **disagreement at the
+mapped index** means the memo is stale:
+
+| case | cost |
+| --- | --- |
+| the map is right | nothing (R36b) |
+| the id at the mapped index disagrees | one rebuild (R36e), and free again after (R36f) |
+| the map does not hold the id | nothing — fifty absent ids, zero rebuilds (R36g, R36h) |
+
+### 36.3 The ticket names one reader; there are two
+
+`Reco._rowsByIds` has the identical defect and is the reader the bulk offset paths use, so it is the
+one that would have marked forty wrong rows at once. Fixed the same way, rebuilding once for the
+whole list.
+
+### 36.4 And the grid made the fix smaller
+
+`_rowsByIds` had a `rebuilt` flag guarding its rebuild. The mutation that removed it measured
+nothing — after the first rebuild the map is right for every id after it, and nothing in that loop
+mutates the array, so the branch cannot fire twice either way. The flag is gone, and the edit is
+recorded in the runner as not a mutation.
+
+**Where the red=NONE rule now stands**, over the five rounds since 32:
+
+| round | the fixture was too narrow | my own line was redundant |
+| --- | --- | --- |
+| 32 T-24R2-5 | 1 | — |
+| 33 T-26-7 | 1 | — |
+| 34 T-S10-31 | — | 1 |
+| 35 T-S10-3 | 3 | 2 |
+| 36 T-F1-1 | — | 1 |
+
+Four of the nine were the line, and two of those let code be deleted. So the rule reads: **when a
+mutation measures nothing, ask which of the two is redundant — the arm or the line** — and a line
+that no mutation can redden is either belt-and-braces worth saying so about, or dead weight worth
+removing.

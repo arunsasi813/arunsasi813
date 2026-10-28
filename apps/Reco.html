@@ -24077,16 +24077,60 @@ _invalidateIdx(sess) {
    inside a loop over the selection is O(selected x rows): marking 10,000 of
    200,000 rows offset meant two billion comparisons. */
 _rowById(sess, rowId) {
+  const data = sess.data || [];
   const i = Reco._buildRowIdxMap(sess).get(rowId);
-  return i === undefined ? null : sess.data[i];
+  /* ---- T-F1-1. THE MEMO IS VERIFIED, NOT TRUSTED. It is keyed on the row
+     array's identity AND its length, and an IN-PLACE re-order
+     (sess.data.reverse(), .sort()) keeps both - so the map points at the
+     wrong index and this used to hand back A DIFFERENT ROW. Everything that
+     addresses a row by id comes through here (setTag, bulkMarkOffset,
+     smartUnmark, _repaintRow, _replaceOne, applyCorrection), so a wrong row
+     here is a wrong number on the share.
+     LATENT TODAY and re-checked on this tree: nothing re-orders sess.data in
+     place (grep for .data.sort( / .data.reverse( / .data.splice( /
+     .data.unshift( is empty), because every real route that invalidates an
+     index - ingest, the Excel load-back, Clear, Restore - REPLACES the array
+     and busts the memo correctly. The one in-place mutation is
+     Reco.ssAddRow's push, which changes the length. This makes the next one
+     safe instead of relying on that staying true.
+     A MISS IS NOT A STALE ORDER, which is why the rebuild hangs off the
+     id DISAGREEING rather than off `r` being falsy. An in-place re-order
+     does not change WHICH ids are present, so an id the map does not hold is
+     genuinely absent - and rebuilding for it would make a loop over a stale
+     selection O(selected x rows) again, which is the cost _rowById exists to
+     remove: 10,000 absent ids against 200,000 rows would rebuild the map
+     10,000 times. */
+  if (i === undefined) return null;
+  const r = data[i];
+  if (r && r._id === rowId) return r;
+  Reco._invalidateIdx(sess);
+  const j = Reco._buildRowIdxMap(sess).get(rowId);
+  return j === undefined ? null : (data[j] || null);
 },
 
-/* Several rows by _id, in selection order, skipping ids that no longer exist. */
+/* Several rows by _id, in selection order, skipping ids that no longer exist.
+   T-F1-1: the same verification as _rowById, and the rebuild happens ONCE for
+   the whole list rather than once per id - a stale order is a property of the
+   array, so the first disagreement is enough to know the map is wrong. */
 _rowsByIds(sess, ids) {
-  const map = Reco._buildRowIdxMap(sess);
+  let map = Reco._buildRowIdxMap(sess);
   const out = [];
   for (const id of ids || []) {
-    const i = map.get(id);
+    let i = map.get(id);
+    if (i !== undefined) {
+      const r = (sess.data || [])[i];
+      if (!(r && r._id === id)) {
+        /* ONE DISAGREEMENT IS ENOUGH, and no flag is needed to say so: the
+           rebuilt map is right for every id after this one, and nothing in
+           this loop mutates the array, so this branch cannot fire twice.
+           An earlier version guarded it with a `rebuilt` flag; the mutation
+           grid removed the flag and measured no difference, which is what
+           redundant means. */
+        Reco._invalidateIdx(sess);
+        map = Reco._buildRowIdxMap(sess);
+        i = map.get(id);
+      }
+    }
     if (i !== undefined) out.push(sess.data[i]);
   }
   return out;

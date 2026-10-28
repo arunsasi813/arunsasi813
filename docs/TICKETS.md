@@ -153,6 +153,68 @@ building that test: with the in-place form, the by-`_id` fix looks broken.
 
 ---
 
+**CLOSED — measured first, and the Fix snippet above is NOT what shipped, for a reason that is the
+whole point of this function.**
+
+**The harm, measured** (`scratchpad/rx/probes/p2_fix.mjs`), 2,000 rows, one in-place
+`sess.data.reverse()`:
+
+| asked | got |
+|---|---|
+| `_rowById(sess, <the _id of the row whose Doc is D0>)` | the row whose Doc is **D1999** |
+| `Reco.setTag(<that same _id>, 'Note', …)` | filed under row key **D1999** |
+
+A value on the wrong row, on the shared folder, with nothing said. "A wrong row here is a wrong
+number on the share" is now a measurement rather than a deduction.
+
+**The latency claim re-checked on this tree, not taken from this ticket:** `.data.sort(`,
+`.data.reverse(`, `.data.splice(` and `.data.unshift(` are all absent, because every real route
+that invalidates an index — ingest, the Excel load-back, Clear, Restore — REPLACES the array, and
+the one in-place mutation (`Reco.ssAddRow`'s `push`) changes the length, which the existing key
+catches. The fix makes the next one safe instead of relying on that staying true.
+
+**WHY NOT THE SNIPPET ABOVE.** It hangs the rebuild off the ROW being falsy:
+
+```js
+const r = (i === undefined) ? null : data[i];
+if (r && r._id === rowId) return r;      // a MISS falls through here too
+```
+
+so every id the map does not hold costs a full rebuild. In the case this function was written for
+— 10,000 selected ids against 200,000 rows — that is O(selected × rows) again, which is the two
+billion comparisons `_rowById` exists to remove. An in-place re-order does not change WHICH ids are
+present, so a missing id is genuinely absent; only a **disagreement at the mapped index** signals a
+stale order. What shipped:
+
+```js
+if (i === undefined) return null;                  // a miss is O(1), no rebuild
+const r = data[i];
+if (r && r._id === rowId) return r;                // the common path is free
+Reco._invalidateIdx(sess);                         // the memo is about another order
+const j = Reco._buildRowIdxMap(sess).get(rowId);
+return j === undefined ? null : (data[j] || null);
+```
+
+R36g/R36h pin it with fifty absent ids and assert **zero** rebuilds; the snippet above is M2 in the
+grid.
+
+**AND THIS TICKET NAMES ONLY `_rowById`.** `Reco._rowsByIds` has the identical defect and is the
+reader the bulk offset paths use — so it is the one that would have marked forty wrong rows at
+once. Fixed the same way (R36i, R36j).
+
+**The grid then made the fix smaller.** `_rowsByIds` had a `rebuilt` flag guarding its rebuild; the
+mutation that removed it measured nothing, because after the first rebuild the map is right for
+every id after it and nothing in that loop mutates the array — so the branch cannot fire twice
+either way. The flag is gone from the code, and that edit is recorded in the runner as **not a
+mutation** with the measurement, rather than kept as a grid entry that reddens nothing.
+
+**Tests** `run_store_e2e` `[105] R36`, 13 checks: the wrong row (R36d) and the real door that files
+against it (R36l), the costs — free on the common path (R36b), one rebuild when the memo is wrong
+(R36e), free again afterwards (R36f), none for a miss (R36g/R36h) — and the bulk reader (R36i,
+R36j, R36k). **Mutation grid** `scratchpad/rx/mut/run.py`, 4 mutations × those 13 — all four
+measure.
+
+
 ## T-F1-2  The pane key is still missing from five row-level writers
             (= finding A6, LOW — fixer 2's list, named here so it is done in
             ONE pass with the `_id` half)
@@ -3868,6 +3930,43 @@ documents.
 **Tests** `run_store_e2e` `[103] R34`, 25 checks over eight windows on one share.
 **Mutation grid** `scratchpad/sx/mut/run.py`, 9 mutations × those 25 — all nine measure.
 
+
+---
+
+## T-S10-32  An untouched session is never REFRESHED from the share, so a window shows its boot copy until it reloads
+
+**Where** `apps/Reco.html` `Store._saveSessions` (T-S10-31's per-template-id merge) and
+`Store.loadAll`'s one-shot read into `AppState.recoSessionsOwned`.
+
+**What** T-S10-31 made the WRITE side right: a window writes only the ids whose session it has
+changed, so it can no longer put its stale copy over a colleague's work. The READ side is
+unchanged. `AppState.load()` runs once, at boot, so a window that has held T1's session since then
+goes on showing that copy — if a colleague loads a new day file into T1, or clears it, this window
+shows yesterday's rows until somebody reopens the app or re-opens the reconciliation.
+
+It is not a loss: nothing this window writes can clobber T1 any more (that is the closed half), and
+the share is the authority for every id this window has not changed. It is a **staleness**, and the
+operator has no way to know: there is no "this reconciliation has moved on the folder" anywhere on
+screen.
+
+**Why it is only a ticket** The obvious fix — adopt the share's copy for every untouched id on each
+merge — would mutate a session object a pane may be rendering, mid-render, with the row array
+swapped under `Reco._virtStates` and `Reco._idxCache` (both keyed on that array) and under any
+in-flight `applyEdits`. `Panes.replaceSession` exists for exactly that swap and is deliberately a
+door with its own invalidation, not something a background write may do. So this needs a decision
+about WHEN a window may be re-pointed at a newer session — on a navigate, on a focus, only when
+asked — and that is a question about the operator's work, not a detail.
+
+**Fix** Two halves, and the first is worth having alone: when `_saveSessions` reads the share and
+finds a NEWER copy of a session this window holds untouched, record it (a per-id "the folder has
+moved" flag) and say so where the operator looks — the reconciliation list and the grid's own
+header are both candidates. Then, as a separate decision, offer to reload that one session through
+`Panes.replaceSession` so the invalidation runs.
+
+**Test** Two windows on one share, both holding T1 and T2. A loads a day file into T1. B, which has
+T1 untouched, flushes its own work in T2 — then assert B is TOLD that T1 has moved (and, once the
+second half lands, that accepting the offer re-points B at the share's copy and that
+`Reco._idxCache` / `Reco._virtStates` no longer describe the old array).
 
 ## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED in round 8, reviewed, and then cleaned up** — the key rule's SIGNATURE is recorded on the row at mint time and carried through the day file; the remainder is T-S10-25
 
