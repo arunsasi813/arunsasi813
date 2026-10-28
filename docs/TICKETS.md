@@ -1999,6 +1999,68 @@ from then on (`run_store_e2e` section 48, X8a-X8c). What is still missing is thi
 BUTTON. Sharding automatically past a threshold was the reviewer's other suggestion and is worse:
 it decides where everybody's data lives, in the middle of a typing burst, with no one asked.
 
+**CLOSED — and two of the three things the Fix paragraph asks for were already built, which is
+worth saying before the third.**
+
+`removeValuesNotLoaded` ("remove all for keys not in the current data", explicitly confirmed, with
+RC-5's posted-key split) has existed since #30, and the measurement is this ticket's own. What was
+missing: **the count the operator can see before they need it**, and **the move**.
+
+**The count.** `Store.valueFileStats()` is now the one walk over the map, and both readers ask it:
+the boot warning and the Values panel. It was inline inside `Store.loadAll` with nothing else able
+to ask, so the panel and the startup message were two answers waiting to disagree. The panel names
+the file this template's values live in, the file's TOTAL count across every template in it, and
+about how many MB that is — the file's number rather than this template's, because the whole file
+crosses the folder twice every few keystrokes. Over the ceiling it says so in a warning box.
+
+**The move**, `Reco.moveValuesToOwnFile()`, in four steps, and the order is the safety:
+
+| step | what | why |
+|---|---|---|
+| 1 | CAPTURE what the main file holds, through a `mergeWrite` with the pre-move `owns` | `_mergeJob` runs `_takeDisk` **before** the intents, so the share is merged into memory first. A colleague who typed since this window booted has records in the FILE and nowhere in memory |
+| 2 | write the SPLIT file with that set | from here the records are in BOTH files, and both are read at boot, so every later failure loses nothing |
+| 3 | point the routing at it, mutated in place | the closures `_extraValueFlush` already took keep seeing it |
+| 4 | write the MAIN file, which no longer PICKS this template | `_mergeJob` writes `Store._pick(mem, owns)`, so **the routing change IS the removal** — memory, and the screen, are never touched |
+
+**The residual window, stated rather than implied:** a value typed by another window between step 1
+and step 4 is in the main file when step 4 drops this template from it, and is lost. It cannot be
+closed without a transaction across two files, which this bridge does not have. It is **narrower
+than the hand method the boot message used to recommend**, where the same hazard lasts until every
+window has restarted — and that message now points at the button instead.
+
+**A colleague who already has the app open** keeps writing this template's values into the main
+file until they restart, because their routing was read at their boot. Nothing is lost (the main
+file is read and merged under the split one) but the records are in two places until then, and the
+confirm says so rather than implying the move is instant for everybody.
+
+**THE GRID CORRECTED TWO THINGS I HAD WRITTEN, AND BOTH WERE CLAIMS ABOUT MY OWN CODE.**
+
+1. I wrote that capturing through `mergeWrite` matters because the intent reads `map` rather than
+   memory. It does not: `_takeDisk` has already merged the share into `AppState.extraValueMaster`
+   by the time the intent runs, so either read gives the same complete answer and swapping them
+   changes nothing. What must not be removed is **the read itself**. The mutation is retargeted at
+   that, and the comment now says it.
+2. Writing the split file with the MAIN file's `owns` is **inert**, which the write-spy arm
+   explains: with a split file that does not exist yet, `_takeDisk` deletes every unsplit template
+   from memory, the intent re-adds only this one, and `_pick` writes the same single key. The bytes
+   are identical either way. That edit is recorded in the runner as **not a mutation**, with the
+   measurement; what really keeps a split file to one template is `_extraValueFlush`'s predicate on
+   every write after the move.
+
+**And the up-front read-only guard turned out to be belt-and-braces too.** `Store.mergeWrite`
+refuses a read-only file on its own, so removing the guard leaves the data just as safe. What it
+adds is refusing **before** the operator is asked to confirm a move that cannot happen, and R35q2
+asserts that — nothing asked, nothing written — rather than implying the guard is the protection.
+
+**Tests** `run_store_e2e` `[104] R35`, 31 checks over five windows, including a file of 50,001
+records written by hand so boot parses it for real and the ceiling message is measured rather than
+assumed. **Mutation grid** `scratchpad/vx/mut/run.py`, 7 mutations × those 31 — all seven measure.
+
+**What is still not built:** sharding automatically past a threshold, which the reviewer also
+suggested and this ticket already rejected — it decides where everybody's data lives, in the middle
+of a typing burst, with nobody asked. Still the right answer.
+
+
 ## T-26-4  ~~A row that is already posted can be posted a SECOND time~~  **FIXED** (the banner's cap closed after the review)
 
 **THE BANNER STOPPED NAMING THEM PAST EIGHT.** The review's finding A8 (LOW): with more than eight

@@ -10754,6 +10754,7 @@ const PORT_R31  = 21534;   // R31 T-24R2-7: the AEG link asks the role matrix
 const PORT_R32  = 21538;   // R32 T-24R2-5: a one-component key holding '||'
 const PORT_R33  = 21542;   // R33 T-26-7: the live-key Set is memoised
 const PORT_R34  = 21546;   // R34 T-S10-31: recoSessions written per template id
+const PORT_R35  = 21550;   // R35 T-S10-3: move a template's values to their own file
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -18542,6 +18543,463 @@ section(103, 'R34 T-S10-31 — recoSessions is written per template id, against 
     'R34z no page or console error beyond the refusals this section provokes on purpose',
     sxErrs.slice(0, 5));
   for (const w of [A, C, D, E, F, G, H]) { try { await w.ctx.close(); } catch (e) {} }
+}
+
+/* ====================================================================
+   T-S10-3. THE VALUES PANEL'S MOVE BUTTON, AND THE COUNT BESIDE IT.
+
+   A typed value is kept for ever under its _pk, deliberately, because the key
+   may come back in next month's extract - so reco/extraValueMaster.json only
+   grows. At 148 bytes a record (re-measured on the shipped tree: 2,000 /
+   50,000 / 200,000 records -> 287,797 / 7,327,799 / 29,577,801 bytes) a share
+   that types two columns onto 200,000 rows a month reaches tens of MB in a
+   year, and Store._mergeJob reads AND writes the whole file for every 150 ms
+   typing burst: about 6 s of transfer plus 3 s of work PER BURST at 200,000
+   records on a 10 MB/s folder.
+
+   TWO OF THE THREE THINGS THIS TICKET ASKS FOR WERE ALREADY BUILT: the
+   measurement, and "remove all for keys not in the current data". What was
+   missing is the count the operator can see BEFORE the file is too big, and
+   the move itself - "the remedy already works without any UI ... but the
+   'move this template's values into their own file' answer cannot be reached
+   from anywhere in the UI" (reviewer B's F15).
+
+   THE ORDER IS THE SAFETY:
+
+     1  CAPTURE what the main file really holds for this template, through a
+        mergeWrite with the pre-move `owns`. The mergeWrite is the whole point:
+        _mergeJob runs _takeDisk BEFORE the intents, so the share has been
+        merged into memory by the time the capture runs. A colleague who typed
+        into this template since this window booted has records in the FILE and
+        nowhere in memory, and a snapshot taken without a read drops them
+        (R35t, R35u, R35v).
+     2  write the SPLIT file with that set. From here the records are in BOTH
+        files, and both are read at boot, so every later failure loses nothing
+        (R35w, R35x, R35y).
+     3  point the routing at it, mutated in place so the closures
+        _extraValueFlush already took keep seeing it (R35g, R35i).
+     4  write the MAIN file, which no longer PICKS this template. _mergeJob
+        writes Store._pick(mem, owns), so THE ROUTING CHANGE IS THE REMOVAL and
+        memory - the screen - is never touched (R35g, R35i).
+
+   THE RESIDUAL WINDOW, stated rather than implied: a value typed by another
+   window between step 1 and step 4 is in the main file when step 4 drops this
+   template from it, and is lost. It cannot be closed without a transaction
+   across two files, which this bridge does not have. It is NARROWER than the
+   hand method the boot message used to recommend, where the same hazard lasts
+   until every window has restarted - and that message now points at this
+   button instead (R35zc).
+
+   MUTATION GRID: scratchpad/vx/mut/run.py, 7 mutations x the 31 checks of this
+   section's own probe (scratchpad/vx/probes/p2_fix.mjs) - all seven measure:
+
+     the move snapshots memory with no read  -> R35t, R35u, R35v
+     the split file is written AFTER the main -> R35w
+     the routing is never set                -> R35g, R35i, R35u
+     an already-split template may be moved  -> R35p
+     a read-only file is written into anyway -> R35q2
+     the panel offers no button              -> R35d
+     the boot warning keeps a private count  -> R35zb, R35zc
+
+   AND ONE EDIT IS RECORDED IN THAT RUNNER AS NOT A MUTATION, because the grid
+   proved it inert: writing the split file with the MAIN file's `owns`. With a
+   split file that does not exist yet, _takeDisk deletes every unsplit template
+   from memory, the intent re-adds only this one, and _pick writes the same
+   single key - so the bytes are identical either way (measured: R35h3 stayed
+   green, wroteKeys [["TPL_BIG"]]). What really keeps a split file to one
+   template is _extraValueFlush's own predicate on every write after the move,
+   which R35m and R35o cover.
+   ==================================================================== */
+
+section(104, 'R35 T-S10-3 — a template\'s typed values can be moved into their own file');
+{
+  const CEIL_N = 50001;   // one past Store.VALUE_FILE_CEILING
+  const VX = makeRoot('share-r35');
+  const brVX = await startBridge(VX.root, PORT_R35); procs.push(brVX.proc);
+  const MKTPL = `(async function (arg) {
+    const [ID, n, col] = arg;
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(c => ({
+      name: c, label: c, formats: [], isValue: c === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount']; t.primaryKeys = ['Doc'];
+    t.additionalColumns = [{ name: col, type: 'custom', _cid: U.uid() }];
+    RecoTemplate.saveTemplate();
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    RecoTemplate.open(ID); App.closeModal();
+    AppState.activeRecoId = ID;
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push({ Doc: ID + '-' + i, Amount: String(i + 1) });
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, rows, ['Doc','Amount']); } finally { window.confirm = rc; }
+    const sess = AppState.recoSessionsOwned[ID] || AppState.recoSessions[ID];
+    /* Typed values, through the real door, so they are store records. */
+    await Reco.applyEdits(live, sess, (sess.data||[]).map((r, i) => ({
+      row: r, col: col, value: ID + '-typed-' + i })), { source: 'grid', trusted: true });
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 300));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { rows: (sess.data||[]).length };
+  })`;
+
+  const mainOf = () => { try {
+    return JSON.parse(fs.readFileSync(path.join(VX.root, 'reco/extraValueMaster.json'), 'utf8')); }
+    catch (e) { return null; } };
+  const splitOf = (id) => { try {
+    return JSON.parse(fs.readFileSync(path.join(VX.root, 'reco/extraValues/' + id + '.json'), 'utf8')); }
+    catch (e) { return null; } };
+  const cellsIn = (obj, id) => { const b = obj && obj[id]; if (!b) return 0;
+    return Object.keys(b).reduce((a, pk) => a + Object.keys(b[pk] || {}).length, 0); };
+
+  const A = await openReco(browser, brVX);
+  await A.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_BIG', 4, 'Note']) + ')');
+  await A.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_OTHER', 2, 'Memo']) + ')');
+  note('the main file after setup', { TPL_BIG: cellsIn(mainOf(), 'TPL_BIG'),
+                                     TPL_OTHER: cellsIn(mainOf(), 'TPL_OTHER') });
+  check(cellsIn(mainOf(), 'TPL_BIG') === 4 && cellsIn(mainOf(), 'TPL_OTHER') === 2,
+    'R35a PREMISE: both templates keep their typed values in the ONE shared values file',
+    { big: cellsIn(mainOf(), 'TPL_BIG'), other: cellsIn(mainOf(), 'TPL_OTHER') });
+  check(splitOf('TPL_BIG') === null,
+    'R35b PREMISE: no split file exists yet', splitOf('TPL_BIG'));
+
+  /* ---- THE COUNT IN THE PANEL, which is the half the ticket asks for "before
+     they need it". */
+  const panel = await A.page.evaluate(`(function () {
+    AppState.activeRecoId = 'TPL_BIG';
+    Reco.openValuesModal();
+    const body = document.querySelector('.modal-body') || document.body;
+    const h = body.innerHTML;
+    const stats = Store.valueFileStats();
+    App.closeModal();
+    return { hasFile: h.indexOf('extraValueMaster.json') !== -1,
+             hasMove: h.indexOf('moveValuesToOwnFile') !== -1,
+             saysCount: /6 value\\(s\\) in all/.test(h),
+             byTpl: stats.byTpl, byFile: stats.byFile };
+  })()`);
+  note('the panel', panel);
+  check(panel.hasFile === true && panel.saysCount === true,
+    'R35c THE PANEL NAMES THE FILE AND ITS TOTAL, not just this template\'s: the whole file crosses '
+    + 'the shared folder twice every few keystrokes, so the number that matters is the file\'s. '
+    + 'Six values in all - four on this template and two on the other', panel);
+  check(panel.hasMove === true,
+    'R35d ...AND OFFERS THE MOVE. Before this round the remedy worked but could not be reached from '
+    + 'anywhere in the UI, which is what reviewer B\'s finding said', panel.hasMove);
+  check(panel.byTpl.TPL_BIG && panel.byTpl.TPL_BIG.n === 4
+        && panel.byFile['reco/extraValueMaster.json'].n === 6
+        && panel.byFile['reco/extraValueMaster.json'].tpls === 2,
+    'R35e AND THE COUNT IS ONE WALK SHARED WITH THE BOOT WARNING (Store.valueFileStats), so the '
+    + 'panel and the startup message cannot disagree about the same file', panel);
+
+  /* ---- THE MOVE. */
+  const moved = await A.page.evaluate(`(async function () {
+    AppState.activeRecoId = 'TPL_BIG';
+    window.__toasts = [];
+    /* THE TEXT ACTUALLY WRITTEN to the new file. Reading the file afterwards is
+       not the same question: _mergeJob runs _takeDisk before the intents, so a
+       split write made with the MAIN file's predicate would wipe every other
+       template out of memory and then be repaired by the next main-file write,
+       leaving the file on disk looking right. What went INTO the file is the
+       only place that mistake is visible. */
+    const wrote = [];
+    const realW = Store._writeJsonFile;
+    Store._writeJsonFile = async function (rel, text, token) {
+      if (rel === 'reco/extraValues/TPL_BIG.json') {
+        try { wrote.push(Object.keys(JSON.parse(text)).sort()); } catch (e) { wrote.push(['UNPARSEABLE']); }
+      }
+      return realW.call(Store, rel, text, token);
+    };
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.moveValuesToOwnFile(); }
+    finally { window.confirm = rc; Store._writeJsonFile = realW; }
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 120)),
+             routed: (Store.extraValueFiles||{}).TPL_BIG || null,
+             wroteKeys: wrote,
+             inMemory: Object.keys((AppState.extraValueMaster||{}).TPL_BIG || {}).length };
+  })()`);
+  note('after the move', { moved, split: cellsIn(splitOf('TPL_BIG'), 'TPL_BIG'),
+                           mainBig: cellsIn(mainOf(), 'TPL_BIG'),
+                           mainOther: cellsIn(mainOf(), 'TPL_OTHER') });
+  check(cellsIn(splitOf('TPL_BIG'), 'TPL_BIG') === 4,
+    'R35f THE SPLIT FILE HOLDS THEM: reco/extraValues/TPL_BIG.json has all four values',
+    splitOf('TPL_BIG'));
+  check(cellsIn(mainOf(), 'TPL_BIG') === 0,
+    'R35g ...AND THE MAIN FILE NO LONGER DOES, which is the point - the file everyone else is typing '
+    + 'into got smaller. The routing change IS the removal: _mergeJob writes Store._pick(mem, owns) '
+    + 'and `owns` stopped picking this template', mainOf());
+  check(moved.wroteKeys.length > 0 && moved.wroteKeys.every(k => JSON.stringify(k) === JSON.stringify(['TPL_BIG'])),
+    'R35h3 AND WHAT WAS WRITTEN INTO IT NAMED ONLY THAT TEMPLATE. Asserted on the TEXT rather than the '
+    + 'file, because _takeDisk runs before the intents: a split write made with the main file\'s '
+    + 'predicate wipes every other template out of memory and the next main-file write repairs it, so '
+    + 'the file on disk ends up looking correct and only the bytes that went in show the mistake',
+    moved.wroteKeys);
+  check(JSON.stringify(Object.keys(splitOf('TPL_BIG') || {})) === JSON.stringify(['TPL_BIG']),
+    'R35h2 AND THE SPLIT FILE HOLDS EXACTLY ONE TEMPLATE - its own. `owns` for the new file is this '
+    + 'template alone; written with the main file\'s predicate instead it would have copied every '
+    + 'unsplit template in, giving each of them TWO homes, and F17\'s note is explicit that a '
+    + 'template with two homes loses the newer copy the day the share recovers',
+    Object.keys(splitOf('TPL_BIG') || {}));
+  check(cellsIn(mainOf(), 'TPL_OTHER') === 2,
+    'R35h AND THE OTHER TEMPLATE IS UNTOUCHED in the main file. A move that rewrote the whole file '
+    + 'from this window\'s memory would be the overwrite T-S10-31 just closed, by another route',
+    mainOf());
+  check(moved.routed === 'reco/extraValues/TPL_BIG.json' && moved.inMemory === 4,
+    'R35i the routing points at the new file and MEMORY IS UNTOUCHED - the screen still shows the '
+    + 'values, because nothing was deleted from AppState.extraValueMaster', moved);
+  check(moved.said.some(t => /^success/.test(t) && /Moved 4 value/.test(t)),
+    'R35j ...and the operator is told what moved and where', moved.said);
+
+  /* ---- A RELOAD READS THE SAME VALUES. */
+  const B = await openReco(browser, brVX);
+  const reread = await B.page.evaluate(`(function () {
+    const byTpl = (AppState.extraValueMaster||{}).TPL_BIG || {};
+    const vals = Object.keys(byTpl).sort().map(pk => (byTpl[pk].Note||{}).v);
+    return { n: vals.length, vals: vals, routed: (Store.extraValueFiles||{}).TPL_BIG || null,
+             other: Object.keys((AppState.extraValueMaster||{}).TPL_OTHER || {}).length };
+  })()`);
+  note('a fresh window', reread);
+  check(reread.n === 4 && reread.vals.every(v => /^TPL_BIG-typed-/.test(v)),
+    'R35k A RELOAD READS THE SAME VALUES: loadAll reads the main file and then merges '
+    + 'reco/extraValues/*.json over it, so nothing had to be converted', reread);
+  check(reread.routed === 'reco/extraValues/TPL_BIG.json' && reread.other === 2,
+    'R35l ...and THE FILENAME IS THE ROUTING: the fresh window writes this template to the split file '
+    + 'from boot, and the other template still reads from the main one', reread);
+
+  /* ---- A WRITE FOR THE SECOND TEMPLATE DOES NOT TOUCH THE SPLIT FILE. */
+  const second = await B.page.evaluate(`(async function () {
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_OTHER');
+    RecoTemplate.open('TPL_OTHER'); App.closeModal();
+    AppState.activeRecoId = 'TPL_OTHER';
+    const sess = AppState.recoSessionsOwned.TPL_OTHER || AppState.recoSessions.TPL_OTHER;
+    await Reco.applyEdits(live, sess, [{ row: sess.data[0], col: 'Memo', value: 'AFTER-THE-MOVE' }],
+                          { source: 'grid', trusted: true });
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return true;
+  })()`);
+  note('after a write for the OTHER template',
+       { mainBig: cellsIn(mainOf(), 'TPL_BIG'), mainOther: cellsIn(mainOf(), 'TPL_OTHER'),
+         split: cellsIn(splitOf('TPL_BIG'), 'TPL_BIG') });
+  check(cellsIn(mainOf(), 'TPL_BIG') === 0 && cellsIn(splitOf('TPL_BIG'), 'TPL_BIG') === 4,
+    'R35m A WRITE FOR A SECOND TEMPLATE TOUCHES NEITHER: it does not resurrect the moved template in '
+    + 'the main file, and it does not write the split file at all. `owns` is what keeps the two '
+    + 'apart - the main file holds every template that has NOT been split, and a split file holds '
+    + 'exactly its own', { mainBig: cellsIn(mainOf(), 'TPL_BIG'),
+                           split: cellsIn(splitOf('TPL_BIG'), 'TPL_BIG') });
+  check(cellsIn(mainOf(), 'TPL_OTHER') === 2,
+    'R35n ...and the second template\'s own write did land in the main file, which is the control for '
+    + 'R35m', mainOf());
+
+  /* ---- A NEW VALUE ON THE MOVED TEMPLATE GOES TO THE SPLIT FILE. */
+  const typed = await B.page.evaluate(`(async function () {
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_BIG');
+    RecoTemplate.open('TPL_BIG'); App.closeModal();
+    AppState.activeRecoId = 'TPL_BIG';
+    const sess = AppState.recoSessionsOwned.TPL_BIG || AppState.recoSessions.TPL_BIG;
+    await Reco.applyEdits(live, sess, [{ row: sess.data[0], col: 'Note', value: 'TYPED-AFTER-MOVE' }],
+                          { source: 'grid', trusted: true });
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return true;
+  })()`);
+  const splitNow = splitOf('TPL_BIG') || {};
+  const anyTyped = JSON.stringify(splitNow).indexOf('TYPED-AFTER-MOVE') !== -1;
+  note('typing on the moved template', { inSplit: anyTyped,
+    inMain: JSON.stringify(mainOf() || {}).indexOf('TYPED-AFTER-MOVE') !== -1 });
+  check(anyTyped === true && JSON.stringify(mainOf() || {}).indexOf('TYPED-AFTER-MOVE') === -1,
+    'R35o AND FROM NOW ON TYPING GOES TO THE SPLIT FILE, not the main one - which is the whole '
+    + 'saving: the big shared file is no longer rewritten when somebody types into this '
+    + 'reconciliation', { split: anyTyped });
+
+  /* ---- THE BUTTON REFUSES WHEN THERE IS NOTHING TO DO. */
+  const twice = await B.page.evaluate(`(async function () {
+    AppState.activeRecoId = 'TPL_BIG';
+    window.__toasts = [];
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.moveValuesToOwnFile(); } finally { window.confirm = rc; }
+    return (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 110));
+  })()`);
+  note('moving an already-split template', twice);
+  check(twice.some(t => /^error/.test(t) && /already keeps its typed values/.test(t)),
+    'R35p MOVING A TEMPLATE THAT IS ALREADY SPLIT IS REFUSED BY NAME rather than writing its records '
+    + 'over themselves', twice);
+
+  /* ---- AND IT REFUSES WHEN THE FILE COULD NOT BE READ (F17's rule). */
+  const roRefused = await B.page.evaluate(`(async function () {
+    AppState.activeRecoId = 'TPL_OTHER';
+    Store.readOnlyFiles = Store.readOnlyFiles || {};
+    Store.readOnlyFiles['reco/extraValues/TPL_OTHER.json'] = true;
+    window.__toasts = [];
+    let asked = 0, wrote = 0;
+    const rc = window.confirm; window.confirm = (m) => { asked++; return true; };
+    const realW = Store._writeJsonFile;
+    Store._writeJsonFile = async function (rel) { wrote++; return realW.apply(Store, arguments); };
+    try { await Reco.moveValuesToOwnFile(); }
+    finally { window.confirm = rc; Store._writeJsonFile = realW; }
+    delete Store.readOnlyFiles['reco/extraValues/TPL_OTHER.json'];
+    return { said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 130)),
+             asked: asked, wrote: wrote,
+             routed: (Store.extraValueFiles||{}).TPL_OTHER || null };
+  })()`);
+  note('a file that could not be read', roRefused);
+  check(roRefused.asked === 0 && roRefused.wrote === 0,
+    'R35q2 ...AND THAT IS WHAT THE UP-FRONT CHECK BUYS: nothing was ASKED and nothing was WRITTEN. '
+    + 'Store.mergeWrite refuses a read-only file on its own, so the protection is not what this guard '
+    + 'adds - the mutation that removes it leaves the data just as safe. What it adds is refusing '
+    + 'before the operator is asked to confirm a move that cannot happen',
+    roRefused);
+  check(roRefused.said.some(t => /^error/.test(t) && /could not be read/.test(t))
+        && roRefused.routed === null && splitOf('TPL_OTHER') === null,
+    'R35q AND A FILE THIS WINDOW COULD NOT READ AT BOOT IS NEVER WRITTEN INTO - F17\'s rule, asked '
+    + 'before anything moves: a template with two homes loses the newer copy the day the share '
+    + 'recovers. Nothing was routed and no file was made', roRefused);
+
+  /* ---- AND THE MOVE TAKES WHAT THE FILE HOLDS, NOT WHAT THIS WINDOW KNOWS.
+     A colleague who typed into this template since this window booted has
+     records in the main file and nowhere in this window's memory. A move built
+     from memory would drop them at the moment the main file is rewritten, so the
+     set that moves is CAPTURED through a real read first. The colleague is
+     simulated the honest way - their record is put into the shared file directly,
+     which is what their window's own write would have done. */
+  const C = await openReco(browser, brVX);
+  await C.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_CARRY', 2, 'Note']) + ')');
+  const beforeInject = cellsIn(mainOf(), 'TPL_CARRY');
+  const injected = JSON.parse(fs.readFileSync(path.join(VX.root, 'reco/extraValueMaster.json'), 'utf8'));
+  injected.TPL_CARRY = injected.TPL_CARRY || {};
+  injected.TPL_CARRY['SOMEBODY-ELSES-KEY'] = {
+    Note: { k: 'typed', v: 'TYPED-BY-A-COLLEAGUE', by: 'them', at: '2026-01-01T00:00:00.000Z' } };
+  fs.writeFileSync(path.join(VX.root, 'reco/extraValueMaster.json'), JSON.stringify(injected));
+  const unseen = await C.page.evaluate(`(function () {
+    const byTpl = (AppState.extraValueMaster||{}).TPL_CARRY || {};
+    return { inMemory: Object.keys(byTpl).indexOf('SOMEBODY-ELSES-KEY') !== -1,
+             memoryCells: Object.keys(byTpl).length };
+  })()`);
+  note('a colleague record in the file, unseen by this window',
+       { beforeInject, onDisk: cellsIn(mainOf(), 'TPL_CARRY'), unseen });
+  check(unseen.inMemory === false && cellsIn(mainOf(), 'TPL_CARRY') === beforeInject + 1,
+    'R35s PREMISE: the shared file holds a value this window has never seen - exactly what a colleague '
+    + 'typing into the same template since boot leaves behind', { unseen, disk: cellsIn(mainOf(), 'TPL_CARRY') });
+
+  const carried = await C.page.evaluate(`(async function () {
+    AppState.activeRecoId = 'TPL_CARRY';
+    window.__toasts = [];
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.moveValuesToOwnFile(); } finally { window.confirm = rc; }
+    App.closeModal();
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 180)),
+             memoryNow: Object.keys((AppState.extraValueMaster||{}).TPL_CARRY || {}).length };
+  })()`);
+  const splitCarry = JSON.stringify(splitOf('TPL_CARRY') || {});
+  note('after moving it', { carried, split: cellsIn(splitOf('TPL_CARRY'), 'TPL_CARRY'),
+                            main: cellsIn(mainOf(), 'TPL_CARRY') });
+  check(splitCarry.indexOf('TYPED-BY-A-COLLEAGUE') !== -1,
+    'R35t THE COLLEAGUE\'S VALUE MOVED TOO: the captured set is what the FILE held, so a record this '
+    + 'window had never seen is in the split file rather than dropped when the main file was '
+    + 'rewritten. A move built from AppState.extraValueMaster would have lost it',
+    { split: splitCarry.slice(0, 200) });
+  check(cellsIn(mainOf(), 'TPL_CARRY') === 0
+        && cellsIn(splitOf('TPL_CARRY'), 'TPL_CARRY') === beforeInject + 1,
+    'R35u ...and the main file is clear of this template, with every value accounted for: the '
+    + (beforeInject) + ' this window typed plus the colleague\'s one',
+    { main: cellsIn(mainOf(), 'TPL_CARRY'), split: cellsIn(splitOf('TPL_CARRY'), 'TPL_CARRY') });
+  check(carried.memoryNow === beforeInject + 1
+        && carried.said.some(t => /^success/.test(t) && /somebody else/.test(t)),
+    'R35v ...AND THE OPERATOR IS TOLD THE COUNT CAME FROM THE FILE: memory gained the colleague\'s '
+    + 'record at the same moment (_takeDisk merged the share before the capture), and the sentence '
+    + 'says how many of the moved values this window did not know about', carried);
+
+  /* ---- AND A FAILED SPLIT WRITE LEAVES EVERYTHING WHERE IT WAS. This is what
+     the order buys, and it is only visible when something fails: the split file
+     is written BEFORE the main file is rewritten, so a failure at that point
+     leaves every value still in the main file. Written the other way round -
+     rewrite main, then write the split file - the same failure loses the lot.
+     The failure is injected at Store._writeJsonFile for that one path, which is
+     where a full disk or a vanished share would surface. */
+  const D = await openReco(browser, brVX);
+  await D.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_FAIL', 3, 'Note']) + ')');
+  const beforeFail = cellsIn(mainOf(), 'TPL_FAIL');
+  const failed = await D.page.evaluate(`(async function () {
+    AppState.activeRecoId = 'TPL_FAIL';
+    const real = Store._writeJsonFile;
+    Store._writeJsonFile = async function (rel, text, token) {
+      if (rel === 'reco/extraValues/TPL_FAIL.json') return { ok: false, reason: 'busy', token: null };
+      return real.call(Store, rel, text, token);
+    };
+    window.__toasts = [];
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.moveValuesToOwnFile(); }
+    finally { window.confirm = rc; Store._writeJsonFile = real; }
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 130)),
+             routed: (Store.extraValueFiles||{}).TPL_FAIL || null,
+             inMemory: Object.keys((AppState.extraValueMaster||{}).TPL_FAIL || {}).length };
+  })()`);
+  note('a split write that fails', { failed, main: cellsIn(mainOf(), 'TPL_FAIL'),
+                                     split: cellsIn(splitOf('TPL_FAIL'), 'TPL_FAIL') });
+  check(cellsIn(mainOf(), 'TPL_FAIL') === beforeFail,
+    'R35w A FAILED MOVE LOSES NOTHING: the split file could not be written, so every value is still '
+    + 'in the main file. This is the whole reason the split file is written FIRST - rewrite the main '
+    + 'file first and this same failure takes all ' + beforeFail + ' of them with it',
+    { main: cellsIn(mainOf(), 'TPL_FAIL'), expected: beforeFail });
+  check(failed.routed === null && failed.inMemory === beforeFail,
+    'R35x ...and nothing was routed and nothing left memory, so the next attempt starts from exactly '
+    + 'where this one did', failed);
+  check(failed.said.some(t => /^error/.test(t) && /Nothing was moved/.test(t)),
+    'R35y ...and the operator is told it did not happen, rather than being left to assume it did',
+    failed.said);
+
+  /* ---- AND THE BOOT MESSAGE, which is the other reader of the shared count.
+     The ceiling is 50,000 records and the measurement behind it is real
+     (29.6 MB at 200,000, 2,730 ms for ONE merge write), so the arm uses a file
+     that genuinely crosses it rather than a lowered constant - boot parses it
+     the way it would on a share that got there by typing. */
+  const BIG = {};
+  BIG.TPL_HUGE = {};
+  for (let i = 0; i < CEIL_N; i++) {
+    BIG.TPL_HUGE['K' + i] = { Note: { k: 'typed', v: 'v' + i, by: 'b', at: '2026-01-01T00:00:00Z' } };
+  }
+  fs.writeFileSync(path.join(VX.root, 'reco/extraValueMaster.json'), JSON.stringify(BIG));
+  const E = await openReco(browser, brVX);
+  const boot = await E.page.evaluate(`(function () {
+    const probs = (Store.loadProblems || []).map(String);
+    const stats = Store.valueFileStats();
+    return { said: probs.filter(t => /extraValueMaster/.test(t)).map(t => t.slice(0, 320)),
+             counted: (stats.byFile['reco/extraValueMaster.json'] || {}).n || 0,
+             ceiling: Store.VALUE_FILE_CEILING };
+  })()`);
+  note('boot with a file over the ceiling', { counted: boot.counted, ceiling: boot.ceiling,
+                                              said: (boot.said[0] || '').slice(0, 200) });
+  check(boot.counted > boot.ceiling,
+    'R35za PREMISE: the shared values file now holds more records than Store.VALUE_FILE_CEILING, which '
+    + 'is where one merge write stops being something a person can type through', boot);
+  check(boot.said.length === 1 && /typed values/.test(boot.said[0])
+        && new RegExp(String(boot.counted)).test(boot.said[0]),
+    'R35zb THE BOOT MESSAGE NAMES THE FILE AND THE COUNT, from the SAME walk the panel uses '
+    + '(Store.valueFileStats). Before this round that count was computed inline inside Store.loadAll '
+    + 'and nothing else could ask it, so the panel and the startup message were two answers waiting '
+    + 'to disagree', boot.said);
+  check(boot.said.length === 1 && /Column Values/.test(boot.said[0]),
+    'R35zc ...AND IT POINTS AT THE BUTTON rather than telling the operator to create the file by hand, '
+    + 'which is what it said while the remedy was unreachable', boot.said);
+
+
+  const vxErrs = [...A.errors, ...B.errors, ...C.errors, ...D.errors, ...E.errors]
+    .filter(e => !/Could not save|injected fault|could not be read|could not write|busy/.test(e));
+  check(vxErrs.length === 0,
+    'R35zz no page or console error beyond the failures this section injects on purpose',
+    vxErrs.slice(0, 5));
+  for (const w of [A, B, C, D, E]) { try { await w.ctx.close(); } catch (e) {} }
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

@@ -3860,6 +3860,36 @@ const Store = {
      queue and two colleagues each move 30 MB. 50,000 (7 MB, ~1 s local plus
      ~1.5 s of wire per burst) is the last size that is usable. */
   VALUE_FILE_CEILING: 50000,
+  /* T-S10-3's own measurement, re-measured on the shipped tree at 2,000 /
+     50,000 / 200,000 records (287,797 / 7,327,799 / 29,577,801 bytes). Used
+     only to put an approximate MB beside a count a person is reading. */
+  VALUE_BYTES_PER_RECORD: 148,
+
+  /* T-S10-3. THE COUNT, PER FILE AND PER TEMPLATE, IN ONE PLACE. The boot
+     warning and the Values panel's own line are the same walk over the same
+     map, and a second copy of it would eventually be a second answer. Takes
+     the map explicitly because loadAll asks before AppState.extraValueMaster
+     has been assigned. */
+  valueFileStats(evm) {
+    const out = { byFile: {}, byTpl: {} };
+    const map = evm || (typeof AppState !== 'undefined' && AppState.extraValueMaster) || {};
+    Object.keys(map).forEach(tid => {
+      const byTpl = map[tid] || {};
+      let n = 0;
+      Object.keys(byTpl).forEach(pk => { n += Object.keys(byTpl[pk] || {}).length; });
+      if (!n) return;
+      const file = (Store.extraValueFiles || {})[tid] || 'reco/extraValueMaster.json';
+      out.byTpl[tid] = { n: n, keys: Object.keys(byTpl).length, file: file };
+      const e = out.byFile[file] || (out.byFile[file] = { n: 0, top: null, topN: 0, tpls: 0 });
+      e.n += n; e.tpls++;
+      if (n > e.topN) { e.topN = n; e.top = tid; }
+    });
+    Object.keys(out.byFile).forEach(f => {
+      out.byFile[f].mb = Math.max(1, Math.round(
+        out.byFile[f].n * Store.VALUE_BYTES_PER_RECORD / 1048576));
+    });
+    return out;
+  },
 
   /* Keys whose file is written without indentation. recoSessions has its own
      branch above because it also needs a replacer. */
@@ -4845,27 +4875,17 @@ const Store = {
        that hold records. At 200,000 records that is tens of milliseconds
        against a boot that has just parsed 30 MB. */
     try {
-      const perFile = {};
-      const evm = out.extraValueMaster || {};
-      Object.keys(evm).forEach(tid => {
-        const byTpl = evm[tid] || {};
-        let n = 0;
-        Object.keys(byTpl).forEach(pk => { n += Object.keys(byTpl[pk] || {}).length; });
-        if (!n) return;
-        const file = (Store.extraValueFiles || {})[tid] || 'reco/extraValueMaster.json';
-        const e = perFile[file] || (perFile[file] = { n: 0, top: null, topN: 0 });
-        e.n += n;
-        if (n > e.topN) { e.topN = n; e.top = tid; }
-      });
+      const perFile = Store.valueFileStats(out.extraValueMaster || {}).byFile;
       Object.keys(perFile).forEach(file => {
         const e = perFile[file];
         if (e.n <= Store.VALUE_FILE_CEILING) return;
         Store.loadProblems.push(file + ' holds ' + e.n + ' typed values (about '
-          + Math.max(1, Math.round(e.n * 148 / 1048576)) + ' MB). Above about '
+          + e.mb + ' MB). Above about '
           + Store.VALUE_FILE_CEILING + ' the whole file crosses the shared folder twice for every '
           + 'few keystrokes, so typing gets slow for everyone on it. Its biggest template holds '
-          + e.topN + ' of them: moving that one into reco/extraValues/' + e.top + '.json - which '
-          + 'Reco reads at startup and writes to from then on - brings this file back under the '
+          + e.topN + ' of them: open that reconciliation, press Column Values and use "move this '
+          + 'template\'s values into their own file" (reco/extraValues/' + e.top + '.json, which '
+          + 'Reco reads at startup and writes to from then on) to bring this file back under the '
           + 'limit. Nothing has been lost and nothing is being done automatically.');
       });
     } catch (e) { console.error('values file size check', e); }
@@ -27144,6 +27164,34 @@ renderRecoTable(tpl, sess) {
       if (orphans) h += '<div style="margin-top:6px;"><button class="danger" '
         + 'onclick="Reco.removeValuesNotLoaded()">Remove all ' + orphans + ' for keys not in the '
         + 'current data</button></div>';
+      /* ---- T-S10-3. WHICH FILE THESE VALUES LIVE IN, AND HOW BIG IT IS -
+         the count the ticket asks the operator to be able to see BEFORE they
+         need it, rather than only in a boot warning once the file is already
+         too big. The whole file crosses the shared folder twice every few
+         keystrokes, so the number that matters is the FILE's, not this
+         template's. */
+      const vStats = Store.valueFileStats();
+      const vMine = vStats.byTpl[id] || { n: 0, file: 'reco/extraValueMaster.json' };
+      const vFile = vStats.byFile[vMine.file] || { n: 0, mb: 0, tpls: 0 };
+      const vSplit = vMine.file !== 'reco/extraValueMaster.json';
+      const vOver = vFile.n > Store.VALUE_FILE_CEILING;
+      h += '<div class="' + (vOver ? 'xl-warn' : 'help') + '" style="margin-top:8px;">'
+        + 'These values are kept in <code>' + U.esc(vMine.file) + '</code>, which holds '
+        + U.fmtInt(vFile.n) + ' value(s) in all (about ' + vFile.mb + ' MB) across '
+        + U.fmtInt(vFile.tpls) + ' reconciliation(s)'
+        + (vOver ? '. <b>That is past the point where typing gets slow for everyone on this '
+                 + 'folder</b> (about ' + U.fmtInt(Store.VALUE_FILE_CEILING) + '), because the '
+                 + 'whole file crosses the shared folder twice every few keystrokes.'
+                 : '. Reco reads and rewrites the whole file on every few keystrokes, so the '
+                 + 'number that matters is the file\'s rather than this template\'s.')
+        + '</div>';
+      if (!vSplit && vMine.n) h += '<div style="margin-top:6px;"><button'
+        + (vOver ? ' class="primary"' : '')
+        + ' onclick="Reco.moveValuesToOwnFile()">Move this template\'s ' + U.fmtInt(vMine.n)
+        + ' value(s) into their own file</button></div>';
+      if (vSplit) h += '<div class="help" style="margin-top:6px;">This reconciliation already has '
+        + 'its own file, so typing into it does not move anybody else\'s values across the '
+        + 'folder.</div>';
     }
     App.openModal('Column Values — ' + U.esc(tpl.name), h,
       '<button onclick="App.closeModal()">Close</button>');
@@ -27245,6 +27293,176 @@ renderRecoTable(tpl, sess) {
     Reco.openValuesModal();
     const sess = AppState.recoSessions[id];
     if (sess && (sess.data || []).some(r => r._pk === pk)) Reco.refreshGrid();
+  },
+
+  /* ============ T-S10-3. MOVE THIS TEMPLATE'S VALUES INTO THEIR OWN FILE ===
+     THE BUTTON THE TICKET ASKS FOR, and the reason it waited for its own
+     round: this moves records between two shared files while colleagues may
+     be typing into either, and the values store is the one thing on this
+     folder with NO SECOND COPY - no mirror on the row, no Cn row in the CSV.
+
+     WHY THE FILE GETS TOO BIG AT ALL: a record is kept for ever under its
+     _pk, deliberately, because the key may come back in next month's extract.
+     At 148 bytes a record (measured: 2,000 / 50,000 / 200,000 records ->
+     287,797 / 7,327,799 / 29,577,801 bytes) a share that types two columns
+     onto 200,000 rows a month reaches tens of MB in a year, and
+     Store._mergeJob reads AND writes the whole file for every typing burst.
+
+     THE ORDER IS THE SAFETY, and it is the only order that is safe:
+
+       1  CAPTURE what the main file really holds for this template, through a
+          mergeWrite with the pre-move `owns` - so the set that moves is the
+          FILE's and not merely this window's memory
+       2  write the SPLIT file with that set
+       3  point the routing at it (Store.extraValueFiles, mutated IN PLACE so
+          the closures _extraValueFlush already took keep seeing it)
+       4  write the MAIN file, which no longer PICKS this template, so the
+          records leave it - _mergeJob writes Store._pick(mem, owns), so the
+          routing change IS the removal and memory is never touched
+
+     A failure after step 2 leaves the records in BOTH files, never in
+     neither, and both are read at boot (loadAll reads the main file and then
+     merges reco/extraValues/*.json over it), so a half-finished move loses
+     nothing. The reverse order - remove first, write second - loses
+     everything in the gap, which is why it is not written that way.
+
+     STEP 1 IS WHY THIS IS NOT JUST A COPY OF MEMORY, and the mergeWrite is
+     the whole of it. A colleague may have typed into this template since this
+     window booted; those records are in the file and NOT in
+     AppState.extraValueMaster, and a snapshot taken before any read would
+     drop them at step 4. Going through mergeWrite is what fixes that:
+     _mergeJob runs _takeDisk(mem, read.data, owns) BEFORE the intents, so by
+     the time the intent runs the share has already been merged into memory -
+     which is why the intent can read either `map` or
+     AppState.extraValueMaster and get the same complete answer, and why
+     replacing one with the other changes nothing. What must not be replaced
+     is the read itself. Memory also gains the colleague's values at that
+     moment, so the screen agrees.
+     An earlier version of this function captured AFTER step 4 instead, which
+     could not work: step 4 had already dropped them.
+
+     THE RESIDUAL WINDOW, stated rather than implied: a value typed by another
+     window between step 1 and step 4 - a few hundred milliseconds - is in the
+     main file when step 4 drops this template from it, and is lost. It cannot
+     be closed without a transaction across two files, which this bridge does
+     not have. It is NARROWER than the hand method the boot message used to
+     recommend, where the same hazard lasts until every window has restarted.
+
+     AND A COLLEAGUE WHO ALREADY HAS THE APP OPEN keeps writing that
+     template's values into the MAIN file until they restart, because their
+     window's routing was read at their boot. Nothing is lost - the main file
+     is read at boot and merged under the split one - but the records are in
+     two places until then, and the confirm says so rather than implying the
+     move is instant for everybody. */
+  async moveValuesToOwnFile() {
+    const id = AppState.activeRecoId;
+    const tpl = AppState.recoTemplates.find(x => x.id === id);
+    if (!tpl) return;
+    const MAIN = 'reco/extraValueMaster.json';
+    const already = (Store.extraValueFiles || {})[id];
+    if (already) {
+      U.toast('This reconciliation already keeps its typed values in ' + already, 'error');
+      return;
+    }
+    const mine = Store.valueFileStats().byTpl[id];
+    if (!mine || !mine.n) {
+      U.toast('This reconciliation has no stored values to move', 'error');
+      return;
+    }
+    const file = 'reco/extraValues/' + id + '.json';
+    /* F17's rule, asked before anything is written: never move records into or
+       out of a file this window could not read at boot. */
+    if (Store.readOnlyKeys.extraValueMaster) {
+      U.toast('The values file could not be read from the shared folder at startup, so nothing is '
+        + 'being saved to it in this session. Reopen the app once the folder responds.', 'error');
+      return;
+    }
+    const ro = Store.readOnlyFiles || {};
+    if (ro[file] || ro[MAIN]) {
+      U.toast('⚠ ' + (ro[file] ? file : MAIN) + ' could not be read from the shared folder, so this '
+        + 'move would be writing records into a file whose contents are unknown. Repair or remove '
+        + 'that file and reopen the app.', 'error');
+      return;
+    }
+    const stats = Store.valueFileStats().byFile[MAIN] || { n: mine.n, mb: 0 };
+    if (!confirm('Move ' + U.fmtInt(mine.n) + ' stored value(s) on ' + U.fmtInt(mine.keys)
+      + ' row key(s) out of the shared values file and into ' + file + '?\n\n'
+      + 'Why: ' + MAIN + ' holds ' + U.fmtInt(stats.n) + ' value(s) in total (about '
+      + stats.mb + ' MB) and the WHOLE file crosses the shared folder twice every few keystrokes '
+      + 'for everyone using it. Giving this reconciliation its own file makes both smaller.\n\n'
+      + 'Nothing is lost and nothing is deleted: the values are written to the new file FIRST and '
+      + 'only then leave the old one, so if this fails half way they are in both and Reco reads '
+      + 'both.\n\n'
+      + 'Colleagues who already have Reco open will keep writing THIS template\'s values into the '
+      + 'old file until they restart it. Those values are still read and still used; they are just '
+      + 'in two places until everyone has reopened the app.')) return;
+
+    /* 1. WHAT IS REALLY IN THE FILE, which is not the same as what this
+          window holds. A colleague may have typed into this template since
+          this window booted, and their records are in the main file and not
+          in AppState.extraValueMaster. So the set that MOVES is captured from
+          a real read: mergeWrite with the PRE-MOVE `owns` (which still
+          includes this template), whose intent sees `mem` after _takeDisk has
+          merged the share over it. That also leaves memory complete, so the
+          screen gains the colleague's values at the same moment.
+          The write itself changes nothing: the content is Store._pick(mem,
+          owns) and `owns` has not moved yet. */
+    let captured = null;
+    const w0 = await Store.mergeWrite('extraValueMaster',
+      map => { captured = JSON.parse(JSON.stringify(map[id] || {})); },
+      { file: MAIN, owns: tid => !(Store.extraValueFiles || {})[tid] });
+    if (!w0 || w0.refused || captured == null) {
+      U.toast('Nothing was moved: ' + MAIN + ' could not be read, so what would move is not known. '
+        + 'The values are where they were.', 'error');
+      return;
+    }
+    let cells = 0;
+    Object.keys(captured).forEach(pk => { cells += Object.keys(captured[pk] || {}).length; });
+    /* 2. THE SPLIT FILE FIRST, with that captured set. From here the records
+          are in BOTH files, and both are read at boot - so every failure
+          below loses nothing.
+          `owns` is this template alone, which is what a split file holds by
+          definition - but on THIS write it is belt-and-braces and the
+          mutation grid proved it: _takeDisk runs before the intents, so with
+          the main file's predicate and a split file that does not exist yet
+          it empties memory of every unsplit template, the intent re-adds only
+          this one, and _pick writes the same single key. What really keeps a
+          split file to one template is _extraValueFlush's predicate on every
+          write AFTER the move. */
+    const w1 = await Store.mergeWrite('extraValueMaster',
+      map => { map[id] = captured; },
+      { file: file, owns: tid => tid === id });
+    if (!w1 || w1.refused || !w1.written) {
+      U.toast('Nothing was moved: ' + file + ' could not be written ('
+        + ((w1 && (w1.reason || 'no write')) || 'no write') + '). The values are where they were.',
+        'error');
+      return;
+    }
+    /* 3. THE ROUTING, mutated in place so the closures _extraValueFlush has
+          already taken keep seeing it. From here every write of this
+          template's values goes to the split file. */
+    Store.extraValueFiles = Store.extraValueFiles || {};
+    Store.extraValueFiles[id] = file;
+    /* 4. THE MAIN FILE, which no longer PICKS this template, so the records
+          leave it. The intent is a no-op on purpose: the content is
+          Store._pick(mem, owns) and `owns` is what dropped it, so memory -
+          and the screen - are untouched. */
+    const w2 = await Store.mergeWrite('extraValueMaster',
+      () => {},
+      { file: MAIN, owns: tid => !(Store.extraValueFiles || {})[tid] });
+    if (!w2 || w2.refused) {
+      U.toast('The values were copied to ' + file + ' and are being used from there, but ' + MAIN
+        + ' could not be rewritten, so they are still in both files. Nothing is lost; typing into '
+        + 'this reconciliation again will tidy it up.', 'error');
+      return;
+    }
+
+    U.toast('Moved ' + U.fmtInt(cells) + ' value(s) into ' + file
+      + (cells !== mine.n ? ' (' + U.fmtInt(cells) + ' were in the shared file, against the '
+                          + U.fmtInt(mine.n) + ' this window knew about - the rest were typed by '
+                          + 'somebody else)' : '')
+      + '. Reco reads this file at startup and writes to it from now on.', 'success');
+    Reco.openValuesModal();
   },
 
   removeValuesNotLoaded() {

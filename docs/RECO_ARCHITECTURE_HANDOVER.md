@@ -6847,3 +6847,66 @@ worth writing down:
 merged write produces the same bytes. No baseline moves and this round pins none — the compatibility
 was checked before the fix was designed around it, because a design that broke T1 would have had to
 be a different design.
+
+---
+
+## 35. T-S10-3 — moving a template's typed values into their own file
+
+### 35.1 What was already there
+
+The measurement, decision G's split file (read at boot, written to from then on), and
+`removeValuesNotLoaded`. What was missing was the **count** the operator can see before the file is
+too big, and the **move**. Reviewer B's F15 put it exactly: "the remedy already works without any
+UI … but the 'move this template's values into their own file' answer cannot be reached from
+anywhere in the UI".
+
+### 35.2 One walk, two readers
+
+`Store.valueFileStats()` replaces a count that lived inline in `Store.loadAll`. The boot warning and
+the Values panel now ask the same function, so they cannot give two answers about the same file. The
+panel shows the file's **total** across every template in it, not this template's, because the whole
+file crosses the folder twice every few keystrokes.
+
+### 35.3 The order is the safety
+
+| step | what | why |
+| --- | --- | --- |
+| 1 | capture through `mergeWrite` with the **pre-move** `owns` | `_mergeJob` runs `_takeDisk` before the intents, so the share is merged into memory first |
+| 2 | write the **split** file | from here the records are in BOTH files, both of which are read at boot |
+| 3 | point the routing at it, **in place** | the closures `_extraValueFlush` already took keep seeing it |
+| 4 | write the **main** file, which no longer picks this template | `_pick(mem, owns)` means the routing change IS the removal; memory is untouched |
+
+A failure after step 2 leaves the records in both files, never neither. The reverse order loses
+everything in the gap, which is what R35w measures by injecting a failure at `_writeJsonFile`.
+
+**The residual window:** a value typed by another window between step 1 and step 4 is lost. No
+transaction spans two files here. It is narrower than the hand method the boot message used to
+recommend, where the hazard lasts until every window restarts — and that message now points at the
+button.
+
+### 35.4 The grid corrected two claims about my own code
+
+| what I wrote | what is true | how it showed |
+| --- | --- | --- |
+| capturing through `mergeWrite` matters because the intent reads `map` rather than memory | `_takeDisk` has already merged the share into `AppState.extraValueMaster` by then, so either read gives the same answer; what must not be removed is **the read itself** | the mutation swapping one for the other measured nothing |
+| the split write's `owns: tid => tid === id` keeps other templates out of the new file | on that one write it is **inert**: with a split file that does not exist yet, `_takeDisk` empties memory of every unsplit template, the intent re-adds only this one, and `_pick` writes the same single key | the write-spy arm stayed green under the edit, `wroteKeys [["TPL_BIG"]]` |
+
+The second is recorded in the runner as **not a mutation**, with the measurement beside it, rather
+than left as a grid entry that reddens nothing. What really keeps a split file to one template is
+`_extraValueFlush`'s predicate on every write after the move.
+
+**And the up-front read-only guard is belt-and-braces too**: `mergeWrite` refuses a read-only file
+on its own. What the guard adds is refusing *before* the operator confirms a move that cannot
+happen, which is what R35q2 asserts — nothing asked, nothing written.
+
+### 35.5 Three red=NONE in one round, all fixture, and what each needed
+
+| mutation | why the arms missed it | the arm |
+| --- | --- | --- |
+| snapshot memory with no read | the existing arm was mis-targeted at where the intent reads | retargeted at the read |
+| split written after the main rewrite | nothing failed, so both orders ended identically | inject a failure at the split write (R35w) |
+| the boot warning's private count | the fixture was far under the ceiling | boot against 50,001 hand-written records (R35za–R35zc) |
+
+The pattern from 28.6 / 30.6 / 31.4 / 32.5 / 33.4 holds, with 34.5's exception noted: when a
+mutation measures nothing, the question is **which of the two is redundant — the arm or the line**.
+Three times here it was the arm; twice it was the line.
