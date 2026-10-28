@@ -412,6 +412,27 @@ people on the folder are writing.
 
 ---
 
+**RE-MEASURED in the T-S10-31 round, and it stays open — but one sentence above is now wrong and
+the remedy it names is not the one that helps.**
+
+T-S10-31 gave `Store.save` a per-template-id merge, so the **write** of `recoSessions` now carries
+only the ids this window changed (`run_store_e2e` R34h). That does **not** close this ticket, and
+it is worth being exact about why: the cost measured here is two 200,000-row templates **both open
+in a split**, where every id has changed and all of them are written anyway. The
+**serialisation** — which is how change is detected at all — is still per session and still paid in
+full on every save.
+
+So the shape is unchanged for the case the table above measures. What has changed is the case the
+table does not: a window holding templates it never opened no longer serialises them INTO the
+write, and no longer sends them.
+
+**And "it is the argument for S10 (moving `manualTags` and friends off the session into a pk-keyed
+store)" is no longer the whole story.** That migration has largely landed, and the file is still
+this size, because the bulk of a session is `sess.data` — the loaded rows themselves, which cannot
+move off the session: they ARE the session. A future fix has to make change detection cheaper
+(a per-id dirty signal that cannot be forgotten) or stop holding every loaded template's rows in
+one file, not move more fields out of it.
+
 ## T-F2-6  `Reco._selectedPks()` with no pane key still reads the global
 
 **Where** `Reco._selectedPks(paneKey)`.
@@ -3697,6 +3718,94 @@ bytes alone, which is also the proof that the merge only fires where there is
 something to merge.
 
 ---
+
+**CLOSED — measured first, as the Test paragraph asks, and the fix does NOT use the marker the
+Fix paragraph proposes.**
+
+**The measurement** (`scratchpad/sx/probes/p1_repro.mjs`), two windows on one share:
+
+```
+C boots while TPL_1 holds 41 rows, and never opens it
+A loads a 42nd row into TPL_1 and flushes          → share: 42 rows
+C, working only in TPL_2, flushes                  → share: 41 rows.  A's row gone, silently.
+```
+
+**And the first arm of that reproduction lost nothing, which is the useful half.** A window that
+booted AFTER the other's work holds a CURRENT copy, so writing it back changes nothing. The loss
+needs the held copy to be **stale** — that is why it is intermittent, and why nobody has reported
+it. Both are kept as arms: the control (R34e) and the harm (R34d).
+
+**The rule, which is the decision this ticket leaves open, taken:** the share is the authority
+**per template id**, and a window writes only the ids whose session it has changed since it last
+read or wrote them. An untouched session is never written back.
+
+**NOT "the ids this window has actually OPENED", which is what the Fix paragraph says.** Two
+reasons, both found by reading the code the ticket points at:
+
+1. `Panes.rebuild` calls `Panes._repoint` for **every** loaded session at boot, so "a pane is
+   pointed at it" does not mean "this window opened it". The notion the ticket says already exists
+   (`activeRecoId` and the pane table) does not distinguish the two.
+2. A marker must be set at every door that can touch a session, and the cost of forgetting one is
+   that the operator's work is **never written** — swallowed, which is the worst class of bug in
+   this file.
+
+Comparing each session against the text this window last read or wrote for that id cannot be
+forgotten: if it changed in memory it differs, so it is written. It is `AppState._snap`'s own
+mechanism at the grain the file needs, and the same per-id discipline `Store._syncAegTemplates`
+already uses ("only templates this session has seen are ever deleted").
+
+**Four things are easy to get wrong here and each has its own arm:**
+
+| the wrong fix | what it would do | arm |
+|---|---|---|
+| write only this window's ids | removes every other template from the file | R34f |
+| never delete anything | a template deletion becomes impossible — the share puts it back | R34l |
+| delete whatever is absent from memory | deletes the template a colleague created after this window booted | R34m |
+| leave the snapshot at the boot text | this window re-writes an id it already wrote, over the colleague's later change — the same loss one step later | R34t |
+
+The last one came from the mutation grid, not from the probe.
+
+**The two refusals are different, and the ticket treats "cannot read" as one thing.** A read that
+THREW is the ordinary weather of a network folder: no latch, and the write must go out when the
+folder answers (R34v/R34w/R34x). A read that WOULD NOT PARSE latches the key inside
+`_readJsonFile`, so this window writes no sessions again until it restarts (R34n–R34q) —
+pre-existing, and now asserted so a change to it shows up against this round.
+
+**AND REPORTING IS WHAT KEEPS A REFUSED WRITE OWED.** `Store._reportError` forgets
+`AppState._snap` for the key. The first version of this round also nulled `_snap` in the refusal
+branch; that was a second copy of the same rule, **the mutation that removed it measured nothing**,
+and the three lines came out. The four-collision tail — which had the invalidation and no report —
+now reports, so the operator is told when a colleague is writing the file as fast as they are.
+
+**Byte identity is undisturbed.** `run_panes_e2e` T1 still writes a `reco/recoSessions.json`
+byte-identical to the build before it: every template in that sitting is one that window changed.
+No baseline moves, and this round pins none.
+
+**What this does NOT do.** An untouched session is not *refreshed* from the share either — this
+window keeps showing its boot copy until it reloads. Adopting the share's copy would mutate a
+session a pane may be rendering, so it is left alone and is the next ticket in this area.
+
+**The other PERSIST_KEYS are untouched**, as the Fix paragraph says they should be: `groupMaster`,
+`commentMaster`, `attachmentMaster` and `correctionMaster` are pk-keyed and want naming one at a
+time; `recoTemplates` already has its own refusal (T-24R2-1).
+
+**AND THE WRITE IS NOW CONDITIONAL, which one assertion elsewhere was keyed on.** `run_e2e`'s
+"recoSessions.json written once for the whole burst (debounced)" counted `write_file` calls for that
+path; the merge writes through `Store._writeJsonFile`, which calls `write_file_if_unchanged` when
+the launcher has it. The check now counts either method, because what it is about is the debounce —
+one write per burst, not six — and not which primitive carries it. It was the only assertion in the
+suites keyed on that method name for this file.
+
+**On a launcher with no conditional write** (an older build on the same folder) `_writeJsonFile`
+falls back to the unconditional `write_file` and counts `Store._casUnconditional`. The per-id merge
+still happens — the share is still read and only changed ids are overlaid — so such a window is
+strictly better than before this round, just without the collision check. That is the same
+"worse, but not worse than before, and counted so a gate can see it" rule `_writeJsonFile` already
+documents.
+
+**Tests** `run_store_e2e` `[103] R34`, 25 checks over eight windows on one share.
+**Mutation grid** `scratchpad/sx/mut/run.py`, 9 mutations × those 25 — all nine measure.
+
 
 ## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED in round 8, reviewed, and then cleaned up** — the key rule's SIGNATURE is recorded on the row at mint time and carried through the day file; the remainder is T-S10-25
 

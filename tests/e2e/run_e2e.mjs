@@ -169,7 +169,13 @@ try {
   const d1 = vrows.filter(r => r._pk === 'D1');
   check(d1.length === 2 && d1[1]._ver === 'C1' && d1[1].Status === 'review 4', 'five quick edits of one row → a single C1 with the final value', d1);
   const log1 = (await calls(B)).calls;
-  const sessWrites = log1.filter(c => c.method === 'write_file' && c.arg0 === 'reco/recoSessions.json').length;
+  /* T-S10-31 made this a CONDITIONAL write: recoSessions is merged per template
+     id against the share, so the call is write_file_if_unchanged when the
+     launcher has it and write_file when it does not. Both are counted, because
+     what this check is about is the DEBOUNCE - one write for the whole burst,
+     not six - and not which primitive carries it. */
+  const sessWrites = log1.filter(c => (c.method === 'write_file' || c.method === 'write_file_if_unchanged')
+                                      && c.arg0 === 'reco/recoSessions.json').length;
   check(sessWrites === 1, 'recoSessions.json written once for the whole burst (debounced)', sessWrites);
   check(log1.some(c => c.method === 'append_csv_rows'), 'edits appended via append_csv_rows (no full rewrite)');
   check(!log1.some(c => c.method === 'save_master'), 'unchanged Accounts Master is not rewritten');

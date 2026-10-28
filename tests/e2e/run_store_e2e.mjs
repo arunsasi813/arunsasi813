@@ -10753,6 +10753,7 @@ const PORT_R30  = 21530;   // R30 T-24R2-3: a renamed column keeps its place
 const PORT_R31  = 21534;   // R31 T-24R2-7: the AEG link asks the role matrix
 const PORT_R32  = 21538;   // R32 T-24R2-5: a one-component key holding '||'
 const PORT_R33  = 21542;   // R33 T-26-7: the live-key Set is memoised
+const PORT_R34  = 21546;   // R34 T-S10-31: recoSessions written per template id
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -18094,6 +18095,453 @@ section(102, 'R33 T-26-7 — one override record no longer makes every build wal
   check(xs.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R33o no page or console error across the whole section', xs.errors.slice(0, 5));
   await xs.ctx.close();
+}
+
+/* ====================================================================
+   T-S10-31. reco/recoSessions.json WAS WRITTEN WHOLE BY EVERY WINDOW.
+
+   Store.loadAll reads EVERY session on the folder into
+   AppState.recoSessionsOwned - including templates this window never opens -
+   and the tail of Store.save wrote the whole key. So a window that has held
+   T1's session since boot and never touched it overwrote whatever another
+   window had been doing in T1 all morning, with its own stale copy, and
+   nothing was said. It is T-S10-10's shape on a different file.
+
+   MEASURED (scratchpad/sx/probes/p1_repro.mjs), because the ticket was read
+   off the code and said so - "a two-page probe was started and left hanging
+   ... The Test paragraph below is the measurement this ticket wants first":
+
+     C boots while TPL_1 holds 41 rows, and never opens it.
+     A loads a 42nd row into TPL_1 and flushes.          share: 42
+     C, working only in TPL_2, flushes.                  share: 41
+
+   AND THE FIRST ARM OF THAT REPRODUCTION LOST NOTHING, which is the useful
+   half: a window that booted AFTER the other's work holds a CURRENT copy, so
+   writing it back changes nothing. The loss needs the held copy to be STALE,
+   which is why it is intermittent and why nobody has reported it. R34e is
+   that control and R34d is the harm.
+
+   THE RULE, which is the decision the ticket leaves open: THE SHARE IS THE
+   AUTHORITY PER TEMPLATE ID, and this window writes only the ids whose
+   session it has CHANGED since it last read or wrote them. An untouched
+   session is never written back.
+
+   NOT AN "OPENED" MARKER, which is what the ticket proposes. Boot calls
+   Panes._repoint for every loaded session (Panes.rebuild), so "a pane is
+   pointed at it" does not mean "this window opened it"; and a marker has to
+   be set at every door that can touch a session, where forgetting one means
+   the operator's work is never written - SWALLOWED, the worst class of bug in
+   this file. Comparing each session against the text this window last read or
+   wrote for THAT id cannot be forgotten, and it is the mechanism
+   AppState._snap already uses for the whole key, at the grain the file needs.
+
+   THE FOUR THINGS THAT ARE EASY TO GET WRONG, each with its own arm:
+     R34f  writing only this window's ids, without reading the share first,
+           REMOVES every other template from the file - worse than the
+           overwrite it fixes.
+     R34l  never deleting anything makes a template deletion impossible: the
+           share puts it back on every write. Panes.dropSession records it.
+     R34m  deleting whatever is absent from memory deletes the template a
+           COLLEAGUE created after this window booted. "Absent" has two
+           causes and only one of them may delete.
+     R34t  the snapshot has to MOVE when the write lands. If it stayed the
+           text read at boot, this window's copy would read as changed for the
+           rest of the run and every later flush would write it again, over
+           whatever the colleague has done to that template since - the same
+           loss, one step later. The grid asked for this arm; the probe did
+           not have it.
+
+   AND THE TWO REFUSALS ARE DIFFERENT. A read that THREW is the ordinary
+   weather of a network folder: no latch, and the write must go out when the
+   folder answers (R34v, R34w, R34x). A read that WOULD NOT PARSE latches the
+   key inside _readJsonFile, so this window writes no sessions again until it
+   restarts (R34n, R34o, R34p, R34q) - pre-existing, and asserted here so a
+   change to it shows up against this round.
+
+   REPORTING IS WHAT KEEPS A REFUSED WRITE OWED. Store._reportError forgets
+   AppState._snap for the key, which is what makes the next save retry it. An
+   earlier version of this round also nulled _snap in the refusal branch; that
+   was a second copy of the same rule, the mutation which removed it measured
+   NOTHING, and the three lines came out. The four-collision tail, which had
+   the invalidation and no report, now reports - so the operator is told when
+   a colleague is writing the file as fast as they are.
+
+   BYTE IDENTITY IS UNDISTURBED: run_panes_e2e T1 still writes a
+   reco/recoSessions.json byte-identical to the build before it, because every
+   template in that sitting is one that window changed. No baseline moves.
+
+   WHAT THIS DOES NOT DO. An untouched session is not REFRESHED from the share
+   either - this window keeps showing its boot copy until it reloads. That is
+   pre-existing and out of scope: adopting the share's copy would mutate a
+   session a pane may be rendering. It is the next ticket in this area, not
+   this one.
+
+   T-F2-5 IS NOT CLOSED BY THIS. Its measured case is two 200,000-row
+   templates BOTH open in a split, where every id is changed and all of them
+   are written; the SERIALISATION is per session and still paid in full. What
+   changed is the WRITE, which now names the changed ids (R34h).
+
+   MUTATION GRID: scratchpad/sx/mut/run.py, 9 mutations x the 25 checks of
+   this section's own probe (scratchpad/sx/probes/p2_fix.mjs) - all nine
+   measure:
+
+     the per-id comparison is dropped      -> R34d, R34h, R34j, R34t
+     the share is not read first           -> R34f and the fixture itself
+     the recorded drop is ignored          -> R34l
+     deletion by "absent from memory"      -> R34m
+     the write carries no token            -> R34g, R34i
+     a collision is treated as success     -> R34i, R34j
+     an unreadable file is written anyway  -> R34v, R34x, R34n, R34p
+     the refusal is silent                 -> R34w, R34x
+     the snapshot is not moved on write    -> R34t
+   ==================================================================== */
+
+section(103, 'R34 T-S10-31 — recoSessions is written per template id, against the share');
+{
+  const SX = makeRoot('share-r34');
+  const brSX = await startBridge(SX.root, PORT_R34); procs.push(brSX.proc);
+  const MKTPL = `(async function (arg) {
+    const [ID, n] = arg;
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(c => ({
+      name: c, label: c, formats: [], isValue: c === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount']; t.primaryKeys = ['Doc'];
+    RecoTemplate.saveTemplate();
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    RecoTemplate.open(ID); App.closeModal();
+    AppState.activeRecoId = ID;
+    const rows = [];
+    for (let i = 0; i < n; i++) rows.push({ Doc: ID + '-' + i, Amount: String(i + 1) });
+    const real = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, rows, ['Doc','Amount']); } finally { window.confirm = real; }
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    return ((AppState.recoSessionsOwned[ID]||{}).data||[]).length;
+  })`;
+  const LOAD = `(async function (arg) {
+    const [ID, tag] = arg;
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    RecoTemplate.open(ID); App.closeModal();
+    AppState.activeRecoId = ID;
+    const real = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, [{ Doc: tag, Amount: '9' }], ['Doc','Amount']); }
+    finally { window.confirm = real; }
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    return ((AppState.recoSessionsOwned[ID]||{}).data||[]).length;
+  })`;
+
+  const fileOf = () => { try {
+    return JSON.parse(fs.readFileSync(path.join(SX.root, 'reco/recoSessions.json'), 'utf8')); }
+    catch (e) { return null; } };
+  const rowsOn = (id) => { const f = fileOf(); return f && f[id] ? (f[id].data || []).length : null; };
+  const idsOn = () => { const f = fileOf(); return f ? Object.keys(f).sort() : null; };
+
+  /* ---- SETUP: two templates, a session each. */
+  const S = await openReco(browser, brSX);
+  await S.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_1', 1]) + ')');
+  await S.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_2', 1]) + ')');
+  await S.ctx.close();
+  check(rowsOn('TPL_1') === 1 && rowsOn('TPL_2') === 1,
+    'R34a PREMISE: both templates have a session on the share, one row each', idsOn());
+
+  /* ---- A works in TPL_1. C boots holding that, then A works again, then C
+     flushes its own work in TPL_2. C's held copy of TPL_1 is now STALE. */
+  const A = await openReco(browser, brSX);
+  const a1 = await A.page.evaluate(LOAD + '(' + JSON.stringify(['TPL_1', 'A-ONE']) + ')');
+  check(a1 === 2 && rowsOn('TPL_1') === 2,
+    'R34b PREMISE: A loaded a row into TPL_1 and it is on the share', { mem: a1, disk: rowsOn('TPL_1') });
+
+  const C = await openReco(browser, brSX);
+  const cHeld = await C.page.evaluate(`(function () {
+    return { rows1: ((AppState.recoSessionsOwned.TPL_1||{}).data||[]).length,
+             owned: Object.keys(AppState.recoSessionsOwned||{}).sort() };
+  })()`);
+  const a2 = await A.page.evaluate(LOAD + '(' + JSON.stringify(['TPL_1', 'A-TWO']) + ')');
+  check(cHeld.rows1 === 2 && a2 === 3 && rowsOn('TPL_1') === 3,
+    'R34c PREMISE: C holds TPL_1 at two rows and has never opened it; A has since made it three. '
+    + 'C\'s copy is STALE, which is the condition the loss needs',
+    { cHeld: cHeld.rows1, aNow: a2, disk: rowsOn('TPL_1') });
+
+  const c1 = await C.page.evaluate(LOAD + '(' + JSON.stringify(['TPL_2', 'C-ONE']) + ')');
+  note('after C flushed its own work', { cRows2: c1, disk: { TPL_1: rowsOn('TPL_1'),
+                                                             TPL_2: rowsOn('TPL_2') } });
+  check(rowsOn('TPL_1') === 3,
+    'R34d THE FIX: A\'s third row survives C\'s flush. C never changed TPL_1, so its copy of that '
+    + 'session compares equal to the text it read at boot and is not written at all - the share '
+    + 'stays the authority for an id this window is not working in', rowsOn('TPL_1'));
+  check(rowsOn('TPL_2') === 2,
+    'R34e CONTROL: C\'s OWN work still reaches the share. A fix that stopped writing would pass R34d '
+    + 'and lose everything', rowsOn('TPL_2'));
+  check(JSON.stringify(idsOn()) === JSON.stringify(['TPL_1', 'TPL_2']),
+    'R34f CONTROL, AND THE OBVIOUS WRONG FIX: the file still holds BOTH templates. Writing only the '
+    + 'ids this window changed - without reading the share first - would have removed TPL_1 from the '
+    + 'file altogether, which is worse than the overwrite it fixes', idsOn());
+  const casUsed = await C.page.evaluate(`(function () {
+    return { casWrites: Store._casWrites || 0, uncond: Store._casUnconditional || 0,
+             retries: Store._sessCasRetries || 0, refused: Store._sessRefused || 0,
+             wrote: (Store._sessWroteIds || []).slice() };
+  })()`);
+  note('C: how the write was made', casUsed);
+  check(casUsed.casWrites > 0,
+    'R34g THE WRITE IS A COMPARE-AND-SWAP, counted: it carries the token of the file it read, so a '
+    + 'colleague writing between this window\'s read and its write is detected rather than '
+    + 'overwritten', casUsed);
+  check(JSON.stringify(casUsed.wrote) === JSON.stringify(['TPL_2']),
+    'R34h AND ONLY THE CHANGED ID WAS CARRIED. This is the operation count for T-F2-5\'s half of the '
+    + 'story: the WRITE now names one template instead of every loaded one - though the SERIALISATION '
+    + 'is still per session and still paid, which is why T-F2-5 stays open',
+    casUsed.wrote);
+
+  /* ---- A STALE TOKEN MUST RETRY, NOT CLOBBER. The collision is forced by
+     handing _saveSessions a token that is already out of date; racing two real
+     writes would be a flake, and the loop is what is under test. */
+  const retry = await C.page.evaluate(`(async function () {
+    const real = Store._readJsonFile;
+    let n = 0;
+    Store._readJsonFile = async function (rel, key) {
+      const r = await real.call(Store, rel, key);
+      if (rel === 'reco/recoSessions.json' && n++ === 0) {
+        return { data: r.data, token: 'STALE-TOKEN-' + Date.now() };
+      }
+      return r;
+    };
+    const before = Store._sessCasRetries || 0;
+    try {
+      const live = AppState.recoTemplates.find(x => x.id === 'TPL_2');
+      AppState.activeRecoId = 'TPL_2';
+      const rc = window.confirm; window.confirm = () => true;
+      try { await Reco.ingestData(live, [{ Doc: 'C-RETRY', Amount: '4' }], ['Doc','Amount']); }
+      finally { window.confirm = rc; }
+      await AppState.flush();
+      if (typeof Store.idle === 'function') await Store.idle();
+    } finally { Store._readJsonFile = real; }
+    return { retries: (Store._sessCasRetries || 0) - before,
+             rows2: ((AppState.recoSessionsOwned.TPL_2||{}).data||[]).length };
+  })()`);
+  note('a stale token', { retry, disk: { TPL_1: rowsOn('TPL_1'), TPL_2: rowsOn('TPL_2') } });
+  check(retry.retries === 1,
+    'R34i A STALE TOKEN IS DETECTED AND THE WRITE IS REDONE, once, counted', retry);
+  check(rowsOn('TPL_2') === 3 && rowsOn('TPL_1') === 3,
+    'R34j ...AND THE RETRY LANDED THE WORK WITHOUT TOUCHING THE OTHER TEMPLATE: the second pass '
+    + 're-read the share, so the colleague\'s id is whatever the file now says and this window\'s own '
+    + 'id is still owed and still written', { TPL_1: rowsOn('TPL_1'), TPL_2: rowsOn('TPL_2') });
+
+  /* ---- A DELETION MUST STILL LAND, and only this window's own. */
+  const del = await C.page.evaluate(`(async function () {
+    /* The door that performs it. */
+    Panes.dropSession('TPL_1');
+    const recorded = Object.keys(Store._sessDropped || {}).slice();
+    AppState.recoTemplates = AppState.recoTemplates.filter(t => t.id !== 'TPL_1');
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { recorded: recorded, owned: Object.keys(AppState.recoSessionsOwned||{}).sort() };
+  })()`);
+  note('C deleted TPL_1', { del, ids: idsOn() });
+  check(JSON.stringify(del.recorded) === JSON.stringify(['TPL_1']),
+    'R34k PREMISE: Panes.dropSession records the deletion, at the one door that performs it',
+    del.recorded);
+  check(JSON.stringify(idsOn()) === JSON.stringify(['TPL_2']),
+    'R34l A DELETION STILL REACHES THE FILE: the id is gone. Without the recorded drop, a rule that '
+    + 'only ever overlays what it holds would have made deleting a template impossible - the share '
+    + 'would put it back on every write', idsOn());
+
+  /* ---- BUT NOT A TEMPLATE THIS WINDOW HAS NEVER SEEN. */
+  const D = await openReco(browser, brSX);
+  await D.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_3', 1]) + ')');
+  note('D created TPL_3 after C booted', idsOn());
+  const cAfter = await C.page.evaluate(`(async function () {
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_2');
+    AppState.activeRecoId = 'TPL_2';
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, [{ Doc: 'C-LAST', Amount: '2' }], ['Doc','Amount']); }
+    finally { window.confirm = rc; }
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    return Object.keys(AppState.recoSessionsOwned||{}).sort();
+  })()`);
+  note('C flushed again, never having seen TPL_3', { cOwned: cAfter, ids: idsOn() });
+  check(cAfter.indexOf('TPL_3') === -1 && (idsOn() || []).indexOf('TPL_3') !== -1,
+    'R34m AND A TEMPLATE A COLLEAGUE CREATED AFTER THIS WINDOW BOOTED IS LEFT ALONE: C has never held '
+    + 'TPL_3, and C\'s write does not remove it. That is why the deletion is driven by the RECORDED '
+    + 'drop and not by "whatever is absent from memory" - absent has two causes and only one of them '
+    + 'may delete', { cOwned: cAfter, onDisk: idsOn() });
+
+  /* ---- AND THE SNAPSHOT MUST MOVE WHEN THE WRITE LANDS. This is the arm the
+     mutation grid asked for rather than the probe: once a window has WRITTEN an
+     id, its own copy is what the share holds, so the snapshot for that id has to
+     become the text just written. If it stayed the text read at BOOT, this
+     window's copy would compare "changed" for the rest of the run and every
+     later flush would write it again - over whatever a colleague has done to
+     that template since. That is the same loss this round closes, arriving one
+     step later. */
+  const F = await openReco(browser, brSX);
+  await F.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_4', 1]) + ')');
+  await F.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_5', 1]) + ')');
+  const f1 = await F.page.evaluate(LOAD + '(' + JSON.stringify(['TPL_4', 'F-ONE']) + ')');
+  check(f1 === 2 && rowsOn('TPL_4') === 2,
+    'R34r PREMISE: F has WRITTEN TPL_4 itself - two rows - so the share now holds F\'s own copy',
+    { mem: f1, disk: rowsOn('TPL_4') });
+
+  const G = await openReco(browser, brSX);
+  const g1 = await G.page.evaluate(LOAD + '(' + JSON.stringify(['TPL_4', 'G-ONE']) + ')');
+  check(g1 === 3 && rowsOn('TPL_4') === 3,
+    'R34s PREMISE: a colleague window G then loaded a row into TPL_4, making it three on the share',
+    { mem: g1, disk: rowsOn('TPL_4') });
+
+  const fLater = await F.page.evaluate(LOAD + '(' + JSON.stringify(['TPL_5', 'F-TWO']) + ')');
+  note('F worked in TPL_5 and flushed', { rows5: fLater,
+    disk: { TPL_4: rowsOn('TPL_4'), TPL_5: rowsOn('TPL_5') } });
+  check(rowsOn('TPL_4') === 3,
+    'R34t THE SNAPSHOT MOVED WITH THE WRITE: F, which has not touched TPL_4 since it wrote it, does '
+    + 'not write it again - so G\'s row survives. Had the snapshot stayed the text F read at BOOT, '
+    + 'F\'s two-row copy would have read as changed for the rest of the run and this flush would '
+    + 'have put TPL_4 back to two rows', { TPL_4: rowsOn('TPL_4'), expected: 3 });
+  check(rowsOn('TPL_5') === 2,
+    'R34u ...and F\'s own new work still landed, which is the control for R34t', rowsOn('TPL_5'));
+
+  /* ---- A READ THAT THROWS IS A DIFFERENT REFUSAL FROM ONE THAT WILL NOT
+     PARSE, and only this one is retryable. _readJsonFile latches the key on a
+     PARSE failure (so this window never writes that file again, by design -
+     asserted below), but a read that THREW is the ordinary weather of a network
+     folder: no latch, and the write has to go out when the folder answers. That
+     is the refusal where invalidating AppState._snap is load-bearing. */
+  const H = await openReco(browser, brSX);
+  const hWork = await H.page.evaluate(`(async function () {
+    RecoTemplate.open('TPL_5'); App.closeModal();
+    AppState.activeRecoId = 'TPL_5';
+    /* SETTLE EVERYTHING FIRST. Reco.ingestData stamps sess.activeVersionFile
+       from a .then AFTER the upload lands, and that stamp is a change to the
+       session - so an ingest here would dirty the key between the refused flush
+       and the retry and carry the write for a reason that has nothing to do with
+       this round. The first version of this arm did exactly that, and the
+       mutation which removes the snapshot invalidation stayed GREEN because of
+       it. So: settle, then make ONE synchronous change that triggers no late
+       stamp of its own. */
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+
+    const sess = AppState.recoSessionsOwned.TPL_5;
+    sess.offsets = sess.offsets || {};
+    sess.offsets['H-OFF'] = { amount: 123, by: 'h', at: 'FIXED' };
+    AppState.save();
+
+    const api = window.pywebview.api;
+    const realRead = api.read_file, realTok = api.read_file_with_token;
+    let blips = 0;
+    const blip = (rel) => (String(rel).indexOf('recoSessions') !== -1 && blips++ === 0);
+    api.read_file = function (rel) {
+      if (blip(rel)) throw new Error('network blip');
+      return realRead.apply(api, arguments); };
+    if (typeof realTok === 'function') api.read_file_with_token = function (rel) {
+      if (blip(rel)) throw new Error('network blip');
+      return realTok.apply(api, arguments); };
+    const before = Store._sessRefused || 0;
+    let refusedDuring = 0;
+    window.__toasts = [];
+    Store._lastToast = 0;
+    try {
+      await AppState.flush();
+      if (typeof Store.idle === 'function') await Store.idle();
+      refusedDuring = (Store._sessRefused || 0) - before;
+    } finally { api.read_file = realRead; if (typeof realTok === 'function') api.read_file_with_token = realTok; }
+    /* The folder answers again, and NOTHING has changed since the refusal. */
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 200));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { refusedDuring: refusedDuring,
+             offsetInMemory: !!((AppState.recoSessionsOwned.TPL_5||{}).offsets||{})['H-OFF'],
+             said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 90)),
+             latched: !!Store.readOnlyKeys.recoSessions };
+  })()`);
+  const offsetOn = () => { const f = fileOf();
+    return !!(f && f.TPL_5 && (f.TPL_5.offsets || {})['H-OFF']); };
+  note('a read that threw', { hWork, offsetOnShare: offsetOn() });
+  check(hWork.refusedDuring > 0 && hWork.latched === false,
+    'R34v PREMISE: a read that THREW refuses the write and does NOT latch the key - that is the '
+    + 'difference from a parse failure, and it is what makes this refusal retryable', hWork);
+  check(hWork.offsetInMemory === true && offsetOn() === true,
+    'R34w THE REFUSED WRITE IS STILL OWED AND GOES OUT WHEN THE FOLDER ANSWERS: the manual offset '
+    + 'typed before the blip reaches the share on the NEXT flush, with nothing whatever changed in '
+    + 'between - so the only thing that can have carried it is the refusal having left the write '
+    + 'owed. REPORTING is what does that: Store._reportError forgets AppState._snap for the key. An '
+    + 'earlier version of this branch also nulled _snap itself and the mutation removing that line '
+    + 'measured nothing, because the report was already doing it',
+    { memory: hWork.offsetInMemory, share: offsetOn() });
+  check((hWork.said || []).some(t => /^error/.test(t) && /recoSessions/.test(t)),
+    'R34x ...AND THE OPERATOR IS TOLD, which is the same act: the refusal is reported, and the report '
+    + 'is both the sentence on screen and the thing that makes the write owed. A silent refusal would '
+    + 'leave the key reading as clean and the offset would never be written again',
+    hWork.said);
+
+  /* The refusal arm is LAST on purpose: it leaves reco/recoSessions.json
+     unparseable, which is the realistic end state (the file stays broken until
+     somebody repairs it) and means no later arm can read the share. The first
+     version of this probe had it in the middle, and every arm after it measured
+     a refusal rather than what it claimed to. */
+  /* ---- AND IT REFUSES RATHER THAN WRITES when the file cannot be read. A
+     corrupt file is the real weather of a shared folder, so no monkey-patching:
+     the bytes are made unparseable and the read fails for the ordinary reason. */
+  const E = await openReco(browser, brSX);
+  const eBefore = await E.page.evaluate(`(async function () {
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_2');
+    RecoTemplate.open('TPL_2'); App.closeModal();
+    AppState.activeRecoId = 'TPL_2';
+    return ((AppState.recoSessionsOwned.TPL_2||{}).data||[]).length;
+  })()`);
+  const preCorrupt = rowsOn('TPL_2');
+  const goodRaw = fs.readFileSync(path.join(SX.root, 'reco/recoSessions.json'), 'utf8');
+  fs.writeFileSync(path.join(SX.root, 'reco/recoSessions.json'), '{ this is not json ');
+  const refused = await E.page.evaluate(`(async function () {
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_2');
+    const rc = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, [{ Doc: 'E-TYPED', Amount: '3' }], ['Doc','Amount']); }
+    finally { window.confirm = rc; }
+    await AppState.flush();
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { refused: Store._sessRefused || 0,
+             snap: AppState._snap.recoSessions,
+             rows2: ((AppState.recoSessionsOwned.TPL_2||{}).data||[]).length,
+             fileStillBad: true };
+  })()`);
+  const raw = fs.readFileSync(path.join(SX.root, 'reco/recoSessions.json'), 'utf8');
+  note('the refusal', { refused, rawStartsWith: raw.slice(0, 24) });
+  check(refused.refused > 0,
+    'R34n IT REFUSES RATHER THAN WRITES when the file it has to merge into will not parse. Writing '
+    + 'then would replace the colleague\'s file with whatever this window happens to hold, which is '
+    + 'the rule Store.mergeWrite already follows', refused);
+  check(refused.rows2 === eBefore + 1,
+    'R34o ...AND THE WORK IS STILL HERE: the typed row is in memory, not discarded. Whether it is '
+    + 'still OWED is a question about the next save, which is what R34v measures - an earlier version '
+    + 'of this check asserted the internal snapshot was null instead, and the mutation that removes '
+    + 'that very line left it GREEN, because flush had not set the snapshot on this path at all',
+    { rows: refused.rows2, expected: eBefore + 1 });
+
+  check(raw.indexOf('this is not json') !== -1,
+    'R34p ...and the corrupt file was NOT overwritten, which is what makes it recoverable by hand',
+    raw.slice(0, 40));
+  const latched = await E.page.evaluate('!!Store.readOnlyKeys.recoSessions');
+  check(latched === true,
+    'R34q AND A PARSE FAILURE LATCHES THE KEY for this window (pre-existing, _readJsonFile), so '
+    + 'repairing the file does not silently resume writing here - the operator restarts. Asserted so '
+    + 'that a change to that rule shows up against this round rather than quietly turning R34w into '
+    + 'the only refusal path', latched);
+
+
+  const sxErrs = [...A.errors, ...C.errors, ...D.errors, ...E.errors, ...F.errors,
+                  ...G.errors, ...H.errors]
+    .filter(e => !/Could not save|injected fault|could not be read|network blip|read_file failed/.test(e));
+  check(sxErrs.length === 0,
+    'R34z no page or console error beyond the refusals this section provokes on purpose',
+    sxErrs.slice(0, 5));
+  for (const w of [A, C, D, E, F, G, H]) { try { await w.ctx.close(); } catch (e) {} }
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));

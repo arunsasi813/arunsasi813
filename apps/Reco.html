@@ -4442,6 +4442,131 @@ const Store = {
     return out;
   },
 
+  /* ============ T-S10-31. recoSessions IS WRITTEN PER TEMPLATE ID ========
+     THE LOSS THIS CLOSES, measured (scratchpad/sx/probes/p1_repro.mjs) because
+     the ticket was read off the code and said so:
+
+       window C boots while TPL_1 holds 41 rows, so it holds that session from
+       boot and never opens it; window A then loads a 42nd row into TPL_1 and
+       flushes; C - working only in TPL_2 - flushes, and reco/recoSessions.json
+       goes back to 41 rows. A's row is gone, and nothing is said.
+
+     It is T-S10-10's shape on a different file: Store.loadAll reads EVERY
+     session on the folder into AppState.recoSessionsOwned, including templates
+     this window never opens, and the tail of save() wrote the whole key.
+
+     THE RULE, which is the decision the ticket leaves open: THE SHARE IS THE
+     AUTHORITY PER TEMPLATE ID, and this window writes only the ids whose
+     session it has actually CHANGED since it last read or wrote them. An
+     untouched session is never written back at all.
+
+     WHY CHANGE DETECTION AND NOT AN "OPENED" MARKER, which is what the ticket
+     proposes. A marker has to be set at every door that can touch a session,
+     and the failure mode of forgetting one is that the operator's work is
+     never written - SWALLOWED, the worst class of bug in this file. Boot also
+     makes the obvious marker useless: Panes._repoint runs for every loaded
+     session at boot (Panes.rebuild), so "a pane is pointed at it" does not
+     mean "this window opened it". Comparing each session against the text this
+     window last read or wrote for THAT id cannot be forgotten: if the session
+     changed in memory it differs, so it is written; if it did not, it is not.
+     It is the mechanism AppState._snap already uses for the whole key, at the
+     grain the file actually needs - and the same per-id discipline
+     Store._syncAegTemplates uses ("only templates this session has seen are
+     ever deleted").
+
+     A DELETION STILL NEEDS TELLING, because "absent from memory" has two
+     causes: this window deleted the template, or the template was created by
+     a colleague after this window booted. Only the first may remove the id
+     from the file, so Panes.dropSession records it.
+
+     AND IT REFUSES RATHER THAN WRITES when it cannot read the file it has to
+     merge into - the rule Store.mergeWrite already follows, and for the same
+     reason: writing then replaces a colleague's file with whatever this
+     window happens to hold. The refusal invalidates AppState._snap for the
+     key, so the write is still owed and the next save retries it. */
+  _sessSnap: {},          // tplId -> the text this window last read or wrote
+  _sessDropped: {},       // tplId -> true: THIS window deleted that template
+  _sessRefused: 0,        // counted, so a gate can see a refusal
+  _sessCasRetries: 0,     // counted, so a gate can see the compare-and-swap loop
+  _sessWroteIds: [],      // the ids the last write actually carried
+
+  /* The same replacer Store.serialize uses for this key, per session, so the
+     comparison and the file agree about what is written. */
+  _sessText(sess) {
+    return JSON.stringify(sess, (k, v) =>
+      (k === '_fillDrag' || k === '_autoLoadAttempted' ? undefined : v));
+  },
+
+  /* Seed the per-id snapshots from what this window has just read. Called
+     from AppState.load beside the whole-key _snap loop. */
+  _sessSeed(owned) {
+    Store._sessSnap = {};
+    Store._sessDropped = {};
+    Object.keys(owned || {}).forEach(id => {
+      try { Store._sessSnap[id] = Store._sessText(owned[id]); } catch (e) {}
+    });
+  },
+
+  async _saveSessions() {
+    const owned = AppState.recoSessionsOwned || {};
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const read = await Store._readJsonFile('reco/recoSessions.json', 'recoSessions');
+      if (read.data === Store._UNREADABLE) {
+        /* Refuse. Writing now would replace a colleague's file with this
+           window's copy, which is the one thing this function exists to stop.
+           Invalidating _snap is what keeps the write owed. */
+        Store._sessRefused++;
+        /* REPORTING IS WHAT KEEPS IT OWED: Store._reportError forgets
+           AppState._snap for the key, so the next save retries this write.
+           An earlier version of this branch also nulled _snap itself, which
+           was a second copy of that rule - and the mutation which removed the
+           copy measured nothing, because _reportError was doing the work. */
+        Store._reportError('recoSessions',
+          new Error('reco/recoSessions.json could not be read, so it was not written. '
+                  + 'Your work is still here and will be saved when the folder answers.'));
+        return;
+      }
+      const disk = (read.data && typeof read.data === 'object') ? read.data : {};
+      const out = {};
+      /* The share first, so an id this window has never touched keeps whatever
+         the colleague who is working in it wrote. */
+      Object.keys(disk).forEach(id => { out[id] = disk[id]; });
+      const mine = [];
+      Object.keys(owned).forEach(id => {
+        let t;
+        try { t = Store._sessText(owned[id]); } catch (e) { return; }
+        if (t !== Store._sessSnap[id]) { out[id] = owned[id]; mine.push([id, t]); }
+      });
+      Object.keys(Store._sessDropped).forEach(id => { delete out[id]; });
+      const text = Store.serialize('recoSessions', out);
+      const r = await Store._writeJsonFile('reco/recoSessions.json', text, read.token);
+      if (r.ok) {
+        mine.forEach(pair => { Store._sessSnap[pair[0]] = pair[1]; });
+        Object.keys(Store._sessDropped).forEach(id => {
+          delete Store._sessSnap[id]; delete Store._sessDropped[id]; });
+        Store._sessWroteIds = mine.map(pair => pair[0]);
+        return;
+      }
+      if (r.reason !== 'changed') {
+        Store._sessRefused++;
+        Store._reportError('recoSessions', new Error(r.detail || r.reason || 'write failed'));
+        return;
+      }
+      /* Somebody wrote between the read and the write. Re-read and redo: the
+         ids this window owes are still owed, and the colleague's are now in
+         `disk`. */
+      Store._sessCasRetries++;
+    }
+    /* Four collisions in a row - a colleague is writing this file as fast as
+       we are. Leave it owed rather than forcing a write, and SAY SO: the
+       report is both what tells the operator and what forgets _snap so the
+       next save tries again. */
+    Store._sessRefused++;
+    Store._reportError('recoSessions',
+      new Error('reco/recoSessions.json is being written by somebody else right now, so it was '
+              + 'not saved yet. Your work is still here and the next save will try again.'));
+  },
+
   /* Persist one key. `text` is Store.serialize(key, data) when the caller has it. */
   save(key, data, text) {
     if (Store.readOnlyKeys[key]) return Promise.resolve();
@@ -4464,6 +4589,12 @@ const Store = {
       const snapshot = (data || []).map(t => t && t.id ? { id: t.id, json: JSON.stringify(t, null, 2) } : null).filter(Boolean);
       return Store._enqueue(key, () => Store._syncAegTemplates(snapshot));
     }
+
+    /* T-S10-31: recoSessions is merged per template id against the share
+       rather than overwritten whole. Everything else is still the blind
+       whole-file write it was; the other PERSIST_KEYS want naming one at a
+       time and that is what the ticket's own Fix paragraph says. */
+    if (key === 'recoSessions') return Store._enqueue(key, () => Store._saveSessions());
 
     return Store._enqueue(key, () => api.write_file('reco/' + key + '.json', text));
   },
@@ -10323,6 +10454,12 @@ const AppState = {
       try { AppState._snap[k] = Store.serialize(k, AppState._persistValue(k)); }
       catch (e) { AppState._snap[k] = null; }
     });
+    /* T-S10-31. THE SAME SNAPSHOT, PER TEMPLATE ID, which is the grain
+       recoSessions is written at. Seeded from what this window has just read,
+       so a session it never touches compares equal for the rest of the run and
+       is never written back over the colleague working in it. */
+    try { Store._sessSeed(AppState.recoSessionsOwned); }
+    catch (e) { console.error('recoSessions per-id snapshot', e); }
 
     /* T-24R2-4. CUSTOM MASTER IDS, AFTER THE SNAPSHOT ON PURPOSE. Minting
        before it would make the snapshot match the minted bytes and the uids
@@ -10765,6 +10902,13 @@ const Panes = {
   /* Forget a template's session entirely (template deleted). */
   dropSession(tplId) {
     delete AppState.recoSessionsOwned[tplId];
+    /* T-S10-31. "Absent from memory" has two causes - this window deleted the
+       template, or a colleague created it after this window booted - and only
+       the first may remove the id from the shared file. So the deletion is
+       recorded here, at the one door that performs it. */
+    if (tplId != null && typeof Store !== 'undefined' && Store._sessDropped) {
+      Store._sessDropped[String(tplId)] = true;
+    }
     Panes._repoint(tplId);
   },
 

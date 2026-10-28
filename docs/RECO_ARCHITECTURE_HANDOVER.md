@@ -6737,3 +6737,113 @@ The other paying callers (`ExcelLink.schemaFor`, `ExcelLink.diff`, `Reco._xlInit
 `Reco._reversePlan`) were left as they are. Each is a one-off action that builds once, and after
 this round the second and later builds over the same loaded rows cost nothing extra; handing each a
 cached schema would be four more call sites for no measured gain.
+
+---
+
+## 34. T-S10-31 — recoSessions is written per template id
+
+### 34.1 The loss, and why it is intermittent
+
+`Store.loadAll` reads every session on the folder into `AppState.recoSessionsOwned`, including
+templates this window never opens, and `Store.save` wrote the whole key. Measured
+(`scratchpad/sx/probes/p1_repro.mjs`):
+
+| step | share |
+| --- | --- |
+| C boots holding TPL_1 at 41 rows, never opens it | 41 |
+| A loads a 42nd row into TPL_1 and flushes | 42 |
+| C, working only in TPL_2, flushes | **41** — A's row gone, nothing said |
+
+**The first arm of that reproduction lost nothing**, and that is the useful half: a window which
+booted *after* the other's work holds a CURRENT copy, so writing it back is a no-op. The loss needs
+the held copy to be **stale**. That is why it is intermittent, why it is silent, and why nobody has
+reported it. Both are arms now — R34e the control, R34d the harm.
+
+### 34.2 The rule, and why not an "opened" marker
+
+**The share is the authority per template id; a window writes only the ids whose session it has
+changed since it last read or wrote them.** An untouched session is never written back.
+
+The ticket proposes keeping "only the ids this window has actually OPENED". Two reasons that is the
+wrong instrument:
+
+- `Panes.rebuild` calls `Panes._repoint` for **every** loaded session at boot, so "a pane is
+  pointed at it" does not mean "this window opened it".
+- A marker must be set at every door that can touch a session, and forgetting one means the
+  operator's work is never written — **swallowed**.
+
+Change detection cannot be forgotten: if the session changed in memory it differs from the text
+this window last read or wrote for that id, so it is written. Same mechanism as `AppState._snap`,
+at the grain the file needs; same per-id discipline as `Store._syncAegTemplates`.
+
+### 34.3 The four ways to get this wrong
+
+| the wrong fix | what it does | arm |
+| --- | --- | --- |
+| write only this window's ids | removes every other template from the file | R34f |
+| never delete | a template deletion is impossible; the share puts it back | R34l |
+| delete whatever is absent from memory | deletes the template a colleague created after this window booted | R34m |
+| leave the snapshot at the boot text | re-writes an id already written, over the colleague's later change | R34t |
+
+"Absent from memory" has two causes — this window deleted the template, or a colleague created it
+after boot — and only the first may delete, so `Panes.dropSession` records it. R34t came from the
+mutation grid; the probe did not have that arm.
+
+### 34.4 The two refusals are not one thing
+
+| cause | latches the key? | retryable | arms |
+| --- | --- | --- | --- |
+| the read THREW (a network blip) | no | **yes** — the write goes out when the folder answers | R34v, R34w, R34x |
+| the file WILL NOT PARSE | yes, in `_readJsonFile` | no — this window writes no sessions until it restarts | R34n–R34q |
+
+The ticket treats "cannot read" as a single case. Only the first is retryable, and that is the one
+where keeping the write owed matters.
+
+### 34.5 Reporting is what keeps a refused write owed
+
+`Store._reportError` already forgets `AppState._snap` for the key — "so the next save retries this
+key". The first version of this round also nulled `_snap` in the refusal branch. That was a second
+copy of the same rule, **the mutation that removed it measured nothing**, and the three lines came
+out. The four-collision tail, which had the invalidation and no report, now reports.
+
+**This is the first time in eight rounds that `red=NONE` meant the FIX and not the fixture** (see
+28.6, 30.6, 31.4, 32.5, 33.4). The tell was the same as always — a mutation reddening nothing — but
+the answer was the other way round, and a diagnostic settled it rather than argument: the fixed
+build and the mutant both reported `snapAfterRefusal: "null"`, which only the report could have
+done. When a mutation measures nothing, the question is which of the two is redundant: the arm or
+the line.
+
+### 34.6 What this does not do, and what T-F2-5 keeps
+
+An untouched session is not **refreshed** from the share: this window keeps showing its boot copy
+until it reloads. Adopting the share's copy would mutate a session a pane may be rendering, so it
+is left for its own ticket.
+
+And **T-F2-5 is not closed by this.** Its measured case is two 200,000-row templates both open in a
+split, where every id has changed and all are written; the serialisation is per session and still
+paid in full, because serialising is how change is detected. What changed is the write, which now
+names the changed ids. T-F2-5's own remedy — "move `manualTags` and friends off the session" — is
+also no longer the whole story: that migration largely landed and the file is still this size,
+because the bulk of a session is `sess.data`, which cannot move off the session because it IS the
+session.
+
+### 34.7 The write became conditional, and what that touches
+
+`Store._writeJsonFile` calls `write_file_if_unchanged` when the launcher has it. Two consequences
+worth writing down:
+
+- `run_e2e`'s debounce check counted `write_file` calls for this path and went red. It now counts
+  either method: the check is about one write per burst rather than six, not about the primitive.
+  It was the only assertion in the suites keyed on that method name for this file.
+- On a launcher **without** the conditional write, `_writeJsonFile` falls back to the unconditional
+  one and counts `Store._casUnconditional`. The per-id merge still runs, so that window is strictly
+  better than before this round — it just cannot detect a collision. Same rule `_writeJsonFile`
+  already documents: worse, but not worse than before, and counted so a gate can see it.
+
+### 34.8 Byte identity
+
+`run_panes_e2e` T1 still writes a `reco/recoSessions.json` byte-identical to the build before it
+(baseline `5f61d76`): every template in that scripted sitting is one that window changed, so the
+merged write produces the same bytes. No baseline moves and this round pins none — the compatibility
+was checked before the fix was designed around it, because a design that broke T1 would have had to
+be a different design.
