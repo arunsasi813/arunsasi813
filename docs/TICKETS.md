@@ -788,6 +788,28 @@ context column, or the confirm names them. Read the shared file back off the bri
 `run_correction_e2e` `[R2-F5]` does, rather than trusting memory.
 
 
+**CLOSED by the second of the two options — leave the code wholesale and extend the confirm — which
+is what this ticket's own reasoning points at.**
+
+It says `importBackup` is "wholesale BY DESIGN and its confirm says so in those words", and that
+"folding it into `restoreSession`'s one-line fix would make a wholesale restore quietly partial,
+which is worse than either honest answer". So the sessions are still replaced wholesale and the
+confirm now ENUMERATES the team settings that go with them.
+
+**Only two fields are named**, and that is a judgement this ticket leaves open: the Correction tab's
+context columns (`correctionExtraCols`) and the legacy team column order (`columnOrder`). The rest of
+`Panes.VIEW_KEYS` is one person's page, zoom, cell cursor and selection — nobody means that by "team
+settings", and listing all twenty-three would be the wall of text T-S10-26 warns about. They are
+named only when the backup actually carries a non-empty value for them, so the clause does not
+appear on a backup that has nothing to say.
+
+**The re-apply option was rejected** rather than forgotten: walking `VIEW_KEYS` after the assignment
+to put the stored values back would make the restore partial in exactly the way the ticket says is
+worse, and would also silently diverge from the confirm's own wholesale sentence.
+
+**Tests** `run_store_e2e` R37f: the confirm names both fields, and the control R37m that a whole
+backup carrying none of them adds no clause.
+
 ## T-C27-7  `Reco._extraValueForRow` stops the extras walk by NAME, so a duplicate added-column name gives a wrong value to Find/Replace, exports, filters and the slicer
 
 **Where** `apps/Reco.html` `Reco._extraValueForRow` (`Reco.rowFull(tpl, sess, row, ac.name)`)
@@ -3968,6 +3990,46 @@ T1 untouched, flushes its own work in T2 — then assert B is TOLD that T1 has m
 second half lands, that accepting the offer re-points B at the share's copy and that
 `Reco._idxCache` / `Reco._virtStates` no longer describe the old array).
 
+---
+
+## T-S10-33  `run_grid_scale_e2e` has ten WALL-CLOCK gates, which §16.4a says a performance gate may never be
+
+**Where** `tests/e2e/run_grid_scale_e2e.mjs` — the ten `under(<measured ms>, <budget ms>, …)`
+calls at lines 182, 190, 256, 366, 395, 693, 694, 867, 868 and 879.
+
+**What** Each asserts an absolute millisecond budget against a number measured on whatever machine
+the suite happens to run on: `under(surg.oneRowMs, 150, '2.4 ticking one row of 200,000', 221)` and
+nine siblings. §16.4a is explicit that a performance gate is a count of operations and never a
+wall clock, for exactly the reason these now demonstrate.
+
+**Measured, on one unchanged tree, minutes apart:**
+
+| run | `2.4 ticking one row of 200,000` | budget |
+|---|---|---|
+| inside the full net | **166 ms** → RED | 150 ms |
+| the same suite alone | **60 ms** → green | 150 ms |
+
+A 2.8× swing with no code change between them. Inside the net the suite runs after thirteen others
+have filled the page cache and left Chromium processes winding down; alone it has the machine. So
+the gate is a coin flip whose odds depend on what else the net is doing, and a red one costs a
+round the time to prove it was not a regression — which is what it cost here.
+
+**Why it is only a ticket** These gates DID earn their keep: each carries the figure it was written
+against (`was ~221ms`, `was 5819`, `was 'minutes'`) and several of those were real quadratic bugs
+caught at 200,000 rows. Deleting them would lose that. Converting them needs, per gate, the
+operation whose count is the thing that actually changed — the re-render count for 2.4, the
+comparison count for the sorts, the `applyEdits` pass count for the bulk marks — and that is a
+different measurement for each, not a search-and-replace. §16.4a's own examples (MR-3's gate,
+[79]'s big-load arm, C3b's write count) are the shape to follow.
+
+**Fix** Per gate: keep the ms as a `note` (it is useful context and costs nothing), and assert on
+the operation count that the optimisation changed. Where no such count exists yet, add the counter
+to the code under test the way `Store._casWrites` and `Reco._idxCache`'s set-spy are counted — a
+field incremented at the one place the work happens, which a probe can read.
+
+**Test** The converted gate must stay green when the suite runs inside the full net on a loaded
+machine AND alone, which is the property the current one does not have.
+
 ## T-S10-19  ~~A day file written before a key change hands its OLD keys back to any window, with no latch anywhere~~  **FIXED in round 8, reviewed, and then cleaned up** — the key rule's SIGNATURE is recorded on the row at mint time and carried through the day file; the remainder is T-S10-25
 
 > ## CLOSED IN ROUND 8. WHAT WAS BUILT, WHAT THE THREE OPEN QUESTIONS WERE DECIDED TO BE, AND
@@ -4658,6 +4720,39 @@ case the allow-list exists for.
 
 ---
 
+**CLOSED by taking the THIRD of the three shapes this ticket calls defensible — accept, say, and
+raise the latch — which it also calls "closest to the rest of the design".**
+
+**Why not the other two.** *Refusing* contradicts the reason `importBackup` is allow-listed out of
+the dead-key chokepoint at all: a backup has to be restorable on the day it is needed.
+*Accept-and-say* tells the operator at the restore but then leaves the records live under a rule
+that does not compute them, so the harm continues after the dialog is dismissed.
+
+**And the latch answers all three of the complaints in this ticket's own round-8 note:**
+
+| the note says | the latch |
+|---|---|
+| the refusal arrives one gesture too late | it is said at the restore, before anything is written |
+| it says "a saved day file", which is not what happened | `Reco._keyStaleMark` is the same latch a refused key-definition save raises, and its sentence is about the RULE |
+| it does nothing for a backup written before round 8, whose rows carry no signature | the latch is per TEMPLATE, not per row |
+
+**The third of those is now measured rather than reasoned.** R37l is RED on the build before this
+one: a partial backup whose rows carry no `_pksig` was refused by **nothing at all** — the per-row
+guard the note hoped would cover it does not reach that case. That is what makes the latch the part
+that earns its keep rather than belt-and-braces.
+
+**What shipped.** `App._backupAudit` scans all six pk-keyed maps — `extraValueMaster`,
+`correctionMaster`, `manualOffsetMaster`, `groupMaster`, `commentMaster`, `attachmentMaster` — for
+template ids the backup's own `recoTemplates` does not carry, names them in the confirm with the
+maps they appear in, says the records WILL be restored, that writes are then refused for those
+reconciliations, and that Clear Loaded Data is the route back. The latch is raised AFTER the
+operator says yes, so declining changes nothing (R37i). The sentence is written so it does not read
+as a contradiction of the wholesale one above it, which this ticket warns about.
+
+**Tests** R37g (named, both maps), R37h (what will happen and the way out), R37i (declining),
+R37j (accepting restores — it is not a refusal), R37k (the latch), R37l (the next gesture refused
+with the rule's sentence), R37m/R37n (a whole backup is silent, the case the allow-list exists for).
+
 ## T-S10-24  The replay confirm lists row keys it cannot vouch for
 
 **Where** `apps/Reco.html` `App._replayJournal` (~line 11333) and the confirm it builds, whose
@@ -4781,6 +4876,33 @@ here, for §19.2's reason: this is a warning.
 and declining leaves `AppState.recoTemplates` untouched.
 
 ---
+
+**CLOSED as a WARNING, which is this ticket's own word for it — and the claim it could not measure
+is now measured.**
+
+**The measurement it wanted.** This ticket says the direction was "a **code-reading claim only**:
+skA could not drive the file input's `FileReader` from the probe harness, so the direction was
+reasoned from the source and not run". It is drivable: `run_panes_e2e` [4] already drives the same
+door with a synthetic `File`, and `run_store_e2e` `[106] R37` now does. The premise is confirmed
+rather than carried forward.
+
+**What shipped.** `App._backupAudit` runs `RecoTemplate._keyDefMoved(backup's template, folder's
+template)` for every id present on both sides, and the confirm names the reconciliations and what
+moved — "how \"Ref\" is worked out" — plus why it matters: the day files in `reco_data` are not in a
+backup and are not replaced. Capped at five with "…and N more", which is the decision this ticket
+asked for about not becoming a wall of text.
+
+**NO LATCH HERE, and that is a decision this ticket does not discuss.** The backup's *sessions* are
+restored with it, so the rows on screen were minted by the rule that is now live and every one of
+them is correctly keyed. Raising the key latch would refuse writes on correct rows. The hazard is a
+*later* load of an existing day file, and the per-row `_pksig` guard already refuses exactly those,
+naming the file. R37m/R37n are the control: a whole backup adds no clause and raises no latch.
+
+**Declining leaves `AppState.recoTemplates` untouched** (R37e), which is what the Test asks for.
+
+**Tests** `run_store_e2e` `[106] R37` — R37b (named), R37c (what moved), R37d (why), R37e (declining
+changes nothing). **Grid** `scratchpad/bx/mut/run.py`, 9 mutations × 15 checks, all nine measured on
+the first pass.
 
 ## T-S10-27  A screen that is partly read-only says so per row but not as a number, and cannot be filtered
 

@@ -6975,3 +6975,56 @@ Four of the nine were the line, and two of those let code be deleted. So the rul
 mutation measures nothing, ask which of the two is redundant — the arm or the line** — and a line
 that no mutation can redden is either belt-and-braces worth saying so about, or dead weight worth
 removing.
+
+---
+
+## 37. The restore confirm — T-S10-26, T-S10-23 and T-C27-6 in one gesture
+
+### 37.1 Three tickets, one function, three decisions
+
+`App.importBackup`'s confirm said only that the restore "REPLACES the templates, sessions, masters
+and entry history shared by everyone using this folder". Three tickets were open against what it
+did not say, and each was filed asking for a decision rather than a patch. They are answered in one
+place — `App._backupAudit` — so the confirm has one source.
+
+| ticket | the decision | why it is the least intrusive honest answer |
+| --- | --- | --- |
+| T-S10-26 the rule moved | a **warning**, naming the reconciliations and what moved | its own word for it; the restored sessions match the restored rule, so nothing is wrongly keyed yet |
+| T-S10-23 a partial backup | accept, **say**, and raise the key latch | the third of the three shapes it calls defensible, and the one it calls closest to the design |
+| T-C27-6 the team settings | leave the code wholesale, **enumerate** | its own reasoning: wholesale is by design, and making it quietly partial is worse than either honest answer |
+
+### 37.2 Why T-S10-26 gets no latch and T-S10-23 does
+
+This is the distinction that makes the round coherent, and neither ticket states it:
+
+- **T-S10-26**: the backup brings its *sessions* as well as its templates, so the rows on screen
+  were minted by the rule that is now live. Every one of them is correctly keyed. A latch would
+  refuse writes on correct rows. The hazard is a *later* load of an existing day file, which the
+  per-row `_pksig` guard already refuses, naming the file.
+- **T-S10-23**: the records arrive *without* the rule that keys them, so the live rule does not
+  compute the keys they sit under. Every row the operator touches is then mis-addressed, and there
+  is no per-row signal at all for a pre-round-8 backup.
+
+### 37.3 The complaint that was still true, measured
+
+T-S10-23's round-8 note lists three things still wrong with relying on the per-row guard. The third
+— "it does nothing at all for a backup written before round 8, whose rows carry no signature" — is
+now measured rather than reasoned: **R37l is red on the build before this one.** A partial backup
+whose rows carry no `_pksig` was refused by nothing. That is what makes the per-template latch the
+part that earns its keep.
+
+### 37.4 And T-S10-26 had never been measured at all
+
+It says so: "a **code-reading claim only** — skA could not drive the file input's `FileReader` from
+the probe harness, so the direction was reasoned from the source and not run." It is drivable, and
+has been since the panes round: `run_panes_e2e` [4] drives the same door with a synthetic `File`.
+The lesson is narrow and worth keeping — **a "cannot be measured" note ages**, and the harness that
+could not do it in one round may have learned by the next. Re-check the claim before inheriting it.
+
+### 37.5 The grid measured on the first pass, for once
+
+Nine mutations, all red first time — the first round in six where none had to be retargeted. The
+difference was the order of work: the arms came from the three tickets' own **Test** paragraphs,
+written before the mutations, rather than being written afterwards to cover code I had already
+decided on. Writing the arm from the ticket tests the ticket's claim; writing it from the diff tests
+my memory of the diff.

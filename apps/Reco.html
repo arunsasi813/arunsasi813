@@ -12212,6 +12212,144 @@ const App = {
       + 'put back — check the entries list afterwards.';
   },
 
+  /* ============ THE RESTORE'S PRE-FLIGHT AUDIT =========================
+     T-S10-26, T-S10-23 and T-C27-6 are one gesture and three questions about
+     it, so they are answered in ONE place and named in ONE confirm. Each was
+     filed asking for a decision rather than a patch; the decisions are here.
+
+     1  T-S10-26, THE KEY RULE MOVED (a WARNING, which is this ticket's own
+        word for it). reco_data's day files are NOT in a backup and are not
+        replaced, so restoring one taken before a legitimate key-rule edit
+        puts the OLD rule back under day files written AFTER it. The confirm
+        names the reconciliations whose rule differs from the folder's.
+        NO LATCH HERE, deliberately: the backup's SESSIONS are restored too,
+        so the rows on screen were minted by the rule that is now live and
+        every one of them is correctly keyed. Latching would refuse writes on
+        correct rows. The hazard is a LATER load of an existing day file, and
+        the per-row _pksig guard already refuses exactly those.
+        The coarse RecoTemplate._keyDefOf is the right comparison here for
+        19.2's reason - a warning may say "something about the key moved"
+        without having to be certain the engine's answer changes.
+
+     2  T-S10-23, A PARTIAL BACKUP. The acceptance test needs only ONE of four
+        keys and every restore is its own `if`, so a backup carrying
+        extraValueMaster without recoTemplates is accepted, the typed values
+        land, and the LIVE template's rule is not the one that minted their
+        keys. Every record then sits under a key the current rule does not
+        compute. Of the three shapes the ticket calls defensible - refuse,
+        accept-and-say, or accept-and-latch - this takes THE THIRD, which it
+        calls "closest to the rest of the design", because it answers all
+        three of the complaints in its own round-8 note:
+          the refusal arrives one gesture too late  -> it is said HERE
+          it says "a saved day file", which is wrong -> the latch's sentence
+                                                        is about the RULE
+          it does nothing for a pre-round-8 backup  -> the latch is per
+            whose rows carry no signature              TEMPLATE, not per row
+        Refusing was rejected for the reason the allow-list was written for:
+        a backup has to be restorable on the day it is needed. The latch is
+        reversible by the route it already documents - Clear Loaded Data and
+        load again under the folder's rule.
+
+     3  T-C27-6, THE TEAM VIEW SETTINGS. importBackup is wholesale BY DESIGN
+        and its confirm says so in those words, and that ticket's own
+        reasoning is that making it quietly partial "is worse than either
+        honest answer". So the code stays wholesale and the confirm
+        ENUMERATES what a whole-folder restore replaces. Only the two fields
+        a colleague would call a team setting are named - the Correction
+        tab's context columns and the legacy team column order - because the
+        rest of Panes.VIEW_KEYS is one person's page, zoom and cell cursor,
+        which nobody means by "team settings". */
+  _backupAudit(d) {
+    const out = { moved: [], orphans: [], viewFields: [], typedKeys: 0, typedTpls: 0 };
+    if (!d || typeof d !== 'object') return out;
+    const live = AppState.recoTemplates || [];
+    const liveById = {};
+    live.forEach(t => { if (t && t.id) liveById[String(t.id)] = t; });
+    const bkById = {};
+    (d.recoTemplates || []).forEach(t => { if (t && t.id) bkById[String(t.id)] = t; });
+    const nameOf = (id) => {
+      const t = bkById[id] || liveById[id];
+      return (t && t.name) ? String(t.name) : String(id);
+    };
+
+    /* 1. the key rule moved, for every id present on BOTH sides */
+    if (d.recoTemplates) Object.keys(bkById).forEach(id => {
+      if (!liveById[id]) return;
+      let mv = null;
+      try { mv = RecoTemplate._keyDefMoved(bkById[id], liveById[id]); } catch (e) { mv = null; }
+      if (mv) out.moved.push({ id: id, name: nameOf(id), what: mv });
+    });
+
+    /* 2. pk-keyed records whose template the backup does not carry. The six
+          maps are the pk-keyed ones; extraValueMaster is counted separately
+          because the confirm already reports its size. */
+    const PK_MAPS = ['extraValueMaster', 'correctionMaster', 'manualOffsetMaster',
+                     'groupMaster', 'commentMaster', 'attachmentMaster'];
+    const orphan = {};
+    PK_MAPS.forEach(k => {
+      const m = d[k];
+      if (!m || typeof m !== 'object') return;
+      Object.keys(m).forEach(id => {
+        if (!Object.keys(m[id] || {}).length) return;
+        if (bkById[String(id)]) return;             // the backup keys its own records
+        (orphan[String(id)] || (orphan[String(id)] = [])).push(k);
+      });
+    });
+    Object.keys(orphan).forEach(id => out.orphans.push(
+      { id: id, name: nameOf(id), maps: orphan[id], live: !!liveById[id] }));
+
+    /* 3. the team view settings a wholesale session restore replaces */
+    if (d.recoSessions && typeof d.recoSessions === 'object') {
+      const TEAM = [['correctionExtraCols', 'the Correction tab\'s context columns'],
+                    ['columnOrder', 'the team column order']];
+      TEAM.forEach(pair => {
+        const seen = Object.keys(d.recoSessions).some(id => {
+          const v = (d.recoSessions[id] || {})[pair[0]];
+          return !!(v && (!Array.isArray(v) || v.length));
+        });
+        if (seen) out.viewFields.push(pair[1]);
+      });
+    }
+
+    Object.keys((d.extraValueMaster) || {}).forEach(tid => {
+      out.typedTpls++;
+      out.typedKeys += Object.keys(d.extraValueMaster[tid] || {}).length;
+    });
+    return out;
+  },
+
+  /* The audit as sentences for the confirm. Capped the way every other list
+     in this file is capped, so a folder with forty reconciliations does not
+     produce a wall of text nobody reads. */
+  _backupAuditSay(a) {
+    const cap = (list, f) => list.slice(0, 5).map(f).join('\n')
+      + (list.length > 5 ? '\n  \u2022 \u2026and ' + (list.length - 5) + ' more' : '');
+    let s = '';
+    if (a.moved.length) {
+      s += '\n\nTHE ROW-KEY RULE OF ' + a.moved.length + ' RECONCILIATION(S) IS DIFFERENT IN THIS '
+        + 'BACKUP:\n'
+        + cap(a.moved, m => '  \u2022 ' + m.name + ': ' + m.what.join('; '))
+        + '\n\nThe day files in reco_data are NOT in a backup and are NOT replaced, so rows saved '
+        + 'under the folder\'s current rule will not match the rule this puts back. Those rows are '
+        + 'refused one at a time when you next open such a file, naming the file.';
+    }
+    if (a.orphans.length) {
+      s += '\n\nTHIS BACKUP CARRIES RECORDS FOR ' + a.orphans.length + ' RECONCILIATION(S) WITHOUT '
+        + 'THE RECONCILIATION ITSELF:\n'
+        + cap(a.orphans, o => '  \u2022 ' + o.name + ' (' + o.maps.join(', ') + ')')
+        + '\n\nThose records are keyed by the row-key rule of the reconciliation they were taken '
+        + 'from, and this backup does not bring that rule with them. They will be restored, and '
+        + 'this app will then REFUSE to write anything else against those reconciliations until '
+        + 'you use Clear Loaded Data and load the rows again - because until then it cannot tell '
+        + 'which row each record belongs to.';
+    }
+    if (a.viewFields.length) {
+      s += '\n\nIt also replaces team settings that are shared by everyone on this folder: '
+        + a.viewFields.join(', ') + '.';
+    }
+    return s;
+  },
+
   importBackup(ev) {
     const file = ev.target.files[0]; if (!file) return;
     const r = new FileReader();
@@ -12229,16 +12367,26 @@ const App = {
            way it behaves (per key, not wholesale), because
            Reco._extraValueFlush merges the backup's cells in rather than
            replacing a template's records. */
-        let bkKeys = 0, bkTpls = 0;
-        Object.keys((d.extraValueMaster) || {}).forEach(tid => {
-          bkTpls++; bkKeys += Object.keys(d.extraValueMaster[tid] || {}).length;
-        });
+        /* T-S10-26 / T-S10-23 / T-C27-6: everything this restore MOVES that
+           the sentence did not name, worked out before anything is written. */
+        const audit = App._backupAudit(d);
+        const bkKeys = audit.typedKeys, bkTpls = audit.typedTpls;
         if (!confirm('Restore this backup' + when + '?\n\nIt REPLACES the templates, sessions, masters and entry history shared by everyone using this folder.'
           + (bkTpls ? '\n\nIt also puts back the values people typed into added columns: ' + bkKeys
               + ' row key(s) across ' + bkTpls + ' template(s). Those keys take the backup\'s values; '
               + 'values typed against any other key since the backup was taken are kept.'
             : '\n\nThis backup carries no typed values of added columns, so the ones on the folder are left alone.')
+          + App._backupAuditSay(audit)
           + (d.entryHistory ? App._reversalWarning(AppState.entryHistory, d.entryHistory) : ''))) return;
+        /* T-S10-23. THE LATCH, RAISED FOR THE TEMPLATES WHOSE RECORDS ARRIVED
+           WITHOUT THEIR RULE, and raised AFTER the operator said yes so a
+           declined restore changes nothing. Reco._keyStaleMark is the same
+           latch a refused key-definition save raises, so every door already
+           asks it and the sentence the operator meets is about the RULE
+           rather than about a day file. */
+        audit.orphans.forEach(o => {
+          try { Reco._keyStaleMark(o.id); } catch (e) {}
+        });
         if (d.recoTemplates) AppState.recoTemplates = d.recoTemplates;
         if (d.aegTemplates) AppState.aegTemplates = d.aegTemplates;
         if (d.aegMaster) AppState.aegMaster = d.aegMaster;

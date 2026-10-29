@@ -10756,6 +10756,7 @@ const PORT_R33  = 21542;   // R33 T-26-7: the live-key Set is memoised
 const PORT_R34  = 21546;   // R34 T-S10-31: recoSessions written per template id
 const PORT_R35  = 21550;   // R35 T-S10-3: move a template's values to their own file
 const PORT_R36  = 21554;   // R36 T-F1-1: the row-id memo is verified
+const PORT_R37  = 21558;   // R37 importBackup: what a restore moves
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -19246,6 +19247,274 @@ section(105, 'R36 T-F1-1 — the row-id memo is verified, not trusted');
   check(rx.errors.filter(e => !/Could not save|injected fault/.test(e)).length === 0,
     'R36m no page or console error across the whole section', rx.errors.slice(0, 5));
   await rx.ctx.close();
+}
+
+/* ====================================================================
+   App.importBackup NOW SAYS WHAT A RESTORE MOVES.
+   T-S10-26 + T-S10-23 + T-C27-6 — one gesture, three questions, and each
+   ticket was filed asking for a DECISION rather than a patch.
+
+   The confirm said only that the restore "REPLACES the templates, sessions,
+   masters and entry history shared by everyone using this folder". It did not
+   say that the row-key RULE it puts back may not be the folder's, that a
+   backup carrying pk-keyed records WITHOUT the reconciliation that keys them
+   is accepted anyway, or which team settings travel with the sessions.
+
+   THE DECISIONS, and why each is the least intrusive honest answer:
+
+   T-S10-26, the rule moved -> A WARNING, which is the ticket's own word.
+     reco_data's day files are not in a backup and are not replaced, so a
+     backup taken before a legitimate key-rule edit puts the OLD rule back
+     under day files written after it. The confirm names the reconciliations
+     and what moved (RecoTemplate._keyDefMoved, the same comparison a refused
+     key-definition save uses).
+     NO LATCH HERE, deliberately: the backup's SESSIONS come with it, so the
+     rows on screen were minted by the rule that is now live and every one of
+     them is correctly keyed. Latching would refuse writes on correct rows.
+     The hazard is a LATER load of an existing day file, which the per-row
+     _pksig guard already refuses. R37m/R37n are the control.
+
+   T-S10-23, a partial backup -> ACCEPT, SAY, AND LATCH, which is the third
+     of the three shapes the ticket calls defensible and the one it calls
+     "closest to the rest of the design". Refusing was rejected for the
+     reason the dead-key allow-list was written for: a backup has to be
+     restorable on the day it is needed. The latch answers all three
+     complaints in that ticket's round-8 note:
+       the refusal arrives one gesture too late  -> said at the restore
+       it says "a saved day file", which is wrong -> the latch's sentence is
+                                                     about the RULE
+       it does nothing for a pre-round-8 backup  -> the latch is per
+         whose rows carry no signature              TEMPLATE, not per row
+     THE THIRD OF THOSE IS NOW MEASURED, not inherited: R37l is RED on the
+     build before this one, so a backup whose rows carry no signature was
+     refused by nothing at all.
+
+   T-C27-6, the team settings -> LEAVE THE CODE WHOLESALE AND ENUMERATE.
+     That ticket's own reasoning: importBackup is wholesale BY DESIGN, its
+     confirm says so in those words, and making it quietly partial "is worse
+     than either honest answer". Only the two fields a colleague would call a
+     team setting are named - the Correction tab's context columns and the
+     legacy team column order - because the rest of Panes.VIEW_KEYS is one
+     person's page, zoom and cell cursor.
+
+   AND T-S10-26 WAS NEVER MEASURED AT ALL: "skA could not drive the file
+   input's FileReader from the probe harness, so the direction was reasoned
+   from the source and not run". It is driven here with a synthetic File, the
+   way run_panes_e2e [4] already drives the same door - so that ticket's
+   premise is confirmed rather than carried forward.
+
+   MUTATION GRID: scratchpad/bx/mut/run.py, 9 mutations x the 15 checks of
+   this section's own probe (scratchpad/bx/probes/p2_fix.mjs) - all nine
+   measured on the first pass:
+
+     the audit is never named          -> R37b,c,d,f,g,h
+     the key-rule clause is dropped    -> R37b, R37c, R37d
+     the partial clause is dropped     -> R37g, R37h
+     the team clause is dropped        -> R37f
+     the latch is not raised           -> R37k, R37l
+     the latch is raised before the answer -> R37i
+     the orphan scan ignores the backup's own templates -> R37m, R37n
+     the rule is compared with itself  -> R37b, R37c, R37d
+     only the typed values are scanned -> R37g
+   ==================================================================== */
+
+section(106, 'R37 the restore confirm names the row-key rule, a partial backup and the team settings');
+{
+  const BX = makeRoot('share-r37');
+  const brBX = await startBridge(BX.root, PORT_R37); procs.push(brBX.proc);
+  const bx = await openReco(browser, brBX);
+  /* A template whose key is an ADDED column, so its rule can be moved the way
+     a real key-rule edit moves it. */
+  const SETUP = `(async function () {
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = 'TPL_B'; t.name = 'Bank';
+    t.columns = ['Doc','Amount'].map(c => ({
+      name: c, label: c, formats: [], isValue: c === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+    t.additionalColumns = [{ name: 'Ref', type: 'formula', formula: 'CONCAT({Doc})', _cid: U.uid() },
+                           { name: 'Note', type: 'custom', _cid: U.uid() }];
+    t.primaryKeys = ['Ref'];
+    const rc = window.confirm; window.confirm = () => true;
+    try { RecoTemplate.saveTemplate(); } finally { window.confirm = rc; }
+    const live = AppState.recoTemplates.find(x => x.id === 'TPL_B');
+    RecoTemplate.open('TPL_B'); App.closeModal(); AppState.activeRecoId = 'TPL_B';
+    const rc2 = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, [{ Doc: 'D1', Amount: '10' }, { Doc: 'D2', Amount: '20' }],
+                                ['Doc','Amount']); } finally { window.confirm = rc2; }
+    const sess = AppState.recoSessionsOwned.TPL_B;
+    await Reco.applyEdits(live, sess, [{ row: sess.data[0], col: 'Note', value: 'TYPED-ON-FOLDER' }],
+                          { source: 'grid', trusted: true });
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 300));
+    if (typeof Store.idle === 'function') await Store.idle();
+    return { pks: (sess.data||[]).map(r => r._pk),
+             values: Object.keys((AppState.extraValueMaster||{}).TPL_B || {}) };
+  })`;
+  const pre = await bx.page.evaluate(SETUP + '()');
+  note('the folder', pre);
+  check(pre.pks.join() === 'D1,D2' && pre.values.join() === 'D1',
+    'R37a PREMISE: a template keyed on an added column, two rows, one typed value on the share', pre);
+
+  /* The restore is driven the way run_panes_e2e drives it - a synthetic File -
+     which is what the ticket says could not be done. */
+  const IMPORT = `(async function (arg) {
+    const [payload, accept] = arg;
+    const out = { confirmText: '', said: [] };
+    const rc = window.confirm;
+    window.confirm = (m) => { out.confirmText = String(m); return !!accept; };
+    window.__toasts = [];
+    try {
+      App.importBackup({ target: { files: [new File([JSON.stringify(payload)], 'b.json')],
+                                   value: 'x' } });
+      await new Promise(r => setTimeout(r, 600));
+      await AppState.flush();
+      if (typeof Store.idle === 'function') await Store.idle();
+      await new Promise(r => setTimeout(r, 300));
+      if (typeof Store.idle === 'function') await Store.idle();
+    } finally { window.confirm = rc; }
+    out.said = (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 110));
+    out.pks = ((AppState.recoSessionsOwned.TPL_B||{}).data||[]).map(r => r._pk);
+    out.liveKey = ((AppState.recoTemplates.find(x => x.id === 'TPL_B')||{}).primaryKeys||[]).slice();
+    out.latched = !!(Reco._keyStale||{}).TPL_B;
+    out.values = Object.keys((AppState.extraValueMaster||{}).TPL_B || {});
+    return out;
+  })`;
+  const imp = (payload, accept) =>
+    bx.page.evaluate(IMPORT + '(' + JSON.stringify([payload, accept]) + ')');
+
+  /* ---- T-S10-26: A BACKUP WHOSE KEY RULE DIFFERS FROM THE FOLDER'S. */
+  const movedBk = {
+    exportedAt: '2026-01-01T00:00:00.000Z',
+    recoTemplates: [{
+      id: 'TPL_B', name: 'Bank',
+      columns: [{ name: 'Doc', label: 'Doc', formats: [] },
+                { name: 'Amount', label: 'Amount', formats: [], isValue: true }],
+      valueColumn: 'Amount', displayColumns: ['Doc','Amount'],
+      /* THE RULE MOVED: the key extra is worked out differently. */
+      additionalColumns: [{ name: 'Ref', type: 'formula', formula: 'CONCAT({Doc},"-OLD")', _cid: 'c1' },
+                          { name: 'Note', type: 'custom', _cid: 'c2' }],
+      primaryKeys: ['Ref']
+    }],
+    recoSessions: { TPL_B: { data: [{ _id: 'b1', _pk: 'D1-OLD', _ver: 'upload', Doc: 'D1', Amount: '10' }] } }
+  };
+  const declined = await imp(movedBk, false);
+  note('the confirm for a moved rule (declined)', declined.confirmText.slice(0, 700));
+  check(/ROW-KEY RULE OF 1 RECONCILIATION\(S\) IS DIFFERENT/.test(declined.confirmText)
+        && /Bank/.test(declined.confirmText),
+    'R37b T-S10-26 THE CONFIRM NAMES IT: the restore says which reconciliations\' row-key rule differs '
+    + 'from the folder\'s. It said nothing about row keys at all before - and this is the measurement '
+    + 'the ticket could not take, because the harness could not drive the FileReader then',
+    declined.confirmText.slice(0, 400));
+  check(/how "Ref" is worked out/.test(declined.confirmText),
+    'R37c ...and it names WHAT moved, from RecoTemplate._keyDefMoved - the same comparison a refused '
+    + 'key-definition save uses, so the operator reads one vocabulary for one fact',
+    declined.confirmText);
+  check(/day files in reco_data are NOT in a backup/i.test(declined.confirmText),
+    'R37d ...AND WHY IT MATTERS: reco_data is not in a backup and is not replaced, so rows saved under '
+    + 'the folder\'s current rule will not match the rule this puts back', declined.confirmText);
+  check(declined.liveKey.join() === 'Ref' && declined.pks.join() === 'D1,D2',
+    'R37e AND DECLINING CHANGES NOTHING: the templates and the sessions are untouched, which is what '
+    + 'the ticket\'s Test asks for', declined);
+
+  /* ---- T-C27-6: THE TEAM VIEW SETTINGS. */
+  const teamBk = JSON.parse(JSON.stringify(movedBk));
+  teamBk.recoSessions.TPL_B.correctionExtraCols = ['Doc', 'Amount'];
+  teamBk.recoSessions.TPL_B.columnOrder = ['Amount', 'Doc'];
+  const teamDecl = await imp(teamBk, false);
+  note('the confirm for team settings', teamDecl.confirmText.slice(-320));
+  check(/replaces team settings that are shared by everyone/.test(teamDecl.confirmText)
+        && /Correction tab/.test(teamDecl.confirmText) && /team column order/.test(teamDecl.confirmText),
+    'R37f T-C27-6 THE CONFIRM ENUMERATES THE TEAM SETTINGS a whole-folder restore replaces. The code '
+    + 'stays wholesale, which is that ticket\'s own reasoning: importBackup is wholesale BY DESIGN '
+    + 'and making it quietly partial "is worse than either honest answer". Only the two fields a '
+    + 'colleague would call a team setting are named - the rest of VIEW_KEYS is one person\'s page, '
+    + 'zoom and cell cursor', teamDecl.confirmText.slice(-300));
+
+  /* ---- T-S10-23: A PARTIAL BACKUP - RECORDS WITHOUT THE RULE THAT KEYS THEM. */
+  const partialBk = {
+    exportedAt: '2026-01-02T00:00:00.000Z',
+    recoSessions: { TPL_B: { data: [{ _id: 'p1', _pk: 'FROM-ANOTHER-RULE', _ver: 'upload',
+                                      Doc: 'D1', Amount: '10' }] } },
+    extraValueMaster: { TPL_B: { 'FROM-ANOTHER-RULE': {
+      Note: { k: 'typed', v: 'KEYED-BY-A-RULE-NOT-ON-THIS-FOLDER', by: 'them', at: '2026-01-02T00:00:00Z' } } } },
+    /* A SECOND pk-keyed map, because the scan is over six of them and a scan
+       that looked only at the typed values would miss a backup carrying
+       corrections, offsets, groups, comments or attachments the same way. */
+    correctionMaster: { TPL_B: { 'FROM-ANOTHER-RULE': {
+      Amount: { oldVal: '10', newVal: '99', by: 'them', at: '2026-01-02T00:00:00Z' } } } }
+  };
+  const partialDecl = await imp(partialBk, false);
+  note('the confirm for a partial backup', partialDecl.confirmText.slice(0, 760));
+  check(/WITHOUT THE RECONCILIATION ITSELF/.test(partialDecl.confirmText)
+        && /Bank/.test(partialDecl.confirmText) && /extraValueMaster/.test(partialDecl.confirmText)
+        && /correctionMaster/.test(partialDecl.confirmText),
+    'R37g T-S10-23 THE CONFIRM NAMES THE PARTIAL BACKUP: records for a reconciliation the backup does '
+    + 'not carry. The acceptance test needs only ONE of four keys and every restore is its own `if`, '
+    + 'so this was accepted in silence and the records landed under keys the live rule does not '
+    + 'compute', partialDecl.confirmText.slice(0, 500));
+  check(/REFUSE to write anything else/.test(partialDecl.confirmText)
+        && /Clear Loaded Data/.test(partialDecl.confirmText),
+    'R37h ...AND SAYS WHAT WILL HAPPEN AND THE WAY OUT, before anything is written: the records are '
+    + 'restored, writes are then refused for those reconciliations, and Clear Loaded Data is the '
+    + 'route back. That is the shape the ticket calls closest to the design',
+    partialDecl.confirmText.slice(0, 600));
+  check(partialDecl.latched === false && partialDecl.values.join() === 'D1',
+    'R37i ...and DECLINING raises no latch and restores nothing', partialDecl);
+
+  const partialOk = await imp(partialBk, true);
+  note('after accepting the partial backup', { latched: partialOk.latched, values: partialOk.values,
+                                               said: partialOk.said });
+  check(partialOk.values.indexOf('FROM-ANOTHER-RULE') !== -1,
+    'R37j ACCEPTING RESTORES THE RECORDS - it is not a refusal. That is the reason importBackup is '
+    + 'allow-listed out of the dead-key chokepoint in the first place: a backup has to be restorable '
+    + 'on the day it is needed', partialOk.values);
+  check(partialOk.latched === true,
+    'R37k AND THE LATCH IS UP for that reconciliation, which is what makes the warning more than a '
+    + 'sentence. Reco._keyStaleMark is the same latch a refused key-definition save raises, so every '
+    + 'door already asks it - and being per TEMPLATE it also covers a backup written before the row '
+    + 'signature existed, which is the third thing the ticket\'s round-8 note says is still wrong',
+    partialOk.latched);
+
+  const refused = await bx.page.evaluate(`(async function () {
+    const sess = AppState.recoSessionsOwned.TPL_B;
+    window.__toasts = [];
+    Reco.setTag((sess.data[0]||{})._id, 'Note', 'AFTER-THE-PARTIAL-RESTORE');
+    await new Promise(r => setTimeout(r, 200));
+    return { said: (window.__toasts||[]).map(x => x.kind + ': ' + String(x.msg).slice(0, 200)) };
+  })()`);
+  note('a write after the partial restore', refused);
+  check(refused.said.some(t => /^error/.test(t) && /identifies its rows/.test(t)),
+    'R37l AND THE NEXT GESTURE IS REFUSED WITH THE RULE\'S OWN SENTENCE - not the "a saved day file" '
+    + 'wording the ticket says is wrong for this case, and not one gesture too late: the operator was '
+    + 'told at the restore and is told again at the write', refused.said);
+
+  /* ---- THE CONTROL: A WHOLE BACKUP IS SILENT, which is the case the
+     allow-list exists for. */
+  const wholeBk = await bx.page.evaluate(`(function () {
+    const t = AppState.recoTemplates.find(x => x.id === 'TPL_B');
+    return { exportedAt: '2026-01-03T00:00:00.000Z',
+             recoTemplates: [JSON.parse(JSON.stringify(t))],
+             recoSessions: { TPL_B: JSON.parse(JSON.stringify(AppState.recoSessionsOwned.TPL_B)) },
+             extraValueMaster: { TPL_B: JSON.parse(JSON.stringify(
+               (AppState.extraValueMaster||{}).TPL_B || {})) } };
+  })()`);
+  await bx.page.evaluate(`(function () { delete Reco._keyStale.TPL_B; })()`);
+  const whole = await imp(wholeBk, true);
+  note('a WHOLE backup', { confirm: whole.confirmText.slice(0, 200), latched: whole.latched });
+  check(!/ROW-KEY RULE OF/.test(whole.confirmText)
+        && !/WITHOUT THE RECONCILIATION ITSELF/.test(whole.confirmText),
+    'R37m CONTROL: a WHOLE backup - its own templates, its own sessions, its own records - adds none of '
+    + 'the three clauses. A warning that fires on the ordinary case is how operators learn to click '
+    + 'through warnings', whole.confirmText.slice(0, 300));
+  check(whole.latched === false,
+    'R37n ...and raises no latch, so the restore the allow-list was written for still works end to end',
+    whole.latched);
+
+
+  check(bx.errors.filter(e => !/Could not save|injected fault|identifies its rows/.test(e)).length === 0,
+    'R37o no page or console error beyond the refusal this section provokes', bx.errors.slice(0, 5));
+  await bx.ctx.close();
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
