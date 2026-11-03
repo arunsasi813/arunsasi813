@@ -51,7 +51,7 @@ EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL"
            "webview.platforms.android", "webview.platforms.cef", "PyQt5", "PyQt6", "PySide2",
            "PySide6", "qtpy", "gi", "cefpython3"]
 HEAVY_INSTALLED = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "PyQt5", "PyQt6", "PySide6"]
-MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "pdfout"]
+MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "pdfout", "worker"]
 
 
 def human(n: float) -> str:

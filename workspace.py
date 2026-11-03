@@ -1016,8 +1016,186 @@ def _frame_for(ws: dict, table: str, scope: str, on_progress=None, cancel=None) 
         raise
 
 
+OVERVIEW_ID = "__overview"
+
+
+def _is_overview(report: Any) -> bool:
+    return isinstance(report, dict) and (report.get("id") == OVERVIEW_ID or bool(report.get("overview")))
+
+
+def _card_table(x: dict, tables: dict[str, str]) -> str | None:
+    return tables.get(_key(x.get("table") or ""))
+
+
+def overview_result(ws: dict, ov: dict, frame: Callable[[str], pl.LazyFrame]) -> dict:
+    """One dashboard over several tables. Each card and summary tab names the table it
+    reads; `frame(table)` hands that table (with its relationship fields) once. The
+    dashboard's filters — slicers, clicked values — reach every card whose table has
+    the filtered field, so a slicer on TAX_CODE narrows Sales and Refunds alike."""
+    tables = {_key(n): n for n in [t["name"] for t in tables_of(ws)]}
+    an, su = ov.get("analysis") or {}, ov.get("summaries") or {}
+    items = [i for i in an.get("items") or [] if i.get("enabled") is not False]
+    tabs = [t for t in su.get("tabs") or [] if t.get("enabled") is not False]
+    filters = [f for f in an.get("filters") or [] if f.get("enabled") is not False and
+               [v for v in f.get("values") or [] if str(v) != ""]]
+    order = list(dict.fromkeys(n for n in (_card_table(x, tables) for x in items + tabs) if n))
+    got_items: dict[str, dict] = {}
+    got_tabs: dict[str, dict] = {}
+    facets: dict[str, dict] = {}
+    notes: list[str] = []
+    used: set[int] = set()
+    info: dict[str, dict] = {}
+    columns: list[str] = []
+    for t in order:
+        mine = [i for i in items if _card_table(i, tables) == t]
+        mine_tabs = [x for x in tabs if _card_table(x, tables) == t]
+        try:
+            lf = frame(t)
+            cols = lf.collect_schema().names()
+        except Exception as exc:  # noqa: BLE001 — one table that can't be built must not sink the rest
+            msg = str(exc) if isinstance(exc, WorkspaceError) else E.brief(exc)
+            for x in mine:
+                got_items[x["id"]] = {"id": x["id"], "kind": x.get("kind") or "kpi", "name": x.get("name") or "",
+                                      "width": x.get("width") or "half", "error": f"{t}: {msg}"}
+            for x in mine_tabs:
+                got_tabs[x["id"]] = {"id": x["id"], "name": x.get("name") or "Summary", "error": f"{t}: {msg}"}
+            continue
+        columns += [c for c in cols if c not in columns]
+        fl = []
+        for i, f in enumerate(filters):
+            if A.usable_filters([f], cols):
+                fl.append(f)
+                used.add(i)
+        info[t] = {"columns": cols}
+        sub = {"analysis": {"items": mine, "filters": fl}, "summaries": {"tabs": mine_tabs}}
+        res = A.analyse(lf, sub, cols)
+        for r in res["items"]:                 # "source": the table it reads ("table" is its result)
+            got_items[r["id"]] = {**r, "source": t}
+        for r in res["tabs"]:
+            got_tabs[r["id"]] = {**r, "source": t}
+        for k, v in (res.get("facets") or {}).items():
+            facets.setdefault(k, v)
+    for i, f in enumerate(filters):
+        if i not in used and order:
+            notes.append(f"Filter on {f.get('column')} reaches no card — none of their tables has that field")
+    out_items = []
+    for x in items:
+        if x["id"] in got_items:
+            out_items.append(got_items[x["id"]])
+        else:
+            out_items.append({"id": x["id"], "kind": x.get("kind") or "kpi", "name": x.get("name") or "",
+                              "width": x.get("width") or "half",
+                              "error": "Pick the data this card reads" if not x.get("table")
+                              else f"There is no table called “{x.get('table')}”"})
+    out_tabs = [got_tabs.get(x["id"]) or {"id": x["id"], "name": x.get("name") or "Summary",
+                                          "error": "Pick the data this summary reads"} for x in tabs]
+    live = [f for i, f in enumerate(filters) if i in used]
+    return {"ok": True, "items": out_items, "tabs": out_tabs, "facets": facets, "filters": live,
+            "filter_text": A.describe_filters(live), "notes": notes, "columns": columns, "tables": info}
+
+
+def _overview_frames(b: "Builder") -> Callable[[str], pl.LazyFrame]:
+    memo: dict[str, pl.LazyFrame] = {}
+
+    def frame(t: str) -> pl.LazyFrame:
+        if t not in memo:
+            memo[t] = b.related(t).collect(engine="streaming").lazy()
+        return memo[t]
+    return frame
+
+
+def analyse_overview(ws: dict, scope: str = "preview", on_progress=None, cancel=None) -> dict:
+    t0 = time.time()
+    ws = normalize(ws)
+    stage = E._stage_dir() if scope == "all" else None
+    try:
+        b = Builder(ws, "all" if scope == "all" else "preview", on_progress, cancel, stage)
+        res = overview_result(ws, ws["overview"], _overview_frames(b))
+        rows = {t: None for t in res["tables"]}
+        return {**res, "scope": scope, "note": f"Overview · {len(rows)} table{'' if len(rows) == 1 else 's'}" +
+                (" (preview)" if scope != "all" else ""), "sampled": 0,
+                "notes": b.notes + res["notes"], "elapsed": round(time.time() - t0, 2)}
+    except E.Cancelled:
+        return {"ok": False, "cancelled": True, "error": "Cancelled."}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc) if isinstance(exc, WorkspaceError) else E.brief(exc)}
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def _has_cards(spec: dict) -> bool:
+    return bool((spec.get("analysis") or {}).get("items") or (spec.get("summaries") or {}).get("tabs"))
+
+
+def dashboards_with(ws: dict, b: "Builder", only: set[str] | None = None, notify=None) -> dict[str, dict]:
+    """Every dashboard of a setup over one Builder: each group's own ("g:<id>"), each
+    combined table's ("t:<table>") and the overview ("overview"). In "all" scope the
+    groups are staged once and every dashboard reads the staged data."""
+    out: dict[str, dict] = {}
+    rel_from = {_key(r.get("from")) for r in ws["relationships"] if r["enabled"]}
+    frame = _overview_frames(b)
+    for g in ws["groups"]:
+        k = f"g:{g['id']}"
+        if not g["enabled"] or not _has_cards(g["setup"]) or (only is not None and k not in only):
+            continue
+        if notify:
+            notify(stage="analyse", part=g["name"])
+        try:
+            lf = frame(g["name"]) if _key(g["name"]) in rel_from else \
+                b.get(g["name"]).collect(engine="streaming").lazy()
+            res = A.analyse(lf, g["setup"])
+            out[k] = {**res, "note": f"{g['name']}, {lf.select(pl.len()).collect().item():,} rows"}
+        except (WorkspaceError, A.AnalysisError, F.FormulaError) as exc:
+            out[k] = {"ok": False, "error": str(exc)}
+    for rep in ws["reports"]:
+        k = f"t:{rep.get('table')}"
+        if not rep.get("table") or not _has_cards(rep) or (only is not None and k not in only):
+            continue
+        if notify:
+            notify(stage="analyse", part=rep["name"])
+        try:
+            lf = frame(rep["table"])
+            res = A.analyse(lf, rep)
+            out[k] = {**res, "note": f"{rep['table']}, {lf.select(pl.len()).collect().item():,} rows"}
+        except (WorkspaceError, A.AnalysisError, F.FormulaError) as exc:
+            out[k] = {"ok": False, "error": str(exc)}
+    if _has_cards(ws["overview"]) and (only is None or "overview" in only):
+        if notify:
+            notify(stage="analyse", part="Overview")
+        res = overview_result(ws, ws["overview"], frame)
+        out["overview"] = {**res, "note": f"Overview · {len(res['tables'])} tables"}
+    return out
+
+
+def run_dashboards(ws: dict, scope: str = "all", on_progress=None, cancel=None, only: list[str] | None = None) -> dict:
+    """The Analysis tab's Run dashboards: every dashboard (or those in `only`), over
+    every file, without writing anything."""
+    t0 = time.time()
+    ws = expand_folders(normalize(ws))
+    stage = E._stage_dir() if scope == "all" else None
+    notify = (lambda **k: on_progress(k)) if on_progress else None
+    try:
+        b = Builder(ws, "all" if scope == "all" else "preview", on_progress, cancel, stage)
+        got = dashboards_with(ws, b, set(only) if only else None, notify)
+        for v in got.values():
+            v.setdefault("ok", True)
+            v["scope"] = scope
+        return {"ok": True, "dashboards": got, "notes": b.notes, "elapsed": round(time.time() - t0, 2),
+                "rows_read": sum(int(f.get("rows") or 0) for f in b.per_file)}
+    except E.Cancelled:
+        return {"ok": False, "cancelled": True, "error": "Cancelled."}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc) if isinstance(exc, WorkspaceError) else E.brief(exc)}
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
 def analyse(ws: dict, report: dict | str, scope: str = "preview", on_progress=None, cancel=None) -> dict:
     """A dashboard / summaries on a workspace table — its lookup tables included."""
+    if _is_overview(report):
+        return analyse_overview({**(ws or {}), "overview": report}, scope, on_progress, cancel)
     t0 = time.time()
     ws = normalize(ws)
     stage = None
@@ -1049,7 +1227,8 @@ def drill(ws: dict, report: dict | str, scope: str = "preview", filters: list[di
     try:
         rep = _report(ws, report)
         df, notes, stage = _frame_for(ws, rep.get("table") or "", scope)
-        res = A.detail(df.lazy(), list(filters or []), df.columns, limit)
+        # an overview's filters can name fields of other tables; they don't narrow this one
+        res = A.detail(df.lazy(), A.usable_filters(list(filters or []), df.columns, notes), df.columns, limit)
         return {**res, "notes": notes, "elapsed": round(time.time() - t0, 2)}
     except (WorkspaceError, A.AnalysisError, F.FormulaError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
@@ -1219,52 +1398,38 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
             return {"ok": False, "error": warnings[0] if warnings else "No table could be built.",
                     "warnings": warnings, "files": b.per_file}
 
-        # reports: each group's own dashboard / summaries, then those on combined tables
+        # dashboards: each group's own, those on combined tables, the overview — computed
+        # once over the staged data, for the sheets, the PDFs and (when asked) the window
         extra: list[dict] = []
         pdfs: list[tuple[str, dict, dict, str]] = []
-        rel_from = {_key(r.get("from")) for r in ws["relationships"] if r["enabled"]}
-        for g in ws["groups"]:
-            if not g["enabled"]:
+        want_dash = bool(out.get("refresh_dashboards"))
+        specs: list[tuple[str, str, dict]] = []          # key, title, spec
+        specs += [(f"g:{g['id']}", g["name"], g["setup"]) for g in ws["groups"] if g["enabled"]]
+        specs += [(f"t:{r['table']}", r["name"], r) for r in ws["reports"] if r.get("table")]
+        specs.append(("overview", ws["overview"]["name"], ws["overview"]))
+        need = {k for k, _, sp in specs if _has_cards(sp) and
+                (E.wants_analysis(sp) or E.pdf_parts({**sp, "output": out}) or want_dash)}
+        dash = dashboards_with(ws, b, need, notify) if need else {}
+        for k, title, sp in specs:
+            res = dash.get(k)
+            if res is None:
                 continue
-            gs = g["setup"]
-            wants_sheets = E.wants_analysis(gs)
-            wants_pdf = E.pdf_parts({**gs, "output": out})
-            if not (wants_sheets or wants_pdf):
+            if res.get("ok") is False:
+                warnings.append(f"{title} analysis skipped — {res.get('error')}")
                 continue
-            E._check_cancel(cancel)
-            notify(stage="analyse", part=g["name"])
-            try:
-                src = b.related(g["name"]) if _key(g["name"]) in rel_from else b.get(g["name"])
-                df = src.collect(engine="streaming")
-                res = A.analyse(df.lazy(), gs)
-                warnings += [f"{g['name']} · {i['name']}: {i['error']}" for i in res["items"] if i.get("error")]
-                warnings += [f"{g['name']} · {x['name']}: {x['error']}" for x in res["tabs"] if x.get("error")]
-                if wants_sheets:
-                    extra += [{**grid, "name": f"{g['name']} {grid['name']}"} for grid in E.analysis_grids(res, gs)]
-                if wants_pdf:
-                    pdfs.append((g["name"], gs, res, f"{g['name']} · {df.height:,} rows"))
-            except (WorkspaceError, A.AnalysisError, F.FormulaError) as exc:
-                warnings.append(f"{g['name']} analysis skipped — {exc}")
-        for rep in ws["reports"]:
-            if not rep.get("table"):
-                continue
-            wants_sheets = E.wants_analysis(rep)
-            wants_pdf = E.pdf_parts({**rep, "output": out})
-            if not (wants_sheets or wants_pdf):
-                continue
-            E._check_cancel(cancel)
-            notify(stage="analyse", part=rep["name"])
-            try:
-                df = b.related(rep["table"]).collect(engine="streaming")
-                res = A.analyse(df.lazy(), rep)
-                warnings += [f"{rep['name']} · {i['name']}: {i['error']}" for i in res["items"] if i.get("error")]
-                warnings += [f"{rep['name']} · {x['name']}: {x['error']}" for x in res["tabs"] if x.get("error")]
-                if wants_sheets:
-                    extra += [{**grid, "name": f"{rep['name']} {grid['name']}"} for grid in E.analysis_grids(res, rep)]
-                if wants_pdf:
-                    pdfs.append((rep["name"], rep, res, f"{rep['table']} · {df.height:,} rows"))
-            except (WorkspaceError, A.AnalysisError, F.FormulaError) as exc:
-                warnings.append(f"Report {rep['name']} skipped — {exc}")
+            warnings += [f"{title} · {i['name']}: {i['error']}" for i in res["items"] if i.get("error")]
+            warnings += [f"{title} · {x['name']}: {x['error']}" for x in res["tabs"] if x.get("error")]
+            if k == "overview":           # which table each card reads, in the sheet and the PDF
+                res = {**res, "items": [{**i, "name": f"{i.get('name') or ''} · {i['source']}"} if i.get("source") else i
+                                        for i in res["items"]],
+                       "tabs": [{**x, "name": f"{x.get('name') or ''} · {x['source']}"} if x.get("source") else x
+                                for x in res["tabs"]]}
+            if E.wants_analysis(sp):
+                for grid in E.analysis_grids(res, sp):
+                    own = k == "overview" and grid["name"] == ((sp.get("analysis") or {}).get("sheet_name") or "Overview")
+                    extra.append({**grid, "name": grid["name"] if own else f"{title} {grid['name']}"})
+            if E.pdf_parts({**sp, "output": out}):
+                pdfs.append((title, sp, res, res.get("note") or title))
 
         if fmt == "xlsx" and (out.get("layout") or "workbook") == "workbook":
             used: set[str] = set()
@@ -1324,10 +1489,15 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
         errors = [f"{f.get('group')}: {f['file']} — {f['error']}" for f in b.per_file if f.get("error")]
         elapsed = round(time.time() - t0, 2)
         log = _write_log(ws, frames, b.per_file, written, errors, warnings, elapsed) if out.get("log") else None
+        if want_dash:
+            for v in dash.values():
+                v.setdefault("ok", True)
+                v["scope"] = "all"
         return {"ok": True, "written": written, "rows": sum(f["rows"] for f in frames),
                 "tables": [{"table": f["table"], "sheet": f["sheet"], "rows": f["rows"]} for f in frames],
                 "files": [{**f, "file": f"{f.get('group')}: {f['file']}"} for f in b.per_file],
-                "errors": errors, "warnings": warnings, "log": log, "elapsed": elapsed}
+                "errors": errors, "warnings": warnings, "log": log, "elapsed": elapsed,
+                "dashboards": dash if want_dash else None}
     except E.Cancelled:
         for w in written:
             try:
@@ -1359,7 +1529,18 @@ def run_setup(ws: dict, on_progress=None, cancel=None) -> dict:
         job = group_job(ws, g)
         if not job["files"]:
             return {"ok": False, "error": f"Tick the files for “{g['name']}” on the left."}
-        return {**E.run(job, on_progress, cancel), "mode": "single"}
+        want = bool(ws["output"].get("refresh_dashboards")) and _has_cards(g["setup"])
+        if want:
+            job["_return_analysis"] = True
+        res = E.run(job, on_progress, cancel)
+        got = res.pop("analysis", None)
+        if want and res.get("ok"):
+            if got is None:          # one output per input file: the dashboard reads them all, so read again
+                again = run_dashboards(ws, "all", on_progress, cancel, [f"g:{g['id']}"])
+                got = (again.get("dashboards") or {}).get(f"g:{g['id']}")
+            if got is not None:
+                res["dashboards"] = {f"g:{g['id']}": {**got, "ok": got.get("ok", True), "scope": "all"}}
+        return {**res, "mode": "single"}
     return {**run(ws, on_progress, cancel), "mode": "combined"}
 
 

@@ -131,7 +131,6 @@ def folders_and_loading(ui: UI, d: dict) -> None:
     ui.then("Saved", lambda: page.click("#saveProfile"))
     saved = json.loads((Path(os.environ["COLSIFT_PROFILES"]) / "Two folders.json").read_text())
     assert [x["path"] for x in saved["folders"]] == [str(d["jan"]), str(d["feb"])], saved.get("folders")
-    page.on("dialog", lambda dlg: dlg.accept())
     ui.then("New setup", lambda: page.click("#newProfile"))
     ui.folders(d["jan"])
     assert sorted(ui.files_shown()) == ["codes.xlsx", "sales_JAN.csv"]
@@ -161,7 +160,111 @@ def folders_and_loading(ui: UI, d: dict) -> None:
     page.wait_for_function("WS.groups[1].files.length === 2")
 
 
-SECTIONS = {"folders": folders_and_loading}
+def new_setup(ui: UI) -> None:
+    page = ui.page
+    ui.then("New setup", lambda: page.click("#newProfile"))
+
+
+def group_card(ui: UI, n: int, name: str, mode: str = "", value: str = "") -> None:
+    """Name group n on the Combine tab and give it a file rule."""
+    page = ui.page
+    card = f"#wsGroups .gcard:nth-child({n})"
+    page.fill(f"{card} input[data-k=name]", name)
+    page.dispatch_event(f"{card} input[data-k=name]", "change")
+    if mode:
+        page.select_option(f"{card} select[data-k=mode]", mode)
+        page.fill(f"{card} input[data-k=value]", value)
+        page.dispatch_event(f"{card} input[data-k=value]", "input")
+        page.dispatch_event(f"{card} input[data-k=value]", "change")
+
+
+def three_groups(ui: UI, d: dict) -> None:
+    """Sales (sales_*), Codes (.xlsx), Refunds (refund…) sorted by their rules, Sales
+    keeping three columns with AMOUNT > 300."""
+    page = ui.page
+    new_setup(ui)
+    ui.folders(d["jan"], d["feb"])
+    ui.tab("ws")
+    group_card(ui, 1, "Sales", "pattern", "sales_*")
+    for name, mode, value in (("Codes", "ext", ".xlsx"), ("Refunds", "contains", "refund")):
+        page.click("#groupBar [data-gmenu]")
+        page.click("#groupBar [data-gadd=blank]")
+        n = ui.js("WS.groups.length")
+        page.wait_for_selector(f"#wsGroups .gcard:nth-child({n})")
+        group_card(ui, n, name, mode, value)
+    ui.then("Sorted", lambda: page.click("#wsAuto"))
+    got = ui.js("Object.fromEntries(WS.groups.map(g => [g.name, g.files.map(p => p.split('/').pop()).sort()]))")
+    assert got == {"Sales": ["sales_FEB.csv", "sales_JAN.csv"], "Codes": ["codes.xlsx"], "Refunds": ["refunds_FEB.txt"]}, got
+    ui.js("switchGroup(WS.groups[0].id)")
+    page.wait_for_function("document.querySelector('#peekFile').textContent.startsWith('sales_')")
+    page.wait_for_function("S.allCols.length === 5")
+    ui.tab("cols")
+    page.click("#cNone")
+    for c in ("DOC_NO", "TAX_CODE", "AMOUNT"):
+        page.locator(f"#collist .col:has(.nm:text-is('{c}')) input[data-k=inc]").check()
+    ui.tab("filt")
+    page.click("#rules .qg.root > .gh [data-k=addrule]")
+    page.select_option("#rules .rule select[data-k=col]", "AMOUNT")
+    page.select_option("#rules .rule select[data-k=op]", "gt")
+    page.fill("#rules .rule input[data-k=val]", "300")
+    page.dispatch_event("#rules .rule input[data-k=val]", "input")
+    ui.js("syncBack(); wsSchemaRefresh(true)")
+    page.wait_for_function("(S.wsSchema?.tables || []).length === 3")
+
+
+def kpi_value(ui: UI, table: str) -> float:
+    return ui.js(f"""(() => {{ const it = AT().analysis.items.find(i => i.kind === 'kpi' && i.table === {json.dumps(table)});
+        const r = (S.anData?.items || []).find(x => x.id === it.id); return r.table.rows[0].nums.slice(-1)[0]; }})()""")
+
+
+def overview_dashboard(ui: UI, d: dict) -> None:
+    page = ui.page
+    three_groups(ui, d)
+    ui.tab("anal")
+    page.select_option("#anSource", "o:")
+    page.wait_for_selector("#anAddFrom", state="visible")
+    for table, q in (("Sales", "kpi"), ("Refunds", "kpi"), ("Sales", "slicer")):
+        page.select_option("#anAddFrom", table)
+        ui.then("Analysis ready", lambda q=q: page.click(f"#anQuick [data-q={q}]"))
+    assert ui.js("AT().analysis.items.map(i => i.table)") == ["Sales", "Refunds", "Sales"]
+    assert page.locator("#anCards .srcchip").all_inner_texts() == ["Sales", "Refunds", "Sales"]
+    assert abs(kpi_value(ui, "Refunds") - (-59.75)) < 1e-6
+    ui.shot("overview")
+    # a slicer on Sales' TAX_CODE narrows the Refunds card too — Refunds has TAX_CODE as well
+    ui.then("Analysis ready", lambda: page.locator("#anCards .slicer label:has-text('YQ') input").check())
+    assert abs(kpi_value(ui, "Refunds") - (-47.25)) < 1e-6
+    ui.shot("overview_sliced")
+    # the card editor says which table it reads, and can switch it
+    page.locator("#anCards .card.item").nth(1).locator("[data-act=edit]").click()
+    assert page.locator("#anCards select[data-f=table]").input_value() == "Refunds"
+    page.locator("#anCards .card.item").nth(1).locator("[data-act=edit]").click()
+    page.wait_for_timeout(600)
+
+    # Run all dashboards: every file, every dashboard, nothing written
+    ui.then("worked out over every file", lambda: page.click("#anRunDash"))
+    assert "every file" in page.inner_text("#anNote"), page.inner_text("#anNote")
+    assert not d["out"].exists()
+
+    # a run that hands its dashboards back, with the Overview in the workbook
+    page.check("#anExport")
+    ui.tab("out")
+    page.fill("#outFolder", str(d["out"]))
+    page.dispatch_event("#outFolder", "change")
+    page.select_option("#outFormat", "xlsx")
+    page.dispatch_event("#outFormat", "change")
+    page.check("#runDash")
+    ui.then("Dashboards refreshed from the run", lambda: page.click("#btnRun"))
+    page.wait_for_selector("#p-anal.on")
+    assert "the run" in page.inner_text("#anNote"), page.inner_text("#anNote")
+    import openpyxl
+    book = next(d["out"].glob("*.xlsx"))
+    wb = openpyxl.load_workbook(book)
+    assert {"Sales", "Codes", "Refunds", "Overview"} <= set(wb.sheetnames), wb.sheetnames
+    assert ui.page.inner_text("#memInfo").startswith("Memory ")
+    ui.shot("after_run")
+
+
+SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard}
 
 
 def main() -> int:
@@ -190,6 +293,7 @@ def main() -> int:
             browser = p.chromium.launch(executable_path=CHROME, headless=not a.headed)
             page = browser.new_page(viewport={"width": 1500, "height": 950})
             page.on("pageerror", lambda e: errors.append(str(e)))
+            page.on("dialog", lambda dlg: dlg.accept())          # confirm() and prompt() answer yes
             page.set_default_timeout(30000)
             page.goto(f"http://127.0.0.1:{port}/?t={TOKEN}")
             page.wait_for_function("S.meta && S.meta.ops && S.meta.ops.length")

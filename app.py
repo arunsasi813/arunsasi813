@@ -9,13 +9,16 @@ Build a lean Windows exe with build.py (see nuitka-build.txt for the details).
 
 from __future__ import annotations
 
+import faulthandler
 import functools
 import json
 import os
 import subprocess
 import sys
 import threading
+import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 import webview
@@ -133,6 +136,204 @@ def _background(label: str, work) -> dict:
     return {"ok": True, "started": True}
 
 
+# --------------------------------------------------------------------------
+# heavy work runs in a worker process (worker.py)
+# --------------------------------------------------------------------------
+# A run, Count, Find or a dashboard over every file can need more memory than the
+# machine has. In this process that ends the window; in a worker it ends the worker,
+# and the window says so. Interactive reads (peek, preview, a dashboard on the
+# preview) stay here — they are small — but take turns, so two big workbooks are
+# never parsed at the same moment.
+
+_HEAVY = threading.Lock()
+_READ = threading.RLock()
+_CHILD: dict = {"proc": None, "rss": 0, "peak": 0, "kind": ""}
+CANCEL_GRACE = 20            # seconds a cancelled worker gets to stop by itself
+_LOG: dict = {"path": None, "fh": None}
+
+
+def _isolation() -> bool:
+    return os.environ.get("COLSIFT_INPROCESS", "").lower() not in {"1", "true", "yes"}
+
+
+def _crash_log() -> Path:
+    """colsift.log — on local disk, the same folder engine.log_dir() picks. Worked out
+    here without the engine: logging starts before polars has finished importing."""
+    if _LOG["path"] is None:
+        import tempfile
+        local = os.environ.get("LOCALAPPDATA")
+        cands = [Path(os.environ["COLSIFT_LOGS"]) if os.environ.get("COLSIFT_LOGS") else None,
+                 Path(local) / "ColSift" / "logs" if local else None,
+                 Path.home() / ".colsift" / "logs", Path(tempfile.gettempdir()) / "colsift-logs"]
+        for d in filter(None, cands):
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                with open(d / "colsift.log", "a", encoding="utf-8"):
+                    pass
+                _LOG["path"] = d / "colsift.log"
+                break
+            except OSError:
+                continue
+        else:
+            _LOG["path"] = Path(tempfile.gettempdir()) / "colsift.log"
+    return _LOG["path"]
+
+
+def _log(text: str) -> None:
+    try:
+        with open(_crash_log(), "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {text}\n")
+    except OSError:
+        pass
+
+
+def _human(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:,.0f} {unit}" if unit in ("B", "KB", "MB") else f"{n:,.1f} {unit}"
+        n /= 1024
+    return str(n)
+
+
+_EXIT = {3221225477: "an access violation", 3221226505: "a fatal error in native code",
+         3221225495: "no memory left", 3221225725: "a stack overflow", -9: "the system stopped it (memory)",
+         -11: "a crash in native code", -6: "a fatal error in native code", 137: "the system stopped it (memory)"}
+
+
+def _crash_text(code, peak: int) -> str:
+    why = _EXIT.get(code if code is None or code < 2 ** 31 else code, None) if code is not None else None
+    why = why or (f"exit code {code}" if code is not None else "no answer")
+    used = f" after using {_human(peak)} of memory" if peak else ""
+    return (f"The work stopped unexpectedly ({why}){used}. The window is fine and nothing else was lost. "
+            "This is almost always memory running out: on the Output tab choose “One file at a time”, "
+            "tick fewer files, or write CSV instead of Excel. Details are in " + str(_crash_log()))
+
+
+def _sample_child(p) -> None:
+    try:
+        got = _m()[0].process_memory(p.pid) if p is not None and p.pid else None
+    except Exception:  # noqa: BLE001
+        got = None
+    if got:
+        _CHILD["rss"] = got[0]
+        _CHILD["peak"] = max(_CHILD["peak"], got[1] or got[0], got[0])
+
+
+class _NoWorker(Exception):
+    pass
+
+
+def _in_child(kind: str, payload: dict) -> dict:
+    import multiprocessing as mp
+    import queue
+
+    import worker
+
+    E = _m()[0]
+    try:
+        ctx = mp.get_context("spawn")
+        q, ev = ctx.Queue(), ctx.Event()
+        settings = {"cache": E.cache_on(), "crash_log": str(_crash_log()),
+                    "env": {k: v for k, v in os.environ.items() if k.startswith("COLSIFT_")}}
+        p = ctx.Process(target=worker.main, args=(kind, payload, q, ev, settings),
+                        name=f"colsift-{kind}", daemon=True)
+        p.start()
+    except Exception as exc:  # noqa: BLE001 — a PC that won't start a second process
+        raise _NoWorker(str(exc)) from exc
+    _CHILD.update(proc=p, rss=0, peak=0, kind=kind)
+    res, last, pending, asked = None, 0.0, None, None
+    try:
+        while True:
+            if _CANCEL.is_set() and asked is None:
+                ev.set()
+                asked = time.monotonic()
+            if asked is not None and time.monotonic() - asked > CANCEL_GRACE and p.is_alive():
+                p.terminate()                      # it didn't reach a point where it checks
+            try:
+                typ, val = q.get(timeout=0.25)
+            except queue.Empty:
+                _sample_child(p)
+                if pending is not None:
+                    _js("onProgress", {**pending, "mem": _CHILD["rss"]})
+                    pending, last = None, time.monotonic()
+                if p.is_alive():
+                    continue
+                try:                               # it may have finished just now
+                    typ, val = q.get(timeout=1.5)
+                except queue.Empty:
+                    break
+            if typ == "done":
+                res = val
+                break
+            if time.monotonic() - last >= 0.2:     # progress at most five times a second
+                _js("onProgress", {**val, "mem": _CHILD["rss"]})
+                pending, last = None, time.monotonic()
+            else:
+                pending = val
+    finally:
+        _sample_child(p)
+        p.join(timeout=15)
+        if p.is_alive():
+            p.kill()
+            p.join(timeout=5)
+        peak, code = _CHILD["peak"], p.exitcode
+        _CHILD.update(proc=None, rss=0, kind="")
+    if res is None:
+        if asked is not None:
+            return {"ok": False, "cancelled": True, "error": "Cancelled — the work was stopped.", "peak_memory": peak}
+        _log(f"worker {kind} died: exit code {code}, peak {_human(peak)}")
+        return {"ok": False, "crashed": True, "error": _crash_text(code, peak), "peak_memory": peak}
+    if isinstance(res, dict):
+        res["peak_memory"] = peak
+    return res
+
+
+def _heavy(kind: str, payload: dict, here):
+    """Run `kind` in a worker process; `here` is the same job in this process, used
+    when isolation is off (COLSIFT_INPROCESS=1) or a second process can't start."""
+    if not _HEAVY.acquire(blocking=False):
+        return {"ok": False, "error": "Something heavy is already running — wait for it, or press Cancel."}
+    try:
+        _CANCEL.clear()
+        if _isolation():
+            try:
+                return _in_child(kind, payload)
+            except _NoWorker as exc:
+                _log(f"worker could not start ({exc}) — running {kind} in the window's process")
+        return here()
+    finally:
+        _HEAVY.release()
+
+
+def _reading(fn):
+    """Interactive reads take turns (see above)."""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        with _READ:
+            return fn(*a, **kw)
+    return wrapper
+
+
+def _install_logging() -> None:
+    """Crashes leave a trace: Python tracebacks from any thread, and a native crash's
+    stack via faulthandler, go to colsift.log in the log folder."""
+    try:
+        fh = open(_crash_log(), "a", buffering=1, encoding="utf-8")   # noqa: SIM115 — kept open for the session
+    except OSError:
+        return
+    _LOG["fh"] = fh
+    fh.write(f"\n=== ColSift started {datetime.now():%Y-%m-%d %H:%M:%S}, pid {os.getpid()} ===\n")
+    faulthandler.enable(fh, all_threads=True)
+    if sys.stderr is None or getattr(sys, "frozen", False) or "__compiled__" in globals():
+        sys.stderr = fh                      # a windowed exe has no console: tracebacks land in the log
+
+    def hook(et, ev, tb):
+        traceback.print_exception(et, ev, tb, file=fh)
+
+    sys.excepthook = hook
+    threading.excepthook = lambda a: traceback.print_exception(a.exc_type, a.exc_value, a.exc_traceback, file=fh)
+
+
 class Api:
     """Bridge surface. Methods and nothing else — no instance attributes."""
 
@@ -208,6 +409,8 @@ class Api:
             "delims": E.DELIMS,
             "excel_engine": excel_engine,
             "profiles_dir": str(E.profile_dir()),
+            "log": str(_crash_log()),
+            "isolated": _isolation(),
             "app_dir": str(E.app_dir()),
             "frozen": E.frozen(),
             "home": str(Path.home()),
@@ -224,10 +427,12 @@ class Api:
         return _m()[3].list_folders(p.get("folders") or [], p.get("pattern") or "")
 
     @guard
+    @_reading
     def sheets(self, path: str) -> dict:
         return {"ok": True, "sheets": _m()[0].sheet_names(path)}
 
     @guard
+    @_reading
     def peek(self, p: dict) -> dict:
         E = _m()[0]
         r = E.raw_peek(p.get("path", ""), int(p.get("rows") or 40),
@@ -240,22 +445,26 @@ class Api:
         return r
 
     @guard
+    @_reading
     def columns(self, source: dict) -> dict:
         return _m()[0].columns_of(source)
 
     # -- pipeline ---------------------------------------------------------
     @guard
+    @_reading
     def preview(self, p: dict) -> dict:
         return _m()[0].preview(p.get("job") or {}, int(p.get("rows") or 200))
 
     @guard
     def count(self, job: dict) -> dict:
-        return _m()[0].count_rows(job, on_progress=lambda x: _js("onProgress", x))
+        return _heavy("count", {"job": job},
+                      lambda: _m()[0].count_rows(job, on_progress=lambda x: _js("onProgress", x)))
 
     @guard
     def find(self, p: dict) -> dict:
-        return _m()[0].find(p.get("job") or {}, p.get("params") or {},
-                            on_progress=lambda x: _js("onProgress", x))
+        job, params = p.get("job") or {}, p.get("params") or {}
+        return _heavy("find", {"job": job, "params": params},
+                      lambda: _m()[0].find(job, params, on_progress=lambda x: _js("onProgress", x)))
 
     @guard
     def describe_filters(self, spec: dict) -> dict:
@@ -268,6 +477,7 @@ class Api:
         return {"ok": True}
 
     @guard
+    @_reading
     def peek_all(self, p: dict) -> dict:
         return _m()[0].peek_all(p.get("files") or [], p.get("source") or {}, int(p.get("rows") or 4),
                                 p.get("reference") or [])
@@ -276,15 +486,23 @@ class Api:
     def analyse(self, p: dict) -> dict:
         """The Analysis tab. scope 'active' is the current file (instant on a peek
         sample); 'all' runs the whole batch, like Count."""
-        _CANCEL.clear()
-        return _m()[0].analyse(p.get("job") or {}, p.get("scope") or "active",
-                               on_progress=lambda x: _js("onProgress", x))
+        job, scope = p.get("job") or {}, p.get("scope") or "active"
+        here = lambda: _m()[0].analyse(job, scope, on_progress=lambda x: _js("onProgress", x))  # noqa: E731
+        if scope == "all":
+            return _heavy("analyse", {"job": job}, here)
+        with _READ:
+            return here()
 
     @guard
     def drill(self, p: dict) -> dict:
         """Rows behind a clicked bar, slice or pivot cell."""
-        return _m()[0].drill(p.get("job") or {}, p.get("scope") or "active", p.get("filters") or [],
-                             int(p.get("limit") or 500), on_progress=lambda x: _js("onProgress", x))
+        job, scope, filters, limit = p.get("job") or {}, p.get("scope") or "active", p.get("filters") or [], \
+            int(p.get("limit") or 500)
+        here = lambda: _m()[0].drill(job, scope, filters, limit)  # noqa: E731
+        if scope == "all":
+            return _heavy("drill", {"job": job, "filters": filters, "limit": limit}, here)
+        with _READ:
+            return here()
 
     @guard
     def export_analysis(self, p: dict) -> dict:
@@ -359,15 +577,34 @@ class Api:
     def run(self, job: dict) -> dict:
         """One job the 1.x way. The UI now calls run_setup; kept for scripts."""
         E = _m()[0]
-        return _background("setup", lambda: E.run(job, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+        return _background("setup", lambda: _heavy("run", {"job": job}, lambda: E.run(
+            job, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
     @guard
     def run_setup(self, setup: dict) -> dict:
         """The Run button: every group's ColSift work, then the combine steps, then one
         export. A one-group setup is the classic extract. Results land on onRunDone()."""
         W = _m()[3]
-        return _background("setup", lambda: W.run_setup(setup, on_progress=lambda x: _js("onProgress", x),
-                                                        cancel=_CANCEL))
+        return _background("setup", lambda: _heavy("run_setup", {"setup": setup}, lambda: W.run_setup(
+            setup, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
+
+    @guard
+    def ws_dashboards(self, p: dict) -> dict:
+        """Run dashboards: every dashboard of the setup (or those in `only`) over every
+        file, in a worker. Nothing is written."""
+        ws, only = p.get("workspace") or {}, p.get("only")
+        return _heavy("dashboards", {"workspace": ws, "only": only}, lambda: _m()[3].run_dashboards(
+            ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL, only=only))
+
+    @guard
+    def memory(self) -> dict:
+        """The status bar's meter: this window, the worker if one is running, the machine."""
+        E = _m()[0]
+        me, mach = E.process_memory() or (0, 0), E.system_memory() or (0, 0)
+        live = _CHILD["proc"] is not None
+        return {"ok": True, "app": me[0], "app_peak": me[1], "worker": _CHILD["rss"] if live else 0,
+                "worker_kind": _CHILD["kind"] if live else "", "worker_peak": _CHILD["peak"],
+                "total": mach[0], "available": mach[1], "log": str(_crash_log())}
 
     # -- profiles ---------------------------------------------------------
     @guard
@@ -452,38 +689,51 @@ class Api:
         return _m()[3].rebind(p.get("workspace") or {}, p.get("files") or [], p.get("saved") or {})
 
     @guard
+    @_reading
     def ws_schema(self, ws: dict) -> dict:
         return _m()[3].schema(ws)
 
     @guard
+    @_reading
     def ws_preview(self, p: dict) -> dict:
         return _m()[3].preview(p.get("workspace") or {}, p.get("table") or "", int(p.get("rows") or 200),
                                bool(p.get("related")))
 
     @guard
     def ws_analyse(self, p: dict) -> dict:
-        _CANCEL.clear()
-        return _m()[3].analyse(p.get("workspace") or {}, p.get("report") or {}, p.get("scope") or "preview",
-                               on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)
+        ws, rep, scope = p.get("workspace") or {}, p.get("report") or {}, p.get("scope") or "preview"
+        here = lambda: _m()[3].analyse(ws, rep, scope, on_progress=lambda x: _js("onProgress", x),  # noqa: E731
+                                       cancel=_CANCEL)
+        if scope == "all":
+            return _heavy("ws_analyse", {"workspace": ws, "report": rep}, here)
+        with _READ:
+            return here()
 
     @guard
     def ws_drill(self, p: dict) -> dict:
-        return _m()[3].drill(p.get("workspace") or {}, p.get("report") or {}, p.get("scope") or "preview",
-                             p.get("filters") or [], int(p.get("limit") or 500))
+        ws, rep, scope = p.get("workspace") or {}, p.get("report") or {}, p.get("scope") or "preview"
+        filters, limit = p.get("filters") or [], int(p.get("limit") or 500)
+        here = lambda: _m()[3].drill(ws, rep, scope, filters, limit)  # noqa: E731
+        if scope == "all":
+            return _heavy("ws_drill", {"workspace": ws, "report": rep, "filters": filters, "limit": limit}, here)
+        with _READ:
+            return here()
 
     @guard
+    @_reading
     def ws_check_relationships(self, ws: dict) -> dict:
         return _m()[3].check_relationships(ws)
 
     @guard
+    @_reading
     def ws_suggest_relationships(self, ws: dict) -> dict:
         return _m()[3].suggest_relationships(ws)
 
     @guard
     def ws_run(self, ws: dict) -> dict:
         W = _m()[3]
-        return _background("workspace", lambda: W.run(ws, on_progress=lambda x: _js("onProgress", x),
-                                                      cancel=_CANCEL))
+        return _background("workspace", lambda: _heavy("run_setup", {"setup": ws}, lambda: W.run_setup(
+            ws, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
 
 def main() -> None:
@@ -493,6 +743,7 @@ def main() -> None:
     # before anything else, the import thread included.
     import multiprocessing
     multiprocessing.freeze_support()
+    _install_logging()
     if not UI.exists():
         print(f"ui.html missing next to app.py (looked in {HERE})", file=sys.stderr)
         raise SystemExit(1)

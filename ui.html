@@ -238,6 +238,12 @@ table.grid td.nul{color:#c3ccc7}
 .status .msg{flex:1;min-width:120px;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .status .msg.err{color:var(--red)}
 .status .msg.ok{color:var(--teal-2)}
+.status .mem{font-family:var(--mono);font-size:11px;color:var(--muted);cursor:default}
+.status .mem.warn{color:var(--amber)}
+.status .mem.bad{color:var(--red);font-weight:600}
+.status .rdash{font-size:11px;color:var(--muted);gap:4px;white-space:nowrap}
+.srcchip{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.02em;color:var(--teal-2);background:var(--teal-soft, #e0efed);
+  border-radius:3px;padding:0 5px;margin-left:6px;vertical-align:1px}
 .stat{font-family:var(--mono);font-size:11.5px;color:var(--ink)}
 .stat b{color:var(--teal-2)}
 .bar{height:2px;background:var(--line-2);position:relative;overflow:hidden}
@@ -883,11 +889,12 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <section class="pane" id="p-anal" role="tabpanel">
       <div class="anbar">
         <label class="lbl">Data</label><select id="anSource" style="max-width:380px;height:25px" title="A group's own extract, or a table made on the Combine tab"></select>
-        <span class="lbl" style="text-transform:none;letter-spacing:0;font-weight:400">Each group and each combined table has its own dashboard and summaries.</span>
+        <span class="lbl" id="anHint" style="text-transform:none;letter-spacing:0;font-weight:400">Each group and each combined table has its own dashboard and summaries.</span>
       </div>
       <div class="anbar">
         <button class="btn sm" id="anRunActive" title="Quick: the file you're looking at, or the workspace preview">Refresh from this file</button>
         <button class="btn sm" id="anRunAll" title="Every file — like Count">Run on every ticked file</button>
+        <button class="btn sm" id="anRunDash" title="Every dashboard of this setup — each group's, each combined table's and the Overview — over every file, in one pass. Nothing is written.">Run all dashboards</button>
         <div class="menu"><button class="btn sm" id="anExportBtn">Export ▾</button>
           <div class="menu-pop" id="anExportMenu" style="left:0;right:auto">
             <div class="mh">PDF</div>
@@ -908,6 +915,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
       <div class="fbar" id="anFilterBar" style="display:none"></div>
       <div id="anDash">
         <div class="anbar"><div class="qadd" id="anQuick"><label class="lbl">Add</label>
+            <select id="anAddFrom" style="display:none;max-width:170px;height:24px" title="The table the next visual reads"></select>
             <button class="btn sm" data-q="kpi" title="One number">＃ Number</button>
             <button class="btn sm" data-q="slicer" title="Click values to filter the whole dashboard">☰ Slicer</button>
             <button class="btn sm" data-q="breakdown">▮ Columns</button>
@@ -945,9 +953,11 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <span class="stat">Files <b id="sFiles">0</b></span>
     <span class="stat">Keeping <b id="sCols">0</b></span>
     <span class="stat">Matched <b id="sRows">–</b></span>
+    <span class="stat mem" id="memInfo" title="Memory">Memory –</span>
     <span class="msg" id="msg">Ready.</span>
     <button class="btn" id="btnPreview">Preview</button>
     <button class="btn" id="btnCancel" style="display:none">Cancel</button>
+    <label class="f rdash" title="When the run finishes, work out every dashboard from its full data and show them (saved with the setup)"><input type="checkbox" id="runDash"> then dashboards</label>
     <button class="btn pri" id="btnRun" title="Every group's ColSift work, then the Combine steps, then one export (Ctrl+Enter)">Run</button>
   </div>
 </main>
@@ -988,7 +998,7 @@ const S = {
   processing:"sequential", lastPreview:null, fxTarget:null,
   analysis:{ export:false, sheet_name:"Analysis", items:[], filters:[] },
   summaries:{ export:false, tabs:[] },
-  anView:"dash", anData:null, anScope:"active", anBusy:false, anTarget:"group",
+  anView:"dash", anData:null, anScope:"active", anBusy:false, anTarget:"group", anCache:{}, anCtx:"",
   group:null, wsSchema:null,
   meta:{ops:[],kinds:[]}, peek:null, busy:false
 };
@@ -1017,7 +1027,8 @@ function show(p){
   $$(".pane").forEach(x => x.classList.remove("on"));
   $("#p-"+p).classList.add("on");
   if (p === "out"){ drawFormats(); syncSplit(); syncPdf(); drawOutputMode(); }
-  if (p === "anal"){ drawAnal(); if (S.wsDirty && (AT().report || groupRel())) wsSchemaFresh();
+  if (p === "anal"){ if (!S.anData) anFromCache();
+                     drawAnal(); if (S.wsDirty && (AT().report || groupRel())) wsSchemaFresh();
                      if (!S.anData && (S.active || AT().report)) anRun("active"); }
   if (p === "ws"){ syncBack(); wsDraw(); if (!S.wsSchema) wsSchemaRefresh(true); }
 }
@@ -1890,7 +1901,27 @@ function reportFor(table){
   }
   return r;
 }
+/* The Overview: one dashboard whose cards each read their own table. S.anCtx is the
+   table a field list is drawn for — the card or summary being edited, or "Add from". */
+const OV = "__overview";
+function ovSpec(){
+  if (!WS.overview) WS.overview = {name: "Overview", analysis: {export: false, sheet_name: "Overview", items: [], filters: []},
+                                   summaries: {export: false, tabs: []}};
+  WS.overview.analysis = {export: false, sheet_name: "Overview", items: [], filters: [], ...(WS.overview.analysis || {})};
+  WS.overview.summaries = {export: false, tabs: [], ...(WS.overview.summaries || {})};
+  return WS.overview;
+}
+function ovTables(){ return wsTableNames(); }
+function ovCtx(table){ S.anCtx = table || S.anCtx || ovTables()[0] || ""; return S.anCtx; }
 function AT(){
+  if (S.anTarget === OV){
+    if (isMulti()){
+      const o = ovSpec();
+      return {analysis: o.analysis, summaries: o.summaries, overview: true,
+              report: {...o, id: OV, overview: true, name: o.name || "Overview", table: S.anCtx || ""}};
+    }
+    S.anTarget = "group";
+  }
   if (S.anTarget && S.anTarget !== "group"){
     if (combinedTableNames().includes(S.anTarget)){ const r = reportFor(S.anTarget); return {analysis: r.analysis, summaries: r.summaries, report: r}; }
     S.anTarget = "group";
@@ -1907,7 +1938,9 @@ function groupReport(){
   return {id: "g_" + g.id, name: g.name, table: g.name, analysis: S.analysis, summaries: S.summaries};
 }
 function anCols(){
-  const r = AT().report;
+  const at0 = AT();
+  if (at0.overview){ const t = wsTableInfo(S.anCtx); return t ? [...(t.columns || []), ...(t.related || [])] : []; }
+  const r = at0.report;
   if (!r) return [...outputColumns(), ...(groupRel() ? ((wsTableInfo(activeGroup().name) || {}).related || []) : [])];
   const t = (S.wsSchema?.tables || []).find(x => x.name === r.table);
   return t ? [...(t.columns || []), ...(t.related || [])] : [];
@@ -1983,6 +2016,16 @@ function drawAnal(){
   $("#anExport").checked = !!at.analysis.export;
   $("#suExport").checked = !!at.summaries.export;
   const viaSetup = at.report || groupRel();
+  const af = $("#anAddFrom");
+  af.style.display = at.overview ? "" : "none";
+  $("#anHint").textContent = at.overview
+    ? "One dashboard over several tables: pick the table each visual reads in “Add”. A slicer or a click filters every card whose table has that field."
+    : "Each group and each combined table has its own dashboard and summaries" + (isMulti() ? " — the Overview puts cards from all of them together." : ".");
+  if (at.overview){
+    const names = ovTables(); ovCtx(names.includes(S.anAddFrom) ? S.anAddFrom : null);
+    af.innerHTML = names.map(n => `<option ${n === (S.anAddFrom || S.anCtx) ? "selected" : ""}>${esc(n)}</option>`).join("");
+  }
+  $("#anRunDash").style.display = (isMulti() || anCount()) ? "" : "none";
   $("#anRunActive").textContent = viaSetup ? "Refresh (preview)" : "Refresh from this file";
   $("#anRunAll").textContent = viaSetup ? "Run on every file" : "Run on every ticked file";
   const tabs = [`<button class="subtab" data-v="dash" aria-selected="${S.anView === "dash"}">Dashboard <span class="n">${at.analysis.items.length}</span></button>`]
@@ -1997,12 +2040,16 @@ function drawAnal(){
 function drawAnSource(){
   const groups = liveGroups().map(g => `<option value="g:${g.id}">${esc(g.name)} — ${WS.groups.length > 1 ? "group" : "the extracted rows"}${g.id === S.group && WS.groups.length > 1 ? " (open)" : ""}</option>`);
   const combined = combinedTableNames().map(n => `<option value="t:${esc(n)}">${esc(n)} — ${n === STACK ? "all groups stacked" : "combined"}</option>`);
-  $("#anSource").innerHTML = groups.join("") + (combined.length ? `<optgroup label="Made on the Combine tab">${combined.join("")}</optgroup>` : "");
-  $("#anSource").value = S.anTarget === "group" ? `g:${S.group}` : `t:${S.anTarget}`;
+  const ov = isMulti() ? `<option value="o:">Overview — cards from any group or table</option>` : "";
+  $("#anSource").innerHTML = ov + groups.join("") + (combined.length ? `<optgroup label="Made on the Combine tab">${combined.join("")}</optgroup>` : "");
+  $("#anSource").value = S.anTarget === OV ? "o:" : S.anTarget === "group" ? `g:${S.group}` : `t:${S.anTarget}`;
 }
 $("#anSource").onchange = async e => {
   const v = e.target.value;
-  if (v.startsWith("g:")){
+  if (v === "o:"){
+    S.anTarget = OV; ovCtx();
+    await wsSchemaFresh();
+  } else if (v.startsWith("g:")){
     S.anTarget = "group";
     if (v.slice(2) !== S.group) await switchGroup(v.slice(2));
     if (groupRel()) await wsSchemaFresh();
@@ -2011,7 +2058,9 @@ $("#anSource").onchange = async e => {
     await wsSchemaFresh();
     if (!wsTableInfo(S.anTarget)?.columns?.length) await wsSchemaNow();
   }
-  S.anData = null; S.anView = "dash"; drawAnal();
+  S.anData = null; S.anView = "dash";
+  if (anFromCache()){ drawAnal(); return; }
+  drawAnal();
   if (AT().report || S.active) anRun("active");
 };
 $("#anTabs").addEventListener("click", e => {
@@ -2024,7 +2073,7 @@ $("#anTabs").addEventListener("click", e => {
   }
   const b = e.target.closest(".subtab"); if (!b) return;
   if (b.dataset.v === "__new"){
-    const t = {id: uid(), name: `Summary ${at.summaries.tabs.length + 1}`,
+    const t = {id: uid(), name: `Summary ${at.summaries.tabs.length + 1}`, ...(at.overview ? {table: ovCtx($("#anAddFrom").value)} : {}),
                pivot: {rows: [], cols: [], values: [], filters: [], grand_row: true, grand_col: true, layout: "tabular", chart: "none"}};
     at.summaries.tabs.push(t); S.anView = t.id;
   } else S.anView = b.dataset.v;
@@ -2033,9 +2082,10 @@ $("#anTabs").addEventListener("click", e => {
 $("#anExport").onchange = e => { AT().analysis.export = e.target.checked; };
 $("#suExport").onchange = e => { AT().summaries.export = e.target.checked; };
 $("#anRunActive").onclick = () => anRun("active");
+$("#anAddFrom").onchange = e => { S.anAddFrom = e.target.value; S.anCtx = e.target.value; };
 $("#anRunAll").onclick = () => anRun("all");
 
-function anKey(){ return S.anTarget === "group" ? `g:${S.group}` : `t:${S.anTarget}`; }
+function anKey(){ return S.anTarget === OV ? "overview" : S.anTarget === "group" ? `g:${S.group}` : `t:${S.anTarget}`; }
 async function anRun(scope){
   const at = AT(), target = anKey();
   if (!at.report && !S.active){ say("Pick a file first.", "err"); return; }
@@ -2051,11 +2101,72 @@ async function anRun(scope){
   if (anKey() !== target) return;                              // switched away meanwhile
   if (!r?.ok){ say(r?.error || "Analysis failed.", "err"); $("#anNote").textContent = r?.error || ""; return; }
   S.anData = r;
+  if (scope === "all") S.anCache[target] = {...r, __at: clock()};
   $("#anNote").textContent = `${r.note}${r.sampled ? ` (first ${r.sampled.toLocaleString()} rows)` : ""} · ${r.elapsed}s` +
-    ((r.notes || []).length ? ` · ${r.notes.join(" · ")}` : "");
+    (r.peak_memory ? ` · peak ${human(r.peak_memory)}` : "") + ((r.notes || []).length ? ` · ${r.notes.join(" · ")}` : "");
   if (S.anView === "dash") drawCards(); else drawPivotResult();   // editor keeps focus and text
   say(`Analysis ready — ${r.note}.`, "ok");
 }
+/* Full-data dashboards — from Run all dashboards, a run with "then dashboards", or Run
+   on every file — are kept per dashboard, so switching Data shows them again without
+   reading every file once more. Refresh (preview) or any edit works them out anew. */
+const clock = () => new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+function human(n){
+  if (!n) return "0 MB";
+  const mb = n / 1048576;
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb).toLocaleString()} MB`;
+}
+function anFromCache(){
+  const c = S.anCache[anKey()];
+  if (!c) return false;
+  S.anData = c; S.anScope = "all";
+  $("#anNote").textContent = `${c.note || ""} · every file, from ${c.__from || "the last full run"} at ${c.__at}` +
+    ((c.notes || []).length ? ` · ${c.notes.join(" · ")}` : "");
+  return true;
+}
+function takeDashboards(map, from){
+  const keys = Object.keys(map || {}).filter(k => map[k] && map[k].ok !== false);
+  const at = clock();
+  keys.forEach(k => S.anCache[k] = {...map[k], __at: at, __from: from});
+  const bad = Object.entries(map || {}).filter(([, v]) => v && v.ok === false).map(([, v]) => v.error);
+  if (!keys.length) return {n: 0, bad};
+  // show the one open if it was refreshed, else the Overview, else the first refreshed group / table
+  if (!S.anCache[anKey()] || !keys.includes(anKey())){
+    if (keys.includes("overview") && isMulti()) S.anTarget = OV;
+    else {
+      const k = keys[0];
+      if (k.startsWith("t:")) S.anTarget = k.slice(2);
+      else { S.anTarget = "group"; S.anJump = k.slice(2); }
+    }
+  }
+  return {n: keys.length, bad};
+}
+async function showDashboards(){
+  if (S.anJump && S.anJump !== S.group){ const j = S.anJump; S.anJump = null; await switchGroup(j); }
+  S.anJump = null;
+  if (S.anTarget === OV) ovCtx();
+  S.anView = "dash";
+  anFromCache();
+  show("anal");
+  drawAnal();
+}
+$("#anRunDash").onclick = async () => {
+  const p = setupPayload();
+  if (!p.groups.some(g => g.enabled !== false && g.files.length)){ say("Tick some files first.", "err"); return; }
+  busy(true); $("#btnCancel").style.display = "";
+  say("Working out every dashboard over every file — nothing is written…");
+  const r = await api().ws_dashboards({workspace: p});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "The dashboards could not be worked out.", r?.cancelled ? "" : "err"); return; }
+  const got = takeDashboards(r.dashboards, "Run all dashboards");
+  if (!got.n){ say("No dashboard has any cards yet — add some first.", "err"); return; }
+  await showDashboards();
+  say(`${got.n} dashboard${got.n === 1 ? "" : "s"} worked out over every file in ${r.elapsed}s` +
+      (r.peak_memory ? ` · peak memory ${human(r.peak_memory)}` : "") + (got.bad.length ? ` · ${got.bad.join(" · ")}` : "") + ".",
+      got.bad.length ? "" : "ok");
+};
+$("#runDash").onchange = e => { S.output.refresh_dashboards = e.target.checked; };
+
 let anTimer = null;
 function anRefresh(fast){
   clearTimeout(anTimer);
@@ -2192,19 +2303,24 @@ function heatStyle(v, rng){
   const f = rng[1] === rng[0] ? 0.5 : (v - rng[0]) / (rng[1] - rng[0]);
   return ` style="background:rgba(13,110,102,${(0.06 + 0.5 * f).toFixed(3)})${f > 0.72 ? ";color:#fff" : ""}"`;
 }
+const DRAW_ROWS = 1500, DRAW_PIVOT = 4000;
 function renderTable(t, o = {}){
   const nr = (t.row_fields || []).length ? t.row_fields.length : ((t.colinfo || []).length ? 1 : 0);
   const heat = o.heat ? heatRange(t, Math.max(1, nr)) : null;
   const sel = o.sel || new Set();
   const head = (t.head || []).map(hr => `<tr>${hr.map((c, i) => `<th class="${i >= nr ? "n" : ""}">${esc(c)}</th>`).join("")}</tr>`).join("");
-  const body = (t.rows || []).map((r, ri) => {
+  // a card draws at most DRAW_ROWS rows: a table of tens of thousands of rows can take
+  // the window's page down. Every row is still in the export.
+  const shown = (t.rows || []).slice(0, DRAW_ROWS);
+  const body = shown.map((r, ri) => {
     const clickable = o.click && r.kind === "data" && (r.path || []).length;
     const on = clickable && sel.size && sel.has(r.path[0]) ? " sel" : "";
     return `<tr class="${r.kind}${on}" ${clickable ? `data-r="${ri}"` : ""}>${r.cells.map((c, i) =>
       `<td class="${i < nr ? "lab" : (typeof (r.nums || [])[i] === "number" || NUMRX.test(c) ? "n" : "")}"${heat && r.kind === "data" ? heatStyle((r.nums || [])[i], heat[i]) : ""}>${esc(c)}</td>`).join("")}</tr>`;
   }).join("");
-  const more = t.n_total != null && t.n_total > (t.rows || []).length
-    ? `<div class="sub" style="margin-top:4px">${(t.rows || []).length.toLocaleString()} of ${t.n_total.toLocaleString()} rows</div>` : "";
+  const all = t.n_total != null ? t.n_total : (t.rows || []).length;
+  const more = all > shown.length
+    ? `<div class="sub" style="margin-top:4px">${shown.length.toLocaleString()} of ${all.toLocaleString()} rows${(t.rows || []).length > shown.length ? " shown — Export has them all" : ""}</div>` : "";
   return `<div class="pv"${o.maxh ? ` style="max-height:${o.maxh}"` : ""}><table><thead>${head}</thead><tbody>${body}</tbody></table></div>${more}`;
 }
 
@@ -2230,6 +2346,7 @@ const drawCards = guarded(function(){
     const r = itemResult(it.id), kind = it.kind || "kpi", editing = it.__edit;
     const width = it.width || (kind === "kpi" || kind === "slicer" ? "third" : "half");
     let inner;
+    if (at.overview) S.anCtx = it.table || "";
     if (editing) inner = itemForm(it, i);
     else if (!r) inner = `<div class="sub">Not worked out yet — press Refresh.</div>`;
     else if (r.error) inner = `<div class="itemerr">${esc(r.error)}</div>`;
@@ -2242,7 +2359,7 @@ const drawCards = guarded(function(){
         <button class="btn sm ghost" data-act="copy" title="Duplicate">⧉</button>
         <button class="btn x" data-act="del" title="Remove">✕</button>
       </div>
-      <h4><span class="grip" title="Drag to move">⠿</span>${esc(it.name || (r && r.name) || "Visual")}${it.ignore_filters ? ` <span class="sub" title="This visual ignores the dashboard filters">· unfiltered</span>` : ""}</h4>
+      <h4><span class="grip" title="Drag to move">⠿</span>${esc(it.name || (r && r.name) || "Visual")}${at.overview ? `<span class="srcchip" title="The table this card reads">${esc(it.table || "no data")}</span>` : ""}${it.ignore_filters ? ` <span class="sub" title="This visual ignores the dashboard filters">· unfiltered</span>` : ""}</h4>
       ${inner}</div>`;
   }).join("");
 });
@@ -2296,7 +2413,10 @@ function itemForm(it, i){
   AM().item_kinds.forEach(k => { let g = groups.find(x => x.g === k.group); if (!g) groups.push(g = {g: k.group, ks: []}); g.ks.push(k); });
   const by = it.by || {}, by2 = it.by2 || {}, charts = (AM().charts || {})[kind] || [];
   const top = by.top || {};
-  return `<div class="iform">
+  const ovRow = AT().overview ? `<div class="args"><label class="lbl">Data</label><select data-f="table" style="max-width:220px">${
+    ovTables().map(n => `<option ${n === it.table ? "selected" : ""}>${esc(n)}</option>`).join("")}${it.table && !ovTables().includes(it.table) ? `<option selected>${esc(it.table)}</option>` : ""}</select>
+    <span class="sub" style="margin:0">Each card reads its own group or table; slicers and clicks filter every card whose table has that field.</span></div>` : "";
+  return `<div class="iform">${ovRow}
     <div class="args"><label class="lbl">Name</label><input type="text" data-f="name" value="${esc(it.name || "")}" placeholder="automatic" style="width:190px">
       <label class="lbl">Shows</label><select data-f="kind">${groups.map(g => `<optgroup label="${esc(g.g)}">${g.ks.map(k =>
         `<option value="${k.id}" ${kind === k.id ? "selected" : ""}>${esc(k.label)}</option>`).join("")}</optgroup>`).join("")}</select>
@@ -2344,10 +2464,12 @@ function guessCols(){
 }
 $("#anQuick").addEventListener("click", async e => {
   const b = e.target.closest("[data-q]"); if (!b) return;
+  if (AT().overview) ovCtx($("#anAddFrom").value);
   if (AT().report || groupRel()) await wsSchemaFresh();                // the table's fields, now
   if (!anCols().length && AT().report) await wsSchemaNow();
   if (!anCols().length){ say("Pick a file (or a report table) first.", "err"); return; }
-  const it = {id: uid(), name: "", __edit: b.dataset.q === "blank", ...(QUICK[b.dataset.q] || QUICK.kpi)(guessCols())};
+  const it = {id: uid(), name: "", __edit: b.dataset.q === "blank", ...(QUICK[b.dataset.q] || QUICK.kpi)(guessCols()),
+              ...(AT().overview ? {table: S.anCtx} : {})};
   AT().analysis.items.push(it);
   anCounts();
   drawCards(); if (!it.__edit) anRefresh(true);
@@ -2357,6 +2479,7 @@ $("#anQuick").addEventListener("click", async e => {
 $("#anCards").addEventListener("click", e => {
   const card = e.target.closest(".card.item"); if (!card) return;
   const items = AT().analysis.items, i = +card.dataset.i, it = items[i], r = itemResult(it.id);
+  if (AT().overview) S.anCtx = it.table || "";
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act){
     if (act === "edit"){ it.__edit = !it.__edit; drawCards(); if (!it.__edit) anRefresh(true); }
@@ -2389,6 +2512,7 @@ $("#anCards").addEventListener("click", e => {
 $("#anCards").addEventListener("contextmenu", e => {
   const card = e.target.closest(".card.item"); if (!card) return;
   const it = AT().analysis.items[+card.dataset.i], r = itemResult(it.id);
+  if (AT().overview) S.anCtx = it.table || "";
   const mark = e.target.closest("[data-lab]"), row = e.target.closest("tr[data-r]");
   if (!r || (!mark && !row)) return;
   e.preventDefault();
@@ -2420,6 +2544,8 @@ $("#anCards").addEventListener("input", e => {
 $("#anCards").addEventListener("change", e => {
   const card = e.target.closest(".card.item"); if (!card) return;
   const i = +card.dataset.i, it = AT().analysis.items[i], val = e.target.value, f = e.target.dataset.f;
+  if (AT().overview) S.anCtx = it.table || "";
+  if (f === "table"){ it.table = val; S.anCtx = val; drawCards(); anRefresh(); return; }
   if (e.target.dataset.sv != null){                                              // slicer tick
     const r = itemResult(it.id), field = itemField(it, r);
     const cur = new Set(filterValues(field));
@@ -2531,9 +2657,12 @@ const BOXES = [["rows", "Rows"], ["cols", "Columns"], ["values", "Values"], ["fi
 function curTab(){ return AT().summaries.tabs.find(t => t.id === S.anView); }
 const drawPivotEditor = guarded(function(){
   const t = curTab(); if (!t) return;
+  if (AT().overview) S.anCtx = t.table || ovCtx();
   const p = t.pivot, cols = anCols(), st = p.style || {};
   $("#suEditor").innerHTML = `
     <div class="f" style="gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      ${AT().overview ? `<label class="lbl">Data</label><select id="suSrc" style="max-width:200px">${ovTables().map(n =>
+        `<option ${n === t.table ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>` : ""}
       <label class="lbl">Tab name</label><input type="text" id="suName" value="${esc(t.name)}" style="width:170px">
       <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="suGrandRow" ${p.grand_row !== false ? "checked" : ""}> Grand total row</label>
       <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="suGrandCol" ${p.grand_col !== false ? "checked" : ""}> Grand total column</label>
@@ -2584,14 +2713,16 @@ function renderPivot(tb, t){
     const arrow = sortIdx === j && info && !info.grand ? (p.rows[0].sort === "value_desc" ? " ↓" : " ↑") : "";
     return `<th class="n sortable" data-sortv="${j}" title="Sort the rows by this value">${esc(c)}${arrow}</th>`;
   }).join("")}</tr>`).join("");
-  const body = (tb.rows || []).map((r, ri) => {
+  const body = (tb.rows || []).slice(0, DRAW_PIVOT).map((r, ri) => {
     const tog = r.kind === "subtotal" ? `<span class="tog" data-fold="${esc(JSON.stringify(r.path))}">▾</span>` : "";
     return `<tr class="${r.kind}" data-ri="${ri}">${r.cells.map((c, i) => {
       if (i < nr) return `<td class="lab">${i === Math.max(0, (r.path || []).length - 1) && tog ? tog : ""}${esc(c)}</td>`;
       return `<td class="n cell" data-ci="${i - nr}"${heat && r.kind === "data" ? heatStyle((r.nums || [])[i], heat[i]) : ""}>${esc(c)}</td>`;
     }).join("")}</tr>`;
   }).join("");
-  return `<div class="pv" id="suTable" style="max-height:62vh"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
+  const cut = (tb.rows || []).length > DRAW_PIVOT
+    ? `<div class="sub" style="margin-top:4px">The first ${DRAW_PIVOT.toLocaleString()} of ${(tb.rows || []).length.toLocaleString()} rows are shown — fold groups or search to narrow it; Export has them all.</div>` : "";
+  return `<div class="pv" id="suTable" style="max-height:62vh"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>${cut}`;
 }
 function applyPivotView(t){
   const r = (S.anData?.tabs || []).find(x => x.id === t.id); if (!r?.table) return;
@@ -2609,6 +2740,7 @@ function applyPivotView(t){
 }
 $("#suResult").addEventListener("click", e => {
   const t = curTab(); if (!t) return;
+  if (AT().overview) S.anCtx = t.table || "";
   const r = (S.anData?.tabs || []).find(x => x.id === t.id); if (!r?.table) return;
   const fold = e.target.closest("[data-fold]");
   if (fold){ const set = pvCollapsed(t.id), k = fold.dataset.fold; set.has(k) ? set.delete(k) : set.add(k); applyPivotView(t); return; }
@@ -2726,7 +2858,14 @@ function wirePivot(){
 }
 
 /* bound once: #suEditor is redrawn often, the element itself is not */
+$("#suEditor").addEventListener("change", e => {
+  if (e.target.id !== "suSrc") return;
+  const t = curTab(); if (!t) return;
+  t.table = e.target.value; S.anCtx = t.table;
+  drawPivotEditor(); anRefresh();
+}, true);
 $("#suEditor").addEventListener("click", e => {
+  if (AT().overview && curTab()) S.anCtx = curTab().table || "";
   const wrap = e.target.closest(".chipwrap"); if (!wrap) return;
   const p = curTab()?.pivot; if (!p) return;
   const box = wrap.querySelector("[data-box]"), key = box.dataset.box, i = +box.dataset.i;
@@ -3530,6 +3669,7 @@ function applyOutput(o){
   $("#outQuote").value = S.output.quote_style; $("#outHeader").checked = S.output.header;
   $("#outStamp").checked = S.output.timestamp; $("#outOverwrite").checked = S.output.overwrite;
   $("#outAutofilter").checked = S.output.autofilter;
+  $("#runDash").checked = !!S.output.refresh_dashboards;
   $$("input[name=omode]").forEach(r => r.checked = r.value === S.output.mode);
   syncOutput(); syncOutputControls(); syncPdf(); drawOutputMode();
 }
@@ -3593,6 +3733,7 @@ $("#btnRun").onclick = async () => {
   if (!r?.ok){ busy(false); $("#btnCancel").style.display = "none"; say(r?.error || "Could not start.", "err"); }
 };
 window.onProgress = p => {
+  if (p.mem) showMem({worker: p.mem});
   if (p.stage === "build") say(`Building ${p.part}…`);
   if (p.stage === "analyse") say(`Working out ${p.part}…`);
   if (p.stage === "prepare") say(`First read of ${p.file} (${p.index} of ${p.total}) — cached after this…`);
@@ -3608,6 +3749,7 @@ window.onRunDone = r => {
   busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
   if (!r.ok){
     say(r.error || "The run failed.", r.cancelled ? "" : "err");
+    if (r.crashed) $("#gridwrap").innerHTML = `<div class="empty" style="color:var(--red)">${esc(r.error)}</div>`;
     $("#runResults").innerHTML = ((r.problems || []).length ? `<div class="warn">${r.problems.map(esc).join("<br>")}</div>` : "") +
       ((r.files||[]).length ? `<table>${r.files.map(fileRow).join("")}</table>` : "");
     return;
@@ -3623,13 +3765,18 @@ window.onRunDone = r => {
     $("#gridwrap").innerHTML = `<div class="empty">Written: the tables listed below. Preview any of them on the <a class="link" data-go="ws">Combine</a> tab — Preview here shows the open group.</div>`;
     $("#resInfo").textContent = "";
   }
-  $("#runResults").innerHTML = `<table>${files}${tables}${out}${log}</table>${warn}`;
+  const mem = r.peak_memory ? `<tr><td colspan="2" style="font-family:var(--ui);color:var(--muted)">Peak memory of the run: ${human(r.peak_memory)}</td></tr>` : "";
+  $("#runResults").innerHTML = `<table>${files}${tables}${out}${log}${mem}</table>${warn}`;
   $("#runResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
   refreshCache();
   const errs = (r.errors || []).length;
-  say((r.mode === "combined" ? `Done — ${(r.tables || []).length} table${(r.tables || []).length === 1 ? "" : "s"}, ` : "Done — ") +
+  const done = (r.mode === "combined" ? `Done — ${(r.tables || []).length} table${(r.tables || []).length === 1 ? "" : "s"}, ` : "Done — ") +
       `${r.rows.toLocaleString()} rows into ${r.written.length} file${r.written.length===1?"":"s"} in ${r.elapsed}s.` +
-      (errs ? ` ${errs} file(s) failed.` : ""), errs ? "err" : "ok");
+      (errs ? ` ${errs} file(s) failed.` : "");
+  const got = r.dashboards ? takeDashboards(r.dashboards, "the run") : {n: 0, bad: []};
+  if (got.n){
+    showDashboards().then(() => say(`${done} Dashboards refreshed from the run — every row.`, errs ? "err" : "ok"));
+  } else say(done + (r.dashboards && !got.n ? " (No dashboard has cards yet.)" : ""), errs ? "err" : "ok");
 };
 $("#btnCancel").onclick = async () => {
   $("#btnCancel").disabled = true; say("Cancelling after the current file or chunk…"); await api().cancel();
@@ -3768,6 +3915,25 @@ $("#impProfile").onclick = async () => {
   else say(r?.error || "Nothing imported.", "err");
 };
 
+/* ---------------- memory meter ---------------- */
+let MEM = {};
+function showMem(m){
+  MEM = {...MEM, ...m};
+  const el = $("#memInfo"); if (!el) return;
+  const app = MEM.app || 0, wk = MEM.worker || 0, tot = MEM.total || 0, av = MEM.available;
+  el.textContent = `Memory ${human(app)}` + (wk ? ` + run ${human(wk)}` : "");
+  const free = tot ? av / tot : 1;
+  el.className = "stat mem" + (tot && (free < 0.07) ? " bad" : tot && (free < 0.15 || wk > tot * 0.6) ? " warn" : "");
+  el.title = `This window: ${human(app)}` + (wk ? `\nThe run (in its own process): ${human(wk)}` : "") +
+    (tot ? `\nFree on this PC: ${human(av)} of ${human(tot)}` : "") +
+    (MEM.log ? `\nCrash reports: ${MEM.log}` : "") +
+    "\nRuns, counts and full dashboards work in a separate process: if one runs out of memory it stops, not the window.";
+}
+async function pollMem(){
+  try { const m = await api().memory(); if (m?.ok) showMem(m); } catch (e) {}
+  setTimeout(pollMem, S.busy ? 1500 : 5000);
+}
+
 /* ---------------- boot ---------------- */
 function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; }
 
@@ -3784,6 +3950,7 @@ window.addEventListener("pywebviewready", async () => {
   refreshCache();
   syncOutput(); drawRules(); drawAdds(); syncFind(); syncOutputControls(); syncPdf();
   drawGroupBar(); drawOutputMode(); wsDraw();
+  pollMem();
   say("Choose a source folder to begin.");
 });
 

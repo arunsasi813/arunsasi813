@@ -117,6 +117,107 @@ def human_size(n: int) -> str:
     return f"{n:.1f} GB"
 
 
+# --------------------------------------------------------------------------
+# memory and logs — what the status bar shows, and where crashes are written
+# --------------------------------------------------------------------------
+
+def _win_memory(pid: int | None) -> tuple[int, int] | None:
+    import ctypes
+    from ctypes import wintypes
+
+    class PMC(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(PMC), wintypes.DWORD]
+    k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+    h = k32.GetCurrentProcess() if pid is None else k32.OpenProcess(0x1000 | 0x0010, False, int(pid))
+    if not h:
+        return None
+    try:
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(PMC)
+        if not k32.K32GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+            return None
+        return int(pmc.WorkingSetSize), int(pmc.PeakWorkingSetSize)
+    finally:
+        if pid is not None:
+            k32.CloseHandle(h)
+
+
+def process_memory(pid: int | None = None) -> tuple[int, int] | None:
+    """(resident bytes now, peak resident bytes) of this process or `pid` — what
+    Task Manager calls Memory. None where the platform won't say."""
+    try:
+        if sys.platform.startswith("win"):
+            return _win_memory(pid)
+        status = Path(f"/proc/{pid or 'self'}/status")
+        if status.exists():
+            vals = {}
+            for line in status.read_text().splitlines():
+                k, _, v = line.partition(":")
+                if k in ("VmRSS", "VmHWM"):
+                    vals[k] = int(v.split()[0]) * 1024
+            return vals.get("VmRSS", 0), vals.get("VmHWM", 0)
+        if pid is None:
+            import resource
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return peak, peak            # macOS reports bytes
+    except Exception:  # noqa: BLE001 — a meter must never break anything
+        return None
+    return None
+
+
+def system_memory() -> tuple[int, int] | None:
+    """(total, available) physical memory in bytes."""
+    try:
+        if sys.platform.startswith("win"):
+            import ctypes
+            from ctypes import wintypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            ms = MS()
+            ms.dwLength = ctypes.sizeof(MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+                return int(ms.ullTotalPhys), int(ms.ullAvailPhys)
+            return None
+        info = Path("/proc/meminfo")
+        if info.exists():
+            vals = {}
+            for line in info.read_text().splitlines():
+                k, _, v = line.partition(":")
+                if k in ("MemTotal", "MemAvailable"):
+                    vals[k] = int(v.split()[0]) * 1024
+            return vals.get("MemTotal", 0), vals.get("MemAvailable", 0)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def log_dir() -> Path:
+    """Where crash reports go: beside the workbook cache on local disk."""
+    local = os.environ.get("LOCALAPPDATA")
+    for cand in filter(None, (Path(os.environ["COLSIFT_LOGS"]) if os.environ.get("COLSIFT_LOGS") else None,
+                              Path(local) / "ColSift" / "logs" if local else None,
+                              Path.home() / ".colsift" / "logs",
+                              Path(tempfile.gettempdir()) / "colsift-logs")):
+        if writable(cand):
+            return cand
+    return Path(tempfile.gettempdir())
+
+
 def is_excel(path: Path) -> bool:
     return path.suffix.lower() in EXCEL_EXT
 
@@ -2634,6 +2735,7 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
             groups = [(out.get("basename") or "extract", [pth for _, pth in good], "")]
         warnings: list[str] = []
         total_rows = 0
+        analysis_back = None
         for stem, paths, label in groups:
             _check_cancel(cancel)
             lf = pl.scan_parquet(paths if len(paths) > 1 else paths[0])
@@ -2644,10 +2746,13 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
                 continue
             total_rows += total
             extra: list[dict] = []
-            if wants_analysis(job) or pdf_parts(job):
+            back = bool(job.get("_return_analysis")) and len(groups) == 1
+            if wants_analysis(job) or pdf_parts(job) or back:
                 notify(stage="analyse", part=stem)
                 try:
                     res = A.analyse(lf, job)
+                    if back:          # the window shows this dashboard after the run
+                        analysis_back = {**res, "note": f"{label or 'All files'}, {total:,} rows"}
                     if wants_analysis(job):
                         extra = analysis_grids(res, job)
                     warnings += [f"{i['name']}: {i['error']}" for i in res["items"] if i.get("error")]
@@ -2670,8 +2775,11 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
         if not written:
             return {"ok": False, "error": "Every file matched 0 rows — nothing was written.", "files": per_file,
                     "errors": errors, "elapsed": elapsed}
-        return {"ok": True, "written": written, "rows": total_rows, "files": per_file, "errors": errors,
-                "warnings": warnings, "log": log, "elapsed": elapsed}
+        res = {"ok": True, "written": written, "rows": total_rows, "files": per_file, "errors": errors,
+               "warnings": warnings, "log": log, "elapsed": elapsed}
+        if analysis_back is not None:
+            res["analysis"] = analysis_back
+        return res
     except Cancelled:
         for w in written:
             try:
