@@ -38,6 +38,12 @@ new PDF export needs no library — pdfout.py writes PDF directly. depscan.py no
 runs the workspace and PDF paths too: the whole flow still imports polars and
 nothing else from the heavy list.
 
+2.1: worker.py runs heavy work in a second process. Nothing to add to the
+commands: build.py includes the module, and Nuitka's multiprocessing support (on
+by default) starts the exe again as the worker — the same mechanism the first
+reads of several workbooks already use. Check (e) after a build: press Run on a
+real batch and watch the status bar show "+ run …" memory while it works.
+
 Faster start in 2.0: app.py opens the window first and imports polars and the
 engine on a background thread; the first call that needs them waits.
 
@@ -60,9 +66,9 @@ python -m nuitka --mode=onefile ^
   --include-data-files=ui.html=ui.html --include-package-data=webview ^
   --windows-console-mode=disable --include-package=clr_loader ^
   --include-package-data=clr_loader --include-package-data=pythonnet ^
-  --onefile-tempdir-spec={CACHE_DIR}/ColSift/2.0.0 ^
+  --onefile-tempdir-spec={CACHE_DIR}/ColSift/2.1.0 ^
   --company-name=ColSift --product-name=ColSift ^
-  --file-version=2.0.0 --product-version=2.0.0 ^
+  --file-version=2.1.0 --product-version=2.1.0 ^
   app.py
 
 Nuitka older than 2.5 doesn't know --mode; build.py then uses --standalone

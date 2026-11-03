@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # never imported by ColSift (depscan.py measures this; re-run it after adding features)
 EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL", "sqlalchemy",

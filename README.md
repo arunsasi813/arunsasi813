@@ -21,10 +21,37 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `formula.py` | Excel-style formulas compiled to polars expressions. |
 | `xlsxfast.py` | Streams the first rows of an .xlsx without parsing the whole sheet. |
 | `app.py` | pywebview window + JS bridge. |
+| `worker.py` | Runs, counts, Find and full-data dashboards in a process of their own, so running out of memory can't close the window. |
 | `ui.html` | The interface. Inline CSS and JS. |
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.1
+
+- **Several folders at once.** **＋** beside *Browse* adds another folder; the files pane then
+  shows a row per folder — closed until you click it — with a box that ticks all its files for
+  the open group. Folders are saved with the setup.
+- **A folder can belong to a group.** Pick a group on the folder's row (or *＋ Folder* on the
+  group's card on the Combine tab): every file in that folder goes to that group, other groups'
+  rules leave them alone, and each run reads the folder as it stands then — next month's files
+  included, from the window or the command line.
+- **Loading a setup shows only what is in the open folders.** It used to add every file the
+  setup was saved with to the list, wherever it lived. Now each saved file stays in its group
+  when the same file is listed, follows a file of the same name in the open folders, or is left
+  out — and the status line says which. *＋* the missing folder and they come back. With no
+  folder open, the setup's own folders open.
+- **Overview — one dashboard over several tables.** Under *Data* on the Analysis tab: each card
+  and summary reads the group or combined table you pick for it, side by side. A slicer or a
+  clicked value filters every card whose table has that field.
+- **Run all dashboards** works out every dashboard of the setup over every file in one pass,
+  writing nothing; switching *Data* then shows those results without reading again.
+- **"then dashboards"** beside *Run*: when the run finishes, the Analysis tab opens on the
+  dashboards worked out from the run's own full data — no second read.
+- **Runs can't close the window any more.** Run, Count, Find and full-data dashboards work in a
+  process of their own. If one runs out of memory or crashes, it stops and says so (with the
+  memory it had used); the window, the setup and everything unsaved stay. The status bar shows
+  memory use, each run reports its peak, and crashes are written to `colsift.log`.
 
 ## What's new in 2.0
 
@@ -57,7 +84,8 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 
 ## The flow
 
-1. **Browse** to a folder. Readable files are listed; use the name filter for `TAX_*.xlsx`.
+1. **Browse** to a folder — **＋** adds more folders. Readable files are listed (under their
+   folder when there are several); use the name filter for `TAX_*.xlsx`.
    Handled: `.csv .txt .tsv .tab .dlt .del .dat .prn .psv .pip .asc .out` and
    `.xlsx .xlsm .xlsb .xls`.
 2. **Peek** shows the first rows exactly as they sit in the file. Click a row number to make it
@@ -147,6 +175,18 @@ Other new column kinds: Copy; Part of a column (cut at a separator, −1 = last 
   rows behind it (first 500, with the total), copyable straight into Excel.
 - **Export ▾** writes what is on screen: dashboard → PDF, summaries → PDF, both in one PDF, or
   Excel / CSV.
+- **Overview** (setups with several groups or a Combine step): one dashboard whose cards each
+  read their own group or combined table. Pick the table in the *Add* bar before adding a card,
+  or in the card's editor; each card shows its table. Filters reach every card whose table has
+  the field — a TAX_CODE slicer on Sales narrows Refunds too — and are ignored by the others.
+  Summary tabs pick their table the same way. With *Dashboard in the output* it is written as an
+  *Overview* sheet (each card labelled with its table) and as a PDF.
+- **Run all dashboards** — every dashboard of the setup (each group's, each combined table's,
+  the Overview) over every file, in one pass, writing nothing. *Run on every file* does the same
+  for the dashboard on screen. Full-data results are kept: switching *Data* shows them again,
+  with the time they were worked out; *Refresh (preview)* or editing a card works them out anew.
+- **then dashboards** (beside *Run*, saved with the setup): the run works out the dashboards
+  from the data it has just read and the Analysis tab opens on them.
 
 
 The Analysis tab reads the extracted frame — after filters, renames and computed columns, the same rows the output is written from — so what you see and what lands in the sheets is one computation. **Refresh from this file** uses the file you're looking at (instant on a workbook that has only been peeked, from its first 2,000 rows); **Run on every ticked file** runs the whole batch, like Count.
@@ -235,9 +275,17 @@ places them by each group's rule:
 | Folder name contains | `2026-07` |
 | File has these columns | `DOC_NO; AMOUNT` — blank means the group's kept columns |
 
-A file can feed several groups (two sheets of one workbook, each read by its own group),
-and files from other folders stay in their groups while you browse elsewhere. The rules are
-saved with the setup, so next month *Browse* to the new folder and the files sort themselves.
+A file can feed several groups (two sheets of one workbook, each read by its own group). The
+rules are saved with the setup, so next month *Browse* to the new folder and the files sort
+themselves.
+
+**Folders.** The files pane lists exactly what the open folders hold. Several folders are
+treated as one list — a group can take files from any of them — and each can instead be given
+to one group: on the folder's row in the files pane, or with *＋ Folder* on the group's card. A
+folder given to a group hands it every file there (or every file its rule picks, when it has
+one), keeps them from other groups' rules, and is read again at each run, so files added later
+are included. When a setup is loaded, its saved files are fitted to the open folders: the same
+file, else a file of the same name, else left out and reported.
 
 *2 · Combine.* Each step makes a new table from the groups and the steps above it:
 
@@ -311,6 +359,25 @@ any of those (several files at once); a name already in use gets " (2)".
 - **One file at a time** (default). Each input goes through the pipeline and streams to a staging Parquet file (`<cache>\staging`) before the next one starts, so only one file's working set is in memory — for a workbook, its one full parse. Outputs are then written from the staged data 200,000 rows at a time. Staging is deleted after the run; leftovers from a crash are swept after a day.
 - **Several at once.** Up to four files together, plus the process-pool first read for workbooks. Faster for many small files on a multi-core machine; more memory.
 - **Cancel** stops between files or chunks and deletes whatever that run wrote. A file that fails, or runs out of memory, gets its own error row and the rest carry on (unless *Stop on first error*). Per-file row counts are exact in every mode.
+- **A process of its own.** Run, Count, Find, *Run on every file*, *Run all dashboards* and
+  drill-through on every file work in a separate process (`worker.py`). Memory is the usual
+  reason a big batch fails — a workbook is parsed whole, a join is built in memory — and inside
+  the window's process that used to close the window. Now the worker stops, the window says
+  what happened and how much memory it had used, and nothing else is lost; the worker's memory
+  goes back to the system the moment it ends, so the window stays small between runs. Cancel
+  reaches it; one that doesn't stop within 20 seconds is ended. Only one such job runs at a time.
+  The first start of a worker takes about a second (it loads polars). `COLSIFT_INPROCESS=1`
+  runs everything in the window's process as before; a PC that won't start a second process
+  falls back to that by itself.
+- **Memory meter.** The status bar shows the window's memory and, during a run, the worker's;
+  it turns amber when the PC is short of free memory and red when nearly out. The tooltip says
+  how much is free. Each run's results end with its peak memory.
+- **Crash log.** `colsift.log` in `%LOCALAPPDATA%\ColSift\logs` (or `COLSIFT_LOGS`) collects
+  Python tracebacks from any thread and, for a crash in native code, the stack at the moment it
+  happened — what to send when something goes wrong.
+- Interactive reads (peek, preview, field lists) take turns, so two big workbooks are never
+  parsed at the same moment; cards draw at most 1,500 rows and pivots 4,000 on screen — the
+  export carries every row.
 
 ## Peek
 
@@ -377,6 +444,8 @@ Limits worth knowing (1.3):
 - Charts are drawn in the app (inline SVG) and in the PDFs (vector); the exported sheets carry the tables, not chart objects.
 - Combine previews use the first 5 files of each group, up to 5,000 rows each; runs and "every file" read everything.
 - A relationship joins the lookup side's *first* row per key; *Check* on the Relationships tab says when a key repeats.
+- An Overview filter matches fields by name: a slicer on TAX_CODE narrows every table with a TAX_CODE column, whatever the values mean there. Rename a column (alias) when two tables use one name for different things.
+- The memory meter, the crash log and the worker process were tested on Linux; the Windows parts (memory figures through the Windows API, the worker under the Nuitka exe) follow the documented interfaces but have not been run on Windows yet.
 
 ## Headless
 
@@ -474,3 +543,5 @@ The Windows GUI build adds pywebview and its .NET / WebView2 glue — a few MB.
 | `COLSIFT_NO_CACHE=1` | Read workbooks directly every time |
 | `COLSIFT_WORKERS=n` | Worker processes for first reads; `1` = off |
 | `COLSIFT_XLSX=classic` | Use xlsxwriter instead of the fast writer (not in the lean build) |
+| `COLSIFT_INPROCESS=1` | Run, Count, Find and full dashboards in the window's own process (no worker) |
+| `COLSIFT_LOGS` | Where `colsift.log` goes (default: `%LOCALAPPDATA%\ColSift\logs`) |
