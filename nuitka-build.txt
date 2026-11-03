@@ -1,0 +1,469 @@
+================================================================================
+ ColSift 2.0 — building a small, fast exe
+================================================================================
+
+Short version: run build.bat. It creates a clean virtual environment (.buildenv),
+installs only requirements.txt + requirements-build.txt, and runs build.py, which
+calls Nuitka with the flags below, deletes Nuitka's scratch folder, and prints the
+size of what you actually ship.
+
+  build.bat                      dist\ColSift.exe — one compressed file
+  build.bat --mode standalone    dist\app.dist\  — a folder, fastest start
+  build.bat --cli                also dist\colsift-cli.exe (headless, scheduled runs)
+  build.bat --lean               drop openpyxl, the reader of last resort (~10 MB)
+  build.bat --check              only check the environment
+
+Where the 1 GB+ came from, and what build.py does about each
+-----------------------------------------------------------
+1. The scratch folder. --output-dir=build leaves build\app.build (generated C,
+   object files) beside build\app.dist. It is often bigger than the program and
+   never ships. build.py passes --remove-output, so it is deleted when the build
+   finishes.
+2. Everything else installed in that Python. Nuitka follows every import it can
+   see. A Python that also has pandas, pyarrow (300 MB+ of DLLs), numpy, scipy,
+   matplotlib or Qt hands all of it to Nuitka, and one stray import pulls it in.
+   build.bat's clean environment simply doesn't have them; build.py also lists
+   them in --nofollow-import-to, including pywebview's Qt / GTK / macOS backends.
+3. No compression. --onefile packs the program with zstd (pip install zstandard —
+   in requirements-build.txt) to roughly a third of the folder's size on disk.
+   The 1.4 notes below say onefile "does not make it smaller" — true of the
+   unpacked size, not of the file you copy around. With a fixed
+   --onefile-tempdir-spec, the first start unpacks once into
+   %LOCALAPPDATA%\ColSift\<version> and every later start reuses that copy, so
+   it starts as fast as the folder build.
+
+Also smaller in 2.0: xlsxwriter isn't shipped (ColSift writes .xlsx itself; set
+COLSIFT_XLSX=classic only in a non-lean build with xlsxwriter installed), and the
+new PDF export needs no library — pdfout.py writes PDF directly. depscan.py now
+runs the workspace and PDF paths too: the whole flow still imports polars and
+nothing else from the heavy list.
+
+Faster start in 2.0: app.py opens the window first and imports polars and the
+engine on a background thread; the first call that needs them waits.
+
+What build.py runs (Windows, onefile)
+-------------------------------------
+python -m nuitka --mode=onefile ^
+  --assume-yes-for-downloads --remove-output ^
+  --output-dir=dist --output-filename=ColSift.exe ^
+  --python-flag=no_asserts ^
+  --include-module=engine --include-module=formula --include-module=xlsxfast ^
+  --include-module=analysis --include-module=workspace --include-module=pdfout ^
+  --include-package=fastexcel ^
+  --nofollow-import-to=pandas --nofollow-import-to=pyarrow --nofollow-import-to=numpy ^
+  --nofollow-import-to=matplotlib --nofollow-import-to=scipy --nofollow-import-to=IPython ^
+  --nofollow-import-to=PIL --nofollow-import-to=sqlalchemy --nofollow-import-to=xlsxwriter ^
+  --nofollow-import-to=webview.platforms.qt --nofollow-import-to=webview.platforms.gtk ^
+  ... (the full list is EXCLUDE in build.py) ^
+  --noinclude-pytest-mode=nofollow --noinclude-setuptools-mode=nofollow ^
+  --noinclude-IPython-mode=nofollow --noinclude-unittest-mode=nofollow ^
+  --include-data-files=ui.html=ui.html --include-package-data=webview ^
+  --windows-console-mode=disable --include-package=clr_loader ^
+  --include-package-data=clr_loader --include-package-data=pythonnet ^
+  --onefile-tempdir-spec={CACHE_DIR}/ColSift/2.0.0 ^
+  --company-name=ColSift --product-name=ColSift ^
+  --file-version=2.0.0 --product-version=2.0.0 ^
+  app.py
+
+Nuitka older than 2.5 doesn't know --mode; build.py then uses --standalone
+(--onefile). polars is not force-included with --include-package: Nuitka follows
+the modules polars really imports, which keeps its optional pieces (database,
+plotting back-ends, cloud readers) out unless something asks for them.
+
+The four checks in section 4 below still apply — add a fifth: open a workspace,
+press Run workspace, and open the PDF it writes.
+
+Measured on Linux (headless CLI build, same flags, Nuitka 4.2, polars 1.44):
+  --mode standalone   238 MB folder (172 MB is polars' Rust core)
+  --mode onefile      45 MB single file
+  no scratch folder left behind; a full workspace run including start-up: 0.9 s.
+Windows adds pywebview, the .NET loader and WebView2 glue — a few MB. build.py
+prints the size of exactly what ships.
+
+
+================================================================================
+ ColSift — Nuitka build commands (Windows)
+================================================================================
+
+Run from the folder holding app.py, engine.py and ui.html.
+Everything below is cmd.exe. In PowerShell swap the ^ line-continuations for `.
+
+
+--------------------------------------------------------------------------------
+ 0. READ THIS FIRST — the path trap   (1.4 notes, all still true)
+--------------------------------------------------------------------------------
+
+Nuitka gives you TWO different "current folder", and mixing them up is the
+usual reason a compiled build loses every saved template.
+
+  __file__            After --onefile this points INSIDE the temp folder Nuitka
+                      unpacks to on launch (%TEMP%\ONEFIL~1\...). It is correct
+                      for READING bundled files. Anything you WRITE there is
+                      deleted the moment the app closes.
+
+  sys.argv[0]         The real .exe the user double-clicked. This is the only
+                      safe base for writing.
+
+engine.py already splits these:
+
+  resource_dir()  ->  Path(__file__).parent          reads ui.html
+  app_dir()       ->  Path(sys.argv[0]).parent       when frozen; writes go here
+  profile_dir()   ->  COLSIFT_PROFILES, else app_dir()\profiles,
+                      else %USERPROFILE%\.colsift\profiles
+
+So saved setups land next to ColSift.exe. If the exe sits somewhere read-only
+(Program Files, a locked network share) the third fallback takes over on its
+own — no error, no lost templates. The Saved-setups panel shows the folder in
+use, so you can always confirm where they went.
+
+The WORKBOOK CACHE follows the opposite rule on purpose: it goes to
+%LOCALAPPDATA%\ColSift\cache, never beside the exe. Templates are small and
+belong with the app; cached sheets are large and belong on the local disk — an
+exe on a network share must not start writing gigabytes to that share.
+COLSIFT_CACHE overrides it.
+
+Do NOT "fix" this by hardcoding os.getcwd(). The working directory is wherever
+the user launched from, which for a desktop shortcut is not the app folder.
+
+
+--------------------------------------------------------------------------------
+ 1. STANDALONE — the 1.4 manual command (build.py supersedes it)
+--------------------------------------------------------------------------------
+
+Produces app.dist\ containing ColSift.exe plus its DLLs. Copy the whole folder.
+Starts instantly (no unpack step) and templates sit right there in
+app.dist\profiles.
+
+python -m nuitka ^
+  --standalone ^
+  --assume-yes-for-downloads ^
+  --windows-console-mode=disable ^
+  --output-filename=ColSift.exe ^
+  --output-dir=build ^
+  --include-data-files=ui.html=ui.html ^
+  --include-module=engine ^
+  --include-module=formula ^
+  --include-module=xlsxfast ^
+  --include-module=analysis ^
+  --include-module=workspace ^
+  --include-module=pdfout ^
+  --include-package=webview ^
+  --include-package-data=webview ^
+  --include-package=polars ^
+  --include-package=fastexcel ^
+  --include-package=xlsxwriter ^
+  --include-package=openpyxl ^
+  --include-package=clr_loader ^
+  --include-package-data=clr_loader ^
+  --include-package-data=pythonnet ^
+  --nofollow-import-to=pandas ^
+  --nofollow-import-to=pyarrow ^
+  --nofollow-import-to=numpy ^
+  --nofollow-import-to=matplotlib ^
+  --nofollow-import-to=scipy ^
+  --nofollow-import-to=IPython ^
+  --nofollow-import-to=PIL ^
+  --nofollow-import-to=sqlalchemy ^
+  --nofollow-import-to=connectorx ^
+  --nofollow-import-to=deltalake ^
+  --nofollow-import-to=dask ^
+  --nofollow-import-to=numba ^
+  --nofollow-import-to=altair ^
+  --nofollow-import-to=great_tables ^
+  --nofollow-import-to=xlsx2csv ^
+  --nofollow-import-to=fsspec ^
+  --nofollow-import-to=cloudpickle ^
+  --noinclude-pytest-mode=nofollow ^
+  --noinclude-setuptools-mode=nofollow ^
+  --noinclude-IPython-mode=nofollow ^
+  --nofollow-import-to=matplotlib ^
+  --company-name="Emirates Group" ^
+  --product-name="ColSift" ^
+  --file-version=1.4.0 ^
+  --product-version=1.4.0 ^
+  --file-description="Column extractor for large text and Excel extracts" ^
+  --windows-icon-from-ico=colsift.ico ^
+  app.py
+
+Drop the --windows-icon-from-ico line if you have no .ico yet.
+
+
+--------------------------------------------------------------------------------
+ 2. ONEFILE — the 1.4 manual command (build.py supersedes it)
+--------------------------------------------------------------------------------
+
+Same flags plus --onefile. Slower to start (it unpacks each launch) but it is
+one file to email or drop on a share.
+
+python -m nuitka ^
+  --standalone ^
+  --onefile ^
+  --assume-yes-for-downloads ^
+  --windows-console-mode=disable ^
+  --output-filename=ColSift.exe ^
+  --output-dir=build ^
+  --onefile-tempdir-spec="{CACHE_DIR}\ColSift\{VERSION}" ^
+  --include-data-files=ui.html=ui.html ^
+  --include-module=engine ^
+  --include-module=formula ^
+  --include-module=xlsxfast ^
+  --include-module=analysis ^
+  --include-module=workspace ^
+  --include-module=pdfout ^
+  --include-package=webview ^
+  --include-package-data=webview ^
+  --include-package=polars ^
+  --include-package=fastexcel ^
+  --include-package=xlsxwriter ^
+  --include-package=openpyxl ^
+  --include-package=clr_loader ^
+  --include-package-data=clr_loader ^
+  --include-package-data=pythonnet ^
+  --nofollow-import-to=pandas ^
+  --nofollow-import-to=pyarrow ^
+  --nofollow-import-to=numpy ^
+  --nofollow-import-to=matplotlib ^
+  --nofollow-import-to=scipy ^
+  --nofollow-import-to=IPython ^
+  --nofollow-import-to=PIL ^
+  --nofollow-import-to=sqlalchemy ^
+  --nofollow-import-to=connectorx ^
+  --nofollow-import-to=deltalake ^
+  --nofollow-import-to=dask ^
+  --nofollow-import-to=numba ^
+  --nofollow-import-to=altair ^
+  --nofollow-import-to=great_tables ^
+  --nofollow-import-to=xlsx2csv ^
+  --nofollow-import-to=fsspec ^
+  --nofollow-import-to=cloudpickle ^
+  --noinclude-pytest-mode=nofollow ^
+  --noinclude-setuptools-mode=nofollow ^
+  --noinclude-IPython-mode=nofollow ^
+  --company-name="Emirates Group" ^
+  --product-name="ColSift" ^
+  --file-version=1.4.0 ^
+  --product-version=1.4.0 ^
+  --file-description="Column extractor for large text and Excel extracts" ^
+  app.py
+
+--onefile-tempdir-spec pins the unpack folder to a stable cached path instead of
+a fresh random one per launch, so the second start is much faster. It does NOT
+make that folder safe to write to — templates still go beside the .exe.
+
+
+--------------------------------------------------------------------------------
+ 3. WHY EACH NON-OBVIOUS FLAG IS THERE
+--------------------------------------------------------------------------------
+
+--include-data-files=ui.html=ui.html
+    The whole interface. Without it the app starts and exits with
+    "ui.html missing next to app.py". Left side is the source path at build
+    time, right side is where it lands in the bundle. Keep them identical
+    so resource_dir() finds it.
+
+--include-module=engine
+--include-module=formula
+--include-module=xlsxfast
+    Nuitka follows the import anyway, but naming it makes the failure loud at
+    build time instead of at first launch.
+
+--include-package-data=webview
+    pywebview ships JavaScript files (webview\js\*.js) that it injects into
+    the page to create the pywebview.api bridge. They are package DATA, not
+    modules, so Nuitka skips them by default. Miss this and the window opens,
+    renders the UI, and every button does nothing — window.pywebview is
+    undefined. This is the single most common broken pywebview build.
+
+--include-package=clr_loader / --include-package-data=pythonnet
+    The Windows backend runs on pythonnet. The .NET runtime DLLs live in
+    site-packages\pythonnet\runtime\ as data files. Missing them gives
+    "Failed to create a default .NET runtime" at startup.
+
+--include-package=polars / fastexcel
+    Both are compiled Rust extensions. Named explicitly so the .pyd files and
+    their metadata are collected rather than half-detected.
+
+--nofollow-import-to=pandas,numpy,matplotlib
+    polars can hand data to pandas, so Nuitka pulls the whole scientific stack
+    in unless told not to. ColSift never touches them. Cuts roughly 150 MB.
+    Remove these lines if you later add a pandas code path.
+
+--windows-console-mode=disable
+    No console window behind the app. Use =force while debugging so Python
+    tracebacks are visible — the guard() wrapper prints them to stderr.
+
+
+--------------------------------------------------------------------------------
+ 3b. WORKER PROCESSES
+--------------------------------------------------------------------------------
+
+First reads of several workbooks run in child processes. Nuitka supports this
+without extra flags: its multiprocessing plugin is on by default and relaunches
+the exe as a worker, and app.py calls multiprocessing.freeze_support() before
+anything else. Nothing to add to the commands above.
+
+If a locked-down PC or antivirus stops the children from starting, the app
+notices and parses one workbook at a time instead — slower, never broken.
+Set COLSIFT_WORKERS=1 to skip the attempt entirely on such machines.
+
+
+--------------------------------------------------------------------------------
+ 4. AFTER THE BUILD — four checks
+--------------------------------------------------------------------------------
+
+a) Move the exe somewhere else entirely (a different drive) and start it. If it
+   dies on ui.html, --include-data-files did not take.
+
+b) Save a setup, close, reopen, load it. If it is gone you are writing into the
+   temp unpack dir — check that app_dir() is using sys.argv[0].
+
+c) Open a folder with a .xlsx in it. If the file list shows it but Peek says
+   fastexcel is missing, --include-package=fastexcel did not take and you are
+   silently on the slow openpyxl fallback.
+
+d) Tick three or more new workbooks and press Count. The status line should
+   walk through "First read of …" for each, and the rail's cache figure should
+   grow. Press Count again — it should come back almost at once.
+
+
+--------------------------------------------------------------------------------
+ 5. HEADLESS BUILD (optional)
+--------------------------------------------------------------------------------
+
+engine.py runs on its own with no pywebview, for a scheduled monthly run:
+
+python -m nuitka ^
+  --standalone ^
+  --output-filename=colsift-cli.exe ^
+  --output-dir=build-cli ^
+  --include-package=polars ^
+  --include-package=fastexcel ^
+  --include-package=xlsxwriter ^
+  --include-package=openpyxl ^
+  --nofollow-import-to=pandas ^
+  --nofollow-import-to=numpy ^
+  engine.py
+
+  colsift-cli.exe --profile "Monthly YQ tax" --folder D:\extracts\2026-07
+  colsift-cli.exe --profile "Monthly YQ tax" --folder D:\extracts\2026-07 --count
+  colsift-cli.exe --job job.json --out D:\output
+
+For the CLI build, point COLSIFT_PROFILES at a fixed shared folder so the
+scheduled task and the desktop app read the same templates:
+
+  setx COLSIFT_PROFILES "\\server\finance\colsift\profiles"
+
+
+--------------------------------------------------------------------------------
+ 6. BUILD PREREQUISITES
+--------------------------------------------------------------------------------
+
+python -m pip install nuitka ordered-set zstandard
+python -m pip install pywebview polars fastexcel xlsxwriter openpyxl
+
+Nuitka needs a C compiler. On first run it offers to download MinGW64 —
+--assume-yes-for-downloads accepts that without prompting. If your machine
+blocks the download, install Visual Studio Build Tools with the
+"Desktop development with C++" workload instead.
+
+Expect 5-15 minutes for a cold standalone build.
+
+1.3 notes
+---------
+- formula.py and xlsxfast.py are new modules beside engine.py — the --include-module lines above
+  pull them in. Nothing else changes in the build.
+- Runs stage each input as Parquet under the cache folder (%LOCALAPPDATA%\ColSift\cache\staging,
+  or COLSIFT_CACHE). It is emptied after every run; leftovers from a crash are swept after a day.
+  If the cache folder is on a small drive, point COLSIFT_CACHE somewhere roomier — a staged
+  batch is roughly the size of the filtered output, lz4-compressed.
+
+=============================================================================
+1.4 — new modules, and why the build was 1.5 GB
+=============================================================================
+
+New module: analysis.py (the dashboard and the pivot summaries). The
+--include-module=analysis line above pulls it in; nothing else changes.
+
+FIRST: check what you actually measured
+---------------------------------------
+--output-dir=build produces TWO folders:
+
+  build\app.build   generated C files, .obj, .lib, .pdb — scratch, never shipped.
+                    Routinely 500 MB - 1 GB on its own.
+  build\app.dist    the program. This is the only thing you copy or zip.
+
+If the 1.5 GB is the whole build\ folder, a large part of it is scratch that
+stays on your machine. Delete build\app.build after a successful build and
+measure app.dist on its own:
+
+  python buildsize.py build\app.dist
+
+buildsize.py prints the biggest folders and files inside the dist, flags what is
+safe to delete (Tk, wheel metadata, .pyi stubs, .pdb symbols, polars' CLI and
+docs), and with --prune deletes them and tells you what it freed. Run
+ColSift.exe once afterwards to confirm it still starts.
+
+SECOND: stop shipping packages ColSift never imports
+-----------------------------------------------------
+Don't guess this list — measure it:
+
+  python depscan.py                      (generated sample data)
+  python depscan.py C:\extracts\JUL.xlsx (your own file — more representative)
+
+It runs a full flow (peek, preview, count, analysis, extract to CSV and to XLSX
+with formats and a formula column), then prints which top-level packages were
+imported and which were not, plus the exact --nofollow-import-to= flags.
+
+Measured on the build machine: the whole flow — including a 60,000-row workbook
+in and a formatted workbook out with analysis sheets — imports polars and
+nothing else from that list. With openpyxl, xlsxwriter, numpy, pandas and
+pyarrow all blocked at import time, every step still succeeded and nothing even
+attempted to import them.
+
+The one worth checking first is pyarrow: it is the biggest package that turns up
+in a polars build (300 MB+ of DLLs), and ColSift does not need it — sink_parquet
+and scan_parquet are polars' own Rust code, not Arrow's Python bindings.
+
+About pandas and numpy: polars imports both lazily, and only for paths ColSift
+never takes (to_pandas, to_numpy, constructing a frame from an ndarray). Its
+lazy import catches ImportError, and Nuitka's nofollow raises
+ModuleNotFoundError, which is a subclass of ImportError, so the catch holds.
+That is why --nofollow-import-to=pandas is safe to keep. If a future change does
+crash on a missing numpy, depscan.py will show numpy in the "imported" list and
+say so explicitly — at that point put numpy back rather than guessing.
+
+What cannot be trimmed
+----------------------
+  polars\polars.abi3.pyd     the Rust engine, ~100 MB and irreducible
+  fastexcel                  the Rust Excel reader
+  webview package data       pywebview's own JS/HTML — dropping it breaks the window
+  clr_loader / pythonnet     the .NET WinForms backend
+
+openpyxl and xlsxwriter are fallbacks only
+------------------------------------------
+Since 1.2 ColSift writes .xlsx itself. openpyxl is now used only when calamine
+cannot read a workbook at all (sheet names, raw rows), and xlsxwriter only if
+the built-in writer is bypassed. Dropping both saves roughly 20 MB and costs you
+the fallback for odd workbooks. To drop them, remove their two
+--include-package lines and add:
+
+  --nofollow-import-to=openpyxl --nofollow-import-to=xlsxwriter ^
+
+Keep them if you ever open .xls or .xlsb files that calamine chokes on.
+
+Console window
+--------------
+--windows-console-mode=force keeps a console window open beside the app: right
+for debugging a build that dies on start, wrong for the people you hand it to.
+Ship with --windows-console-mode=disable (as in the commands above). It makes no
+difference to size.
+
+--onefile does not make it smaller
+----------------------------------
+It packs the same dist into one compressed exe and unpacks it to a temp folder
+on every start — a slower first launch for the same payload. Use it because one
+file is easier to hand around, not to save space.
+
+Rough expectation after the above: app.dist in the 250 - 400 MB range, most of
+it polars and fastexcel. If it is still far above that, send me the first
+twenty lines of buildsize.py's output and the answer will be in there.

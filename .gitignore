@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+dist/
+build/
+build-cli/
+*.build/
+*.dist/
+*.onefile-build/
+.buildenv/
+saved/
+profiles/
+depscan-result.json

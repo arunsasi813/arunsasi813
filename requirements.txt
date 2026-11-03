@@ -1,0 +1,7 @@
+# What ColSift needs to run. Nothing else: every extra package installed next to these
+# is something Nuitka may follow into the build.
+pywebview>=5.0
+polars>=1.25
+fastexcel>=0.12
+# Reader of last resort for workbooks calamine can't open. Optional: build.py --lean drops it.
+openpyxl>=3.1

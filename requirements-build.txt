@@ -1,0 +1,4 @@
+nuitka>=2.5
+ordered-set
+# compresses the onefile exe to roughly a third of the folder's size
+zstandard
