@@ -219,6 +219,11 @@ class Api:
         return _m()[0].list_folder(p.get("folder", ""), bool(p.get("recursive")), p.get("pattern", ""))
 
     @guard
+    def list_folders(self, p: dict) -> dict:
+        """Several folders at once — the files pane groups them by folder."""
+        return _m()[3].list_folders(p.get("folders") or [], p.get("pattern") or "")
+
+    @guard
     def sheets(self, path: str) -> dict:
         return {"ok": True, "sheets": _m()[0].sheet_names(path)}
 
@@ -440,6 +445,11 @@ class Api:
     @guard
     def ws_autogroup(self, p: dict) -> dict:
         return _m()[3].auto_group(p.get("workspace") or {}, p.get("files") or [], p.get("keep_manual", True))
+
+    @guard
+    def ws_rebind(self, p: dict) -> dict:
+        """Fit a setup's groups to the files listed now (see workspace.rebind)."""
+        return _m()[3].rebind(p.get("workspace") or {}, p.get("files") or [], p.get("saved") or {})
 
     @guard
     def ws_schema(self, ws: dict) -> dict:

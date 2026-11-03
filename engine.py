@@ -3046,12 +3046,14 @@ def _cli(argv: list[str]) -> int:
         import workspace as W
         ws = W.from_any(job, a.profile or "")
         if a.folder:
+            # the folder replaces the files the setup was saved with: groups keep files of
+            # the same name, rules re-sort the rest; a lone hand-picked group takes them all
             files = [f["path"] for f in list_folder(a.folder, a.recursive, pattern=a.pattern)["files"]]
             live = [g for g in ws["groups"] if g["enabled"]]
-            if len(live) == 1 and (live[0]["match"].get("mode") or "manual") == "manual":
+            if len(live) == 1 and (live[0]["match"].get("mode") or "manual") == "manual" and not live[0]["folders"]:
                 live[0]["files"] = files
             else:
-                ws = W.auto_group(ws, files, keep_manual=False)["workspace"]
+                ws = W.rebind(ws, files)["workspace"]
         if a.out:
             ws["output"]["folder"] = a.out
         res = W.run_setup(ws, on_progress=lambda p: print(f"  {p}", file=sys.stderr))

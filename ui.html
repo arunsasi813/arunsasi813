@@ -445,6 +445,18 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 .relrow .arrow{font-weight:700;color:var(--teal-2);padding:0 4px}
 .relst .ok{color:var(--teal-2);font-weight:600;font-size:11.5px}.relst .warn2{color:var(--amber);font-weight:600;font-size:11.5px}.relst .bad{color:var(--red);font-size:11.5px}
 .trow{display:flex;gap:8px;align-items:center;padding:2px 0}
+.fold{display:grid;grid-template-columns:12px 16px 1fr auto auto;gap:6px;align-items:center;padding:6px 12px 5px;
+  border-top:1px solid var(--rail-line);cursor:pointer;user-select:none}
+.fold:first-child{border-top:0}
+.fold:hover{background:var(--rail-2)}
+.fold .tw{color:#7d939c;font-size:10px;transition:transform .12s}
+.fold.open .tw{transform:rotate(90deg)}
+.fold .fnm{font-size:11.5px;color:#e8f0f2;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fold .fmeta{font-size:10px;color:#6f858e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fold select{height:21px;font-size:10.5px;max-width:96px;background:var(--rail-2);border-color:var(--rail-line);color:#e6eef1;padding:0 3px}
+.fold .fx{background:none;border:0;color:#6f858e;cursor:pointer;font-size:11px;padding:0 2px}
+.fold .fx:hover{color:#ff9a8f}
+.filelist.tree .file{padding-left:30px}
 .file .gtags{display:flex;gap:3px;margin-top:2px;flex-wrap:wrap}
 .file .gtags span{font-size:9px;border-radius:3px;padding:0 4px;color:#fff;letter-spacing:.03em}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -456,10 +468,11 @@ table.matrix tr.unas td.fn{color:var(--faint)}
   <h1>ColSift <em>column extractor</em></h1>
 
   <div class="sec">
-    <label class="lbl">Source folder</label>
+    <label class="lbl">Source folders</label>
     <div class="f" style="margin:5px 0 7px">
-      <input type="text" id="folder" placeholder="No folder chosen">
-      <button class="btn sm" id="pickFolder">Browse</button>
+      <input type="text" id="folder" placeholder="No folder chosen" title="Type a folder and press Enter — it replaces the folders listed">
+      <button class="btn sm" id="pickFolder" title="Choose a folder — it replaces the folders listed">Browse</button>
+      <button class="btn sm" id="addFolder" title="Add another folder — its files are listed with the others, under their folder">＋</button>
     </div>
     <div class="f" style="gap:8px">
       <input type="text" id="pattern" placeholder="Name filter, e.g. TAX_*.xlsx" style="flex:1">
@@ -967,7 +980,7 @@ const DEFAULT_OUTPUT = () => ({ folder:"", basename:"extract", format:"csv", del
            pdf:{dashboard:false, summaries:false, combined:false, size:"A4", orientation:"landscape"},
            layout:"workbook", tables:[], autotype:true, groups_as:"sheets" });
 const S = {
-  folder:"", files:[], sel:new Set(), active:null, sheets:[],
+  folder:"", folders:[], foldOpen:{}, savedFiles:null, known:new Set(), files:[], sel:new Set(), active:null, sheets:[],
   source:DEFAULT_SOURCE(),
   allCols:[], columns:[], filters:{type:"group", mode:"and", negate:false, enabled:true, children:[]}, add_columns:[],
   distinct:false, limit:"", stop_on_error:false,
@@ -1010,58 +1023,189 @@ function show(p){
 }
 
 /* ---------------- folder + files ---------------- */
+const recursive = () => $("#recursive").checked;
+function setFolders(paths){
+  S.folders = [...new Set(paths.filter(Boolean))].map(path => ({path, recursive: recursive()}));
+  S.folder = S.folders[0]?.path || "";
+  $("#folder").value = S.folders.length > 1 ? `${S.folders.length} folders` : S.folder;
+  $("#folder").title = S.folders.map(f => f.path).join("\n") || "Type a folder and press Enter — it replaces the folders listed";
+}
 $("#pickFolder").onclick = async () => {
   const r = await api().pick_folder(S.folder);
-  if (r?.folder){ $("#folder").value = r.folder; S.folder = r.folder; refreshFiles(); }
+  if (r?.folder){ setFolders([r.folder]); refreshFiles(); }
 };
-$("#folder").onchange = e => { S.folder = e.target.value.trim(); refreshFiles(); };
+$("#addFolder").onclick = async () => {
+  const r = await api().pick_folder(S.folder);
+  if (!r?.folder) return;
+  if (S.folders.some(f => f.path === r.folder)){ say("That folder is listed already.", ""); return; }
+  setFolders([...S.folders.map(f => f.path), r.folder]);
+  S.foldOpen[r.folder] = true;
+  refreshFiles();
+};
+$("#folder").onchange = e => {
+  const v = e.target.value.trim();
+  if (S.folders.length > 1 && v === `${S.folders.length} folders`) return;
+  setFolders(v ? [v] : []); refreshFiles();
+};
 $("#pattern").oninput = debounce(refreshFiles, 350);
-$("#recursive").onchange = refreshFiles;
+$("#recursive").onchange = () => { S.folders.forEach(f => f.recursive = recursive()); refreshFiles(); };
 
-async function refreshFiles(){
-  if (!S.folder) return;
-  const r = await api().list_files({folder:S.folder, recursive:$("#recursive").checked, pattern:$("#pattern").value});
-  if (!r?.ok){ say(r?.error || "Could not read that folder.", "err"); return; }
+/* The files pane lists exactly what the open folders hold — nothing else. A loaded
+   setup is fitted to them (fitGroups): its files stay where the same file is listed,
+   follow a file of the same name, or are left out and reported. */
+async function refreshFiles(opts = {}){
+  if (!S.folders.length){
+    S.files = []; S.known = new Set(); WS.groups.forEach(g => g.files = []); S.sel = new Set();
+    drawFiles(); drawGroupBar(); return;
+  }
+  const r = await api().list_folders({folders: S.folders, pattern: $("#pattern").value});
+  if (!r?.ok){ say(r?.error || "Could not read those folders.", "err"); return; }
+  if (!opts.noSync) syncBack();          // a setup being opened must not take the editor's old state
   S.files = r.files;
-  const g = activeGroup();
-  WS.groups.forEach(x => ensureFiles(x.files));             // files from other folders stay in their groups
-  const ruled = WS.groups.some(x => (x.match?.mode || "manual") !== "manual");
-  if (ruled) await autoGroupListed(true);                    // each group's rule picks its files
-  else if (WS.groups.length === 1) g.files = r.files.map(f => f.path);   // one group: every file, as always
+  const fit = await fitGroups();
   S.sel = new Set(activeGroup().files);
   drawFiles(); drawGroupBar();
   if ($("#p-ws").classList.contains("on")) wsDraw();
-  const first = activeGroup().files.find(p => r.files.some(f => f.path === p)) || (r.files[0] || {}).path;
-  if (first){ setActive(first); if (!ruled) say(`${r.files.length} file${r.files.length===1?"":"s"} found.`); }
-  else { say("No readable files in that folder — check the name filter.", "err"); }
+  if (WS.groups.length > 1 || S.folders.length > 1) wsSchemaRefresh();
+  const bad = (r.folders || []).filter(f => f.error);
+  const listed = new Set(S.files.map(f => f.path));
+  const first = activeGroup().files.find(p => listed.has(p)) || (opts.keepActive && listed.has(S.active) ? S.active : (S.files[0] || {}).path);
+  const gone = Object.entries(fit?.dropped || {}).map(([g, fs]) => `${g}: ${fs.length} file${fs.length === 1 ? "" : "s"}`);
+  if (first && first !== S.active) setActive(first);
+  if (bad.length) say(bad.map(b => b.error).join(" · "), "err");
+  else if (!S.files.length) say("No readable files there — check the name filter.", "err");
+  else if (opts.message) say(opts.message + (gone.length ? ` Not in these folders: ${gone.join(", ")}.` : ""), gone.length ? "" : "ok");
+  else say(`${S.files.length} file${S.files.length === 1 ? "" : "s"} in ${S.folders.length} folder${S.folders.length === 1 ? "" : "s"}` +
+           (gone.length ? ` — the setup's files not found here: ${gone.join(", ")}.` : "."));
+  return {gone};
+}
+/* fit every group to the files listed now */
+async function fitGroups(){
+  const listed = S.files.map(f => f.path), was = S.known;
+  S.known = new Set(listed);
+  const g0 = WS.groups[0];
+  if (WS.groups.length === 1 && (g0.match?.mode || "manual") === "manual" && !(g0.folders || []).length && !S.savedFiles){
+    // one hand-picked group, nothing loaded: newly listed files are ticked, the rest keep their ticks
+    g0.files = listed.filter(p => g0.files.includes(p) || !was.has(p));
+    return null;
+  }
+  const r = await api().ws_rebind({workspace: {...stripUi(WS), output: {}}, files: listed, saved: S.savedFiles || {}});
+  if (!r?.ok){ say(r?.error || "Could not fit the groups to these folders.", "err"); return null; }
+  WS.groups.forEach(g => { const n = r.workspace.groups.find(x => x.id === g.id); if (n) g.files = n.files; });
+  return r;
+}
+function folderOf(path){ return (S.files.find(f => f.path === path) || {}).folder || ""; }
+const baseName = p => String(p || "").split(/[\\/]/).filter(Boolean).pop() || p;
+async function assignFolder(path, gid){
+  syncBack();
+  const inFolder = new Set(S.files.filter(f => f.folder === path).map(f => f.path));
+  WS.groups.forEach(g => {
+    if ((g.folders || []).some(d => d.path === path)){
+      g.folders = g.folders.filter(d => d.path !== path);
+      g.files = g.files.filter(p => !inFolder.has(p));          // what the folder brought leaves with it
+    }
+  });
+  const g = WS.groups.find(x => x.id === gid);
+  if (g){
+    g.folders = [...(g.folders || []), {path, recursive: recursive()}];
+    WS.groups.forEach(x => { if (x !== g) x.files = x.files.filter(p => !inFolder.has(p)); });   // the folder's files move to it
+  }
+  if (S.savedFiles) Object.keys(S.savedFiles).forEach(k => S.savedFiles[k] = S.savedFiles[k].filter(p => !inFolder.has(p)));
+  await fitGroups();
+  S.sel = new Set(activeGroup().files);
+  drawFiles(); drawGroupBar(); wsDraw(); wsSchemaRefresh();
+  const mine = activeGroup().files;
+  if (mine.length && !mine.includes(S.active)) await setActive(mine[0]);
+  say(g ? `Every file in ${baseName(path)} now belongs to “${g.name}” — next month's files there will too.` : `${baseName(path)} is no longer tied to a group.`, "ok");
+}
+function closeFolder(path){
+  setFolders(S.folders.map(f => f.path).filter(p => p !== path));
+  WS.groups.forEach(g => g.folders = (g.folders || []).filter(d => d.path !== path));
+  refreshFiles();
+}
+function untick(paths){         // a file taken out by hand must not come back with the saved setup
+  if (!S.savedFiles) return;
+  const g = activeGroup(), drop = new Set(paths);
+  if (g && S.savedFiles[g.id]) S.savedFiles[g.id] = S.savedFiles[g.id].filter(p => !drop.has(p));
 }
 
+function fileItem(f){
+  return `<div class="file ${S.active===f.path?"active":""}" data-p="${esc(f.path)}">
+      <input type="checkbox" ${S.sel.has(f.path)?"checked":""} data-chk="${esc(f.path)}">
+      <div>
+        <div class="nm" title="${esc(f.path)}">${esc(f.name)}</div>
+        <div class="meta"><span class="tag">${esc(f.ext.slice(1))}</span>${f.size_h ? ` · ${esc(f.size_h)}` : ""}${f.modified ? ` · ${esc(f.modified)}` : ""}</div>
+        ${WS.groups.length > 1 && groupsOf(f.path).length ? `<div class="gtags">${groupsOf(f.path).map(g => `<span style="background:${gColor(g)}">${esc(g.name)}</span>`).join("")}</div>` : ""}
+      </div>
+    </div>`;
+}
+/* One folder and one group: the plain list. Several folders (or groups): a row per
+   folder — closed by default once there are several — that ticks all its files for the
+   open group, ties the folder to a group, or closes it. */
 function drawFiles(){
   $("#fileCount").textContent = S.files.length ? `(${S.sel.size}/${S.files.length})` : "";
   $("#sFiles").textContent = S.sel.size;
   const box = $("#filelist");
-  if (!S.files.length){ box.innerHTML = `<div class="empty">Nothing readable here.</div>`; return; }
-  box.innerHTML = S.files.map(f => `
-    <div class="file ${S.active===f.path?"active":""}" data-p="${esc(f.path)}">
-      <input type="checkbox" ${S.sel.has(f.path)?"checked":""} data-chk="${esc(f.path)}">
-      <div>
-        <div class="nm" title="${esc(f.rel)}">${esc(f.name)}</div>
-        <div class="meta"><span class="tag">${esc(f.ext.slice(1))}</span>${f.size_h ? ` · ${esc(f.size_h)}` : ""}${f.modified ? ` · ${esc(f.modified)}` : ""}</div>
-        ${WS.groups.length > 1 && groupsOf(f.path).length ? `<div class="gtags">${groupsOf(f.path).map(g => `<span style="background:${gColor(g)}">${esc(g.name)}</span>`).join("")}</div>` : ""}
-      </div>
-    </div>`).join("");
-  box.querySelectorAll("[data-chk]").forEach(c => c.onclick = e => {
-    e.stopPropagation();
-    c.checked ? S.sel.add(c.dataset.chk) : S.sel.delete(c.dataset.chk);
-    $("#fileCount").textContent = `(${S.sel.size}/${S.files.length})`;
-    $("#sFiles").textContent = S.sel.size;
-    syncBack(); drawGroupBar();
-    if (WS.groups.length > 1){ drawFiles(); wsSchemaRefresh(); }
-  });
-  box.querySelectorAll(".file").forEach(d => d.onclick = () => setActive(d.dataset.p));
+  const tree = S.folders.length > 1 || (WS.groups.length > 1 && S.folders.length > 0);
+  box.classList.toggle("tree", tree);
+  if (!S.files.length && !tree){
+    box.innerHTML = `<div class="empty">${S.folders.length ? "Nothing readable here." : "Choose a folder to see the files ColSift can read — .txt, .csv, .tsv, .dat, .xlsx, .xlsm, .xls. ＋ adds more folders."}</div>`;
+    return;
+  }
+  if (!tree){ box.innerHTML = S.files.map(fileItem).join(""); return; }
+  box.innerHTML = S.folders.map(d => {
+    const fs = S.files.filter(f => f.folder === d.path);
+    const on = fs.filter(f => S.sel.has(f.path)).length;
+    const open = S.foldOpen[d.path] ?? S.folders.length === 1;
+    const owner = WS.groups.find(g => (g.folders || []).some(x => x.path === d.path));
+    return `<div class="fold ${open ? "open" : ""}" data-fold="${esc(d.path)}" title="${esc(d.path)}">
+        <span class="tw">▶</span>
+        <input type="checkbox" data-fchk="${esc(d.path)}" ${fs.length && on === fs.length ? "checked" : ""} ${on && on < fs.length ? "data-mixed=1" : ""} title="Tick every file in this folder for “${esc(activeGroup()?.name || "")}”">
+        <div style="min-width:0"><div class="fnm">${esc(baseName(d.path))}</div>
+          <div class="fmeta">${fs.length} file${fs.length === 1 ? "" : "s"}${on ? ` · ${on} ticked` : ""}</div></div>
+        ${WS.groups.length > 1 ? `<select data-fgroup="${esc(d.path)}" title="Give every file in this folder — now and later — to one group">
+            <option value="">no group</option>${WS.groups.map(g => `<option value="${g.id}" ${owner?.id === g.id ? "selected" : ""}>→ ${esc(g.name)}</option>`).join("")}</select>` : "<span></span>"}
+        ${S.folders.length > 1 ? `<button class="fx" data-fdel="${esc(d.path)}" title="Close this folder">✕</button>` : "<span></span>"}
+      </div>` + (open ? fs.map(fileItem).join("") || `<div class="empty" style="padding:6px 30px">Nothing readable here.</div>` : "");
+  }).join("");
+  box.querySelectorAll("[data-mixed]").forEach(c => c.indeterminate = true);
 }
+$("#filelist").addEventListener("click", e => {
+  const chk = e.target.closest("[data-chk]");
+  if (chk){
+    e.stopPropagation();
+    chk.checked ? S.sel.add(chk.dataset.chk) : (S.sel.delete(chk.dataset.chk), untick([chk.dataset.chk]));
+    syncBack(); drawGroupBar();
+    if (WS.groups.length > 1 || S.folders.length > 1){ drawFiles(); wsSchemaRefresh(); }
+    else { $("#fileCount").textContent = `(${S.sel.size}/${S.files.length})`; $("#sFiles").textContent = S.sel.size; }
+    return;
+  }
+  const fchk = e.target.closest("[data-fchk]");
+  if (fchk){
+    e.stopPropagation();
+    const fs = S.files.filter(f => f.folder === fchk.dataset.fchk).map(f => f.path);
+    if (fchk.checked) fs.forEach(p => S.sel.add(p)); else { fs.forEach(p => S.sel.delete(p)); untick(fs); }
+    syncBack(); drawFiles(); drawGroupBar(); wsSchemaRefresh();
+    return;
+  }
+  const del = e.target.closest("[data-fdel]");
+  if (del){ e.stopPropagation(); closeFolder(del.dataset.fdel); return; }
+  if (e.target.closest("select")) return;
+  const fold = e.target.closest("[data-fold]");
+  if (fold){
+    const pth = fold.dataset.fold;
+    S.foldOpen[pth] = !(S.foldOpen[pth] ?? S.folders.length === 1);
+    drawFiles(); return;
+  }
+  const row = e.target.closest(".file");
+  if (row) setActive(row.dataset.p);
+});
+$("#filelist").addEventListener("change", e => {
+  const sel = e.target.closest("[data-fgroup]");
+  if (sel) assignFolder(sel.dataset.fgroup, sel.value);
+});
 $("#selAll").onclick = () => { S.sel = new Set(S.files.map(f=>f.path)); syncBack(); drawFiles(); drawGroupBar(); };
-$("#selNone").onclick = () => { S.sel.clear(); syncBack(); drawFiles(); drawGroupBar(); };
+$("#selNone").onclick = () => { untick([...S.sel]); S.sel.clear(); syncBack(); drawFiles(); drawGroupBar(); };
 
 async function setActive(path){
   S.active = path; drawFiles();
@@ -2675,18 +2819,11 @@ function syncBack(){
 function setupPayload(){
   syncBack();
   const out = JSON.parse(JSON.stringify(S.output)); delete out.formats;
-  return stripUi({...WS, output: out, processing: S.processing});
+  return stripUi({...WS, output: out, processing: S.processing, folders: S.folders});
 }
 const wsPayload = setupPayload;
 function wsCols(name){ return ((S.wsSchema?.tables || []).find(t => t.name === name) || {}).columns || []; }
 function wsTableInfo(name){ return (S.wsSchema?.tables || []).find(t => t.name === name); }
-function ensureFiles(paths){
-  const have = new Set(S.files.map(f => f.path));
-  paths.filter(p => !have.has(p)).forEach(p => {
-    const name = p.split(/[\\/]/).pop(), ext = (name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
-    S.files.push({name, path: p, rel: p, ext, kind: [".xlsx", ".xlsm", ".xlsb", ".xls"].includes(ext) ? "excel" : "text", size_h: "", modified: ""});
-  });
-}
 function groupsOf(path){ return WS.groups.filter(g => g.files.includes(path)); }
 
 /* ---- switching the open group ---- */
@@ -2696,7 +2833,7 @@ async function switchGroup(id, opts = {}){
   S.group = id;
   const g = activeGroup(); if (!g) return;
   applyGroupSetup(g.setup || {});
-  ensureFiles(g.files); S.sel = new Set(g.files);
+  S.sel = new Set(g.files);
   drawFiles(); drawGroupBar(); drawOutputMode();
   const first = g.files.find(p => S.files.some(f => f.path === p));
   if (!first){
@@ -2754,15 +2891,22 @@ $("#groupBar").addEventListener("click", async e => {
       const g = makeGroup(wsUnique(`Group ${WS.groups.length + 1}`), {source: DEFAULT_SOURCE()}, [], null);
       WS.groups.push(g); first = g;
     } else if (kind === "copy"){
-      const g = JSON.parse(JSON.stringify(cur)); g.id = uid(); g.name = wsUnique(cur.name + " copy");
+      const g = JSON.parse(JSON.stringify(cur)); g.id = uid(); g.name = wsUnique(cur.name + " copy"); g.folders = [];
       WS.groups.splice(WS.groups.indexOf(cur) + 1, 0, g); first = g;
     } else {
       const r = await api().load_profile(add.dataset.name);
       if (!r?.ok){ say(r?.error || "Could not load that setup.", "err"); return; }
+      const tied = [];
       for (const src of r.setup.groups){
         const g = {...JSON.parse(JSON.stringify(src)), id: uid(), name: wsUnique(src.name), profile: add.dataset.name};
+        (S.savedFiles ||= Object.fromEntries(WS.groups.map(x => [x.id, [...x.files]])))[g.id] = [...(g.files || [])];
+        g.files = []; g.folders = g.folders || [];          // fitted to the open folders below, never added as they were
+        tied.push(...g.folders.map(d => d.path));
         WS.groups.push(g); first = first || g;
       }
+      const more = tied.filter(x => !S.folders.some(f => f.path === x));
+      if (more.length){ setFolders([...S.folders.map(f => f.path), ...more]); await refreshFiles({noSync: true}); }
+      else await fitGroups();
     }
     await switchGroup(first.id, {fresh: true, force: true});
     if (kind === "blank") say(`“${first.name}” added. Tick the files it reads on the left, then set its columns and filters in the usual tabs.`, "ok");
@@ -2867,11 +3011,15 @@ function wsDrawGroups(){
         ${info?.columns?.length ? `<span class="chip2" title="${esc(info.columns.join(", "))}">${info.columns.length} column${info.columns.length === 1 ? "" : "s"} out</span>` : ""}
         <span style="flex:1"></span>
         <button class="btn sm ${open ? "" : "pri"}" data-k="edit" title="Open this group in the Peek, Columns, Filters … tabs">${open ? "Editing" : "Open"}</button>
+        <button class="btn sm ghost" data-k="addfolder" title="Give a whole folder to this group — what it holds now and later">＋ Folder</button>
         <button class="btn sm ghost" data-k="save" title="Save this group on its own under Saved setups">Save as setup</button>
         ${g.profile ? `<button class="btn sm ghost" data-k="reload" title="Replace its settings with the saved setup “${esc(g.profile)}”">Reload “${esc(g.profile)}”</button>` : ""}
         ${WS.groups.length > 1 ? `<button class="btn x" data-k="del" title="Remove this group">✕</button>` : ""}
       </div>
       <div class="sub" style="margin:4px 0 6px">${esc(setupSummary(g.setup || {}))}${info?.error ? ` · <span style="color:var(--red)">${esc(info.error)}</span>` : ""}</div>
+      ${(g.folders || []).length ? `<div class="f" style="gap:5px;flex-wrap:wrap;margin-bottom:6px"><label class="lbl">Folders</label>${g.folders.map(d =>
+        `<span class="chip2" title="${esc(d.path)} — every file in it belongs to this group${(g.match?.mode || "manual") !== "manual" && g.match?.mode !== "folder" ? ", if its rule picks it" : ""}">${esc(baseName(d.path))}
+          <button class="btn x" data-k="unfold" data-path="${esc(d.path)}" title="Untie this folder" style="padding:0 2px">✕</button></span>`).join("")}</div>` : ""}
       <div class="f" style="gap:6px;flex-wrap:wrap"><label class="lbl">Files by</label>
         <select data-k="mode" style="width:300px">${modes.map(m => `<option value="${m.id}" ${(g.match?.mode || "manual") === m.id ? "selected" : ""}>${esc(m.label)}</option>`).join("")}</select>
         ${(g.match?.mode || "manual") !== "manual" ? `<input type="text" data-k="value" value="${esc(g.match?.value || "")}" placeholder="${esc({pattern: "SALES_*.xlsx; SALES_*.csv", contains: "refund", ext: ".txt; .dat", regex: "^TAX_\\d{6}", folder: "2026-07", layout: "DOC_NO; AMOUNT"}[g.match?.mode] || "")}" style="flex:1;min-width:160px">` : ""}
@@ -2880,7 +3028,7 @@ function wsDrawGroups(){
   wsDrawFiles();
 }
 function wsDrawFiles(){
-  const all = [...new Set([...S.files.map(f => f.path), ...WS.groups.flatMap(g => g.files)])];
+  const all = S.files.map(f => f.path);
   const gs = WS.groups;
   if (!all.length){ $("#wsFiles").innerHTML = `<div class="empty">Choose a source folder on the left to list files here.</div>`; $("#wsFileInfo").textContent = ""; return; }
   const q = ($("#wsFileQ").value || "").toLowerCase();
@@ -2942,6 +3090,16 @@ $("#wsGroups").addEventListener("click", async e => {
   const b = e.target.closest("button[data-k]"); if (!b) return;
   const g = WS.groups.find(x => x.id === b.closest("[data-g]").dataset.g), k = b.dataset.k;
   if (k === "edit"){ await switchGroup(g.id); show("peek"); return; }
+  if (k === "addfolder"){
+    const r = await api().pick_folder(S.folder);
+    if (!r?.folder) return;
+    if (!S.folders.some(f => f.path === r.folder)){
+      setFolders([...S.folders.map(f => f.path), r.folder]);
+      await refreshFiles({keepActive: true});
+    }
+    await assignFolder(r.folder, g.id); return;
+  }
+  if (k === "unfold"){ await assignFolder(b.dataset.path, ""); return; }
   if (k === "del"){
     if (WS.groups.length < 2 || !confirm(`Remove the group “${g.name}” and its settings?`)) return;
     const i = WS.groups.indexOf(g), wasOpen = g.id === S.group;
@@ -3294,22 +3452,39 @@ $("#wsPrevBtn").onclick = () => wsPreview();
 /* ---- opening, saving and starting setups ---- */
 async function openSetup(st, name){
   WS = {kind: "colsift.setup", version: 2, name: st.name || name || "", groups: st.groups || [], steps: st.steps || [],
-        relationships: st.relationships || [], reports: st.reports || []};
+        relationships: st.relationships || [], reports: st.reports || [], overview: st.overview || null};
   if (!WS.groups.length) WS.groups.push(makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null));
+  WS.groups.forEach(g => g.folders = g.folders || []);
   applyOutput(st.output || {});
   S.processing = st.processing || "sequential"; syncOutputControls();
-  S.wsSchema = null; S.wsRelCheck = null; S.wsRelSug = null; S.anTarget = "group"; S.anData = null;
-  // one group with no files of its own is a template: it reads what is ticked now
+  S.wsSchema = null; S.wsRelCheck = null; S.wsRelSug = null; S.anTarget = "group"; S.anData = null; S.anCache = {};
+  // what the setup was saved with; fitGroups maps it onto whatever folders are open
   const live = liveGroups();
-  if (live.length === 1 && !live[0].files.length && (live[0].match?.mode || "manual") === "manual") live[0].files = [...S.sel];
-  S.group = WS.groups[0].id;
-  if (S.files.length && WS.groups.some(g => (g.match?.mode || "manual") !== "manual")){
-    const r = await api().ws_autogroup({workspace: {...stripUi(WS), output: {}}, files: S.files.map(f => f.path)});
-    if (r?.ok) WS.groups.forEach(g => { const n = r.workspace.groups.find(x => x.id === g.id); if (n) g.files = n.files; });
+  const template = live.length === 1 && !live[0].files.length && (live[0].match?.mode || "manual") === "manual" && !live[0].folders.length;
+  S.savedFiles = template ? null : Object.fromEntries(WS.groups.map(g => [g.id, [...g.files]]));
+  // folders: keep the ones open; with none open, open the setup's own. Folders tied to a
+  // group are part of the setup, so they are always listed.
+  const tied = WS.groups.flatMap(g => g.folders.map(d => d.path));
+  let paths = S.folders.map(f => f.path);
+  let note = "";
+  if (!paths.length){
+    paths = (st.folders || []).map(d => d.path || d);
+    if (!paths.length) paths = [...new Set(WS.groups.flatMap(g => g.files).map(p => p.replace(/[\\/][^\\/]*$/, "")))];
+  } else {
+    const savedIn = (st.folders || []).map(d => d.path || d).filter(x => !paths.includes(x));
+    if (savedIn.length) note = ` It was saved with ${savedIn.map(baseName).join(", ")} — ＋ adds ${savedIn.length === 1 ? "it" : "them"}.`;
   }
+  const want = [...new Set([...paths, ...tied])];
+  if (want.join("\n") !== S.folders.map(f => f.path).join("\n")) setFolders(want);
+  S.group = WS.groups[0].id;
+  if (template) WS.groups[0].files = [...S.sel];
+  let gone = [];
+  if (S.folders.length) gone = (await refreshFiles({message: `Loaded “${WS.name || name}”.${note}`, noSync: true}))?.gone || [];
+  else { WS.groups.forEach(g => g.files = []); drawFiles(); }
   await switchGroup(WS.groups[0].id, {fresh: true, force: true});
   $("#profileName").value = WS.name || name || "";
   wsDraw(); wsSchemaRefresh();
+  return {gone, note};
 }
 
 /* ---------------- job ---------------- */
@@ -3552,8 +3727,10 @@ $("#loadProfile").onclick = async () => {
   const name = $("#profileList").value; if (!name) return;
   const r = await api().load_profile(name);
   if (!r?.ok){ say(r?.error||"Could not load.", "err"); return; }
-  await openSetup(r.setup, name);
-  say(`Loaded “${name}” — ${WS.groups.length} group${WS.groups.length === 1 ? "" : "s"}. Reload columns if the layout changed.`, "ok");
+  const o = await openSetup(r.setup, name);
+  say(`Loaded “${name}” — ${WS.groups.length} group${WS.groups.length === 1 ? "" : "s"}.` +
+      (o.gone.length ? ` Not in the open folders, so left out: ${o.gone.join(", ")}.` : "") + o.note +
+      " Reload columns if the layout changed.", o.gone.length ? "" : "ok");
 };
 $("#newProfile").onclick = async () => {
   if ((WS.groups.length > 1 || WS.steps.length) && !confirm("Start a new, empty setup? Anything not saved in this one is lost.")) return;

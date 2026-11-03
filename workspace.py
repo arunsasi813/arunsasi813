@@ -137,9 +137,11 @@ def normalize(ws: dict | None) -> dict:
         g = {"id": g.get("id") or _id(), "name": str(g.get("name") or "").strip() or "Group",
              "enabled": g.get("enabled", True) is not False, "setup": g.get("setup") or {},
              "profile": g.get("profile") or "", "files": list(dict.fromkeys(g.get("files") or [])),
+             "folders": _folders(g.get("folders")),
              "match": {"mode": "manual", "value": "", **(g.get("match") or {})}}
         groups.append(g)
     ws["groups"] = groups
+    ws["folders"] = _folders(ws.get("folders"))
     ws["steps"] = [{"id": s.get("id") or _id(), "enabled": s.get("enabled", True) is not False,
                     "name": str(s.get("name") or "").strip() or "Step", **{k: v for k, v in s.items()
                                                                           if k not in ("id", "enabled", "name")}}
@@ -156,7 +158,24 @@ def normalize(ws: dict | None) -> dict:
     out.pop("formats", None)                      # column formats belong to each group
     ws["output"] = out
     ws["processing"] = ws.get("processing") or "sequential"
+    ov = ws.get("overview") or {}
+    ws["overview"] = {"name": ov.get("name") or "Overview",
+                      "analysis": {"export": False, "sheet_name": "Overview", "items": [], "filters": [],
+                                   **(ov.get("analysis") or {})},
+                      "summaries": {"export": False, "tabs": [], **(ov.get("summaries") or {})}}
     return ws
+
+
+def _folders(v: Any) -> list[dict]:
+    """Folders as [{path, recursive}] — a plain string is a folder without its subfolders."""
+    out, seen = [], set()
+    for x in v or []:
+        d = {"path": x, "recursive": False} if isinstance(x, str) else dict(x or {})
+        p = str(d.get("path") or "").strip()
+        if p and p not in seen:
+            seen.add(p)
+            out.append({"path": p, "recursive": bool(d.get("recursive"))})
+    return out
 
 
 def from_any(obj: dict | None, name: str = "") -> dict:
@@ -299,15 +318,20 @@ def _file_columns(path: str, setup: dict) -> list[str] | None:
         return None
 
 
-def auto_group(ws: dict, files: list[str], keep_manual: bool = True) -> dict:
+def auto_group(ws: dict, files: list[str], keep_manual: bool = True, replace: bool = False) -> dict:
     """Assign files to groups by the groups' rules, first match wins, in group order.
-    Files already placed by hand in a 'manual' group stay where they are."""
+    Files already placed by hand in a 'manual' group stay where they are. With
+    `replace`, `files` is everything there is: a group keeps nothing from outside it."""
     ws = normalize(ws)
     assign: dict[str, str | None] = {}
     why: dict[str, str] = {}
     manual = {f: g["id"] for g in ws["groups"] if (g["match"].get("mode") or "manual") == "manual"
               for f in g["files"]} if keep_manual else {}
+    owned = {f: g["id"] for g in ws["groups"] if g["enabled"] for f in folder_files(g, files)}
     for f in files:
+        if f in owned:                      # a folder assigned to a group: its files are that group's
+            assign[f], why[f] = owned[f], "folder"
+            continue
         if f in manual:
             assign[f], why[f] = manual[f], "assigned by hand"
             continue
@@ -320,11 +344,114 @@ def auto_group(ws: dict, files: list[str], keep_manual: bool = True) -> dict:
                 assign[f], why[f] = g["id"], g["match"]["mode"]
                 break
     for g in ws["groups"]:
-        keep = [f for f in g["files"] if f not in assign]          # files outside this list stay
+        keep = [] if replace else [f for f in g["files"] if f not in assign]   # files outside this list stay
         g["files"] = keep + [f for f in files if assign.get(f) == g["id"]]
     counts = {g["id"]: len(g["files"]) for g in ws["groups"]}
     return {"ok": True, "workspace": ws, "assign": assign, "why": why, "counts": counts,
             "unassigned": [f for f in files if not assign.get(f)]}
+
+
+def list_folders(folders: list[dict] | list[str], pattern: str = "") -> dict:
+    """The readable files of several folders, each tagged with the folder it was
+    listed under, each file once (a subfolder listed twice doesn't double it)."""
+    files: list[dict] = []
+    report: list[dict] = []
+    seen: set[str] = set()
+    for d in _folders(folders):
+        r = E.list_folder(d["path"], d["recursive"], pattern)
+        if not r.get("ok"):
+            report.append({"path": d["path"], "error": r.get("error") or f"Cannot read {d['path']}"})
+            continue
+        n = 0
+        for f in r["files"]:
+            if f["path"] not in seen:
+                seen.add(f["path"])
+                files.append({**f, "folder": d["path"]})
+                n += 1
+        report.append({"path": d["path"], "count": n})
+    return {"ok": True, "files": files, "folders": report, "count": len(files)}
+
+
+def list_files(folders: list[dict] | list[str], pattern: str = "") -> list[str]:
+    """Every readable file in these folders, in folder order, each file once."""
+    return [f["path"] for f in list_folders(folders, pattern)["files"]]
+
+
+def _under(path: str, folder: dict) -> bool:
+    p, root = Path(path), Path(folder["path"])
+    try:
+        rel = p.relative_to(root)
+    except ValueError:
+        return False
+    return folder.get("recursive") or len(rel.parts) == 1
+
+
+def folder_files(g: dict, files: list[str]) -> list[str]:
+    """The files of `files` that a group takes because one of its folders holds them —
+    all of them, or those its file rule picks when it has one."""
+    if not g.get("folders"):
+        return []
+    mode = (g.get("match") or {}).get("mode") or "manual"
+    out = []
+    for f in files:
+        if not any(_under(f, d) for d in g["folders"]):
+            continue
+        if mode in ("manual", "folder"):
+            out.append(f)
+        else:
+            cols = _file_columns(f, g["setup"]) if mode == "layout" else None
+            if match_rule(f, g["match"], cols, g["setup"]):
+                out.append(f)
+    return out
+
+
+def expand_folders(ws: dict) -> dict:
+    """A group with folders assigned reads whatever those folders hold *now* — so next
+    month's files are picked up without touching the setup."""
+    ws = normalize(ws)
+    for g in ws["groups"]:
+        if g["folders"]:
+            have = list_files(g["folders"])
+            g["files"] = list(dict.fromkeys([f for f in g["files"] if Path(f).exists()] + folder_files(g, have)))
+    return ws
+
+
+def rebind(ws: dict, files: list[str], saved: dict[str, list[str]] | None = None) -> dict:
+    """Fit a setup to the files at hand (the folders open in the window, or --folder).
+
+    A saved setup remembers full paths. Loading it must not drag those paths into the
+    file list: a file the setup knew stays in its group when the same path is listed,
+    else moves to a listed file of the same name (the setup copied to another folder),
+    else is dropped — and reported. Folder-assigned groups take what their folders
+    hold among `files`; rule groups are re-sorted over `files`. `saved` gives each
+    group's paths from when the setup was loaded, so adding a folder later brings
+    back the assignments it holds."""
+    ws = normalize(ws)
+    listed = list(dict.fromkeys(files))
+    have = set(listed)
+    by_name: dict[str, list[str]] = {}
+    for f in listed:
+        by_name.setdefault(Path(f).name.lower(), []).append(f)
+    dropped: dict[str, list[str]] = {}
+    moved = 0
+    for g in ws["groups"]:
+        want = list(dict.fromkeys(list(g["files"]) + list((saved or {}).get(g["id"]) or [])))
+        out: list[str] = []
+        for f in want:
+            if f in have:
+                out.append(f)
+                continue
+            alt = [x for x in by_name.get(Path(f).name.lower(), []) if x not in out]
+            if alt:
+                out.append(alt[0])
+                moved += 1
+            elif f in g["files"]:
+                dropped.setdefault(g["name"], []).append(Path(f).name)
+        g["files"] = list(dict.fromkeys(out + folder_files(g, listed)))
+    if any((g["match"].get("mode") or "manual") != "manual" for g in ws["groups"] if g["enabled"]):
+        ws = auto_group(ws, listed, keep_manual=True, replace=True)["workspace"]
+    return {"ok": True, "workspace": ws, "moved": moved, "dropped": dropped,
+            "counts": {g["id"]: len(g["files"]) for g in ws["groups"]}}
 
 
 # --------------------------------------------------------------------------
@@ -1224,7 +1351,7 @@ def run_setup(ws: dict, on_progress=None, cancel=None) -> dict:
     extract — engine.run, with every one of its options (one file per input,
     splitting, per-file row counts). Anything more: every group's ColSift work,
     then the combine steps on those results, then one export."""
-    ws = from_any(ws)
+    ws = expand_folders(from_any(ws))
     if not [g for g in ws["groups"] if g["enabled"]]:
         return {"ok": False, "error": "The setup has no groups."}
     if is_classic(ws):
@@ -1331,7 +1458,7 @@ def _cli(argv: list[str]) -> int:
         ap.error("need --workspace or --file")
     if a.folder:
         files = [f["path"] for f in E.list_folder(a.folder, a.recursive)["files"]]
-        ws = auto_group(ws, files, keep_manual=False)["workspace"]
+        ws = rebind(ws, files)["workspace"]
     if a.out:
         ws.setdefault("output", {})["folder"] = a.out
     res = run_setup(ws, on_progress=lambda p: print(f"  {p}", file=sys.stderr))
