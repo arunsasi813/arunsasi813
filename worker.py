@@ -37,6 +37,7 @@ def _jobs():
         "ws_drill": lambda p, prog, cancel: W.drill(p["workspace"], p["report"], "all", p.get("filters") or [],
                                                     int(p.get("limit") or 500)),
         "dashboards": lambda p, prog, cancel: W.run_dashboards(p["workspace"], "all", prog, cancel, p.get("only")),
+        "checks": lambda p, prog, cancel: W.test_checks(p["workspace"], "all", prog, cancel),
         "_selftest": _selftest,
     }
 
@@ -59,7 +60,7 @@ def _selftest(p: dict, prog, cancel) -> dict:
     return {"ok": True, "pid": os.getpid(), "echo": p.get("echo")}
 
 
-KINDS = ("run_setup", "run", "count", "find", "analyse", "drill", "ws_analyse", "ws_drill", "dashboards")
+KINDS = ("run_setup", "run", "count", "find", "analyse", "drill", "ws_analyse", "ws_drill", "dashboards", "checks")
 
 
 def main(kind: str, payload: dict, q, cancel, settings: dict) -> None:

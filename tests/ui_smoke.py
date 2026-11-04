@@ -159,7 +159,8 @@ def folders_and_loading(ui: UI, d: dict) -> None:
     ui.then("Loaded", lambda: page.click("#loadProfile"))
     assert sorted(ui.files_shown()) == ["codes.xlsx", "sales_JAN.csv"], ui.files_shown()
     assert ui.js("S.files.length") == 2, "a loaded setup never adds files that aren't in the open folders"
-    assert "not in these folders" in ui.msg().lower() or "not found here" in ui.msg().lower(), ui.msg()
+    said = ui.msg().lower()          # the file list's note, or the load's own line after it
+    assert any(x in said for x in ("not in these folders", "not found here", "not in the open folders")), ui.msg()
     ui.shot("loaded_without_stale_files")
     # ＋ February brings the saved assignments back
     ui.js(f"setFolders([...S.folders.map(f => f.path), {json.dumps(str(d['feb']))}]); refreshFiles()")
@@ -359,8 +360,57 @@ def parameters(ui: UI, d: dict) -> None:
     assert ui.js("WS.params.map(p => p.name)") == ["PERIOD", "MONTH"]
 
 
+def run_checks(ui: UI, d: dict) -> None:
+    """Checks on the Output tab: Check now, a Stop check that writes nothing, then as a warning."""
+    page = ui.page
+    three_groups(ui, d)
+    ui.tab("out")
+    out = d["out"] / "checked"
+    page.fill("#outFolder", str(out))
+    page.dispatch_event("#outFolder", "change")
+    page.select_option("#outFormat", "xlsx")
+    page.dispatch_event("#outFormat", "change")
+    page.uncheck("#runDash")
+    page.click("#checkAdd")                                   # Sales has at least 1 row
+    page.click("#checkAdd")
+    r1 = "#checkRows [data-ci='1']"
+    page.select_option(f"{r1} select[data-ck=kind]", "found")
+    page.select_option(f"{r1} select[data-ck=table]", "Sales")
+    page.select_option(f"{r1} select[data-ck=col]", "TAX_CODE")
+    page.select_option(f"{r1} select[data-ck=table2]", "Codes")
+    assert ui.js("WS.checks.map(c => [c.kind, c.table, (c.cols || []).join(), c.table2 || ''])") == \
+        [["rows", "Sales", "", ""], ["found", "Sales", "TAX_CODE", "Codes"]]
+    ui.then("Checks: 1 pass, 1 fail", lambda: page.click("#checkNow"))
+    assert "a run now would write nothing" in ui.msg()
+    assert page.inner_text("#checkRows [data-ci='0'] .ckres").startswith("✓")
+    assert "ZR" in page.inner_text(f"{r1} .ckres"), page.inner_text(f"{r1} .ckres")
+    ui.shot("checks")
+    assert not out.exists(), "Check now writes nothing"
+
+    ui.then("Stopped before writing", lambda: page.click("#btnRun"))
+    assert not out.exists() or not any(out.iterdir())
+    assert "Checks — 1 of 2 pass" in page.inner_text("#runResults")
+    ui.shot("checks_stopped")
+
+    ui.tab("out")
+    page.select_option(f"{r1} select[data-ck=on_fail]", "warn")
+    ui.then("1 check warned", lambda: page.click("#btnRun"))
+    import openpyxl
+    wb = openpyxl.load_workbook(next(out.glob("*.xlsx")))
+    rows = list(wb["Checks"].iter_rows(values_only=True))
+    assert [r[2] for r in rows[1:]] == ["PASS", "FAIL (warning)"], rows
+
+    page.fill("#profileName", "Checked")
+    ui.then("Saved", lambda: page.click("#saveProfile"))
+    ui.then("New setup", lambda: page.click("#newProfile"))
+    assert ui.js("WS.checks.length") == 0
+    page.select_option("#profileList", "Checked")
+    ui.then("Loaded", lambda: page.click("#loadProfile"))
+    assert ui.js("WS.checks.map(c => c.on_fail)") == ["stop", "warn"]
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
-            "params": parameters}
+            "params": parameters, "checks": run_checks}
 
 
 def main() -> int:

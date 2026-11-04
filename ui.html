@@ -451,6 +451,13 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 .relrow .arrow{font-weight:700;color:var(--teal-2);padding:0 4px}
 .relst .ok{color:var(--teal-2);font-weight:600;font-size:11.5px}.relst .warn2{color:var(--amber);font-weight:600;font-size:11.5px}.relst .bad{color:var(--red);font-size:11.5px}
 .trow{display:flex;gap:8px;align-items:center;padding:2px 0}
+.ckrow{border-bottom:1px dashed var(--line);padding:4px 0}
+.ckrow:last-child{border-bottom:0}
+.ckrow.off{opacity:.55}
+.ckst{padding:2px 0 2px 24px;font-size:11.5px}
+.ckres{font-family:var(--mono)}
+.ckres.ok{color:var(--teal-2)}
+.ckres.bad{color:var(--red)}
 .fold{display:grid;grid-template-columns:12px 16px 1fr auto auto;gap:6px;align-items:center;padding:6px 12px 5px;
   border-top:1px solid var(--rail-line);cursor:pointer;user-select:none}
 .fold:first-child{border-top:0}
@@ -780,6 +787,14 @@ table.matrix tr.unas td.fn{color:var(--faint)}
         <p class="hint" style="margin:6px 0 8px">Write <code>{PERIOD}</code> — or any name below — in a folder, a file rule, a filter value, a column's text, SQL, or the output's name and folder. It is filled in whenever the setup reads or runs: a fixed value, one asked for at each run, or a date worked out from today (<code>yyyy-mm</code>, <code>MMMyy</code> → JUL26, <code>yyyy-Qq</code> → 2026-Q3). From the command line: <code>--set PERIOD=2026-09</code>.</p>
         <div id="paramRows"></div>
       </div>
+      <div class="card" id="checkCard">
+        <div class="f" style="justify-content:space-between"><h3 style="margin:0">Checks</h3>
+          <span class="f"><button class="btn sm" id="checkNow" title="Work the checks out over every file now — nothing is written">Check now</button>
+          <button class="btn sm" id="checkAdd">＋ Check</button></span></div>
+        <p class="hint" style="margin:6px 0 8px">Worked out on the finished tables, before anything is written. A check set to <b>Stop</b> writes nothing when it fails; <b>Warn</b> writes and says so. Results show here and on the Result tab, go to a Checks sheet beside the output and to the run log; from the command line a stopped run exits with code 3.</p>
+        <div id="checkRows"></div>
+        <label class="f" style="margin-top:8px"><input type="checkbox" id="checkSheet" checked> Write a Checks sheet (or <code>_Checks</code> file) with the output</label>
+      </div>
       <div class="card">
         <h3>Where it goes</h3>
         <div class="f" style="margin-bottom:10px">
@@ -1047,7 +1062,8 @@ function show(p){
   $$(".tab").forEach(t => t.setAttribute("aria-selected", String(t.dataset.p===p)));
   $$(".pane").forEach(x => x.classList.remove("on"));
   $("#p-"+p).classList.add("on");
-  if (p === "out"){ drawFormats(); syncSplit(); syncPdf(); drawOutputMode(); }
+  if (p === "out"){ drawFormats(); syncSplit(); syncPdf(); drawOutputMode(); drawChecks();
+                    if (isMulti() && (S.wsDirty || !S.wsSchema) && (WS.checks || []).length) wsSchemaFresh().then(drawChecks); }
   if (p === "filt") drawDups();
   if (p === "anal"){ if (!S.anData) anFromCache();
                      drawAnal(); if (S.wsDirty && (AT().report || groupRel())) wsSchemaFresh();
@@ -2974,7 +2990,7 @@ function makeGroup(name, setup, files, match){
 function newSetup(){
   const g = makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null);
   return {kind: "colsift.setup", version: 2, name: "", groups: [g], steps: [], relationships: [], reports: [],
-          params: [], param_values: {}};
+          params: [], param_values: {}, checks: []};
 }
 let WS = newSetup();                     // S.output holds the setup's output while it is open
 S.group = WS.groups[0].id;
@@ -3652,6 +3668,7 @@ async function openSetup(st, name){
   if (!WS.groups.length) WS.groups.push(makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null));
   WS.groups.forEach(g => g.folders = g.folders || []);
   WS.params = st.params || []; WS.param_values = st.param_values || {};
+  WS.checks = st.checks || []; S.checkRes = {};
   await refreshParams(true);
   applyOutput(st.output || {});
   S.processing = st.processing || "sequential"; syncOutputControls();
@@ -3814,12 +3831,15 @@ window.onRunDone = r => {
   if (!r.ok){
     say(r.error || "The run failed.", r.cancelled ? "" : "err");
     if (r.crashed) $("#gridwrap").innerHTML = `<div class="empty" style="color:var(--red)">${esc(r.error)}</div>`;
+    const hd = t => `<tr><td colspan="2" style="font-family:var(--ui);font-weight:600;color:var(--muted);padding-top:8px;text-align:left">${t}</td></tr>`;
+    takeChecks(r.checks);
     $("#runResults").innerHTML = ((r.problems || []).length ? `<div class="warn">${r.problems.map(esc).join("<br>")}</div>` : "") +
-      ((r.files||[]).length ? `<table>${r.files.map(fileRow).join("")}</table>` : "");
+      ((r.checks || []).length ? `<table>${checksTable(r.checks, hd)}</table>` : "") +
+      ((r.files||[]).length ? `<table>${(r.checks || []).length ? hd("Files read") : ""}${r.files.map(fileRow).join("")}</table>` : "");
     return;
   }
   $("#sRows").textContent = r.rows == null ? "–" : r.rows.toLocaleString();
-  const head = t => `<tr><td colspan="2" style="font-family:var(--ui);font-weight:600;color:var(--muted);padding-top:8px">${t}</td></tr>`;
+  const head = t => `<tr><td colspan="2" style="font-family:var(--ui);font-weight:600;color:var(--muted);padding-top:8px;text-align:left">${t}</td></tr>`;
   const tables = (r.tables || []).length ? head("Tables written") + r.tables.map(t => `<tr><td>${esc(t.sheet)}</td><td>${t.rows.toLocaleString()} rows</td></tr>`).join("") : "";
   const files = (r.files || []).length ? head(r.mode === "combined" ? "Groups — files read" : "Files read") + r.files.map(fileRow).join("") : "";
   const out = head("Written") + r.written.map(p => `<tr><td colspan="2"><a class="link" data-open="${esc(p)}">${esc(p)}</a></td></tr>`).join("");
@@ -3830,13 +3850,17 @@ window.onRunDone = r => {
     $("#resInfo").textContent = "";
   }
   const mem = r.peak_memory ? `<tr><td colspan="2" style="font-family:var(--ui);color:var(--muted)">Peak memory of the run: ${human(r.peak_memory)}</td></tr>` : "";
-  $("#runResults").innerHTML = `<table>${files}${tables}${out}${log}${mem}</table>${warn}`;
+  takeChecks(r.checks);
+  const checks = checksTable(r.checks, head);
+  $("#runResults").innerHTML = `<table>${checks}${files}${tables}${out}${log}${mem}</table>${warn}`;
   $("#runResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
   refreshCache();
   const errs = (r.errors || []).length;
   const done = (r.mode === "combined" ? `Done — ${(r.tables || []).length} table${(r.tables || []).length === 1 ? "" : "s"}, ` : "Done — ") +
       `${r.rows.toLocaleString()} rows into ${r.written.length} file${r.written.length===1?"":"s"} in ${r.elapsed}s.` +
-      (errs ? ` ${errs} file(s) failed.` : "");
+      (errs ? ` ${errs} file(s) failed.` : "") +
+      ((r.checks || []).length ? ((n => n ? ` ${n} check${n === 1 ? "" : "s"} warned.` : ` ${r.checks.length} check${r.checks.length === 1 ? "" : "s"} passed.`)
+        (r.checks.filter(c => c.status !== "pass").length)) : "");
   const got = r.dashboards ? takeDashboards(r.dashboards, "the run") : {n: 0, bad: []};
   if (got.n){
     showDashboards().then(() => say(`${done} Dashboards refreshed from the run — every row.`, errs ? "err" : "ok"));
@@ -4032,6 +4056,97 @@ async function askParams(){
   await refreshParams();
   return true;
 }
+
+/* ---------------- checks ---------------- */
+const CHK = () => WSM().checks || {kinds: [], on_fail: []};
+function checkCols(t){
+  const have = t ? wsCols(t) : [];
+  if (have.length) return have;
+  const g = activeGroup();
+  return (!isMulti() || !t || (g && t === g.name)) ? outputColumns() : [];
+}
+const ckOpts = (list, sel, blank) => (blank != null ? `<option value="">${esc(blank)}</option>` : "") +
+  [...new Set([...(sel && !list.includes(sel) ? [sel] : []), ...list])]
+    .map(n => `<option ${n === sel ? "selected" : ""}>${esc(n)}</option>`).join("");
+function drawChecks(){
+  WS.checks = WS.checks || [];
+  const kinds = CHK().kinds, tabs = wsTableNames(), res = S.checkRes || {};
+  $("#checkRows").innerHTML = WS.checks.map((c, i) => {
+    const k = c.kind || "rows", t = c.table || tabs[0] || "", cols = checkCols(t), col = (c.cols || [])[0] || "";
+    const t2 = c.table2 || "", cols2 = t2 ? checkCols(t2) : [];
+    const tSel = `<select data-ck="table" style="width:130px" title="Table">${ckOpts(tabs, t)}</select>`;
+    const cSel = `<select data-ck="col" style="width:130px" title="Column">${ckOpts(cols, col, "column…")}</select>`;
+    const t2Sel = blank => `<select data-ck="table2" style="width:130px">${ckOpts(tabs, t2, blank)}</select>`;
+    const c2Sel = `<select data-ck="col2" style="width:130px">${ckOpts(cols2, c.col2 || "", "same name")}</select>`;
+    const fold = `<label class="f" style="gap:4px"><input type="checkbox" data-ck="fold" ${c.fold ? "checked" : ""}>ignore case</label>`;
+    const txt = (key, ph, w) => `<input type="text" data-ck="${key}" value="${esc(c[key] ?? "")}" placeholder="${esc(ph)}" style="width:${w}px">`;
+    const body = k === "rows" ? `${tSel}<label class="lbl">Min</label>${txt("min", "1", 76)}<label class="lbl">Max</label>${txt("max", "no limit", 76)}`
+      : k === "same_rows" ? `${tSel}<label class="lbl">as</label>${t2Sel("table…")}`
+      : k === "unique" ? `${tSel}<input type="text" data-ck="cols" list="ckl${i}" value="${esc((c.cols || []).join(", "))}" placeholder="key column(s), comma between" style="width:210px"><datalist id="ckl${i}">${cols.map(n => `<option value="${esc(n)}">`).join("")}</datalist>${fold}`
+      : k === "not_blank" ? `${tSel}${cSel}`
+      : k === "found" ? `${tSel}${cSel}<label class="lbl">in</label>${t2Sel("table…")}${c2Sel}${fold}`
+      : k === "totals" ? `${tSel}${cSel}<label class="lbl">total =</label>${t2Sel("a number")}${t2 ? c2Sel : txt("value", "e.g. 125000 or {TOTAL}", 130)}<label class="lbl">±</label>${txt("tolerance", "0.005", 60)}`
+      : `<textarea data-ck="sql" rows="2" placeholder="SELECT * FROM ${esc(tabs[0] || "Sales")} WHERE AMOUNT < 0" style="flex:1;min-width:280px;font-family:var(--mono);font-size:11.5px">${esc(c.sql || "")}</textarea>`;
+    const r = res[c.id];
+    const st = r ? `<div class="ckst"><span class="ckres ${r.status === "pass" ? "ok" : "bad"}">${r.status === "pass" ? "✓" : "✗"} ${esc(r.detail)}` +
+      `${r.examples?.length && r.status !== "pass" ? ` — e.g. ${esc(r.examples.join(", "))}` : ""}</span></div>` : "";
+    return `<div class="ckrow${c.enabled === false ? " off" : ""}" data-ci="${i}"><div class="trow" style="flex-wrap:wrap">
+      <input type="checkbox" data-ck="enabled" ${c.enabled === false ? "" : "checked"} title="On / off">
+      <select data-ck="kind" style="width:150px" title="${esc((kinds.find(x => x.id === k) || {}).help || "")}">${kinds.map(x => `<option value="${x.id}" ${x.id === k ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select>
+      ${body}
+      <select data-ck="on_fail" style="width:172px" title="When it fails">${CHK().on_fail.map(x => `<option value="${x.id}" ${(c.on_fail || "stop") === x.id ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</select>
+      ${txt("name", "name (optional)", 130)}
+      <button class="btn x" data-ck="del" title="Remove">✕</button></div>${st}</div>`;
+  }).join("") || `<div class="sub" style="margin:0">None yet — a run writes whatever it builds.</div>`;
+  $("#checkSheet").checked = S.output.checks_sheet !== false;
+  $("#checkNow").disabled = !WS.checks.some(c => c.enabled !== false);
+}
+$("#checkAdd").onclick = () => {
+  WS.checks = WS.checks || [];
+  WS.checks.push({id: "c" + uid(), kind: "rows", table: wsTableNames()[0] || "", min: "1", on_fail: "stop", enabled: true});
+  drawChecks();
+};
+$("#checkSheet").onchange = e => { S.output.checks_sheet = e.target.checked; };
+$("#checkRows").addEventListener("change", e => {
+  const row = e.target.closest("[data-ci]"), k = e.target.dataset.ck; if (!row || !k) return;
+  const c = WS.checks[+row.dataset.ci], v = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  if (k === "col") c.cols = v ? [v] : [];
+  else if (k === "cols") c.cols = v.split(",").map(x => x.trim()).filter(Boolean);
+  else if (k === "table"){ c.table = v; c.cols = (c.cols || []).filter(x => checkCols(v).includes(x)); }
+  else if (k === "table2"){ c.table2 = v; c.col2 = ""; }
+  else c[k] = v;
+  delete (S.checkRes || {})[c.id];
+  // what changes the row's shape redraws it; typed values only update the setup
+  if (["kind", "table", "table2", "enabled", "col"].includes(k)) drawChecks();
+});
+$("#checkRows").addEventListener("click", e => {
+  const b = e.target.closest("[data-ck=del]"); if (!b) return;
+  WS.checks.splice(+b.closest("[data-ci]").dataset.ci, 1); drawChecks();
+});
+function takeChecks(list){
+  if (!list) return;
+  S.checkRes = Object.fromEntries(list.map(c => [c.id, c]));
+  if ($("#p-out").classList.contains("on")) drawChecks();
+}
+function checksTable(list, head){
+  if (!(list || []).length) return "";
+  const ok = list.filter(c => c.status === "pass").length;
+  return head(`Checks — ${ok} of ${list.length} pass`) + list.map(c => `<tr><td>${esc(c.name)}</td><td class="${c.status === "pass" ? "" : "bad"}">` +
+    `${c.status === "pass" ? "✓" : c.on_fail === "warn" ? "✗ warning:" : "✗"} ${esc(c.detail)}` +
+    `${c.examples?.length && c.status !== "pass" ? ` — e.g. ${esc(c.examples.join(", "))}` : ""}</td></tr>`).join("");
+}
+$("#checkNow").onclick = async () => {
+  if (!(await askParams())) return;
+  const p = setupPayload();
+  if (!p.groups.some(g => g.enabled !== false && g.files.length)){ say("Tick at least one file.", "err"); return; }
+  busy(true); $("#btnCancel").style.display = ""; say("Checking over every file — nothing is written…");
+  const r = await api().ws_checks({workspace: p, scope: "all"});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "Could not check.", r?.cancelled ? "" : "err"); return; }
+  takeChecks(r.checks); drawChecks();
+  say(r.failed ? `Checks: ${r.passed} pass, ${r.failed} fail${r.stop ? " — a run now would write nothing" : " (warnings only)"}.`
+               : `All ${r.passed} check${r.passed === 1 ? "" : "s"} pass.`, r.failed ? "err" : "ok");
+};
 
 /* ---------------- memory meter ---------------- */
 let MEM = {};

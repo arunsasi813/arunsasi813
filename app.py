@@ -624,6 +624,18 @@ class Api:
             ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL, only=only))
 
     @guard
+    @_params
+    def ws_checks(self, p: dict) -> dict:
+        """Check now: the setup's checks over every file (scope "all", in a worker) or
+        the preview's sample. Nothing is written."""
+        ws, scope = p.get("workspace") or {}, p.get("scope") or "all"
+        if scope != "all":
+            with _READ:
+                return _m()[3].test_checks(ws, scope)
+        return _heavy("checks", {"workspace": ws}, lambda: _m()[3].test_checks(
+            ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
     def param_values(self, p: dict) -> dict:
         """What each {PARAMETER} stands for right now."""
         return {"ok": True, "values": _m()[0].param_values(p, p.get("given") or None)}

@@ -59,7 +59,7 @@ python -m nuitka --mode=onefile ^
   --output-dir=dist --output-filename=ColSift.exe ^
   --python-flag=no_asserts ^
   --include-module=engine --include-module=formula --include-module=xlsxfast ^
-  --include-module=analysis --include-module=workspace --include-module=pdfout ^
+  --include-module=analysis --include-module=workspace --include-module=checks --include-module=pdfout ^
   --include-module=worker --include-package=fastexcel ^
   --nofollow-import-to=pandas --nofollow-import-to=pyarrow --nofollow-import-to=numpy ^
   --nofollow-import-to=matplotlib --nofollow-import-to=scipy --nofollow-import-to=IPython ^
@@ -157,7 +157,9 @@ python -m nuitka ^
   --include-module=xlsxfast ^
   --include-module=analysis ^
   --include-module=workspace ^
+  --include-module=checks ^
   --include-module=pdfout ^
+  --include-module=worker ^
   --include-package=webview ^
   --include-package-data=webview ^
   --include-package=polars ^
@@ -220,7 +222,9 @@ python -m nuitka ^
   --include-module=xlsxfast ^
   --include-module=analysis ^
   --include-module=workspace ^
+  --include-module=checks ^
   --include-module=pdfout ^
+  --include-module=worker ^
   --include-package=webview ^
   --include-package-data=webview ^
   --include-package=polars ^

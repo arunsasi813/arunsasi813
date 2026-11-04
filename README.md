@@ -21,6 +21,7 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `formula.py` | Excel-style formulas compiled to polars expressions. |
 | `xlsxfast.py` | Streams the first rows of an .xlsx without parsing the whole sheet. |
 | `app.py` | pywebview window + JS bridge. |
+| `checks.py` | Checks that pass or fail a run: row counts, unique keys, blanks, keys found, totals, a query that must find nothing. |
 | `worker.py` | Runs, counts, Find and full-data dashboards in a process of their own, so running out of memory can't close the window. |
 | `ui.html` | The interface. Inline CSS and JS. |
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
@@ -52,6 +53,44 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
   process of their own. If one runs out of memory or crashes, it stops and says so (with the
   memory it had used); the window, the setup and everything unsaved stay. The status bar shows
   memory use, each run reports its peak, and crashes are written to `colsift.log`.
+- **Duplicates across all files** (Filters tab). Pick key columns and a group looks for
+  repeats over every one of its files together — a ticket in January's and February's extract
+  counts twice. Keep every row, only repeated keys, keys found in more than one file, the first
+  or last of each key, or keys that appear once; optional `DUP_COUNT`, `DUP_FILES` and `DUP_NO`
+  columns. Keys compare trimmed and ignoring case; a blank key never repeats.
+  It runs after each file's own filters and columns, in the run, Count, dashboards and
+  combined groups. Preview looks within its one file and says so.
+- **Run parameters** (Output tab). Write `{PERIOD}` — or any name you define — in a folder, a
+  file rule, a filter value, a column's text, SQL, a check, or the output's name and folder.
+  Each parameter is a fixed value, a value asked for at every run (the last answer is
+  suggested), or a date worked out from today: today, yesterday, this / last month, quarter or
+  year, in an Excel-style format (`yyyy-mm`, `MMMyy` → JUL26, `yyyy-Qq` → 2026-Q3). A folder
+  written `D:\extracts\{PERIOD}` lists next month's folder by itself. From the command line,
+  `--set PERIOD=2026-09` answers or overrides one. A regex's `\d{6}` is left alone: only names
+  defined as parameters are filled in.
+- **Checks** (Output tab) — reconciliations worked out on the finished tables before anything
+  is written:
+
+  | Check | Passes when |
+  |---|---|
+  | Row count | the table has between Min and Max rows (both blank: at least 1) |
+  | Same rows as | the table has exactly as many rows as another |
+  | No repeated keys | each key — one column or several together — appears once |
+  | No blanks | a column is never blank |
+  | Every key found in | every value of a column is in a column of another table |
+  | Totals agree | a column's total equals another table's column total, or a number, within ± |
+  | Query finds nothing | a `SELECT` over the tables returns no rows (`… WHERE AMOUNT < 0`) |
+
+  A failed **Stop** check writes nothing and says why, with examples (the keys that repeat,
+  the codes not found). **Warn** writes and lists it. *Check now* works them out over every
+  file without writing. Results show on the Output and Result tabs, in a `Checks` sheet (or
+  `<name>_Checks.csv`) beside the output and in the run log. `colsift-cli` exits with **3**
+  when a check stopped the run, so a scheduled script can tell that from a failure (1).
+- **Checked on Windows by GitHub Actions** (`.github/workflows/colsift.yml`): the unit tests
+  run on Windows and Linux on every push. With `[build]` in the commit message (or run by
+  hand), it builds `ColSift.exe` and `colsift-cli.exe` on Windows, starts the exe once with
+  `--selftest` — a worker process from the exe, progress, memory, a crash that must not close
+  the app, a real count and run — and attaches both exes to the run.
 
 ## What's new in 2.0
 
@@ -454,8 +493,12 @@ Same engine, no window — for a scheduled monthly run:
 ```
 python engine.py --profile "Monthly YQ tax" --folder D:\extracts\2026-07 --pattern "TAX_*"
 python engine.py --profile "Monthly YQ tax" --folder D:\extracts\2026-07 --count
+python engine.py --profile "Monthly" --set PERIOD=2026-09        # a run parameter
 python engine.py --job job.json --out D:\output
+ColSift.exe --selftest result.json                              # no window: checks the exe works here
 ```
+
+Exit codes: 0 done, 1 failed, 2 setup not found, 3 a check stopped the run (nothing written).
 
 ## Building a small, fast exe
 

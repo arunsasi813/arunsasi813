@@ -2820,7 +2820,7 @@ def _align_stage(paths: list[Path]) -> None:
 
 
 def _write_log(out: dict, job: dict, per_file: list, written: list, errors: list,
-               warnings: list, total: int, elapsed: float) -> str:
+               warnings: list, total: int, elapsed: float, checks: list[str] | None = None) -> str:
     path = _norm(out["folder"]) / f"{_safe_name(out.get('basename') or 'extract')}_log.txt"
     lines = [f"ColSift run log — {datetime.now():%Y-%m-%d %H:%M:%S}", "",
              f"Filters:    {describe_filters(job.get('filters'))}",
@@ -2836,6 +2836,7 @@ def _write_log(out: dict, job: dict, per_file: list, written: list, errors: list
         state = f"ERROR  {f['error']}" if f.get("error") else f"{f.get('rows') or 0:>12,} rows"
         lines.append(f"  {f['file']:<48} {state}" + (f"   · {f['note']}" if f.get("note") else ""))
     lines += ["", "Written:"] + [f"  {w}" for w in written] + ["", f"Rows written: {total:,}", f"Elapsed: {elapsed}s"]
+    lines += checks or []
     if warnings:
         lines += ["", "Warnings:"] + [f"  {w}" for w in warnings]
     if errors:
@@ -2971,6 +2972,24 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
         warnings: list[str] = [dup_note] if batch_dupes(job) else []
         total_rows = 0
         analysis_back = None
+        # the setup's checks, over everything this run read, before anything is written
+        checks = None
+        if job.get("_checks"):
+            notify(stage="build", part="checks")
+            if batch_dupes(job):
+                whole = both.drop(SRC_COL)
+            else:                  # what is written: distinct rows per output
+                parts = [pl.scan_parquet(p) for _, p in good]
+                if job.get("distinct") and per_input:
+                    parts = [x.unique(maintain_order=True) for x in parts]
+                whole = stacked(parts).drop(SRC_COL)
+                if job.get("distinct") and not per_input:
+                    whole = whole.unique(maintain_order=True)
+            checks = job["_checks"](whole)
+            if checks["stop"]:
+                return {"ok": False, "stopped": True, "error": checks["error"], "files": per_file, "errors": errors,
+                        "checks": checks["results"], "elapsed": round(time.time() - t0, 2)}
+            warnings += checks["warnings"]
         for stem, paths, label in groups:
             _check_cancel(cancel)
             if isinstance(paths, pl.LazyFrame):
@@ -3002,14 +3021,25 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
                                               f"{label or 'All files'} · {total:,} rows")
                 except (A.AnalysisError, F.FormulaError) as exc:
                     warnings.append(f"Analysis skipped — {exc}")
+            if checks and checks.get("grid") and len(groups) == 1:
+                extra = [*extra, dict(checks["grid"])]      # a Checks sheet beside the data
             notify(stage="write", rows=0, total=total, part=stem)
             written += write_parts(lf, total, out, stem, fmt, cancel,
                                    lambda off, tot, part: notify(stage="write", rows=off, total=tot, part=part),
                                    extra)
             if out.get("formats"):
                 warnings += format_warnings(lf, out["formats"], f"{label}: " if label else "")
+        if checks and checks.get("grid") and len(groups) > 1 and written:
+            stem = f"{_safe_name(out.get('basename') or 'extract')}_{checks['grid']['name']}"
+            path = _out_path(out, stem, fmt)
+            if fmt == "xlsx":
+                write_xlsx_book(path, [dict(checks["grid"])], out, cancel)
+            else:
+                _write_grid_csv(checks["grid"]["grid"], path, out)
+            written.append(str(path))
         elapsed = round(time.time() - t0, 2)
-        log = _write_log(out, job, per_file, written, errors, warnings, total_rows, elapsed) if out.get("log") else None
+        log = _write_log(out, job, per_file, written, errors, warnings, total_rows, elapsed,
+                         checks.get("log") if checks else None) if out.get("log") else None
         if not written:
             return {"ok": False, "error": "Every file matched 0 rows — nothing was written.", "files": per_file,
                     "errors": errors, "elapsed": elapsed}
@@ -3017,6 +3047,8 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
                "warnings": warnings, "log": log, "elapsed": elapsed}
         if analysis_back is not None:
             res["analysis"] = analysis_back
+        if checks:
+            res["checks"] = checks["results"]
         return res
     except Cancelled:
         for w in written:
@@ -3401,6 +3433,7 @@ def _cli(argv: list[str]) -> int:
         job = apply_params(job, values=vals)
     if job.get("groups") is not None and not a.count:
         # a setup with groups: every group's ColSift work, the combine steps, one export
+        import checks as C
         import workspace as W
         ws = W.from_any(job, a.profile or "")
         if a.folder:
@@ -3420,7 +3453,10 @@ def _cli(argv: list[str]) -> int:
             ws["output"]["folder"] = a.out
         res = W.run_setup(ws, on_progress=lambda p: print(f"  {p}", file=sys.stderr))
         print(json.dumps(res, indent=2, default=str))
-        return 0 if res.get("ok") else 1
+        for line in C.log_lines(res.get("checks") or [])[1:]:
+            print(line, file=sys.stderr)
+        # 3: a check stopped the run, so a scheduled script can tell it from a failure
+        return 0 if res.get("ok") else 3 if res.get("stopped") else 1
     if job.get("groups") is not None:        # --count on a setup: its first group
         import workspace as W
         ws = W.from_any(job)

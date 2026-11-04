@@ -55,6 +55,7 @@ from typing import Any, Callable
 import polars as pl
 
 import analysis as A
+import checks as C
 import engine as E
 import formula as F
 
@@ -103,7 +104,8 @@ class WorkspaceError(ValueError):
 def meta() -> dict:
     return {"step_kinds": [{"id": i, "label": l, "help": h} for i, l, h in STEP_KINDS],
             "join_how": [{"id": i, "label": l} for i, l in JOIN_HOW],
-            "match_modes": [{"id": i, "label": l} for i, l in MATCH_MODES]}
+            "match_modes": [{"id": i, "label": l} for i, l in MATCH_MODES],
+            "checks": C.meta()}
 
 
 def _id() -> str:
@@ -160,6 +162,7 @@ def normalize(ws: dict | None) -> dict:
     ws["processing"] = ws.get("processing") or "sequential"
     ws["params"] = [p for p in ws.get("params") or [] if isinstance(p, dict) and str(p.get("name") or "").strip()]
     ws["param_values"] = dict(ws.get("param_values") or {})
+    ws["checks"] = [C.normalize(c) for c in ws.get("checks") or [] if isinstance(c, dict)]
     ov = ws.get("overview") or {}
     ws["overview"] = {"name": ov.get("name") or "Overview",
                       "analysis": {"export": False, "sheet_name": "Overview", "items": [], "filters": [],
@@ -194,13 +197,15 @@ def from_any(obj: dict | None, name: str = "") -> dict:
     formats = out.pop("formats", None) or {}
     processing = obj.pop("processing", None)
     match = obj.pop("match", None)
+    checks = obj.pop("checks", None)
     for k in ("_name", "_saved", "kind", "version"):
         obj.pop(k, None)
     gname = str(name or out.get("basename") or "Group 1").strip()
     group = {"name": gname if gname.lower() != "extract" else "Group 1", "files": files,
              "match": match or {"mode": "manual", "value": ""},
              "setup": {**obj, "output": {"formats": formats}}}
-    return normalize({"name": name, "groups": [group], "output": out, "processing": processing})
+    return normalize({"name": name, "groups": [group], "output": out, "processing": processing,
+                      "checks": checks or []})
 
 
 def is_classic(ws: dict) -> bool:
@@ -844,31 +849,10 @@ class Builder:
                           str(s.get("flag") or "").strip(), rename, default)
 
     def _sql(self, s: dict) -> pl.LazyFrame:
-        q = str(s.get("sql") or "").strip().rstrip(";")
-        if not q:
-            raise WorkspaceError("write a SELECT")
-        if not re.match(r"(?is)^\s*(with|select)\b", q):
-            raise WorkspaceError("only SELECT (or WITH … SELECT) queries run here")
-        ctx = pl.SQLContext()
-        used = []
-        for k, (kind, obj) in self.by_name.items():
-            nm = obj["name"]
-            if _key(nm) == _key(s["name"]):
-                continue
-            safe = re.sub(r"\W+", "_", nm).strip("_")
-            alias = [a for a in {nm, safe, nm.lower(), safe.lower()} if a]
-            if not any(re.search(r'(?<![\w"])' + re.escape(a) + r'(?![\w"])', q, re.I) or f'"{a}"' in q for a in alias):
-                continue
-            lf = self.get(nm)
-            if (s.get("numbers") or "auto") == "auto":
-                lf = _typed(lf)
-            for a in alias:
-                ctx.register(a, lf)
-            used.append(nm)
-        if not used:
-            raise WorkspaceError("the query names none of the tables — use a table's name after FROM")
+        names = [obj["name"] for _, obj in self.by_name.values() if _key(obj["name"]) != _key(s["name"])]
+        lf, used = sql_over(s.get("sql"), names, self.get, s.get("numbers") or "auto")
         self._inherit(s, used)
-        return ctx.execute(q, eager=False)
+        return lf
 
     def _transform(self, s: dict) -> pl.LazyFrame:
         src = s.get("input")
@@ -923,6 +907,32 @@ class Builder:
         keys = [pl.col(b).fill_null("") for b in by]
         out = lf.group_by(keys, maintain_order=True).agg(aggs)
         return out.sort([e for b in by for e in _sort_expr(b)], nulls_last=True)
+
+
+def sql_over(q: Any, names: list[str], get: Callable[[str], pl.LazyFrame], numbers: str = "auto") -> tuple[pl.LazyFrame, list[str]]:
+    """A SELECT over the named tables. Each table answers to its name, and to it with
+    spaces as underscores (FROM All_groups); only the tables the query names are built."""
+    q = str(q or "").strip().rstrip(";")
+    if not q:
+        raise WorkspaceError("write a SELECT")
+    if not re.match(r"(?is)^\s*(with|select)\b", q):
+        raise WorkspaceError("only SELECT (or WITH … SELECT) queries run here")
+    ctx = pl.SQLContext()
+    used = []
+    for nm in names:
+        safe = re.sub(r"\W+", "_", nm).strip("_")
+        alias = [a for a in {nm, safe, nm.lower(), safe.lower()} if a]
+        if not any(re.search(r'(?<![\w"])' + re.escape(a) + r'(?![\w"])', q, re.I) or f'"{a}"' in q for a in alias):
+            continue
+        lf = get(nm)
+        if numbers == "auto":
+            lf = _typed(lf)
+        for a in alias:
+            ctx.register(a, lf)
+        used.append(nm)
+    if not used:
+        raise WorkspaceError("the query names none of the tables — use a table's name after FROM")
+    return ctx.execute(q, eager=False), used
 
 
 def _typed(lf: pl.LazyFrame) -> pl.LazyFrame:
@@ -1405,6 +1415,15 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
             return {"ok": False, "error": warnings[0] if warnings else "No table could be built.",
                     "warnings": warnings, "files": b.per_file}
 
+        # checks: worked out on the built tables before anything is written
+        results = check_tables(ws, b.get, b.names(), cancel, notify)
+        verdict = C.verdict(results)
+        if verdict["stop"]:
+            return {"ok": False, "stopped": True, "error": verdict["error"], "checks": results,
+                    "warnings": warnings + b.notes, "files": b.per_file}
+        warnings += verdict["warnings"]
+        check_grid = C.grid(results) if results and out.get("checks_sheet", True) is not False else None
+
         # dashboards: each group's own, those on combined tables, the overview — computed
         # once over the staged data, for the sheets, the PDFs and (when asked) the window
         extra: list[dict] = []
@@ -1439,6 +1458,8 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
                 pdfs.append((title, sp, res, res.get("note") or title))
 
         if fmt == "xlsx" and (out.get("layout") or "workbook") == "workbook":
+            if check_grid:
+                extra.append(check_grid)
             used: set[str] = set()
             sheets = []
             for fr in frames:
@@ -1485,6 +1506,13 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
                         pth = E._out_path(out, f"{base}_{E._safe_name(e['name'], 60)}", fmt)
                         E._write_grid_csv(e["grid"], pth, out)
                         written.append(str(pth))
+            if check_grid:
+                pth = E._out_path(out, f"{base}_{C.SHEET}", fmt)
+                if fmt == "xlsx":
+                    E.write_xlsx_book(pth, [check_grid], out, cancel)
+                else:
+                    E._write_grid_csv(check_grid["grid"], pth, out)
+                written.append(str(pth))
         for name, spec, res, sub in pdfs:
             stem = f"{base}_{E._safe_name(name, 50)}" if len(pdfs) > 1 else base
             written += E.write_pdfs(res, {**spec, "output": out}, out, stem,
@@ -1495,7 +1523,7 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
         warnings += b.notes
         errors = [f"{f.get('group')}: {f['file']} — {f['error']}" for f in b.per_file if f.get("error")]
         elapsed = round(time.time() - t0, 2)
-        log = _write_log(ws, frames, b.per_file, written, errors, warnings, elapsed) if out.get("log") else None
+        log = _write_log(ws, frames, b.per_file, written, errors, warnings, elapsed, results) if out.get("log") else None
         if want_dash:
             for v in dash.values():
                 v.setdefault("ok", True)
@@ -1504,7 +1532,7 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
                 "tables": [{"table": f["table"], "sheet": f["sheet"], "rows": f["rows"]} for f in frames],
                 "files": [{**f, "file": f"{f.get('group')}: {f['file']}"} for f in b.per_file],
                 "errors": errors, "warnings": warnings, "log": log, "elapsed": elapsed,
-                "dashboards": dash if want_dash else None}
+                "dashboards": dash if want_dash else None, "checks": results}
     except E.Cancelled:
         for w in written:
             try:
@@ -1539,6 +1567,8 @@ def run_setup(ws: dict, on_progress=None, cancel=None) -> dict:
         want = bool(ws["output"].get("refresh_dashboards")) and _has_cards(g["setup"])
         if want:
             job["_return_analysis"] = True
+        if any(c["enabled"] for c in ws["checks"]):
+            job["_checks"] = _classic_checks(ws, g, cancel)
         res = E.run(job, on_progress, cancel)
         got = res.pop("analysis", None)
         if want and res.get("ok"):
@@ -1551,8 +1581,53 @@ def run_setup(ws: dict, on_progress=None, cancel=None) -> dict:
     return {**run(ws, on_progress, cancel), "mode": "combined"}
 
 
+def check_tables(ws: dict, get: Callable[[str], pl.LazyFrame], names: list[str], cancel=None, notify=None) -> list[dict]:
+    """The setup's enabled checks over tables `get` builds."""
+    if not any(c["enabled"] for c in ws.get("checks") or []):
+        return []
+    if notify:
+        notify(stage="build", part="checks")
+    return C.evaluate(ws["checks"], get, names, lambda q: sql_over(q, names, get)[0], cancel, E._check_cancel)
+
+
+def _classic_checks(ws: dict, g: dict, cancel=None) -> Callable[[pl.LazyFrame], dict]:
+    """For engine.run: the checks over the one table a plain extract writes."""
+    names = [g["name"]]
+
+    def hook(whole: pl.LazyFrame) -> dict:
+        def get(t: str) -> pl.LazyFrame:
+            if _key(t) in ("", _key(g["name"])):
+                return whole
+            raise WorkspaceError(f"There is no table called “{t}” — this setup builds one table, “{g['name']}”")
+        results = check_tables(ws, get, names, cancel)
+        grid = C.grid(results) if results and ws["output"].get("checks_sheet", True) is not False else None
+        return {**C.verdict(results), "results": results, "grid": grid, "log": C.log_lines(results)}
+    return hook
+
+
+def test_checks(ws: dict, scope: str = "all", on_progress=None, cancel=None) -> dict:
+    """The Check now button: the checks over every file (or the preview's sample),
+    nothing written."""
+    t0 = time.time()
+    ws = expand_folders(from_any(E.apply_params(ws)))
+    if not any(c["enabled"] for c in ws["checks"]):
+        return {"ok": True, "checks": [], "scope": scope}
+    stage = E._stage_dir() if scope == "all" else None
+    b = Builder(ws, "all" if scope == "all" else "preview", on_progress, cancel, stage)
+    try:
+        results = check_tables(ws, b.get, b.names(), cancel)
+    except E.Cancelled:
+        return {"ok": False, "cancelled": True, "error": "Cancelled."}
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+    v = C.verdict(results)
+    return {"ok": True, "checks": results, "scope": scope, "passed": v["passed"], "failed": v["failed"],
+            "stop": v["stop"], "notes": b.notes, "files": b.per_file, "elapsed": round(time.time() - t0, 2)}
+
+
 def _write_log(ws: dict, frames: list[dict], per_file: list[dict], written: list[str], errors: list[str],
-               warnings: list[str], elapsed: float) -> str:
+               warnings: list[str], elapsed: float, checks: list[dict] | None = None) -> str:
     out = ws["output"]
     path = E._norm(out["folder"]) / f"{E._safe_name(out.get('basename') or 'workspace')}_log.txt"
     lines = [f"ColSift run — {ws.get('name') or 'setup'} — {datetime.now():%Y-%m-%d %H:%M:%S}", "",
@@ -1574,6 +1649,7 @@ def _write_log(ws: dict, frames: list[dict], per_file: list[dict], written: list
         lines.append(f"  {f.get('group', '')}: {f['file']:<44} {state}")
     lines += ["", "Tables written:"] + [f"  {f['sheet']:<32} {f['rows']:>12,} rows" for f in frames]
     lines += ["", "Files:"] + [f"  {w}" for w in written] + ["", f"Elapsed: {elapsed}s"]
+    lines += C.log_lines(checks or [])
     if warnings:
         lines += ["", "Warnings:"] + [f"  {w}" for w in warnings]
     if errors:

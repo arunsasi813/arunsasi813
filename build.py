@@ -51,7 +51,7 @@ EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL"
            # drops the unused ones itself and refuses a build that names them here too.
            "PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy", "gi", "cefpython3"]
 HEAVY_INSTALLED = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "PyQt5", "PyQt6", "PySide6"]
-MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "pdfout", "worker"]
+MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "checks", "pdfout", "worker"]
 
 
 def human(n: float) -> str:
