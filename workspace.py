@@ -158,6 +158,8 @@ def normalize(ws: dict | None) -> dict:
     out.pop("formats", None)                      # column formats belong to each group
     ws["output"] = out
     ws["processing"] = ws.get("processing") or "sequential"
+    ws["params"] = [p for p in ws.get("params") or [] if isinstance(p, dict) and str(p.get("name") or "").strip()]
+    ws["param_values"] = dict(ws.get("param_values") or {})
     ov = ws.get("overview") or {}
     ws["overview"] = {"name": ov.get("name") or "Overview",
                       "analysis": {"export": False, "sheet_name": "Overview", "items": [], "filters": [],
@@ -1177,7 +1179,7 @@ def run_dashboards(ws: dict, scope: str = "all", on_progress=None, cancel=None, 
     """The Analysis tab's Run dashboards: every dashboard (or those in `only`), over
     every file, without writing anything."""
     t0 = time.time()
-    ws = expand_folders(normalize(ws))
+    ws = expand_folders(normalize(E.apply_params(ws)))
     stage = E._stage_dir() if scope == "all" else None
     notify = (lambda **k: on_progress(k)) if on_progress else None
     try:
@@ -1526,7 +1528,7 @@ def run_setup(ws: dict, on_progress=None, cancel=None) -> dict:
     extract — engine.run, with every one of its options (one file per input,
     splitting, per-file row counts). Anything more: every group's ColSift work,
     then the combine steps on those results, then one export."""
-    ws = expand_folders(from_any(ws))
+    ws = expand_folders(from_any(E.apply_params(ws)))
     if not [g for g in ws["groups"] if g["enabled"]]:
         return {"ok": False, "error": "The setup has no groups."}
     if is_classic(ws):

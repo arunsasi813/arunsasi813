@@ -52,6 +52,13 @@ class UI:
         self.page = page
         self.shots = shots
         self.n = 0
+        self.answers: list[str] = []          # what the next prompt() dialogs are answered with
+
+    def on_dialog(self, dlg) -> None:
+        if dlg.type == "prompt" and self.answers:
+            dlg.accept(self.answers.pop(0))
+        else:
+            dlg.accept()                       # confirm() and prompt() answer yes / the suggestion
 
     def shot(self, name: str) -> None:
         if self.shots:
@@ -292,7 +299,68 @@ def duplicates_across_files(ui: UI, d: dict) -> None:
     ui.shot("duplicates")
 
 
-SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files}
+def parameters(ui: UI, d: dict) -> None:
+    """{MONTH} in the folder and the output, {PERIOD} from today, one asked at the run."""
+    import datetime as dt
+    page = ui.page
+    new_setup(ui)
+    ui.tab("out")
+    page.click("#paramAdd")                                   # PERIOD: last month, yyyy-mm
+    page.click("#paramAdd")                                   # MONTH: a fixed value
+    page.wait_for_selector("#paramRows [data-pi='1']")
+    assert ui.js("WS.params.map(p => p.name)") == ["PERIOD", "MONTH"]
+    row = "#paramRows [data-pi='1']"
+    page.fill(f"{row} input[data-pk=value]", "jan")
+    page.dispatch_event(f"{row} input[data-pk=value]", "change")
+    page.wait_for_function("S.paramValues.MONTH === 'jan'")
+    today = dt.date.today()
+    last = (today.replace(day=1) - dt.timedelta(days=1)).strftime("%Y-%m")
+    assert ui.js("S.paramValues.PERIOD") == last
+    assert page.inner_text("#paramRows [data-pi='0'] .chip2") == f"= {last}"
+
+    tpl = str(d["jan"].parent / "{MONTH}")
+    ui.folders(tpl)
+    assert ui.js("S.folders[0].path") == str(d["jan"]) and ui.js("S.folders[0].tpl") == tpl
+    assert sorted(ui.files_shown()) == ["codes.xlsx", "sales_JAN.csv"], ui.files_shown()
+    # another month: the same setup now reads February's folder
+    page.fill(f"{row} input[data-pk=value]", "feb")
+    page.dispatch_event(f"{row} input[data-pk=value]", "change")
+    page.wait_for_function("S.folders[0] && S.folders[0].path.endsWith('feb') && S.files.length === 2 && "
+                           "S.files.every(f => /FEB/.test(f.name))")
+    ui.shot("parameters")
+
+    # asked at each run, used in the output folder and name
+    page.select_option(f"{row} select[data-pk=mode]", "ask")
+    page.wait_for_function("WS.params[1].mode === 'ask'")
+    page.fill("#outFolder", str(d["out"] / "p_{MONTH}"))
+    page.dispatch_event("#outFolder", "change")
+    page.fill("#outName", "report_{PERIOD}")
+    page.dispatch_event("#outName", "change")
+    page.select_option("#outFormat", "csv")
+    page.dispatch_event("#outFormat", "change")
+    page.uncheck("#runDash")
+    ui.answers = ["feb"]
+    ui.then("Done", lambda: page.click("#btnRun"))
+    assert ui.answers == [], "the run asked for {MONTH}"
+    written = sorted(x.name for x in (d["out"] / "p_feb").iterdir())
+    assert written and all(n.startswith(f"report_{last}") for n in written), written
+
+    # saved as written: the folder keeps {MONTH}, the parameters travel with the setup
+    page.fill("#profileName", "Monthly")
+    ui.then("Saved", lambda: page.click("#saveProfile"))
+    saved = json.loads((Path(os.environ["COLSIFT_PROFILES"]) / "Monthly.json").read_text())
+    assert [x["path"] for x in saved["folders"]] == [tpl], saved["folders"]
+    assert [p["name"] for p in saved["params"]] == ["PERIOD", "MONTH"]
+    assert saved["output"]["folder"].endswith("p_{MONTH}")
+    ui.then("New setup", lambda: page.click("#newProfile"))
+    assert ui.js("WS.params.length") == 0
+    page.select_option("#profileList", "Monthly")
+    ui.then("Loaded", lambda: page.click("#loadProfile"))
+    assert ui.js("WS.params.map(p => p.name)") == ["PERIOD", "MONTH"]
+
+
+SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
+            "params": parameters}
 
 
 def main() -> int:
@@ -321,11 +389,11 @@ def main() -> int:
             browser = p.chromium.launch(executable_path=CHROME, headless=not a.headed)
             page = browser.new_page(viewport={"width": 1500, "height": 950})
             page.on("pageerror", lambda e: errors.append(str(e)))
-            page.on("dialog", lambda dlg: dlg.accept())          # confirm() and prompt() answer yes
             page.set_default_timeout(30000)
             page.goto(f"http://127.0.0.1:{port}/?t={TOKEN}")
             page.wait_for_function("S.meta && S.meta.ops && S.meta.ops.length")
             ui = UI(page, shots)
+            page.on("dialog", ui.on_dialog)
             only = [x for x in a.only.split(",") if x] or list(SECTIONS)
             for name in only:
                 print(f"-- {name}", flush=True)

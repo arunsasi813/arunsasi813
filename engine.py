@@ -218,6 +218,121 @@ def log_dir() -> Path:
     return Path(tempfile.gettempdir())
 
 
+# --------------------------------------------------------------------------
+# run parameters — {PERIOD} and friends
+# --------------------------------------------------------------------------
+# One saved setup, every month: a parameter is a name used as {NAME} anywhere in a
+# setup — folders, file rules, filter values, column text, SQL, the output's name
+# and folder — and filled in when it runs: a fixed value, one asked for at Run, or
+# a date worked out from today in a format of your choosing.
+
+PARAM_MODES = [("fixed", "Fixed value"), ("ask", "Ask at each run"), ("today", "Today"),
+               ("yesterday", "Yesterday"), ("this_month", "This month"), ("last_month", "Last month"),
+               ("this_quarter", "This quarter"), ("last_quarter", "Last quarter"),
+               ("this_year", "This year"), ("last_year", "Last year")]
+PARAM_FORMATS = {"today": "yyyy-mm-dd", "yesterday": "yyyy-mm-dd", "this_month": "yyyy-mm", "last_month": "yyyy-mm",
+                 "this_quarter": "yyyy-Qq", "last_quarter": "yyyy-Qq", "this_year": "yyyy", "last_year": "yyyy"}
+_PARAM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")
+_PARAM_REF = re.compile(r"\{([A-Za-z][A-Za-z0-9_]{0,39})\}")
+_DATE_TOKENS = re.compile(r"yyyy|YYYY|yy|YY|MMMM|mmmm|Mmmm|MMM|mmm|Mmm|mm|MM|m|M|dd|DD|d|D|q")
+_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+           "October", "November", "December"]
+
+
+def format_date(d: date, fmt: str) -> str:
+    """Excel-style date codes: yyyy yy, mmmm (July) MMMM (JULY) mmm (Jul) MMM (JUL),
+    mm m, dd d, and q for the quarter (yyyy-Qq -> 2026-Q3). Anything else is copied as it is."""
+    def tok(m: re.Match) -> str:
+        t = m.group(0)
+        name = _MONTHS[d.month - 1]
+        return {"yyyy": f"{d.year:04d}", "YYYY": f"{d.year:04d}", "yy": f"{d.year % 100:02d}", "YY": f"{d.year % 100:02d}",
+                "mmmm": name, "Mmmm": name, "MMMM": name.upper(), "mmm": name[:3], "Mmm": name[:3],
+                "MMM": name[:3].upper(), "mm": f"{d.month:02d}", "MM": f"{d.month:02d}", "m": str(d.month),
+                "M": str(d.month), "dd": f"{d.day:02d}", "DD": f"{d.day:02d}", "d": str(d.day), "D": str(d.day),
+                "q": str((d.month - 1) // 3 + 1)}[t]
+    return _DATE_TOKENS.sub(tok, fmt)
+
+
+def _auto_date(mode: str, today: date) -> date:
+    from datetime import timedelta
+
+    def month_back(d: date, n: int) -> date:
+        y, m = divmod(d.year * 12 + d.month - 1 - n, 12)
+        return date(y, m + 1, 1)
+    if mode == "today":
+        return today
+    if mode == "yesterday":
+        return today - timedelta(days=1)
+    if mode == "this_month":
+        return today.replace(day=1)
+    if mode == "last_month":
+        return month_back(today, 1)
+    if mode == "this_quarter":
+        return date(today.year, (today.month - 1) // 3 * 3 + 1, 1)
+    if mode == "last_quarter":
+        return month_back(date(today.year, (today.month - 1) // 3 * 3 + 1, 1), 3)
+    if mode == "this_year":
+        return date(today.year, 1, 1)
+    if mode == "last_year":
+        return date(today.year - 1, 1, 1)
+    raise ValueError(f"unknown parameter mode {mode}")
+
+
+def _param_owner(obj: Any) -> dict | None:
+    """Where a payload keeps its parameter list: itself, or its job / setup inside."""
+    if not isinstance(obj, dict):
+        return None
+    if isinstance(obj.get("params"), list):
+        return obj
+    for k in ("job", "workspace", "setup"):
+        if isinstance(obj.get(k), dict) and isinstance(obj[k].get("params"), list):
+            return obj[k]
+    return None
+
+
+def param_values(obj: Any, given: dict | None = None, today: date | None = None) -> dict[str, str]:
+    """Each parameter's value now: `given` (the answers at Run, --set) first, then
+    the setup's last answers for 'ask', then fixed values and dates from today."""
+    owner = _param_owner(obj)
+    if owner is None:
+        return {}
+    answers = {**(owner.get("param_values") or {}), **(given or {})}
+    today = today or date.today()
+    out: dict[str, str] = {}
+    for p in owner.get("params") or []:
+        name = str(p.get("name") or "").strip()
+        if not _PARAM_NAME.match(name):
+            continue
+        mode = p.get("mode") or "fixed"
+        if name in (given or {}):
+            out[name] = str(given[name])
+        elif mode == "fixed":
+            out[name] = str(p.get("value") or "")
+        elif mode == "ask":
+            out[name] = str(answers.get(name, p.get("value") or ""))
+        else:
+            out[name] = format_date(_auto_date(mode, today), p.get("format") or PARAM_FORMATS.get(mode, "yyyy-mm-dd"))
+    return out
+
+
+def _subst(x: Any, values: dict[str, str], skip: frozenset = frozenset({"params", "param_values", "id"})) -> Any:
+    if isinstance(x, str):
+        return _PARAM_REF.sub(lambda m: values.get(m.group(1), m.group(0)), x) if "{" in x else x
+    if isinstance(x, list):
+        return [_subst(v, values) for v in x]
+    if isinstance(x, dict):
+        return {k: (v if k in skip else _subst(v, values)) for k, v in x.items()}
+    return x
+
+
+def apply_params(obj: Any, given: dict | None = None, values: dict | None = None) -> Any:
+    """A copy of a job, a setup or a payload holding one, with every {NAME} of a
+    parameter filled in. Names that aren't parameters are left alone — a regex's
+    \\d{6} is not one. Applying it twice changes nothing more."""
+    vals = values if values is not None else param_values(obj, given)
+    return _subst(obj, vals) if vals else obj
+
+
 def is_excel(path: Path) -> bool:
     return path.suffix.lower() in EXCEL_EXT
 
@@ -2807,6 +2922,7 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
     import shutil
 
     t0 = time.time()
+    job = apply_params(job)
     files = job.get("files") or []
     if not files:
         return {"ok": False, "error": "No files selected."}
@@ -3251,7 +3367,15 @@ def _cli(argv: list[str]) -> int:
     ap.add_argument("--workspace", help="saved workspace name — runs every group, step and report")
     ap.add_argument("--workspace-file", help="workspace JSON file")
     ap.add_argument("--recursive", action="store_true", help="with --folder: include subfolders")
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="a run parameter's value, e.g. --set PERIOD=2026-09 (repeat for several)")
     a = ap.parse_args(argv)
+    given = {}
+    for kv in a.set:
+        k, sep, v = kv.partition("=")
+        if not sep or not k.strip():
+            ap.error(f"--set needs NAME=VALUE, got {kv!r}")
+        given[k.strip()] = v
 
     if a.workspace or a.workspace_file:
         import workspace as W
@@ -3271,6 +3395,10 @@ def _cli(argv: list[str]) -> int:
     else:
         ap.error("need --job or --profile")
 
+    if job.get("params"):
+        vals = param_values(job, given)
+        print("parameters: " + ", ".join(f"{k}={v}" for k, v in vals.items()), file=sys.stderr)
+        job = apply_params(job, values=vals)
     if job.get("groups") is not None and not a.count:
         # a setup with groups: every group's ColSift work, the combine steps, one export
         import workspace as W
@@ -3284,6 +3412,10 @@ def _cli(argv: list[str]) -> int:
                 live[0]["files"] = files
             else:
                 ws = W.rebind(ws, files)["workspace"]
+        elif ws.get("folders"):
+            # the folders the setup was saved with ({PERIOD} filled in): what they hold now
+            print("folders: " + "; ".join(d["path"] for d in ws["folders"]), file=sys.stderr)
+            ws = W.rebind(ws, W.list_files(ws["folders"]))["workspace"]
         if a.out:
             ws["output"]["folder"] = a.out
         res = W.run_setup(ws, on_progress=lambda p: print(f"  {p}", file=sys.stderr))

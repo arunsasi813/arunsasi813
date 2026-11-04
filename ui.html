@@ -774,6 +774,12 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 
     <!-- OUTPUT -->
     <section class="pane" id="p-out">
+      <div class="card" id="paramCard">
+        <div class="f" style="justify-content:space-between"><h3 style="margin:0">Run parameters</h3>
+          <button class="btn sm" id="paramAdd">＋ Parameter</button></div>
+        <p class="hint" style="margin:6px 0 8px">Write <code>{PERIOD}</code> — or any name below — in a folder, a file rule, a filter value, a column's text, SQL, or the output's name and folder. It is filled in whenever the setup reads or runs: a fixed value, one asked for at each run, or a date worked out from today (<code>yyyy-mm</code>, <code>MMMyy</code> → JUL26, <code>yyyy-Qq</code> → 2026-Q3). From the command line: <code>--set PERIOD=2026-09</code>.</p>
+        <div id="paramRows"></div>
+      </div>
       <div class="card">
         <h3>Where it goes</h3>
         <div class="f" style="margin-bottom:10px">
@@ -1051,10 +1057,14 @@ function show(p){
 
 /* ---------------- folder + files ---------------- */
 const recursive = () => $("#recursive").checked;
+/* {NAME} filled in with the setup's parameters (see the Output tab) */
+const subst = v => String(v ?? "").replace(/\{([A-Za-z][A-Za-z0-9_]{0,39})\}/g,
+  (m, n) => (S.paramValues && Object.prototype.hasOwnProperty.call(S.paramValues, n)) ? S.paramValues[n] : m);
 function setFolders(paths){
-  S.folders = [...new Set(paths.filter(Boolean))].map(path => ({path, recursive: recursive()}));
+  // each folder keeps what was typed or saved (tpl, may hold {PERIOD}) and the folder it means now (path)
+  S.folders = [...new Set(paths.filter(Boolean))].map(tpl => ({tpl, path: subst(tpl), recursive: recursive()}));
   S.folder = S.folders[0]?.path || "";
-  $("#folder").value = S.folders.length > 1 ? `${S.folders.length} folders` : S.folder;
+  $("#folder").value = S.folders.length > 1 ? `${S.folders.length} folders` : (S.folders[0]?.tpl || "");
   $("#folder").title = S.folders.map(f => f.path).join("\n") || "Type a folder and press Enter — it replaces the folders listed";
 }
 $("#pickFolder").onclick = async () => {
@@ -1065,7 +1075,7 @@ $("#addFolder").onclick = async () => {
   const r = await api().pick_folder(S.folder);
   if (!r?.folder) return;
   if (S.folders.some(f => f.path === r.folder)){ say("That folder is listed already.", ""); return; }
-  setFolders([...S.folders.map(f => f.path), r.folder]);
+  setFolders([...S.folders.map(f => f.tpl), r.folder]);
   S.foldOpen[r.folder] = true;
   refreshFiles();
 };
@@ -1127,14 +1137,15 @@ async function assignFolder(path, gid){
   syncBack();
   const inFolder = new Set(S.files.filter(f => f.folder === path).map(f => f.path));
   WS.groups.forEach(g => {
-    if ((g.folders || []).some(d => d.path === path)){
-      g.folders = g.folders.filter(d => d.path !== path);
+    if ((g.folders || []).some(d => subst(d.path) === path)){
+      g.folders = g.folders.filter(d => subst(d.path) !== path);
       g.files = g.files.filter(p => !inFolder.has(p));          // what the folder brought leaves with it
     }
   });
   const g = WS.groups.find(x => x.id === gid);
   if (g){
-    g.folders = [...(g.folders || []), {path, recursive: recursive()}];
+    const tpl = (S.folders.find(f => f.path === path) || {}).tpl || path;     // keep {PERIOD} if the folder has it
+    g.folders = [...(g.folders || []), {path: tpl, recursive: recursive()}];
     WS.groups.forEach(x => { if (x !== g) x.files = x.files.filter(p => !inFolder.has(p)); });   // the folder's files move to it
   }
   if (S.savedFiles) Object.keys(S.savedFiles).forEach(k => S.savedFiles[k] = S.savedFiles[k].filter(p => !inFolder.has(p)));
@@ -1146,8 +1157,8 @@ async function assignFolder(path, gid){
   say(g ? `Every file in ${baseName(path)} now belongs to “${g.name}” — next month's files there will too.` : `${baseName(path)} is no longer tied to a group.`, "ok");
 }
 function closeFolder(path){
-  setFolders(S.folders.map(f => f.path).filter(p => p !== path));
-  WS.groups.forEach(g => g.folders = (g.folders || []).filter(d => d.path !== path));
+  setFolders(S.folders.filter(f => f.path !== path).map(f => f.tpl));
+  WS.groups.forEach(g => g.folders = (g.folders || []).filter(d => subst(d.path) !== path));
   refreshFiles();
 }
 function untick(paths){         // a file taken out by hand must not come back with the saved setup
@@ -1184,8 +1195,8 @@ function drawFiles(){
     const fs = S.files.filter(f => f.folder === d.path);
     const on = fs.filter(f => S.sel.has(f.path)).length;
     const open = S.foldOpen[d.path] ?? S.folders.length === 1;
-    const owner = WS.groups.find(g => (g.folders || []).some(x => x.path === d.path));
-    return `<div class="fold ${open ? "open" : ""}" data-fold="${esc(d.path)}" title="${esc(d.path)}">
+    const owner = WS.groups.find(g => (g.folders || []).some(x => subst(x.path) === d.path));
+    return `<div class="fold ${open ? "open" : ""}" data-fold="${esc(d.path)}" title="${esc(d.path)}${d.tpl && d.tpl !== d.path ? `\n(${esc(d.tpl)})` : ""}">
         <span class="tw">▶</span>
         <input type="checkbox" data-fchk="${esc(d.path)}" ${fs.length && on === fs.length ? "checked" : ""} ${on && on < fs.length ? "data-mixed=1" : ""} title="Tick every file in this folder for “${esc(activeGroup()?.name || "")}”">
         <div style="min-width:0"><div class="fnm">${esc(baseName(d.path))}</div>
@@ -2193,6 +2204,7 @@ async function showDashboards(){
   drawAnal();
 }
 $("#anRunDash").onclick = async () => {
+  if (!(await askParams())) return;
   const p = setupPayload();
   if (!p.groups.some(g => g.enabled !== false && g.files.length)){ say("Tick some files first.", "err"); return; }
   busy(true); $("#btnCancel").style.display = "";
@@ -2961,7 +2973,8 @@ function makeGroup(name, setup, files, match){
 }
 function newSetup(){
   const g = makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null);
-  return {kind: "colsift.setup", version: 2, name: "", groups: [g], steps: [], relationships: [], reports: []};
+  return {kind: "colsift.setup", version: 2, name: "", groups: [g], steps: [], relationships: [], reports: [],
+          params: [], param_values: {}};
 }
 let WS = newSetup();                     // S.output holds the setup's output while it is open
 S.group = WS.groups[0].id;
@@ -3001,7 +3014,8 @@ function syncBack(){
 function setupPayload(){
   syncBack();
   const out = JSON.parse(JSON.stringify(S.output)); delete out.formats;
-  return stripUi({...WS, output: out, processing: S.processing, folders: S.folders});
+  return stripUi({...WS, output: out, processing: S.processing,
+                  folders: S.folders.map(f => ({path: f.tpl || f.path, recursive: f.recursive}))});
 }
 const wsPayload = setupPayload;
 function wsCols(name){ return ((S.wsSchema?.tables || []).find(t => t.name === name) || {}).columns || []; }
@@ -3276,12 +3290,12 @@ $("#wsGroups").addEventListener("click", async e => {
     const r = await api().pick_folder(S.folder);
     if (!r?.folder) return;
     if (!S.folders.some(f => f.path === r.folder)){
-      setFolders([...S.folders.map(f => f.path), r.folder]);
+      setFolders([...S.folders.map(f => f.tpl), r.folder]);
       await refreshFiles({keepActive: true});
     }
     await assignFolder(r.folder, g.id); return;
   }
-  if (k === "unfold"){ await assignFolder(b.dataset.path, ""); return; }
+  if (k === "unfold"){ await assignFolder(subst(b.dataset.path), ""); return; }
   if (k === "del"){
     if (WS.groups.length < 2 || !confirm(`Remove the group “${g.name}” and its settings?`)) return;
     const i = WS.groups.indexOf(g), wasOpen = g.id === S.group;
@@ -3637,6 +3651,8 @@ async function openSetup(st, name){
         relationships: st.relationships || [], reports: st.reports || [], overview: st.overview || null};
   if (!WS.groups.length) WS.groups.push(makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null));
   WS.groups.forEach(g => g.folders = g.folders || []);
+  WS.params = st.params || []; WS.param_values = st.param_values || {};
+  await refreshParams(true);
   applyOutput(st.output || {});
   S.processing = st.processing || "sequential"; syncOutputControls();
   S.wsSchema = null; S.wsRelCheck = null; S.wsRelSug = null; S.anTarget = "group"; S.anData = null; S.anCache = {};
@@ -3647,17 +3663,17 @@ async function openSetup(st, name){
   // folders: keep the ones open; with none open, open the setup's own. Folders tied to a
   // group are part of the setup, so they are always listed.
   const tied = WS.groups.flatMap(g => g.folders.map(d => d.path));
-  let paths = S.folders.map(f => f.path);
+  let paths = S.folders.map(f => f.tpl);
   let note = "";
   if (!paths.length){
     paths = (st.folders || []).map(d => d.path || d);
     if (!paths.length) paths = [...new Set(WS.groups.flatMap(g => g.files).map(p => p.replace(/[\\/][^\\/]*$/, "")))];
   } else {
-    const savedIn = (st.folders || []).map(d => d.path || d).filter(x => !paths.includes(x));
+    const savedIn = (st.folders || []).map(d => d.path || d).filter(x => !paths.includes(x) && !S.folders.some(f => f.path === subst(x)));
     if (savedIn.length) note = ` It was saved with ${savedIn.map(baseName).join(", ")} — ＋ adds ${savedIn.length === 1 ? "it" : "them"}.`;
   }
-  const want = [...new Set([...paths, ...tied])];
-  if (want.join("\n") !== S.folders.map(f => f.path).join("\n")) setFolders(want);
+  const want = [...new Set([...paths, ...tied.filter(t => !paths.some(x => subst(x) === subst(t)))])];
+  if (want.join("\n") !== S.folders.map(f => f.tpl).join("\n")) setFolders(want);
   S.group = WS.groups[0].id;
   if (template) WS.groups[0].files = [...S.sel];
   let gone = [];
@@ -3679,7 +3695,8 @@ function job(){        // the open group as the engine's job: its settings, its 
     distinct: S.distinct, limit: S.limit ? +S.limit : null, stop_on_error: S.stop_on_error,
     batch_dupes: (S.batch_dupes.keys || []).length ? S.batch_dupes : null,
     output: S.output, processing: S.processing,
-    analysis: S.analysis, summaries: S.summaries
+    analysis: S.analysis, summaries: S.summaries,
+    params: WS.params || [], param_values: WS.param_values || {}
   };
 }
 /* one group's ColSift settings into the tabs. Everything starts from the defaults: a
@@ -3767,6 +3784,7 @@ $("#doCount").onclick = async () => {
 /* One Run: every group's ColSift work (columns, filters, added columns), then the
    Combine steps on those results, then one export. One group = the plain extract. */
 $("#btnRun").onclick = async () => {
+  if (!(await askParams())) return;
   const p = setupPayload(), live = p.groups.filter(g => g.enabled !== false);
   if (!live.some(g => g.files.length)){ say("Tick at least one file.", "err"); return; }
   if (!p.output.folder){ say("Choose an output folder on the Output tab.", "err"); show("out"); return; }
@@ -3960,6 +3978,60 @@ $("#impProfile").onclick = async () => {
   if (got.length) say(`Imported ${got.join(", ")}.` + (r.error ? ` Skipped: ${r.error}` : ""), "ok");
   else say(r?.error || "Nothing imported.", "err");
 };
+
+/* ---------------- run parameters ---------------- */
+async function refreshParams(quiet){
+  WS.params = WS.params || []; WS.param_values = WS.param_values || {};
+  const r = WS.params.length ? await api().param_values({params: WS.params, param_values: WS.param_values}) : {ok: true, values: {}};
+  S.paramValues = r?.ok ? r.values : {};
+  drawParams();
+  // folders written with {NAME} now mean another folder
+  if (!quiet && S.folders.some(f => subst(f.tpl) !== f.path)){ setFolders(S.folders.map(f => f.tpl)); await refreshFiles(); }
+}
+function drawParams(){
+  const modes = S.meta.param_modes || [{id: "fixed", label: "Fixed value"}];
+  $("#paramRows").innerHTML = (WS.params || []).map((p, i) => {
+    const auto = !["fixed", "ask"].includes(p.mode || "fixed");
+    const fmt = p.format || (modes.find(m => m.id === p.mode) || {}).format || "";
+    return `<div class="trow" data-pi="${i}">
+      <input type="text" data-pk="name" value="${esc(p.name || "")}" placeholder="PERIOD" style="width:120px;font-family:var(--mono)">
+      <select data-pk="mode" style="width:150px">${modes.map(m => `<option value="${m.id}" ${(p.mode || "fixed") === m.id ? "selected" : ""}>${esc(m.label)}</option>`).join("")}</select>
+      ${auto ? `<label class="lbl">Format</label><input type="text" data-pk="format" value="${esc(fmt)}" style="width:110px;font-family:var(--mono)">`
+             : `<input type="text" data-pk="value" value="${esc(p.value || "")}" placeholder="${(p.mode || "fixed") === "ask" ? "suggested answer" : "value"}" style="width:170px">`}
+      <span class="chip2" title="What {${esc(p.name || "")}} stands for now">= ${esc((S.paramValues || {})[p.name] ?? "")}</span>
+      <button class="btn x" data-pk="del" title="Remove">✕</button></div>`;
+  }).join("") || `<div class="sub" style="margin:0">None yet.</div>`;
+}
+$("#paramAdd").onclick = () => {
+  WS.params = WS.params || [];
+  const taken = new Set(WS.params.map(p => p.name));
+  const name = ["PERIOD", "MONTH", "CODE", "P1", "P2", "P3"].find(n => !taken.has(n)) || `P${WS.params.length + 1}`;
+  WS.params.push({name, mode: name === "PERIOD" ? "last_month" : "fixed", value: "", format: name === "PERIOD" ? "yyyy-mm" : ""});
+  refreshParams();
+};
+$("#paramRows").addEventListener("change", e => {
+  const row = e.target.closest("[data-pi]"); if (!row) return;
+  const p = WS.params[+row.dataset.pi], k = e.target.dataset.pk;
+  if (k === "name") p.name = e.target.value.trim().replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z]+/, "");
+  else if (k === "mode"){ p.mode = e.target.value; p.format = ""; }
+  else if (k === "value"){ p.value = e.target.value; if (p.mode === "ask") delete WS.param_values[p.name]; }
+  else if (k === "format") p.format = e.target.value;
+  refreshParams();
+});
+$("#paramRows").addEventListener("click", e => {
+  const b = e.target.closest("[data-pk=del]"); if (!b) return;
+  WS.params.splice(+b.closest("[data-pi]").dataset.pi, 1); refreshParams();
+});
+/* "ask at each run" parameters: asked right before the run or the dashboards */
+async function askParams(){
+  for (const p of (WS.params || []).filter(p => p.mode === "ask" && p.name)){
+    const v = prompt(`{${p.name}} — the value for this run`, WS.param_values[p.name] ?? p.value ?? "");
+    if (v === null){ say("Not started — no value given.", ""); return false; }
+    WS.param_values[p.name] = v;
+  }
+  await refreshParams();
+  return true;
+}
 
 /* ---------------- memory meter ---------------- */
 let MEM = {};

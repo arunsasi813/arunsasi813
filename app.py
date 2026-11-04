@@ -314,6 +314,14 @@ def _heavy(kind: str, payload: dict, here):
         _HEAVY.release()
 
 
+def _params(fn):
+    """Fill in the setup's {PARAMETERS} before the work sees the payload."""
+    @functools.wraps(fn)
+    def wrapper(self, p, *a, **kw):
+        return fn(self, _m()[0].apply_params(p), *a, **kw)
+    return wrapper
+
+
 def _reading(fn):
     """Interactive reads take turns (see above)."""
     @functools.wraps(fn)
@@ -414,6 +422,7 @@ class Api:
             "kinds": [{"id": k[0], "label": k[1], "group": k[2]} for k in E.ADD_KINDS],
             "column_compare": sorted(E.COLUMN_COMPARE_OPS),
             "dup_keep": [{"id": i, "label": l} for i, l in E.DUP_KEEP],
+            "param_modes": [{"id": i, "label": l, "format": E.PARAM_FORMATS.get(i, "")} for i, l in E.PARAM_MODES],
             "analysis": A.meta(),
             "workspace": W.meta(),
             "delims": E.DELIMS,
@@ -462,15 +471,18 @@ class Api:
     # -- pipeline ---------------------------------------------------------
     @guard
     @_reading
+    @_params
     def preview(self, p: dict) -> dict:
         return _m()[0].preview(p.get("job") or {}, int(p.get("rows") or 200))
 
     @guard
+    @_params
     def count(self, job: dict) -> dict:
         return _heavy("count", {"job": job},
                       lambda: _m()[0].count_rows(job, on_progress=lambda x: _js("onProgress", x)))
 
     @guard
+    @_params
     def find(self, p: dict) -> dict:
         job, params = p.get("job") or {}, p.get("params") or {}
         return _heavy("find", {"job": job, "params": params},
@@ -493,6 +505,7 @@ class Api:
                                 p.get("reference") or [])
 
     @guard
+    @_params
     def analyse(self, p: dict) -> dict:
         """The Analysis tab. scope 'active' is the current file (instant on a peek
         sample); 'all' runs the whole batch, like Count."""
@@ -504,6 +517,7 @@ class Api:
             return here()
 
     @guard
+    @_params
     def drill(self, p: dict) -> dict:
         """Rows behind a clicked bar, slice or pivot cell."""
         job, scope, filters, limit = p.get("job") or {}, p.get("scope") or "active", p.get("filters") or [], \
@@ -584,6 +598,7 @@ class Api:
         return E.cache_info()
 
     @guard
+    @_params
     def run(self, job: dict) -> dict:
         """One job the 1.x way. The UI now calls run_setup; kept for scripts."""
         E = _m()[0]
@@ -591,6 +606,7 @@ class Api:
             job, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
     @guard
+    @_params
     def run_setup(self, setup: dict) -> dict:
         """The Run button: every group's ColSift work, then the combine steps, then one
         export. A one-group setup is the classic extract. Results land on onRunDone()."""
@@ -599,12 +615,18 @@ class Api:
             setup, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
     @guard
+    @_params
     def ws_dashboards(self, p: dict) -> dict:
         """Run dashboards: every dashboard of the setup (or those in `only`) over every
         file, in a worker. Nothing is written."""
         ws, only = p.get("workspace") or {}, p.get("only")
         return _heavy("dashboards", {"workspace": ws, "only": only}, lambda: _m()[3].run_dashboards(
             ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL, only=only))
+
+    @guard
+    def param_values(self, p: dict) -> dict:
+        """What each {PARAMETER} stands for right now."""
+        return {"ok": True, "values": _m()[0].param_values(p, p.get("given") or None)}
 
     @guard
     def memory(self) -> dict:
@@ -690,26 +712,31 @@ class Api:
         return _m()[3].delete(name)
 
     @guard
+    @_params
     def ws_autogroup(self, p: dict) -> dict:
         return _m()[3].auto_group(p.get("workspace") or {}, p.get("files") or [], p.get("keep_manual", True))
 
     @guard
+    @_params
     def ws_rebind(self, p: dict) -> dict:
         """Fit a setup's groups to the files listed now (see workspace.rebind)."""
         return _m()[3].rebind(p.get("workspace") or {}, p.get("files") or [], p.get("saved") or {})
 
     @guard
     @_reading
+    @_params
     def ws_schema(self, ws: dict) -> dict:
         return _m()[3].schema(ws)
 
     @guard
     @_reading
+    @_params
     def ws_preview(self, p: dict) -> dict:
         return _m()[3].preview(p.get("workspace") or {}, p.get("table") or "", int(p.get("rows") or 200),
                                bool(p.get("related")))
 
     @guard
+    @_params
     def ws_analyse(self, p: dict) -> dict:
         ws, rep, scope = p.get("workspace") or {}, p.get("report") or {}, p.get("scope") or "preview"
         here = lambda: _m()[3].analyse(ws, rep, scope, on_progress=lambda x: _js("onProgress", x),  # noqa: E731
@@ -720,6 +747,7 @@ class Api:
             return here()
 
     @guard
+    @_params
     def ws_drill(self, p: dict) -> dict:
         ws, rep, scope = p.get("workspace") or {}, p.get("report") or {}, p.get("scope") or "preview"
         filters, limit = p.get("filters") or [], int(p.get("limit") or 500)
@@ -731,15 +759,18 @@ class Api:
 
     @guard
     @_reading
+    @_params
     def ws_check_relationships(self, ws: dict) -> dict:
         return _m()[3].check_relationships(ws)
 
     @guard
     @_reading
+    @_params
     def ws_suggest_relationships(self, ws: dict) -> dict:
         return _m()[3].suggest_relationships(ws)
 
     @guard
+    @_params
     def ws_run(self, ws: dict) -> dict:
         W = _m()[3]
         return _background("workspace", lambda: _heavy("run_setup", {"setup": ws}, lambda: W.run_setup(
