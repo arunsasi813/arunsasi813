@@ -1,0 +1,79 @@
+# ColSift checks. Tests run on every push to this branch, on Windows and Linux.
+# The Windows exe is built (and started once in --selftest mode, no window) when a
+# commit message contains [build], or by hand from the Actions tab; the exes are
+# attached to the run for download.
+name: ColSift
+
+on:
+  push:
+    branches: ["claude/colsift-app-enhancements-v6441e"]
+  workflow_dispatch:
+
+concurrency:
+  group: colsift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install polars fastexcel openpyxl pytest
+      - name: Unit tests
+        run: python -m pytest tests -q
+
+  exe:
+    name: Windows exe — build and self-test
+    needs: tests
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (the same clean set build.bat installs)
+        run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - name: Build ColSift.exe and colsift-cli.exe
+        run: python build.py --cli
+      - name: Self-test the exe (worker process, memory, a run)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\ColSift.exe" -ArgumentList @("--selftest", "$PWD\selftest.json") -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(600000)) { Stop-Process -Id $p.Id -Force; Write-Error "the self-test did not finish"; exit 1 }
+          if (Test-Path selftest.json) { Get-Content selftest.json } else { Write-Output "no selftest.json" }
+          Get-Content "$env:LOCALAPPDATA\ColSift\logs\colsift.log" -ErrorAction SilentlyContinue | Select-Object -Last 60
+          if ($p.ExitCode -ne 0) { Write-Error "self-test failed with exit code $($p.ExitCode)"; exit 1 }
+      - name: Command-line exe runs a job
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          "DOC_NO,AMOUNT`nA1,10`nA2,20" | Set-Content -Encoding utf8 smoke\in.csv
+          '{"files": ["smoke/in.csv"], "output": {"folder": "smoke/out", "format": "csv"}}' | Set-Content -Encoding utf8 smoke\job.json
+          .\dist\colsift-cli.exe --job smoke\job.json
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem smoke\out
+      - name: Sizes
+        shell: pwsh
+        run: Get-ChildItem dist\*.exe | ForEach-Object { "{0,-20} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ColSift-windows-${{ github.sha }}
+          path: |
+            dist/ColSift.exe
+            dist/colsift-cli.exe
+            selftest.json
+          retention-days: 30

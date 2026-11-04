@@ -121,7 +121,7 @@ def folders_and_loading(ui: UI, d: dict) -> None:
     page.wait_for_selector("#groupBar .gchip.on:has-text('Group 2')")
     page.select_option(f"#filelist .fold[data-fold='{d['feb']}'] select[data-fgroup]", label="→ Group 2")
     ui.wait_msg("now belongs to")
-    files2 = ui.js("WS.groups[1].files.map(p => p.split('/').pop()).sort()")
+    files2 = ui.js("WS.groups[1].files.map(p => p.split(/[\\\\/]/).pop()).sort()")
     assert files2 == ["refunds_FEB.txt", "sales_FEB.csv"], files2
     assert ui.js("WS.groups[1].folders.length") == 1
     ui.shot("folder_to_group")
@@ -193,7 +193,7 @@ def three_groups(ui: UI, d: dict) -> None:
         page.wait_for_selector(f"#wsGroups .gcard:nth-child({n})")
         group_card(ui, n, name, mode, value)
     ui.then("Sorted", lambda: page.click("#wsAuto"))
-    got = ui.js("Object.fromEntries(WS.groups.map(g => [g.name, g.files.map(p => p.split('/').pop()).sort()]))")
+    got = ui.js("Object.fromEntries(WS.groups.map(g => [g.name, g.files.map(p => p.split(/[\\\\/]/).pop()).sort()]))")
     assert got == {"Sales": ["sales_FEB.csv", "sales_JAN.csv"], "Codes": ["codes.xlsx"], "Refunds": ["refunds_FEB.txt"]}, got
     ui.js("switchGroup(WS.groups[0].id)")
     page.wait_for_function("document.querySelector('#peekFile').textContent.startsWith('sales_')")

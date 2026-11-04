@@ -21,7 +21,12 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-import webview
+
+def _webview():
+    """pywebview, imported when the window needs it — not at module level: every
+    worker process imports this module again, and must not load the GUI with it."""
+    import webview
+    return webview
 
 # Read-only bundle dir (ui.html travels with the exe); the writable dir is separate —
 # under Nuitka onefile they are NOT the same place. engine.py owns the writable rule.
@@ -67,7 +72,10 @@ def _m():
 def _win() -> "webview.Window | None":
     if _WINDOW is not None:
         return _WINDOW
-    return webview.windows[0] if getattr(webview, "windows", None) else None
+    if "webview" not in sys.modules:
+        return None
+    wv = _webview()
+    return wv.windows[0] if getattr(wv, "windows", None) else None
 
 
 def _js(fn: str, payload) -> None:
@@ -101,10 +109,11 @@ def guard(fn):
 
 def _dialog(kind: str):
     """pywebview 5 moved the dialog constants into FileDialog; older ones keep the names."""
-    fd = getattr(webview, "FileDialog", None)
+    wv = _webview()
+    fd = getattr(wv, "FileDialog", None)
     if fd is not None:
         return getattr(fd, kind)
-    return getattr(webview, f"{kind}_DIALOG")
+    return getattr(wv, f"{kind}_DIALOG")
 
 
 def _first(res) -> str:
@@ -736,6 +745,50 @@ class Api:
             ws, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
 
+def selftest(out: str) -> int:
+    """`ColSift.exe --selftest result.json`: checks a build without opening a window —
+    the worker process starts from the exe, does real work, reports progress and its
+    memory, and a worker that dies leaves this process standing. Writes what it saw as
+    JSON; exit code 0 when all of it held."""
+    import tempfile
+
+    _load_modules()
+    res: dict = {"pid": os.getpid(), "frozen": bool(getattr(sys, "frozen", False) or "__compiled__" in globals())}
+    seen: list = []
+    global _js
+    keep, _js = _js, (lambda fn, payload: seen.append(fn))
+    try:
+        res["worker"] = _heavy("_selftest", {"sleep": 0.5, "echo": "hello"}, lambda: {"ok": False, "in_process": True})
+        res["progress_events"] = seen.count("onProgress")
+        res["crash"] = _heavy("_selftest", {"exit": 3}, lambda: {"ok": False, "in_process": True})
+        d = Path(tempfile.mkdtemp(prefix="colsift_selftest_"))
+        rows = ["DOC_NO,TAX_CODE,AMOUNT"] + [f"D{i:05d},{'YQ' if i % 3 else 'YR'},{i}.50" for i in range(5000)]
+        (d / "t.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        job = {"files": [str(d / "t.csv")], "columns": [{"name": "DOC_NO", "include": True}],
+               "filters": {"type": "group", "mode": "and", "children": [
+                   {"type": "rule", "column": "TAX_CODE", "op": "equals", "value": "YR"}]},
+               "output": {"folder": str(d / "out"), "format": "xlsx"}}
+        res["count"] = Api().count(job)
+        res["run"] = _heavy("run_setup", {"setup": {"groups": [{"name": "T", "files": job["files"], "setup": job}],
+                                                    "output": job["output"]}}, lambda: {"ok": False, "in_process": True})
+        res["memory"] = Api().memory()
+    finally:
+        _js = keep
+    w, c, n, r, m = res["worker"], res["crash"], res["count"], res["run"], res["memory"]
+    checks = {
+        "worker ran in its own process": bool(w.get("ok")) and w.get("pid") not in (None, os.getpid()),
+        "worker reported progress": res["progress_events"] > 0,
+        "worker memory measured": (w.get("peak_memory") or 0) > 0,
+        "a dying worker is reported, not fatal": bool(c.get("crashed")) and not c.get("ok"),
+        "count in the worker": n.get("total") == 1667,
+        "run in the worker wrote a workbook": bool(r.get("ok")) and any(str(p).endswith(".xlsx") for p in r.get("written") or []),
+        "memory meter reads this process and the machine": (m.get("app") or 0) > 0 and (m.get("total") or 0) > 0,
+    }
+    res["checks"] = checks
+    Path(out).write_text(json.dumps(res, indent=2, default=str), encoding="utf-8")
+    return 0 if all(checks.values()) else 1
+
+
 def main() -> None:
     global _WINDOW
     # First reads of several workbooks run in worker processes (see engine.prepare).
@@ -744,10 +797,14 @@ def main() -> None:
     import multiprocessing
     multiprocessing.freeze_support()
     _install_logging()
+    if "--selftest" in sys.argv:
+        i = sys.argv.index("--selftest")
+        raise SystemExit(selftest(sys.argv[i + 1] if len(sys.argv) > i + 1 else "colsift-selftest.json"))
     if not UI.exists():
         print(f"ui.html missing next to app.py (looked in {HERE})", file=sys.stderr)
         raise SystemExit(1)
     threading.Thread(target=_load_modules, daemon=True).start()
+    webview = _webview()
     _WINDOW = webview.create_window(
         "ColSift — column extractor",
         str(UI),

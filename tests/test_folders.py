@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import openpyxl
 
@@ -65,8 +66,8 @@ def test_a_folder_assigned_to_a_group_is_read_as_it_stands_at_run_time(data):
     ws["output"] = {"folder": str(tmp / "out"), "basename": "m", "format": "xlsx"}
     write_sales(f["feb"].parent / "sales_MAR.csv", 3)          # arrives after the setup was made
     got = W.expand_folders(ws)
-    assert {p.split("/")[-1] for p in got["groups"][0]["files"]} == {"sales_JAN.csv", "sales_FEB.csv", "sales_MAR.csv"}
-    assert [p.split("/")[-1] for p in got["groups"][1]["files"]] == ["codes.xlsx"]
+    assert {Path(p).name for p in got["groups"][0]["files"]} == {"sales_JAN.csv", "sales_FEB.csv", "sales_MAR.csv"}
+    assert [Path(p).name for p in got["groups"][1]["files"]] == ["codes.xlsx"]
     r = W.run_setup(ws)
     assert r["ok"], r
     wb = openpyxl.load_workbook(r["written"][0])
@@ -80,8 +81,8 @@ def test_folder_files_belong_to_their_group_before_any_rule(data):
     ws["groups"][1].update(files=[], folders=[str(f["jan"].parent)], match={"mode": "manual"})
     listed = W.list_files([str(f["jan"].parent), str(f["feb"].parent)])
     g = W.auto_group(ws, listed, replace=True)["workspace"]["groups"]
-    assert sorted(p.split("/")[-1] for p in g[1]["files"]) == ["codes.xlsx", "sales_JAN.csv"]
-    assert [p.split("/")[-1] for p in g[0]["files"]] == ["sales_FEB.csv"]
+    assert sorted(Path(p).name for p in g[1]["files"]) == ["codes.xlsx", "sales_JAN.csv"]
+    assert [Path(p).name for p in g[0]["files"]] == ["sales_FEB.csv"]
 
 
 def test_cli_folder_replaces_the_saved_files(data):
