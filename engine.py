@@ -1674,6 +1674,10 @@ def preview(job: dict, rows: int = 200) -> dict:
     try:
         raw_cols = _schema_names(src)
         lf = build_pipeline(src, job, for_preview=True, available=raw_cols, notes=notes)
+        if batch_dupes(job):
+            lf = across_files(lf, job)
+            notes.append("Duplicates across files: the preview looks within this file only — "
+                         "Run, Count and the dashboards on every file look across all of them")
         df = lf.head(int(rows)).collect()
     except Exception as exc:
         return {"ok": False, "error": brief(exc)}
@@ -1736,6 +1740,21 @@ def count_rows(job: dict, on_progress=None) -> dict:
             per_file.append({"file": name, "rows": 0, "error": brief(exc)})
 
     total = 0
+    if batch_dupes(job) and lfs:
+        # rows per file after duplicates are found over every file together
+        whole = [build_pipeline(Source.from_dict({**(job.get("source") or {}), "path": files[k]}), job)
+                 for k, row in enumerate(per_file) if not row.get("error")]
+        try:
+            got = (across_files(stacked(whole), job).group_by(SRC_COL).len()
+                   .collect(engine="streaming"))
+            n = {int(r[0]): int(r[1]) for r in got.iter_rows()}
+            for j, i in enumerate(owners):
+                per_file[i]["rows"] = n.get(j, 0)
+                total += per_file[i]["rows"]
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": brief(exc), "files": per_file}
+        return {"ok": True, "total": total, "files": per_file, "elapsed": round(time.time() - t0, 2),
+                "note": "Counted after duplicates across files"}
     for i, res in zip(owners, _collect_many(lfs, _sequential(job))):
         if isinstance(res, Exception):
             per_file[i]["error"] = brief(res)
@@ -2477,7 +2496,10 @@ def _analysis_frame(job: dict, scope: str = "active", on_progress=None, rows: in
         frames = [d for d in _collect_many(lfs, _sequential(job)) if not isinstance(d, Exception)]
         if not frames:
             raise ValueError("No file could be read.")
-        df = pl.concat(frames, how="diagonal_relaxed")
+        if batch_dupes(job) or job.get("distinct"):
+            df = across_files(stacked([f.lazy() for f in frames]), job).drop(SRC_COL).collect()
+        else:
+            df = pl.concat(frames, how="diagonal_relaxed")
         return df, f"{len(frames)} file{'s' if len(frames) != 1 else ''}, {df.height:,} rows", 0
     src = Source.from_dict({**(job.get("source") or {}), "path": files[0]})
     p0 = _norm(files[0])
@@ -2486,6 +2508,8 @@ def _analysis_frame(job: dict, scope: str = "active", on_progress=None, rows: in
                and bool(_peek_cached(str(p0), src.encoding, src.sheet).get("fast")) else 0)
     src.sample_rows = sampled
     lf = build_pipeline(src, job, for_preview=bool(sampled))
+    if batch_dupes(job):            # within this one file — "every file" looks across all of them
+        lf = across_files(lf, job)
     df = lf.head(int(rows)).collect() if rows else lf.collect(engine="streaming")
     return df, f"{p0.name}, {df.height:,} rows", sampled
 
@@ -2582,6 +2606,87 @@ def _stage_dir() -> Path:
         except OSError:
             pass
     return d
+
+
+# --------------------------------------------------------------------------
+# across every file — duplicates by key, after each file's own pipeline
+# --------------------------------------------------------------------------
+# Filters and computed columns work file by file. A ticket that turns up in both
+# January's and February's extract is a duplicate only when the files are looked at
+# together, so this step runs once over everything the files produced.
+
+DUP_KEEP = [("all", "Every row — just add the columns"), ("dups", "Only rows whose key repeats"),
+            ("files", "Only keys found in more than one file"), ("first", "The first row of each key"),
+            ("last", "The last row of each key"), ("unique", "Only keys that appear once")]
+SRC_COL = "__colsift_src"
+
+
+def batch_dupes(job: dict) -> dict | None:
+    """The job's duplicates-across-files step, or None when it has none."""
+    d = job.get("batch_dupes") or {}
+    keys = [str(k) for k in d.get("keys") or [] if str(k or "").strip()]
+    if not keys or d.get("enabled") is False:
+        return None
+    keep = d.get("keep") or "all"
+    if keep not in {k for k, _ in DUP_KEEP}:
+        raise ValueError(f"Duplicates across files: unknown choice “{keep}”")
+    return {"keys": keys, "keep": keep, "fold": d.get("fold", True) is not False,
+            "count_col": str(d.get("count_col") or "").strip(), "files_col": str(d.get("files_col") or "").strip(),
+            "occ_col": str(d.get("occ_col") or "").strip()}
+
+
+def stacked(parts: list[pl.LazyFrame]) -> pl.LazyFrame:
+    """Files one under another, each row tagged with its file's position."""
+    return pl.concat([lf.with_columns(pl.lit(i, dtype=pl.UInt32).alias(SRC_COL)) for i, lf in enumerate(parts)],
+                     how="diagonal_relaxed")
+
+
+def across_files(lf: pl.LazyFrame, job: dict) -> pl.LazyFrame:
+    """Distinct rows and the duplicates step over everything at once. `lf` may carry
+    SRC_COL (from stacked); it is kept for the caller to split on or drop."""
+    cols = lf.collect_schema().names()
+    data = [c for c in cols if c != SRC_COL]
+    if job.get("distinct"):
+        lf = lf.unique(subset=data, keep="first", maintain_order=True)
+    d = batch_dupes(job)
+    if not d:
+        return lf
+    miss = [k for k in d["keys"] if k not in data]
+    if miss:
+        raise ValueError(f"Duplicates across files: the output has no column {', '.join(miss)} — "
+                         "keep it on the Columns tab (under its new name, if renamed)")
+    kk = [f"__dk{i}" for i in range(len(d["keys"]))]
+    norm = []
+    for k in d["keys"]:
+        e = pl.col(k).cast(pl.String).str.strip_chars().fill_null("")
+        norm.append(e.str.to_lowercase() if d["fold"] else e)
+    lf = lf.with_columns([e.alias(n) for e, n in zip(norm, kk)]).with_row_index("__dr")
+    blank = pl.all_horizontal([pl.col(n) == "" for n in kk])        # no key: never a duplicate
+    files = pl.col(SRC_COL).n_unique().over(kk) if SRC_COL in cols else pl.lit(1)
+    lf = lf.with_columns(
+        pl.when(blank).then(1).otherwise(pl.len().over(kk)).cast(pl.Int64).alias("__dc"),
+        pl.when(blank).then(1).otherwise(files).cast(pl.Int64).alias("__df"),
+        pl.when(blank).then(1).otherwise(pl.col("__dr").rank("ordinal").over(kk)).cast(pl.Int64).alias("__do"))
+    keep = {"dups": pl.col("__dc") > 1, "files": pl.col("__df") > 1, "first": pl.col("__do") == 1,
+            "last": pl.col("__do") == pl.col("__dc"), "unique": pl.col("__dc") == 1}.get(d["keep"])
+    if keep is not None:
+        lf = lf.filter(keep)
+    adds = [pl.col(src).cast(pl.String).alias(name) for src, name in
+            (("__dc", d["count_col"]), ("__df", d["files_col"]), ("__do", d["occ_col"])) if name]
+    if adds:
+        lf = lf.with_columns(adds)
+    return lf.drop(["__dr", "__dc", "__df", "__do", *kk])
+
+
+def _materialised(lf: pl.LazyFrame, stage: Path, name: str) -> pl.LazyFrame:
+    """Work a plan out once into the staging folder: written in chunks later, a window
+    over every file must not be recomputed for each chunk."""
+    path = stage / f"{name}_{time.time_ns()}.parquet"
+    try:
+        lf.sink_parquet(path, compression="lz4")
+    except Exception:  # noqa: BLE001 — a plan the streaming sink can't take
+        lf.collect(engine="streaming").write_parquet(path, compression="lz4")
+    return pl.scan_parquet(path)
 
 
 def _align_stage(paths: list[Path]) -> None:
@@ -2728,19 +2833,36 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
         if not good:
             return {"ok": False, "error": "Nothing to write — every file failed.", "files": per_file, "errors": errors}
 
-        if per_input:
+        if batch_dupes(job):
+            # duplicates are found over every file together, then (one output per
+            # input) each file gets its own rows back
+            notify(stage="build", part="duplicates across files")
+            both = _materialised(across_files(stacked([pl.scan_parquet(p) for _, p in good]), job), stage, "across")
+            kept = both.select(pl.len()).collect().item()
+            read = sum(int(r.get("rows") or 0) for r in results if not r.get("error"))
+            label = dict(DUP_KEEP)[batch_dupes(job)["keep"]].split(" —")[0].lower()
+            dup_note = f"Duplicates across files ({label}): {kept:,} of the {read:,} rows read were kept"
+            if per_input:
+                groups = [(Path(name).stem + str(out.get("suffix") or ""),
+                           both.filter(pl.col(SRC_COL) == i).drop(SRC_COL), name) for i, (name, _) in enumerate(good)]
+            else:
+                groups = [(out.get("basename") or "extract", both.drop(SRC_COL), "")]
+        elif per_input:
             groups = [(Path(name).stem + str(out.get("suffix") or ""), [pth], name) for name, pth in good]
         else:
             _align_stage([pth for _, pth in good])
             groups = [(out.get("basename") or "extract", [pth for _, pth in good], "")]
-        warnings: list[str] = []
+        warnings: list[str] = [dup_note] if batch_dupes(job) else []
         total_rows = 0
         analysis_back = None
         for stem, paths, label in groups:
             _check_cancel(cancel)
-            lf = pl.scan_parquet(paths if len(paths) > 1 else paths[0])
-            if job.get("distinct"):
-                lf = lf.unique(maintain_order=True)
+            if isinstance(paths, pl.LazyFrame):
+                lf = paths
+            else:
+                lf = pl.scan_parquet(paths if len(paths) > 1 else paths[0])
+                if job.get("distinct"):
+                    lf = lf.unique(maintain_order=True)
             total = lf.select(pl.len()).collect().item()
             if total == 0 and not out.get("write_empty"):
                 continue

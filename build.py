@@ -46,10 +46,10 @@ EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL"
            "pydoc_data", "lib2to3", "distutils", "xlsxwriter", "hvplot", "plotly", "torch",
            "jax", "pydantic", "gevent", "adbc_driver_manager", "pyiceberg", "boto3", "botocore",
            "google", "azure", "s3fs", "gcsfs", "adlfs", "polars.testing", "polars.ml",
-           # pywebview's other platforms: never used on Windows, and Qt alone is ~100 MB
-           "webview.platforms.qt", "webview.platforms.gtk", "webview.platforms.cocoa",
-           "webview.platforms.android", "webview.platforms.cef", "PyQt5", "PyQt6", "PySide2",
-           "PySide6", "qtpy", "gi", "cefpython3"]
+           # GUI toolkits pywebview can use elsewhere — never on Windows, and Qt alone is ~100 MB.
+           # Its own webview.platforms.* modules are left to Nuitka's pywebview plugin, which
+           # drops the unused ones itself and refuses a build that names them here too.
+           "PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy", "gi", "cefpython3"]
 HEAVY_INSTALLED = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "PyQt5", "PyQt6", "PySide6"]
 MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "pdfout", "worker"]
 

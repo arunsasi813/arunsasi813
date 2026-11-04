@@ -701,6 +701,21 @@ table.matrix tr.unas td.fn{color:var(--faint)}
           <label class="f" style="gap:6px"><input type="checkbox" id="stopOnError"> Stop the whole run if one file fails</label>
         </div>
       </div>
+      <div class="card" id="dupCard">
+        <h3>Duplicates across all files</h3>
+        <p class="hint" style="margin:0 0 8px">Looked for over every file of this group together — a ticket in January's extract and again in February's counts twice. It runs after each file's filters and columns, on the columns you keep; keys compare trimmed and ignoring case, and a blank key is never a duplicate.</p>
+        <div class="f" style="gap:8px;flex-wrap:wrap">
+          <label class="lbl">Key</label><span id="dupKeys" class="f" style="gap:4px;flex-wrap:wrap"></span>
+          <select id="dupAdd" style="width:170px"></select>
+          <label class="lbl" style="margin-left:10px">Keep</label><select id="dupKeep" style="width:250px"></select>
+        </div>
+        <div class="f" style="gap:16px;flex-wrap:wrap;margin-top:8px">
+          <label class="f" style="gap:6px"><input type="checkbox" id="dupCount"> <b>DUP_COUNT</b> — rows with this key</label>
+          <label class="f" style="gap:6px"><input type="checkbox" id="dupFiles"> <b>DUP_FILES</b> — files holding it</label>
+          <label class="f" style="gap:6px"><input type="checkbox" id="dupOcc"> <b>DUP_NO</b> — 1, 2, 3… in file order</label>
+        </div>
+        <div class="sub" id="dupNote" style="margin-top:6px"></div>
+      </div>
     </section>
 
     <!-- ADD COLUMNS -->
@@ -935,7 +950,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 
     <!-- RESULT -->
     <section class="pane" id="p-res">
-      <p class="hint">A dry run of the whole pipeline against the first selected file. Nothing is written until you press Extract.</p>
+      <p class="hint">A dry run of the whole pipeline against the first selected file. Nothing is written until you press Run.</p>
       <div class="f" style="margin-bottom:9px">
         <button class="btn" id="doPreview">Refresh preview</button>
         <label class="lbl">Rows</label>
@@ -993,7 +1008,7 @@ const S = {
   folder:"", folders:[], foldOpen:{}, savedFiles:null, known:new Set(), files:[], sel:new Set(), active:null, sheets:[],
   source:DEFAULT_SOURCE(),
   allCols:[], columns:[], filters:{type:"group", mode:"and", negate:false, enabled:true, children:[]}, add_columns:[],
-  distinct:false, limit:"", stop_on_error:false,
+  distinct:false, limit:"", stop_on_error:false, batch_dupes:{keys:[], keep:"all", count_col:"", files_col:"", occ_col:""},
   output:DEFAULT_OUTPUT(),
   processing:"sequential", lastPreview:null, fxTarget:null,
   analysis:{ export:false, sheet_name:"Analysis", items:[], filters:[] },
@@ -1027,6 +1042,7 @@ function show(p){
   $$(".pane").forEach(x => x.classList.remove("on"));
   $("#p-"+p).classList.add("on");
   if (p === "out"){ drawFormats(); syncSplit(); syncPdf(); drawOutputMode(); }
+  if (p === "filt") drawDups();
   if (p === "anal"){ if (!S.anData) anFromCache();
                      drawAnal(); if (S.wsDirty && (AT().report || groupRel())) wsSchemaFresh();
                      if (!S.anData && (S.active || AT().report)) anRun("active"); }
@@ -1717,8 +1733,34 @@ const DATE_PRESETS = ["dd/mm/yyyy", "dd-mmm-yyyy", "yyyy-mm-dd", "dd/mm/yyyy hh:
 function outputColumns(){
   const kept = S.columns.filter(c => c.include).map(c => (c.alias || "").trim() || c.name);
   const added = S.add_columns.filter(a => a.enabled !== false && (a.name || "").trim()).map(a => a.name.trim());
-  return [...(kept.length ? kept : S.allCols), ...added];
+  const d = S.batch_dupes || {}, dup = (d.keys || []).length ? [d.count_col, d.files_col, d.occ_col].filter(Boolean) : [];
+  return [...(kept.length ? kept : S.allCols), ...added, ...dup];
 }
+/* ---- duplicates across all files ---- */
+function drawDups(){
+  const d = S.batch_dupes, base = outputColumns().filter(c => ![d.count_col, d.files_col, d.occ_col].includes(c));
+  $("#dupKeys").innerHTML = (d.keys || []).map((k, i) => `<span class="chip2" ${base.includes(k) ? "" : 'style="border-color:var(--red)" title="Not among the kept columns"'}>${esc(k)}
+      <button class="btn x" data-dk="${i}" style="padding:0 2px" title="Remove">✕</button></span>`).join("") ||
+    `<span class="sub" style="margin:0">none — the step is off</span>`;
+  $("#dupAdd").innerHTML = `<option value="">＋ key column…</option>` + base.filter(c => !(d.keys || []).includes(c))
+    .map(c => `<option>${esc(c)}</option>`).join("");
+  $("#dupKeep").innerHTML = (S.meta.dup_keep || [{id: "all", label: "Every row"}]).map(k =>
+    `<option value="${k.id}" ${d.keep === k.id ? "selected" : ""}>${esc(k.label)}</option>`).join("");
+  $("#dupCount").checked = !!d.count_col; $("#dupFiles").checked = !!d.files_col; $("#dupOcc").checked = !!d.occ_col;
+  const on = (d.keys || []).length;
+  ["#dupKeep", "#dupCount", "#dupFiles", "#dupOcc"].forEach(x => $(x).disabled = !on);
+  $("#dupNote").textContent = !on ? "" : `Preview looks within the first file only; Run, Count and dashboards on every file look across all of them.` +
+    ((S.output.mode || "combine") !== "combine" ? " With one output per input, each file keeps its own rows after the step." : "");
+}
+$("#dupAdd").onchange = e => { if (!e.target.value) return; S.batch_dupes.keys = [...(S.batch_dupes.keys || []), e.target.value]; drawDups(); };
+$("#dupKeys").addEventListener("click", e => {
+  const b = e.target.closest("[data-dk]"); if (!b) return;
+  S.batch_dupes.keys.splice(+b.dataset.dk, 1); drawDups();
+});
+$("#dupKeep").onchange = e => { S.batch_dupes.keep = e.target.value; };
+$("#dupCount").onchange = e => { S.batch_dupes.count_col = e.target.checked ? "DUP_COUNT" : ""; drawDups(); };
+$("#dupFiles").onchange = e => { S.batch_dupes.files_col = e.target.checked ? "DUP_FILES" : ""; drawDups(); };
+$("#dupOcc").onchange = e => { S.batch_dupes.occ_col = e.target.checked ? "DUP_NO" : ""; drawDups(); };
 function drawFormats(){
   const cols = outputColumns(), F = S.output.formats || (S.output.formats = {});
   if (!cols.length){ $("#fmtBox").innerHTML = `<div class="empty" style="padding:8px 0">Pick a file and columns first.</div>`; return; }
@@ -2946,7 +2988,8 @@ function activeGroup(){ return WS.groups.find(g => g.id === S.group) || WS.group
 function groupSetupFromEditor(){
   const j = job();
   return JSON.parse(JSON.stringify({source: j.source, columns: j.columns, filters: j.filters, add_columns: j.add_columns,
-    distinct: j.distinct, limit: j.limit, stop_on_error: j.stop_on_error, output: {formats: S.output.formats || {}},
+    distinct: j.distinct, limit: j.limit, stop_on_error: j.stop_on_error, batch_dupes: j.batch_dupes,
+    output: {formats: S.output.formats || {}},
     analysis: S.analysis, summaries: S.summaries}));
 }
 function syncBack(){
@@ -3634,6 +3677,7 @@ function job(){        // the open group as the engine's job: its settings, its 
     columns: S.columns.map(c => ({name:c.name, alias:c.alias, include:c.include})),
     filters: S.filters, add_columns: S.add_columns,
     distinct: S.distinct, limit: S.limit ? +S.limit : null, stop_on_error: S.stop_on_error,
+    batch_dupes: (S.batch_dupes.keys || []).length ? S.batch_dupes : null,
     output: S.output, processing: S.processing,
     analysis: S.analysis, summaries: S.summaries
   };
@@ -3646,6 +3690,7 @@ function applyGroupSetup(st0){
   S.columns = st.columns || []; S.filters = normFilters(st.filters);
   S.add_columns = st.add_columns || [];
   S.distinct = !!st.distinct; S.limit = st.limit || ""; S.stop_on_error = !!st.stop_on_error;
+  S.batch_dupes = {keys: [], keep: "all", count_col: "", files_col: "", occ_col: "", ...(st.batch_dupes || {})};
   S.output.formats = (st.output || {}).formats || {};
   S.analysis = {export:false, sheet_name:"Analysis", items:[], filters:[], ...(st.analysis || {})};
   S.summaries = {export:false, tabs:[], ...(st.summaries || {})};
@@ -3655,6 +3700,7 @@ function applyGroupSetup(st0){
   $("#delimiter").value = S.source.auto_delimiter ? "auto" : S.source.delimiter;
   $("#encoding").value = S.source.encoding; $("#trim").checked = S.source.trim;
   $("#distinct").checked = S.distinct;
+  drawDups();
   $("#limit").value = S.limit; $("#stopOnError").checked = S.stop_on_error;
   S.anData = null; S.anView = "dash"; drawAnal();
   drawCols(); drawRules(); drawAdds(); drawFormats(); syncSplit();

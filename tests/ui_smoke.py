@@ -264,7 +264,35 @@ def overview_dashboard(ui: UI, d: dict) -> None:
     ui.shot("after_run")
 
 
-SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard}
+def duplicates_across_files(ui: UI, d: dict) -> None:
+    """The Filters tab's duplicates card: a key, keep only keys in several files, counts."""
+    page = ui.page
+    new_setup(ui)
+    jan, feb = d["jan"].parent / "dup_jan", d["jan"].parent / "dup_feb"
+    for p, body in ((jan, "DOC_NO,AMOUNT\nA1,10\nA2,20\n"), (feb, "DOC_NO,AMOUNT\nA2,21\nA3,30\n")):
+        p.mkdir(exist_ok=True)
+        (p / f"{p.name}.csv").write_text(body, encoding="utf-8")
+    ui.folders(jan, feb)
+    page.wait_for_function("S.allCols.length === 2")
+    ui.tab("filt")
+    page.select_option("#dupAdd", "DOC_NO")
+    page.select_option("#dupKeep", "files")
+    page.check("#dupCount")
+    page.check("#dupFiles")
+    assert "Preview looks within the first file" in page.inner_text("#dupNote")
+    ui.tab("out")
+    page.fill("#outFolder", str(d["out"] / "dups"))
+    page.dispatch_event("#outFolder", "change")
+    page.select_option("#outFormat", "csv")
+    page.dispatch_event("#outFormat", "change")
+    page.uncheck("#runDash")
+    ui.then("Done", lambda: page.click("#btnRun"))
+    out = next((d["out"] / "dups").glob("*.csv")).read_text(encoding="utf-8").split()
+    assert out == ["DOC_NO,AMOUNT,DUP_COUNT,DUP_FILES", "A2,20,2,2", "A2,21,2,2"], out
+    ui.shot("duplicates")
+
+
+SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files}
 
 
 def main() -> int:

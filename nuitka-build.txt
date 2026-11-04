@@ -38,6 +38,11 @@ new PDF export needs no library — pdfout.py writes PDF directly. depscan.py no
 runs the workspace and PDF paths too: the whole flow still imports polars and
 nothing else from the heavy list.
 
+2.1: do NOT list pywebview's own modules (webview.platforms.qt, .gtk, .cef …) in
+--nofollow-import-to. Nuitka 4.x's pywebview plugin drops the unused ones itself
+and stops the build with "Conflict between user and plugin decision for module
+'webview.platforms.cef'" when they are named there too.
+
 2.1: worker.py runs heavy work in a second process. Nothing to add to the
 commands: build.py includes the module, and Nuitka's multiprocessing support (on
 by default) starts the exe again as the worker — the same mechanism the first
@@ -55,11 +60,11 @@ python -m nuitka --mode=onefile ^
   --python-flag=no_asserts ^
   --include-module=engine --include-module=formula --include-module=xlsxfast ^
   --include-module=analysis --include-module=workspace --include-module=pdfout ^
-  --include-package=fastexcel ^
+  --include-module=worker --include-package=fastexcel ^
   --nofollow-import-to=pandas --nofollow-import-to=pyarrow --nofollow-import-to=numpy ^
   --nofollow-import-to=matplotlib --nofollow-import-to=scipy --nofollow-import-to=IPython ^
   --nofollow-import-to=PIL --nofollow-import-to=sqlalchemy --nofollow-import-to=xlsxwriter ^
-  --nofollow-import-to=webview.platforms.qt --nofollow-import-to=webview.platforms.gtk ^
+  --nofollow-import-to=PyQt5 --nofollow-import-to=PySide6 ^
   ... (the full list is EXCLUDE in build.py) ^
   --noinclude-pytest-mode=nofollow --noinclude-setuptools-mode=nofollow ^
   --noinclude-IPython-mode=nofollow --noinclude-unittest-mode=nofollow ^

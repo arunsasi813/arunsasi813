@@ -413,6 +413,7 @@ class Api:
             "ops": [{"id": o[0], "label": o[1], "needs_value": o[2], "group": o[3]} for o in E.FILTER_OPS],
             "kinds": [{"id": k[0], "label": k[1], "group": k[2]} for k in E.ADD_KINDS],
             "column_compare": sorted(E.COLUMN_COMPARE_OPS),
+            "dup_keep": [{"id": i, "label": l} for i, l in E.DUP_KEEP],
             "analysis": A.meta(),
             "workspace": W.meta(),
             "delims": E.DELIMS,

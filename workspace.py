@@ -660,8 +660,8 @@ class Builder:
                     and bool(E._peek_cached(str(p), src.encoding, src.sheet).get("fast"))):
                 src.sample_rows = E.PREVIEW_SAMPLE if self.scope == "schema" else PREVIEW_ROWS
             lf = E.build_pipeline(src, job, for_preview=True)
-            if self.scope == "schema":
-                return lf
+            if self.scope == "schema":       # the columns, the duplicate counts included
+                return E.across_files(lf, job) if E.batch_dupes(job) else lf
             frames.append(lf.head(PREVIEW_ROWS))
         got = E._collect_many(frames, sequential=True)
         ok = [d for d in got if not isinstance(d, Exception)]
@@ -673,6 +673,8 @@ class Builder:
         if len(files) > len(take):
             self.notes.append(f"{g['name']}: preview uses {len(take)} of {len(files)} files, "
                               f"up to {PREVIEW_ROWS:,} rows each")
+        if E.batch_dupes(g["setup"]):
+            return E.across_files(E.stacked([d.lazy() for d in ok]), g["setup"]).drop(E.SRC_COL)
         return pl.concat(ok, how="diagonal_relaxed").lazy()
 
     def _group_all(self, g: dict, files: list[str]) -> pl.LazyFrame:
@@ -685,6 +687,9 @@ class Builder:
         good = [r["_path"] for r in results if not r.get("error")]
         if not good:
             raise WorkspaceError(f"“{g['name']}”: every file failed")
+        if E.batch_dupes(g["setup"]):          # duplicates over every file of the group, worked out once
+            whole = E.across_files(E.stacked([pl.scan_parquet(p) for p in good]), g["setup"]).drop(E.SRC_COL)
+            return self._materialise(f"{g['name']} duplicates", whole)
         E._align_stage(good)
         lf = pl.scan_parquet(good if len(good) > 1 else good[0])
         if g["setup"].get("distinct"):
