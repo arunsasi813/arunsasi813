@@ -45,7 +45,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 # never imported by ColSift (depscan.py measures this; re-run it after adding features)
 EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL", "sqlalchemy",
@@ -133,7 +133,8 @@ def nuitka_cmd(target: str, mode: str, out: Path, name: str, gui: bool, lean: bo
     cmd += ["--noinclude-pytest-mode=nofollow", "--noinclude-setuptools-mode=nofollow",
             "--noinclude-IPython-mode=nofollow", "--noinclude-unittest-mode=nofollow"]
     if gui:
-        cmd += ["--include-data-files=ui.html=ui.html", "--include-package-data=webview"]
+        cmd += ["--include-data-files=ui.html=ui.html", "--include-data-files=studio.html=studio.html",
+                "--include-package-data=webview"]
         if sys.platform.startswith("win"):
             cmd += ["--windows-console-mode=disable", "--include-package=clr_loader",
                     "--include-package-data=clr_loader", "--include-package-data=pythonnet"]

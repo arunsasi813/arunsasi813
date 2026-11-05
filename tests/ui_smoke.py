@@ -465,8 +465,65 @@ def parquet_and_lookup(ui: UI, d: dict) -> None:
     ui.shot("find_export")
 
 
+def studio_visual(ui: UI, d: dict) -> None:
+    """A Studio card: measures over the dashboard's rows, a bar list bound to a column,
+    the designer opening over the window and saving back, slicers narrowing it."""
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "studio_src"
+    src.mkdir(exist_ok=True)
+    (src / "sales_JAN.csv").write_bytes((d["jan"] / "sales_JAN.csv").read_bytes())
+    ui.folders(src)
+    page.wait_for_function("S.allCols.length === 5")
+    ui.tab("anal")
+    ui.then("Analysis ready", lambda: page.click("#anQuick [data-q=slicer]"))
+    ui.then("Analysis ready", lambda: page.click("#anQuick [data-q=studio]"))
+    card = "#anCards .card.item:nth-child(2)"
+    frame = page.frame_locator(f"{card} iframe.msv")
+    total = sum(35.5 + (k * 37) % 900 for k in range(36))
+    frame.locator(".ms-kv").first.wait_for()
+    assert frame.locator(".ms-kv").first.inner_text() == f"{total:,.0f}", frame.locator(".ms-kv").first.inner_text()
+    assert frame.locator(".ms-kv").nth(1).inner_text() == "36"
+    assert frame.locator("text=YQ").count() >= 1, "the bar list draws a row per TAX_CODE"
+    ui.shot("studio_card")
+    # a slicer narrows the Studio card like any other
+    ui.then("Analysis ready", lambda: page.locator("#anCards .slicer label:has-text('YQ') input").check())
+    page.wait_for_function("""() => { const f = document.querySelector('#anCards iframe.msv');
+        return f && f.contentDocument && [...f.contentDocument.querySelectorAll('.ms-kv')].some(x => x.textContent === '9'); }""")
+    # bindings: rename a measure, and the design's references show what is not set
+    page.locator(f"{card} [data-act=edit]").click()
+    page.wait_for_selector(f"{card} [data-f=mname]")
+    assert page.locator(f"{card} [data-bid] select[data-f=mscol]").input_value() == "TAX_CODE"
+    page.locator(f"{card} [data-act=edit]").click()
+    # the designer opens over the window, shows the real numbers, and saves back
+    page.locator(f"{card} [data-act=msedit]").first.click()
+    page.wait_for_selector("#msEd", state="visible")
+    ed = page.frame_locator("#msEdFrame")
+    ed.locator(".top .acts button:has-text('Use in ColSift')").wait_for()
+    pv = ed.frame_locator("#pv")
+    pv.locator(".ms-kv").first.wait_for()
+    assert pv.locator(".ms-kv").nth(1).inner_text() == "9", "the designer previews the dashboard's numbers"
+    ui.shot("studio_designer")
+    ui.then("Studio visual saved", lambda: ed.locator(".top .acts button:has-text('Use in ColSift')").click())
+    assert not page.is_visible("#msEd")
+    ui.then("DAX copied", lambda: page.evaluate("msCopyDax(AT().analysis.items.find(x => x.kind === 'studio'))"))
+    # saved with the setup, drawn again after loading it
+    page.fill("#profileName", "Studio")
+    ui.then("Saved", lambda: page.click("#saveProfile"))
+    saved = json.loads((Path(os.environ["COLSIFT_PROFILES"]) / "Studio.json").read_text())
+    items = saved["groups"][0]["setup"]["analysis"]["items"]
+    st = next(x for x in items if x["kind"] == "studio")
+    assert st["project"]["blocks"] and [m["name"] for m in st["measures"]] == ["Total AMOUNT", "Rows"]
+    ui.then("New setup", lambda: page.click("#newProfile"))
+    page.select_option("#profileList", "Studio")
+    ui.then("Loaded", lambda: page.click("#loadProfile"))
+    ui.tab("anal")
+    page.wait_for_function("""() => { const f = document.querySelector('#anCards iframe.msv');
+        return f && f.contentDocument && f.contentDocument.querySelectorAll('.ms-kv').length >= 2; }""", timeout=60000)
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
-            "params": parameters, "checks": run_checks, "data": parquet_and_lookup}
+            "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual}
 
 
 def main() -> int:

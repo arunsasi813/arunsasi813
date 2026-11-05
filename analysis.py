@@ -77,7 +77,9 @@ ITEM_KINDS = [   # id, label, group
     ("crosstab", "Cross-tab of two columns", "Tables & charts"),
     ("records", "Table of rows (top N)", "Tables & charts"),
     ("quality", "Data checks on chosen columns", "Checks"),
+    ("studio", "Studio visual — designed in Measure Studio", "Visuals"),
 ]
+STUDIO_MAX_ROWS = 500       # rows a Studio block gets: groups, periods or records
 
 CHARTS = {   # the visuals each kind can draw; the first is the default
     "breakdown": [("none", "Table only"), ("bar", "Columns"), ("hbar", "Bars"), ("line", "Line"),
@@ -745,6 +747,88 @@ def _records(lf: pl.LazyFrame, item: dict, columns: list[str]) -> dict:
             "n_total": int(total.item())}
 
 
+def _plain(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return None if v != v else float(v)
+    return str(v)
+
+
+_PLAIN_NUM = re.compile(r"^-?(0|[1-9]\d*)(\.\d+)?$")
+
+
+def _cell(v: Any) -> Any:
+    """A record's value for the studio: a plain number as a number; IDs, codes and
+    values with leading zeros stay text."""
+    v = _plain(v)
+    return float(v) if isinstance(v, str) and len(v) < 16 and _PLAIN_NUM.match(v) else v
+
+
+def _studio_aggs(measures: list[dict], columns: list[str]) -> list[pl.Expr]:
+    return [(pl.len().cast(pl.Float64) if (m.get("agg") or "sum") == "rows" else _agg_expr(m, columns)).alias(f"__m{i}")
+            for i, m in enumerate(measures)]
+
+
+def _studio(src: pl.LazyFrame, item: dict, columns: list[str]) -> dict:
+    """A Studio visual's data: each bound measure over the card's rows (`values`), and
+    per block the rows it draws (`ctx`) — one per value of a column (or month, …) with
+    every measure for that group, or the top N records. Measure Studio evaluates the
+    block's own expressions against these."""
+    measures = [m for m in item.get("measures") or [] if str(m.get("name") or "").strip() and
+                ((m.get("agg") or "sum") == "rows" or m.get("column") or str(m.get("expr") or "").strip())]
+    names = [m["name"].strip() for m in measures]
+    values: dict[str, Any] = {}
+    if measures:
+        row = src.select(_studio_aggs(measures, columns)).collect().row(0)
+        values = {n: _plain(v) for n, v in zip(names, row)}
+    ctx: dict[str, list[dict]] = {}
+    errors: dict[str, str] = {}
+    for bid, g in (item.get("blocks") or {}).items():
+        if (g.get("mode") or "group") == "off":
+            continue
+        try:
+            n = max(1, min(int(g.get("limit") or 50), STUDIO_MAX_ROWS))
+            if (g.get("mode") or "group") == "rows":
+                cols = [_need(c, columns) for c in (g.get("columns") or []) if c] or columns[:60]
+                q = src
+                if g.get("sort_by"):
+                    b = _need(g["sort_by"], columns)
+                    desc = g.get("desc", True) is not False
+                    q = q.sort([F.clean_number(pl.col(b)), pl.col(b).fill_null("")], descending=[desc, desc], nulls_last=True)
+                df = q.select(cols).head(n).collect()
+                ctx[bid] = [{"__label": "" if r[0] is None else str(r[0]), "__order": i,
+                             **{c: _cell(v) for c, v in zip(cols, r)}} for i, r in enumerate(df.iter_rows())]
+                continue
+            by = g.get("by") or {}
+            if not by.get("column"):
+                continue
+            lab, nkey, tkey = _field_exprs(by, columns)
+            df = src.group_by(lab.alias("__label")).agg(
+                [nkey.min().alias("__nk"), tkey.min().alias("__tk"), *_studio_aggs(measures, columns)]).collect()
+            if df.height > n:          # the biggest n by the first measure, then in their natural order
+                df = df.sort("__m0", descending=True, nulls_last=True).head(n) if measures else df.head(n)
+            df = df.sort(["__nk", "__tk", "__label"], nulls_last=True)
+            rows = []
+            for i, r in enumerate(df.iter_rows(named=True)):
+                c = {"__label": r["__label"], "__order": i, by["column"]: r["__label"]}
+                c.update({nm: _plain(r[f"__m{k}"]) for k, nm in enumerate(names)})
+                rows.append(c)
+            ctx[bid] = rows
+        except (AnalysisError, F.FormulaError) as exc:
+            errors[bid] = str(exc)
+    fmts = [m.get("fmt") or {"rows": "#,##0"}.get(m.get("agg") or "sum") or DEFAULT_FMT.get(m.get("agg") or "sum")
+            or "#,##0.00" for m in measures]
+    body = [{"cells": [nm, _fmt_one(values.get(nm), f) if isinstance(values.get(nm), float) else str(values.get(nm) or "")],
+             "nums": [None, values.get(nm) if isinstance(values.get(nm), float) else None], "kind": "data",
+             "level": 0, "path": []} for nm, f in zip(names, fmts)]
+    table = {"ok": True, "head": [["Measure", "Value"]], "rows": body, "fmts": [None, None], "row_fields": [],
+             "colinfo": [], "n_rows": len(body), "n_cols": 2, "values": []}
+    return {"values": values, "ctx": ctx, "errors": errors, "table": table}
+
+
 def dashboard(lf: pl.LazyFrame, items: list[dict], columns: list[str] | None = None,
               filters: list[dict] | None = None) -> list[dict]:
     """Every card, each on the frame after the dashboard's filters (slicers and clicked
@@ -799,6 +883,13 @@ def dashboard(lf: pl.LazyFrame, items: list[dict], columns: list[str] | None = N
                 if not got["name"]:
                     got["name"] = fld["column"] if (fld.get("group") or "none") == "none" else \
                         f"{GROUP_SHORT.get(fld['group'], fld['group'])} of {fld['column']}"
+                out.append(got)
+                continue
+            if kind == "studio":
+                st = _studio(src, item, columns)
+                got.update(values=st["values"], ctx=st["ctx"], block_errors=st["errors"], table=st["table"])
+                if not got["name"]:
+                    got["name"] = (((item.get("project") or {}).get("settings") or {}).get("name") or "Studio visual")
                 out.append(got)
                 continue
             if kind == "quality":

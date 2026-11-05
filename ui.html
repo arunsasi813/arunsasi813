@@ -274,6 +274,10 @@ a.link{color:var(--teal-2);cursor:pointer;text-decoration:underline;text-underli
 .card.item .sub{font-size:11px;color:var(--faint);margin-bottom:6px}
 .card.item .tools{position:absolute;top:8px;right:8px;display:flex;gap:4px;opacity:0;transition:opacity .12s}
 .card.item:hover .tools,.card.item.editing .tools{opacity:1}
+.msed{position:fixed;inset:0;z-index:300;background:rgba(15,22,28,.55);padding:12px}
+.msed iframe{width:100%;height:100%;border:0;border-radius:8px;background:#fff;box-shadow:0 12px 44px rgba(0,0,0,.35)}
+.msv{width:100%;border:0;display:block;min-height:80px;background:transparent}
+.msbind{border-collapse:collapse}.msbind td{padding:2px 8px 2px 0;vertical-align:middle;font-size:12px}
 .kpi{font-size:30px;font-weight:600;letter-spacing:-.01em;color:var(--teal-2);font-variant-numeric:tabular-nums;line-height:1.15}
 .itemerr{color:var(--red);font-size:11.5px;font-family:var(--mono)}
 .pv{overflow:auto;max-height:52vh;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
@@ -975,6 +979,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
             <button class="btn sm" data-q="pie">◔ Donut</button>
             <button class="btn sm" data-q="crosstab">▦ Matrix</button>
             <button class="btn sm" data-q="records">≡ Table</button>
+            <button class="btn sm" data-q="studio" title="A visual designed in Measure Studio — KPI cards, bar lists, charts, tables — drawing this dashboard's numbers, with its DAX for Power BI">✦ Studio</button>
             <button class="btn sm ghost" data-q="blank">Other…</button></div>
           <span class="lbl" style="text-transform:none;letter-spacing:0;font-weight:400">Click a bar, slice or row to filter every other visual (Ctrl-click for several) · right-click to see the rows behind it · drag ⠿ to rearrange.</span></div>
         <div class="cards" id="anCards"></div>
@@ -1014,6 +1019,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
   </div>
 </main>
 
+<div class="msed" id="msEd" style="display:none"><iframe id="msEdFrame" title="Measure Studio"></iframe></div>
 <div class="modal" id="drill"><div class="box">
   <header><h3 id="drillTitle">Rows</h3><button class="btn sm" id="drillCopy" title="Copy as tab-separated text — paste into Excel">Copy</button><button class="btn sm" id="drillClose">Close</button></header>
   <div class="minfo" id="drillInfo"></div>
@@ -2462,7 +2468,8 @@ const drawCards = guarded(function(){
     else inner = itemBody(it, r, width);
     return `<div class="card item ${width} ${editing ? "editing full" : ""}" data-i="${i}" draggable="${editing ? "false" : "true"}">
       <div class="tools">
-        ${kind !== "slicer" && kind !== "kpi" && !editing ? `<button class="btn sm ghost" data-act="rows" title="Show the rows behind this visual">⤓ rows</button>` : ""}
+        ${kind !== "slicer" && kind !== "kpi" && kind !== "studio" && !editing ? `<button class="btn sm ghost" data-act="rows" title="Show the rows behind this visual">⤓ rows</button>` : ""}
+        ${kind === "studio" ? `<button class="btn sm ghost" data-act="msedit" title="Open it in Measure Studio">✦ Design</button>` : ""}
         <button class="btn sm ghost" data-act="edit" title="Edit">${editing ? "Done" : "Edit"}</button>
         <button class="btn sm ghost" data-act="wide" title="Width: third, half, full">${esc((WIDTHS.find(w => w[0] === width) || WIDTHS[1])[1])}</button>
         <button class="btn sm ghost" data-act="copy" title="Duplicate">⧉</button>
@@ -2471,9 +2478,16 @@ const drawCards = guarded(function(){
       <h4><span class="grip" title="Drag to move">⠿</span>${esc(it.name || (r && r.name) || "Visual")}${at.overview ? `<span class="srcchip" title="The table this card reads">${esc(it.table || "no data")}</span>` : ""}${it.ignore_filters ? ` <span class="sub" title="This visual ignores the dashboard filters">· unfiltered</span>` : ""}</h4>
       ${inner}</div>`;
   }).join("");
+  if (at.analysis.items.some(x => x.kind === "studio")) msPaint();
 });
 function itemBody(it, r, width){
   const kind = it.kind || "kpi";
+  if (kind === "studio"){
+    const bad = Object.entries(r.block_errors || {});
+    return `<iframe class="msv" data-msv="${esc(it.id)}" title="${esc(it.name || r.name || "Studio visual")}" sandbox="allow-same-origin"
+      style="height:${(MS.painted[it.id] || {}).h || 320}px"></iframe>` +
+      (bad.length ? `<div class="itemerr">${bad.map(([b, m]) => `${esc(b)}: ${esc(m)}`).join("<br>")}</div>` : "");
+  }
   if (kind === "kpi"){
     const k = r.kpi || {};
     let sub = `<div class="sub">${esc(k.caption || "")}</div>`;
@@ -2518,6 +2532,7 @@ function valuesEditor(it, multi){
 }
 function itemForm(it, i){
   const kind = it.kind || "kpi", needs = ITEM_NEEDS[kind] || [];
+  if (kind === "studio") return studioForm(it, i);
   const groups = [];
   AM().item_kinds.forEach(k => { let g = groups.find(x => x.g === k.group); if (!g) groups.push(g = {g: k.group, ks: []}); g.ks.push(k); });
   const by = it.by || {}, by2 = it.by2 || {}, charts = (AM().charts || {})[kind] || [];
@@ -2562,6 +2577,8 @@ const QUICK = {
   pie: c => ({kind: "breakdown", chart: "donut", by: {column: c.cat, sort: "value_desc"}, values: [{column: c.num, agg: "sum"}]}),
   crosstab: c => ({kind: "crosstab", chart: "heatmap", width: "full", by: {column: c.cat}, by2: {column: c.date, group: "month"}, values: [{column: c.num, agg: "sum"}]}),
   records: c => ({kind: "records", width: "full", columns: anCols().slice(0, 6), sort_by: c.num, limit: 25}),
+  studio: c => ({kind: "studio", width: "full", project: null, blocks: {},
+                 measures: [{name: "Total " + c.num, agg: "sum", column: c.num}, {name: "Rows", agg: "rows"}]}),
 };
 function guessCols(){
   const cols = anCols(), pv = S.lastPreview;
@@ -2579,6 +2596,13 @@ $("#anQuick").addEventListener("click", async e => {
   if (!anCols().length){ say("Pick a file (or a report table) first.", "err"); return; }
   const it = {id: uid(), name: "", __edit: b.dataset.q === "blank", ...(QUICK[b.dataset.q] || QUICK.kpi)(guessCols()),
               ...(AT().overview ? {table: S.anCtx} : {})};
+  if (it.kind === "studio"){                 // a first design from its measures, its rows bound
+    try {
+      const ms = await msRenderer();
+      it.project = ms.starter({name: "Overview", measures: it.measures.map(m => m.name), by: guessCols().cat});
+      msAutoBind(it, ms);
+    } catch (err){ say(err.message || String(err), "err"); return; }
+  }
   AT().analysis.items.push(it);
   anCounts();
   drawCards(); if (!it.__edit) anRefresh(true);
@@ -2600,6 +2624,12 @@ $("#anCards").addEventListener("click", e => {
     else if (act === "vdel"){ it.values.splice(+e.target.closest("[data-vj]").dataset.vj, 1); drawCards(); }
     else if (act === "sclear"){ setFilterValues(itemField(it, r), []); drawFilterBar(); anRefresh(true); }
     else if (act === "rows") openDrill(it.ignore_filters ? [] : dFilters(), it.name || r?.name || "Rows");
+    else if (act === "msedit") msEdit(it);
+    else if (act === "msdax") msCopyDax(it);
+    else if (act === "madd"){ const nm = e.target.closest("[data-name]")?.dataset.name || "";
+      (it.measures = it.measures || []).push(nm ? {name: nm, agg: "sum", column: guessCols().num} : {name: "", agg: "sum", column: guessCols().num});
+      drawCards(); if (nm) anRefresh(true); }
+    else if (act === "mdel"){ it.measures.splice(+e.target.closest("[data-mj]").dataset.mj, 1); drawCards(); anRefresh(true); }
     anCounts();
     return;
   }
@@ -2662,6 +2692,21 @@ $("#anCards").addEventListener("change", e => {
     setFilterValues(field, [...cur]); drawFilterBar(); anRefresh(true); return;
   }
   if (!f || f === "name") return;
+  if (it.kind === "studio" && /^(m|ms)[a-z]+$/.test(f) && f !== "msx"){
+    const mj = e.target.closest("[data-mj]"), m = mj ? it.measures[+mj.dataset.mj] : null;
+    const bid = e.target.closest("[data-bid]")?.dataset.bid, B = (it.blocks = it.blocks || {});
+    const g = bid ? (B[bid] = B[bid] || {}) : null;
+    if (f === "mname" && m) m.name = val.trim();
+    else if (f === "magg" && m){ m.agg = val; if (val === "rows") delete m.column; else if (!m.column) m.column = guessCols().num; }
+    else if (f === "mcol" && m) m.column = val;
+    else if (f === "msmode" && g){ g.mode = val; if (val === "group" && !(g.by || {}).column) g.by = {column: guessCols().cat, group: "none"}; }
+    else if (f === "mscol" && g) g.by = {...(g.by || {}), column: val};
+    else if (f === "msgrp" && g) g.by = {...(g.by || {}), group: val};
+    else if (f === "mssort" && g) g.sort_by = val;
+    else if (f === "mslimit" && g) g.limit = Math.max(1, Math.min(500, +val || 50));
+    delete MS.painted[it.id];
+    drawCards(); anRefresh(true); return;
+  }
   const vj = e.target.closest("[data-vj]"), v = vj ? it.values[+vj.dataset.vj] : null;
   if (f === "kind"){ it.kind = val; it.chart = ((AM().charts || {})[val] || [{id: "none"}])[0].id;
     if (val === "quality" && !it.columns) it.columns = anCols().slice(0, 3);
@@ -2691,6 +2736,150 @@ $("#anCards").addEventListener("change", e => {
   else if (f === "qcol") it.columns = [...$$(`.card.item[data-i="${i}"] [data-f=qcol]`)].filter(x => x.checked).map(x => x.value);
   drawCards(); anRefresh();
 });
+/* ---------------- Studio visuals (Measure Studio) ----------------
+   A Studio card is a design made in Measure Studio (studio.html, shipped with the
+   app) plus what feeds it: measures (Name = Sum of a column, …) worked out over the
+   card's rows after the dashboard's filters, and per block the rows it draws — one
+   per value of a column (or month), or the top records. The studio evaluates each
+   block's own expressions against those. A hidden copy of the studio renders the
+   cards; the designer opens over the window. */
+const MS = {html: null, ready: null, painted: {}, edit: null};
+const msDoc = (html, mode) => html.replace(/<head>/i, `<head><script>window.__MS_EMBED=${JSON.stringify(mode)}<\/script>`);
+async function msPage(){
+  if (!MS.html){
+    const r = await api().studio_html();
+    if (!r?.ok) throw new Error(r?.error || "Measure Studio (studio.html) is missing.");
+    MS.html = r.html;
+  }
+  return MS.html;
+}
+async function msRenderer(){
+  if (MS.ready) return MS.ready;
+  MS.ready = (async () => {
+    const html = await msPage();
+    const f = document.createElement("iframe");
+    f.setAttribute("aria-hidden", "true"); f.tabIndex = -1; f.id = "msRender";
+    f.style.cssText = "position:fixed;left:-20000px;top:0;width:1280px;height:800px;visibility:hidden;border:0";
+    const ok = new Promise(res => MS.onRenderer = res);
+    f.srcdoc = msDoc(html, "render");
+    document.body.appendChild(f);
+    await ok;
+    return (MS.win = f.contentWindow.msColSift);
+  })();
+  MS.ready.catch(() => { MS.ready = null; });
+  return MS.ready;
+}
+window.addEventListener("message", e => {
+  const m = e.data; if (!m || !m.ms) return;
+  if (m.type === "ready" && m.mode === "render") MS.onRenderer && MS.onRenderer();
+  else if (m.type === "ready" && m.mode === "edit") msEditLoad();
+  else if (m.type === "save") msEditDone(m.project);
+  else if (m.type === "close") msEditDone(null);
+});
+const msFields = (it, r) => (it.measures || []).filter(m => (m.name || "").trim()).map(m => {
+  const v = r?.values?.[m.name.trim()];
+  return {name: m.name.trim(), sample: v == null ? "" : String(v)};
+});
+const msLive = (r, strict) => ({strict, values: (r && !r.error && r.values) || {}, ctx: (r && !r.error && r.ctx) || {}});
+/* blocks that draw rows get rows: periods for line / column charts and sparklines, a column's values for the rest */
+function msAutoBind(it, ms){
+  const B = (it.blocks = it.blocks || {}), c = guessCols();
+  for (const b of ms.blocks(it.project || {})){
+    if (B[b.id] || !(b.rows || b.spark)) continue;
+    const dated = b.type === "col" || b.type === "line" || (b.spark && !b.rows);
+    B[b.id] = b.type === "notes" ? {mode: "rows", limit: 20}
+      : {mode: "group", by: dated ? {column: c.date, group: "month"} : {column: c.cat, group: "none"}, limit: dated ? 12 : 50};
+  }
+}
+async function msPaint(){
+  const frames = $$("#anCards iframe.msv"); if (!frames.length) return;
+  let ms;
+  try { ms = await msRenderer(); }
+  catch (err){ frames.forEach(f => { f.outerHTML = `<div class="itemerr">${esc(err.message || String(err))}</div>`; }); return; }
+  for (const f of frames){
+    const it = AT().analysis.items.find(x => x.id === f.dataset.msv), r = itemResult(f.dataset.msv);
+    if (!it || !r) continue;
+    const key = JSON.stringify([it.project, r.values, r.ctx]);
+    let got = MS.painted[it.id];
+    if (!got || got.key !== key){
+      let html;
+      try { html = it.project ? ms.render(it.project, msLive(r, true)) : `<div style="padding:14px;color:#6b7785">Not designed yet — press ✦ Design.</div>`; }
+      catch (err){ html = `<div style="padding:14px;color:#b42318">The design could not be drawn: ${esc(err.message || String(err))}</div>`; }
+      got = MS.painted[it.id] = {key, html, h: got?.h};
+    }
+    f.onload = () => {
+      try { const h = Math.min(2400, Math.max(80, f.contentDocument.documentElement.scrollHeight)); f.style.height = h + "px"; got.h = h; } catch (_){ /* sandboxed */ }
+    };
+    f.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#252423}</style></head><body><div id="htmlContent">${got.html}</div></body></html>`;
+  }
+}
+function studioForm(it, i){
+  const ms = MS.win;
+  if (!ms) msRenderer().then(w => { MS.win = w; drawCards(); }).catch(err => say(err.message || String(err), "err"));
+  const P = it.project;
+  const blocks = ms && P ? ms.blocks(P).filter(b => !b.hidden && (b.rows || b.spark)) : [];
+  const have = new Set((it.measures || []).map(m => (m.name || "").trim().toLowerCase()));
+  const missing = ms && P ? ms.refs(P).filter(n => !have.has(n.toLowerCase())) : [];
+  const aggs = [["rows", "Rows (count)"], ...AM().aggs.map(a => [a.id, a.label])];
+  const ovRow = AT().overview ? `<div class="args"><label class="lbl">Data</label><select data-f="table" style="max-width:220px">${
+    ovTables().map(n => `<option ${n === it.table ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>` : "";
+  return `<div class="iform">${ovRow}
+    <div class="args"><label class="lbl">Name</label><input type="text" data-f="name" value="${esc(it.name || "")}" placeholder="automatic" style="width:190px">
+      <button class="btn sm pri" data-act="msedit">✦ Design in Measure Studio</button>
+      <button class="btn sm" data-act="msdax" ${P ? "" : "disabled"} title="The DAX measure for Power BI's HTML Content visual — the same design">Copy DAX</button>
+      <label class="f" style="gap:4px;font-size:11px" title="Show every row even when the dashboard is filtered"><input type="checkbox" data-f="ignore" ${it.ignore_filters ? "checked" : ""}>Ignore filters</label></div>
+    <div class="args" style="align-items:flex-start"><label class="lbl">Measures</label><div>
+      <table class="msbind">${(it.measures || []).map((m, j) => `<tr data-mj="${j}">
+        <td><input type="text" data-f="mname" value="${esc(m.name || "")}" placeholder="Revenue" style="width:150px;font-family:var(--mono)"></td>
+        <td>=</td><td><select data-f="magg">${aggs.map(([id, l]) => `<option value="${id}" ${(m.agg || "sum") === id ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></td>
+        <td>${(m.agg || "sum") === "rows" ? "" : `<span class="sub" style="margin:0">of</span> <select data-f="mcol">${anColOptions(m.column)}</select>`}</td>
+        <td><button class="btn x" data-act="mdel" title="Remove">✕</button></td></tr>`).join("")}</table>
+      <div class="f" style="gap:6px;margin-top:4px;flex-wrap:wrap"><button class="btn sm ghost" data-act="madd">＋ Measure</button>
+        ${missing.length ? `<span class="sub" style="margin:0">Used in the design, not set here:</span>${missing.map(n => `<button class="btn sm" data-act="madd" data-name="${esc(n)}">＋ [${esc(n)}]</button>`).join("")}` : ""}</div>
+      <div class="sub" style="margin:4px 0 0">In the studio, write a measure as <code>[Name]</code> — <code>[Revenue]</code>, <code>DIVIDE([Revenue], [Rows])</code>.</div></div></div>
+    ${blocks.length ? `<div class="args" style="align-items:flex-start"><label class="lbl">Rows</label><table class="msbind">${blocks.map(b => {
+      const g = (it.blocks || {})[b.id] || {}, mode = g.mode || "off", spark = b.spark && !b.rows;
+      return `<tr data-bid="${esc(b.id)}"><td><b>${esc(b.title || b.id)}</b> <span class="sub" style="margin:0">${esc(b.kind)}${spark ? " · sparkline" : ""}</span></td>
+        <td><select data-f="msmode"><option value="off" ${mode === "off" ? "selected" : ""}>— nothing —</option>
+          <option value="group" ${mode === "group" ? "selected" : ""}>${spark ? "a point per" : "a row per"}</option>
+          ${b.records ? `<option value="rows" ${mode === "rows" ? "selected" : ""}>the top records</option>` : ""}</select></td>
+        <td>${mode === "group" ? `<select data-f="mscol">${anColOptions((g.by || {}).column)}</select> <select data-f="msgrp">${groupOptions((g.by || {}).group || "none")}</select>`
+             : mode === "rows" ? `<span class="sub" style="margin:0">sorted by</span> <select data-f="mssort">${anColOptions(g.sort_by || "", "— file order —")}</select>` : ""}</td>
+        <td>${mode !== "off" ? `<span class="sub" style="margin:0">at most</span> <input type="number" data-f="mslimit" value="${g.limit || (spark ? 12 : 50)}" min="1" max="500" style="width:64px">` : ""}</td></tr>`;
+    }).join("")}</table></div>` : `<div class="args"><span class="sub" style="margin:0">${P ? "No block in this design draws rows — KPI cards, gauges and text read the measures." : "Not designed yet."}</span></div>`}
+  </div>`;
+}
+async function msEdit(it){
+  try { await msPage(); } catch (err){ say(err.message || String(err), "err"); return; }
+  MS.edit = {it};
+  $("#msEd").style.display = "";
+  $("#msEdFrame").srcdoc = msDoc(MS.html, "edit");
+}
+function msEditLoad(){
+  const it = MS.edit?.it; if (!it) return;
+  const r = itemResult(it.id);
+  $("#msEdFrame").contentWindow.postMessage({ms: true, type: "load", project: it.project || null, fields: msFields(it, r),
+                                             live: msLive(r, false), name: it.name || ""}, "*");
+}
+async function msEditDone(project){
+  const ed = MS.edit; MS.edit = null;
+  $("#msEd").style.display = "none"; $("#msEdFrame").srcdoc = "";
+  if (!ed || !project) return;
+  ed.it.project = project;
+  try { msAutoBind(ed.it, await msRenderer()); } catch (_){ /* bound on the next edit */ }
+  delete MS.painted[ed.it.id];
+  drawCards(); anRefresh(true);
+  say("Studio visual saved — its blocks read this dashboard's data.", "ok");
+}
+async function msCopyDax(it){
+  try {
+    const dax = (await msRenderer()).dax(it.project);
+    try { await navigator.clipboard.writeText(dax); }
+    catch (_){ const t = document.createElement("textarea"); t.value = dax; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+    say("DAX copied — paste it as a new measure in Power BI and show it in an HTML Content visual.", "ok");
+  } catch (err){ say(err.message || String(err), "err"); }
+}
+
 /* drag a card onto another to move it there */
 let CARD_DRAG = null;
 $("#anCards").addEventListener("dragstart", e => {

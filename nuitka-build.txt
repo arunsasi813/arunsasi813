@@ -152,6 +152,7 @@ python -m nuitka ^
   --output-filename=ColSift.exe ^
   --output-dir=build ^
   --include-data-files=ui.html=ui.html ^
+  --include-data-files=studio.html=studio.html ^
   --include-module=engine ^
   --include-module=formula ^
   --include-module=xlsxfast ^
@@ -217,6 +218,7 @@ python -m nuitka ^
   --output-dir=build ^
   --onefile-tempdir-spec="{CACHE_DIR}\ColSift\{VERSION}" ^
   --include-data-files=ui.html=ui.html ^
+  --include-data-files=studio.html=studio.html ^
   --include-module=engine ^
   --include-module=formula ^
   --include-module=xlsxfast ^

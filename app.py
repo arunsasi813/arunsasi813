@@ -32,6 +32,7 @@ def _webview():
 # under Nuitka onefile they are NOT the same place. engine.py owns the writable rule.
 HERE = Path(__file__).resolve().parent
 UI = HERE / "ui.html"
+STUDIO = HERE / "studio.html"          # Measure Studio, with ColSift's hooks (studio_embed.py)
 
 # pywebview walks every PUBLIC attribute of the js_api object to build its JS shim.
 # A webview.Window hanging off `self` sends it into the native GUI objects, where the
@@ -649,6 +650,13 @@ class Api:
             ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL, only=only))
 
     @guard
+    def studio_html(self) -> dict:
+        """Measure Studio's page, for the dashboard's Studio cards (designer and renderer)."""
+        if not STUDIO.exists():
+            return {"ok": False, "error": f"studio.html is missing (looked in {HERE})"}
+        return {"ok": True, "html": STUDIO.read_text(encoding="utf-8")}
+
+    @guard
     @_params
     def convert_parquet(self, job: dict) -> dict:
         """Convert to Parquet: the ticked files as read, one .parquet each, in a worker."""
@@ -848,6 +856,11 @@ def selftest(out: str) -> int:
         res["count"] = Api().count(job)
         res["run"] = _heavy("run_setup", {"setup": {"groups": [{"name": "T", "files": job["files"], "setup": job}],
                                                     "output": job["output"]}}, lambda: {"ok": False, "in_process": True})
+        res["convert"] = _heavy("convert", {"job": {"files": job["files"], "folder": str(d / "pq")}},
+                                lambda: {"ok": False, "in_process": True})
+        st = Api().studio_html()
+        res["studio"] = {"ok": bool(st.get("ok")), "bytes": len(st.get("html") or ""),
+                         "hooks": "ColSift live data" in (st.get("html") or ""), "error": st.get("error")}
         res["memory"] = Api().memory()
     finally:
         _js = keep
@@ -860,6 +873,9 @@ def selftest(out: str) -> int:
         "count in the worker": n.get("total") == 1667,
         "run in the worker wrote a workbook": bool(r.get("ok")) and any(str(p).endswith(".xlsx") for p in r.get("written") or []),
         "memory meter reads this process and the machine": (m.get("app") or 0) > 0 and (m.get("total") or 0) > 0,
+        "Convert to Parquet in the worker": bool(res["convert"].get("ok")) and any(
+            str(p).endswith(".parquet") for p in res["convert"].get("written") or []),
+        "Measure Studio ships with the app": res["studio"]["ok"] and res["studio"]["hooks"],
     }
     res["checks"] = checks
     Path(out).write_text(json.dumps(res, indent=2, default=str), encoding="utf-8")

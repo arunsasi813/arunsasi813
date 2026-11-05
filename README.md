@@ -24,9 +24,46 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `checks.py` | Checks that pass or fail a run: row counts, unique keys, blanks, keys found, totals, a query that must find nothing. |
 | `worker.py` | Runs, counts, Find and full-data dashboards in a process of their own, so running out of memory can't close the window. |
 | `ui.html` | The interface. Inline CSS and JS. |
+| `studio.html` | Measure Studio with ColSift's hooks — the designer and renderer of Studio visuals. |
+| `studio_embed.py` | Makes `studio.html` from a Measure Studio file: `python studio_embed.py measure-studio.html`. |
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.2
+
+- **Studio visuals — Measure Studio inside the dashboard.** *✦ Studio* on the Analysis tab adds a
+  visual designed in Measure Studio: KPI cards, bar lists, column and line charts, donuts,
+  gauges, waterfalls, notes and tables, in its themes. The card's **measures** are set beside it
+  (`Revenue` = Sum of AMOUNT, `Tickets` = Rows, `Docs` = Count distinct of DOC_NO …) and worked
+  out over the card's rows after the dashboard's slicers and clicks; each block that draws rows
+  gets **a row per value** of a column (or per month, quarter, year …) with every measure for that
+  row, or the top records. *✦ Design* opens Measure Studio over the window with those real
+  numbers in its preview; *Use in ColSift* saves the design into the card. In the studio a block
+  reads `[Revenue]`, `DIVIDE([Revenue], [Tickets])`, `[@cm] - [@pm]` — its own expressions,
+  evaluated against ColSift's values; a block with nothing bound stays empty on the dashboard
+  rather than showing sample numbers. *Copy DAX* puts the same design on the clipboard as a
+  measure for Power BI's HTML Content visual. The design is saved with the setup; the workbook
+  and PDF list the card's measures.
+- **Parquet in and out.** `.parquet` / `.pq` / `.parq` files are listed with the rest and work
+  everywhere — peek, columns, filters, groups, Find, Count, dashboards — reading only the
+  columns a step needs; the labels are the file's own column names. **Parquet** is an output
+  format too: columns stay typed (numbers, dates), while IDs, codes, values with leading zeros
+  and long digit strings stay text; column formats set on the Output tab win. Dashboards,
+  summaries and checks go to a workbook beside it.
+- **Convert to Parquet** (Output tab): each ticked file as the source settings read it (sheet,
+  header row, separator), every column, saved as `<name>.parquet` with numbers and dates typed —
+  one click, in the worker. A workbook that takes a minute to open reads in a second as Parquet.
+- **Column profile** (Σ on a column, Columns tab): rows, blanks, distinct values, whether it is a
+  key, min / max / sum / average or the date range, and the ten most common values — for the
+  open file, or *Every ticked file*.
+- **Find, as a lookup.** *Load from a file…* takes the values from a column of an Excel, CSV or
+  Parquet file (the column named like DOC / TICKET / REF / INVOICE / …_NO, or pick another).
+  *Clean both sides*: ignore leading zeros (00123 = 123), 123.0 = 123, ignore spaces and symbols
+  (AB-12 = AB12). *Ends with* joins exact / contains / starts with. **Export every match** writes
+  every matching row of every ticked file — no row cap — with `SOURCE_FILE`, `MATCHED_IN` and
+  `MATCH_KEY`, plus the values not found, in the Output tab's folder and format (a workbook gets
+  *Matches* and *Not found* sheets).
 
 ## What's new in 2.1
 
@@ -86,25 +123,6 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
   file without writing. Results show on the Output and Result tabs, in a `Checks` sheet (or
   `<name>_Checks.csv`) beside the output and in the run log. `colsift-cli` exits with **3**
   when a check stopped the run, so a scheduled script can tell that from a failure (1).
-- **Parquet in and out.** `.parquet` / `.pq` / `.parq` files are listed with the rest and work
-  everywhere — peek, columns, filters, groups, Find, Count, dashboards — reading only the
-  columns a step needs; the labels are the file's own column names. **Parquet** is an output
-  format too: columns stay typed (numbers, dates), while IDs, codes, values with leading zeros
-  and long digit strings stay text; column formats set on the Output tab win. Dashboards,
-  summaries and checks go to a workbook beside it.
-- **Convert to Parquet** (Output tab): each ticked file as the source settings read it (sheet,
-  header row, separator), every column, saved as `<name>.parquet` with numbers and dates typed —
-  one click, in the worker. A workbook that takes a minute to open reads in a second as Parquet.
-- **Column profile** (Σ on a column, Columns tab): rows, blanks, distinct values, whether it is a
-  key, min / max / sum / average or the date range, and the ten most common values — for the
-  open file, or *Every ticked file*.
-- **Find, as a lookup.** *Load from a file…* takes the values from a column of an Excel, CSV or
-  Parquet file (the column named like DOC / TICKET / REF / INVOICE / …_NO, or pick another).
-  *Clean both sides*: ignore leading zeros (00123 = 123), 123.0 = 123, ignore spaces and symbols
-  (AB-12 = AB12). *Ends with* joins exact / contains / starts with. **Export every match** writes
-  every matching row of every ticked file — no row cap — with `SOURCE_FILE`, `MATCHED_IN` and
-  `MATCH_KEY`, plus the values not found, in the Output tab's folder and format (a workbook gets
-  *Matches* and *Not found* sheets).
 - **Checked on Windows by GitHub Actions** (`.github/workflows/colsift.yml`): the unit tests
   run on Windows and Linux on every push. With `[build]` in the commit message (or run by
   hand), it builds `ColSift.exe` and `colsift-cli.exe` on Windows, starts the exe once with
@@ -646,3 +664,6 @@ The Windows GUI build adds pywebview and its .NET / WebView2 glue — a few MB.
 | `COLSIFT_XLSX=classic` | Use xlsxwriter instead of the fast writer (not in the lean build) |
 | `COLSIFT_INPROCESS=1` | Run, Count, Find and full dashboards in the window's own process (no worker) |
 | `COLSIFT_LOGS` | Where `colsift.log` goes (default: `%LOCALAPPDATA%\ColSift\logs`) |
+| `COLSIFT_COMPANY` | Building: the publisher name in the exe's properties |
+| `COLSIFT_SIGN_PFX`, `COLSIFT_SIGN_PASSWORD` | Building: sign each exe with this .pfx (see *Sharing the exe*) |
+| `COLSIFT_SIGN_CMD` | Building: sign each exe with this command instead, `{file}` standing for the exe |
