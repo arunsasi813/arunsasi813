@@ -994,7 +994,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 
     <!-- RESULT -->
     <section class="pane" id="p-res">
-      <p class="hint">A dry run of the whole pipeline against the first selected file. Nothing is written until you press Run.</p>
+      <p class="hint">A dry run of the whole pipeline against the file you clicked (or the first ticked file). Nothing is written until you press Run.</p>
       <div class="f" style="margin-bottom:9px">
         <button class="btn" id="doPreview">Refresh preview</button>
         <label class="lbl">Rows</label>
@@ -2213,7 +2213,7 @@ async function anRun(scope){
   const viaSetup = at.report || (groupRel() ? groupReport() : null);
   const r = viaSetup
     ? await api().ws_analyse({workspace: setupPayload(), report: viaSetup, scope: scope === "all" ? "all" : "preview"})
-    : await api().analyse({job: job(), scope});
+    : await api().analyse({job: openJob(), scope});
   S.anBusy = false; busy(false);
   if (S.anAgain){ const s = S.anAgain; S.anAgain = null; anRun(s); return; }
   if (anKey() !== target) return;                              // switched away meanwhile
@@ -2945,7 +2945,7 @@ async function openDrill(filters, title){
   const viaSetup = at.report || (groupRel() ? groupReport() : null);
   const scope = S.anScope === "all" ? "all" : (viaSetup ? "preview" : "active");
   const r = viaSetup ? await api().ws_drill({workspace: setupPayload(), report: viaSetup, scope, filters, limit: 500})
-                     : await api().drill({job: job(), scope, filters, limit: 500});
+                     : await api().drill({job: openJob(), scope, filters, limit: 500});
   if (!r?.ok){ $("#drillInfo").textContent = r?.error || "Could not read the rows."; return; }
   S.lastDrill = r;
   $("#drillInfo").textContent = `${r.total.toLocaleString()} row${r.total === 1 ? "" : "s"}${r.total > r.shown ? ` — showing the first ${r.shown.toLocaleString()}` : ""}` +
@@ -3981,6 +3981,13 @@ function job(){        // the open group as the engine's job: its settings, its 
     params: WS.params || [], param_values: WS.param_values || {}
   };
 }
+/* the same, with the file you clicked first: Preview, the dashboard and its drill-through
+   read that one — or the first ticked file when the clicked one isn't ticked */
+function openJob(){
+  const j = job();
+  if (S.active && j.files.includes(S.active)) j.files = [S.active, ...j.files.filter(f => f !== S.active)];
+  return j;
+}
 /* one group's ColSift settings into the tabs. Everything starts from the defaults: a
    group that never set a value must not inherit it from the group open before. */
 function applyGroupSetup(st0){
@@ -4024,7 +4031,7 @@ async function preview(offset){
   if (!S.sel.size){ say("Tick at least one file.", "err"); return; }
   offset = typeof offset === "number" ? Math.max(0, offset) : 0;
   show("res"); busy(true); say(offset ? "Reading the next rows…" : "Building preview…");
-  const r = await api().preview({job:job(), rows:+$("#prevRows").value||200, offset});
+  const r = await api().preview({job:openJob(), rows:+$("#prevRows").value||200, offset});
   busy(false);
   if (!r?.ok){
     $("#gridwrap").innerHTML = `<div class="empty">${esc(r?.error||"Preview failed.")}</div>`;
