@@ -1129,7 +1129,7 @@ def analyse_overview(ws: dict, scope: str = "preview", on_progress=None, cancel=
         res = overview_result(ws, ws["overview"], _overview_frames(b))
         rows = {t: None for t in res["tables"]}
         return {**res, "scope": scope, "note": f"Overview · {len(rows)} table{'' if len(rows) == 1 else 's'}" +
-                (" (preview)" if scope != "all" else ""), "sampled": 0,
+                (" (sample)" if scope != "all" else ""), "sampled": 0,
                 "notes": b.notes + res["notes"], "elapsed": round(time.time() - t0, 2)}
     except E.Cancelled:
         return {"ok": False, "cancelled": True, "error": "Cancelled."}
@@ -1222,7 +1222,7 @@ def analyse(ws: dict, report: dict | str, scope: str = "preview", on_progress=No
         df, notes, stage = _frame_for(ws, rep["table"], scope, on_progress, cancel)
         res = A.analyse(df.lazy(), rep)
         return {**res, "scope": scope, "note": f"{rep['table']}, {df.height:,} rows" +
-                (" (preview)" if scope != "all" else ""), "sampled": 0, "rows_seen": df.height,
+                (" (sample)" if scope != "all" else ""), "sampled": 0, "rows_seen": df.height,
                 "notes": notes + (res.get("notes") or []), "elapsed": round(time.time() - t0, 2)}
     except (WorkspaceError, A.AnalysisError, F.FormulaError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}

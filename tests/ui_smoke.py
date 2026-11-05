@@ -220,6 +220,12 @@ def three_groups(ui: UI, d: dict) -> None:
     page.wait_for_function("(S.wsSchema?.tables || []).length === 3")
 
 
+def add_visual(ui: UI, q: str) -> None:
+    """＋ Add visual ▾, then the kind."""
+    ui.page.click("#anAddBtn")
+    ui.page.click(f"#anAddMenu [data-q={q}]")
+
+
 def kpi_value(ui: UI, table: str) -> float:
     return ui.js(f"""(() => {{ const it = AT().analysis.items.find(i => i.kind === 'kpi' && i.table === {json.dumps(table)});
         const r = (S.anData?.items || []).find(x => x.id === it.id); return r.table.rows[0].nums.slice(-1)[0]; }})()""")
@@ -233,7 +239,7 @@ def overview_dashboard(ui: UI, d: dict) -> None:
     page.wait_for_selector("#anAddFrom", state="visible")
     for table, q in (("Sales", "kpi"), ("Refunds", "kpi"), ("Sales", "slicer")):
         page.select_option("#anAddFrom", table)
-        ui.then("Analysis ready", lambda q=q: page.click(f"#anQuick [data-q={q}]"))
+        ui.then("Analysis ready", lambda q=q: add_visual(ui, q))
     assert ui.js("AT().analysis.items.map(i => i.table)") == ["Sales", "Refunds", "Sales"]
     assert page.locator("#anCards .srcchip").all_inner_texts() == ["Sales", "Refunds", "Sales"]
     assert abs(kpi_value(ui, "Refunds") - (-59.75)) < 1e-6
@@ -250,10 +256,11 @@ def overview_dashboard(ui: UI, d: dict) -> None:
 
     # Run all dashboards: every file, every dashboard, nothing written
     ui.then("worked out over every file", lambda: page.click("#anRunDash"))
-    assert "every file" in page.inner_text("#anNote"), page.inner_text("#anNote")
+    assert ui.js("document.querySelector('#anMode').textContent") == "Every file"
     assert not d["out"].exists()
 
     # a run that hands its dashboards back, with the Overview in the workbook
+    page.click("#anExportBtn")
     page.check("#anExport")
     ui.tab("out")
     page.fill("#outFolder", str(d["out"]))
@@ -430,7 +437,9 @@ def parquet_and_lookup(ui: UI, d: dict) -> None:
     page.wait_for_function("document.querySelector('#resInfo').textContent.includes('tickets.parquet')")
     assert "3 rows" in page.inner_text("#resInfo"), page.inner_text("#resInfo")
     ui.tab("anal")
-    ui.then("Analysis ready — tickets.parquet", lambda: page.click("#anQuick [data-q=kpi]"))
+    # the dashboard reads a sample: the first rows of each ticked file, the clicked one first
+    ui.then("Analysis ready — the first 100 rows of each of 2 files", lambda: add_visual(ui, "kpi"))
+    assert ui.js("document.querySelector('#anMode').textContent") == "Sample · 100 rows per file"
     ui.tab("cols")
     page.click("#collist .col:has(.nm:text-is('AMOUNT')) [data-k=stats]")
     page.wait_for_selector("#colStats .cs-range")
@@ -482,8 +491,8 @@ def studio_visual(ui: UI, d: dict) -> None:
     ui.folders(src)
     page.wait_for_function("S.allCols.length === 5")
     ui.tab("anal")
-    ui.then("Analysis ready", lambda: page.click("#anQuick [data-q=slicer]"))
-    ui.then("Analysis ready", lambda: page.click("#anQuick [data-q=studio]"))
+    ui.then("Analysis ready", lambda: add_visual(ui, "slicer"))
+    ui.then("Analysis ready", lambda: add_visual(ui, "studio"))
     card = "#anCards .card.item:nth-child(2)"
     frame = page.frame_locator(f"{card} iframe.msv")
     total = sum(35.5 + (k * 37) % 900 for k in range(36))
@@ -514,6 +523,7 @@ def studio_visual(ui: UI, d: dict) -> None:
     assert not page.is_visible("#msEd")
     ui.then("DAX copied", lambda: page.evaluate("msCopyDax(AT().analysis.items.find(x => x.kind === 'studio'))"))
     # the visual as a web page, with the numbers on screen (the YQ slice)
+    page.locator(f"{card} [data-act=cmenu]").click()
     ui.then("as a web page", lambda: page.locator(f"{card} [data-act=mshtml]").click())
     saved_page = next((Path(os.environ["COLSIFT_SAVED"])).glob("*.html")).read_text(encoding="utf-8")
     assert saved_page.count("<iframe") == 1 and "3,281" in saved_page and "ms-kv" in saved_page
@@ -542,8 +552,56 @@ def studio_visual(ui: UI, d: dict) -> None:
         return f && f.contentDocument && f.contentDocument.querySelectorAll('.ms-kv').length >= 2; }""", timeout=60000)
 
 
+def dashboard_basics(ui: UI, d: dict) -> None:
+    """The dashboard as a newcomer meets it: a suggested layout from the columns, the
+    sample badge and its size, every file on request, and each card's ⋯ menu and editor."""
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "basics_src"
+    src.mkdir(exist_ok=True)
+    (src / "sales_JAN.csv").write_bytes((d["jan"] / "sales_JAN.csv").read_bytes())
+    ui.folders(src)
+    page.wait_for_function("S.allCols.length === 5")
+    ui.tab("anal")
+    page.wait_for_selector("#anCards .anempty [data-sug]")
+    ui.wait_msg("Analysis ready")
+    ui.then("Analysis ready", lambda: page.click("#anCards .anempty [data-sug]"))
+    kinds = ui.js("AT().analysis.items.map(i => [i.kind, i.chart || '', (i.by || {}).column || ''])")
+    assert kinds == [["slicer", "", "TAX_CODE"], ["kpi", "", ""], ["kpi", "", ""], ["breakdown", "bar", "TAX_CODE"],
+                     ["trend", "line", "ISSUE_DATE"], ["breakdown", "donut", "CURRENCY"]], kinds
+    page.wait_for_function("(S.anData?.items || []).length === 6 && S.anData.items.every(r => !r.error)")
+    mode = "document.querySelector('#anMode').textContent"
+    assert ui.js(mode) == "Sample · 100 rows per file"
+    ui.shot("suggested_dashboard")
+    # a smaller sample: the numbers come from the first 10 rows
+    page.fill("#anSample", "10")
+    ui.then("Analysis ready — the first 10 rows of sales_JAN.csv, 10 rows", lambda: page.dispatch_event("#anSample", "change"))
+    assert ui.js(mode) == "Sample · 10 rows per file"
+    ui.then("Analysis ready — 1 file", lambda: page.click("#anRunAll"))
+    assert ui.js(mode) == "Every file"
+    # the ⋯ menu: width and remove; the editor folds its extras away
+    card = "#anCards .card.item:nth-child(4)"
+    page.hover(card)
+    page.locator(f"{card} [data-act=cmenu]").click()
+    page.locator(f"{card} .wpick [data-w=full]").click()
+    assert "full" in page.get_attribute(card, "class")
+    page.locator(f"{card} [data-act=edit]").click()
+    assert page.locator(f"{card} [data-f=bsort]").count() == 0
+    page.locator(f"{card} [data-act=more]").click()
+    assert page.locator(f"{card} [data-f=bsort]").input_value() == "value_desc"
+    ui.shot("card_editor")
+    page.locator(f"{card} [data-act=edit]").click()
+    page.hover("#anCards .card.item:nth-child(6)")
+    page.locator("#anCards .card.item:nth-child(6) [data-act=cmenu]").click()
+    page.locator("#anCards .card.item:nth-child(6) [data-act=del]").click()
+    assert ui.js("AT().analysis.items.length") == 5
+    WS_sample = ui.js("setupPayload().sample_rows")
+    assert WS_sample == 10, WS_sample
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
-            "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual}
+            "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual,
+            "basics": dashboard_basics}
 
 
 def main() -> int:

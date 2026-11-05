@@ -30,6 +30,51 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
 
+## What's new in 2.3 — memory and a simpler dashboard
+
+- **A sample unless you ask for every file.** Opening the Analysis tab, a slicer click, the
+  rows behind a bar, a group's preview: each reads **the first 100 rows of each ticked file**
+  (up to 200 files) — an .xlsx streams just those rows, a big text file its first 8 MB, a
+  Parquet file its first row group. Nothing reads a whole file until you press **▶ Every file**,
+  *Run all dashboards*, Count or Run. A badge beside *Data* says which you are looking at —
+  **Sample · 100 rows per file** or **Every file** — and *rows per file* sets the sample size
+  (saved with the setup).
+- **Every file, one file at a time.** *▶ Every file*, Run and Count take the files in turn: each
+  goes through the setup's steps and is written to a staging Parquet file before the next is
+  opened, and the results are written from there in slices. Only one file's working set is in
+  memory, however many files there are.
+- **Big text files are read in blocks.** A CSV / TXT over 48 MB is read 8 MB at a time, cut at a
+  record boundary (quoted commas and line breaks included), into a cached folder of Parquet
+  parts — once; later reads scan the parts. The CSV reader never holds the whole file.
+- **Duplicates and distinct rows without loading every file.** Each row's key becomes a
+  16-byte fingerprint; the fingerprints are split into buckets of at most 500,000 keys and
+  counted bucket by bucket — how many times, in how many files, first and last — and the flags
+  joined back to each file's rows a million rows at a time. Every *Keep* choice (every row,
+  repeats only, in several files, first, last, unique), the count, files and occurrence columns
+  and *Distinct rows* work this way, in Run, Count, *Every file* and the dashboards.
+- **A simpler dashboard.**
+  - One **＋ Add visual** menu (each kind says what it shows) replaces the row of buttons.
+  - **✨ Suggest a dashboard** lays out a slicer, a total, a row count, a breakdown, a trend
+    and a donut from the columns that look right — numbers, dates and text with a handful of
+    values, judged from the data itself, not just the names.
+  - A card shows **Edit** and **⋯** (rows behind it, width, duplicate, remove).
+  - The editor shows what it shows, the measure and the grouping first; sort, top N, number
+    format, target and the filter switches sit under *More options*.
+  - *Dashboard / Summaries in the output* moved into *Export ▾*.
+
+Peak memory of one operation, 6,000,000 rows (four 1.5M-row CSVs, 454 MB), fresh process:
+
+| | 2.2 | 2.3 |
+|---|---:|---:|
+| Open the Analysis tab | 367 MB | 97 MB |
+| The rows behind a bar | 365 MB | 95 MB |
+| A group's preview | 402 MB | 81 MB |
+| Dashboard on every file | 888 MB | 204 MB |
+| … with duplicates across files | 1,613 MB | 321 MB |
+| Run with duplicates | 1,560 MB | 317 MB |
+| Run with *Distinct rows* | 1,707 MB | 391 MB |
+| Count with duplicates | 585 MB | 323 MB |
+
 ## What's new in 2.2
 
 - **Studio visuals — Measure Studio inside the dashboard.** *✦ Studio* on the Analysis tab adds a
@@ -242,15 +287,18 @@ Other new column kinds: Copy; Part of a column (cut at a separator, −1 = last 
 
 2.0 in short — see the sections below for the underlying engine:
 
-- **Add** a number, slicer, columns, trend, donut, matrix or table from the bar above the
-  cards (it guesses sensible columns), then **Edit** any card for everything else: visual type,
-  several measures (shown side by side), sort, top-N, grouping, target, sparkline, ignore filters,
-  chart only.
+- **＋ Add visual** puts a number, slicer, columns, trend, donut, matrix, table or Studio
+  visual on the dashboard (it guesses sensible columns), or **✨ Suggest a dashboard** lays out
+  several at once. **Edit** a card for the rest: visual type, several measures (shown side by
+  side), grouping, and under *More options* sort, top-N, number format, target, sparkline,
+  ignore filters, chart only. **⋯** on a card: the rows behind it, width, duplicate, remove.
+- The numbers come from **a sample** — the first rows of each ticked file — until you press
+  **▶ Every file**; the badge beside *Data* says which.
 - **Slicers and clicks share one set of filters**, shown as chips above the cards. Click a bar,
   slice, point or table row to filter by it (Ctrl-click adds to it); the visual you clicked keeps
   all its values and highlights the selection, everything else filters — as in Power BI. A slicer
   lists its values under every *other* filter, with counts.
-- **Right-click** any mark or table row — or *⤓ rows* on a card, or click a pivot cell — for the
+- **Right-click** any mark or table row — or *⋯ → Show the rows behind it*, or click a pivot cell — for the
   rows behind it (first 500, with the total), copyable straight into Excel.
 - **Export ▾** writes what is on screen: dashboard → PDF, summaries → PDF, both in one PDF, or
   Excel / CSV.
@@ -261,14 +309,14 @@ Other new column kinds: Copy; Part of a column (cut at a separator, −1 = last 
   Summary tabs pick their table the same way. With *Dashboard in the output* it is written as an
   *Overview* sheet (each card labelled with its table) and as a PDF.
 - **Run all dashboards** — every dashboard of the setup (each group's, each combined table's,
-  the Overview) over every file, in one pass, writing nothing. *Run on every file* does the same
+  the Overview) over every file, in one pass, writing nothing. *▶ Every file* does the same
   for the dashboard on screen. Full-data results are kept: switching *Data* shows them again,
-  with the time they were worked out; *Refresh (preview)* or editing a card works them out anew.
+  with the time they were worked out; *↻ Refresh sample* or editing a card works them out anew.
 - **then dashboards** (beside *Run*, saved with the setup): the run works out the dashboards
   from the data it has just read and the Analysis tab opens on them.
 
 
-The Analysis tab reads the extracted frame — after filters, renames and computed columns, the same rows the output is written from — so what you see and what lands in the sheets is one computation. **Refresh from this file** uses the file you're looking at (instant on a workbook that has only been peeked, from its first 2,000 rows); **Run on every ticked file** runs the whole batch, like Count.
+The Analysis tab reads the extracted frame — after filters, renames and computed columns, the same rows the output is written from — so what you see and what lands in the sheets is one computation. **↻ Refresh sample** reads the first rows of each ticked file (100 by default — *rows per file* beside it), the file you clicked first; **▶ Every file** runs the whole batch, one file at a time, like Count.
 
 **Dashboard.** Cards you add, arrange and keep with the setup:
 
@@ -477,7 +525,7 @@ any of those (several files at once); a name already in use gets " (2)".
 - **One file at a time** (default). Each input goes through the pipeline and streams to a staging Parquet file (`<cache>\staging`) before the next one starts, so only one file's working set is in memory — for a workbook, its one full parse. Outputs are then written from the staged data 200,000 rows at a time. Staging is deleted after the run; leftovers from a crash are swept after a day.
 - **Several at once.** Up to four files together, plus the process-pool first read for workbooks. Faster for many small files on a multi-core machine; more memory.
 - **Cancel** stops between files or chunks and deletes whatever that run wrote. A file that fails, or runs out of memory, gets its own error row and the rest carry on (unless *Stop on first error*). Per-file row counts are exact in every mode.
-- **A process of its own.** Run, Count, Find, *Run on every file*, *Run all dashboards* and
+- **A process of its own.** Run, Count, Find, *▶ Every file*, *Run all dashboards* and
   drill-through on every file work in a separate process (`worker.py`). Memory is the usual
   reason a big batch fails — a workbook is parsed whole, a join is built in memory — and inside
   the window's process that used to close the window. Now the worker stops, the window says
@@ -663,6 +711,7 @@ The Windows GUI build adds pywebview and its .NET / WebView2 glue — a few MB.
 | `COLSIFT_CACHE` | Where the workbook cache lives (default: `%LOCALAPPDATA%\ColSift\cache`) |
 | `COLSIFT_CACHE_GB` | Cache cap, default 10 |
 | `COLSIFT_NO_CACHE=1` | Read workbooks directly every time |
+| `COLSIFT_TEXT_CACHE_MB` | Text files bigger than this (default 48) are read in blocks into a cached Parquet copy |
 | `COLSIFT_WORKERS=n` | Worker processes for first reads; `1` = off |
 | `COLSIFT_XLSX=classic` | Use xlsxwriter instead of the fast writer (not in the lean build) |
 | `COLSIFT_INPROCESS=1` | Run, Count, Find and full dashboards in the window's own process (no worker) |

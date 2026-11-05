@@ -118,3 +118,15 @@ def test_a_one_group_run_hands_back_its_dashboard(data):
     assert k == f"g:{ws['groups'][0]['id']}"
     want = pl.read_csv(f["jan"], infer_schema=False).filter(pl.col("TAX_CODE") == "YQ")["AMOUNT"].cast(pl.Float64).sum()
     assert abs(kpi(v, "k") - want) < 1e-6
+
+
+def test_the_analysis_says_what_each_column_holds_for_suggestions():
+    import analysis as A
+    df = pl.DataFrame({"DOC_NO": ["E1001", "E1002", "E1003", "E1004"],
+                       "AMOUNT": ["1,200.50", "-3", "40", "(12.00)"],
+                       "ISSUE_DATE": ["05/01/2026", "6/1/26", "2026-01-07", "08-Jan-2026"],
+                       "TAX_CODE": ["YQ", "YR", "YQ", ""], "EMPTY": [None, "", None, " "]})
+    res = A.analyse(df.lazy(), {"analysis": {"items": []}})
+    got = {f["name"]: (f["kind"], f["distinct"]) for f in res["fields"]}
+    assert got == {"DOC_NO": ("text", 4), "AMOUNT": ("number", 4), "ISSUE_DATE": ("date", 4),
+                   "TAX_CODE": ("text", 3), "EMPTY": ("text", 3)}

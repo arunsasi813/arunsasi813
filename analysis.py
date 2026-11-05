@@ -966,6 +966,43 @@ def summaries(lf: pl.LazyFrame, tabs: list[dict], columns: list[str] | None = No
     return out
 
 
+_NUM_TXT = r"^[-+(]?\s*[$€£¥₹]?\s*\d[\d,]*(\.\d+)?\s*\)?%?$"
+_DATE_TXT = (r"^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}[-\s][A-Za-z]{3,9}[-\s]\d{2,4}"
+             r")([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?)?$")
+PROFILE_ROWS = 2000
+
+
+def profile(lf: pl.LazyFrame, rows: int = PROFILE_ROWS) -> list[dict]:
+    """What each column looks like in its first rows — numbers, dates or text, and how many
+    different values — so the dashboard can suggest visuals that suit the data."""
+    try:
+        df = lf.head(rows).collect()
+    except Exception:  # noqa: BLE001 — a suggestion is never worth a failed dashboard
+        return []
+    out = []
+    for c in df.columns:
+        if c.startswith("__"):
+            continue
+        s = df[c]
+        if s.dtype.is_numeric():
+            kind = "number"
+        elif s.dtype.is_temporal():
+            kind = "date"
+        else:
+            v = s.cast(pl.String, strict=False).drop_nulls().str.strip_chars()
+            v = v.filter(v != "")
+            if not v.len():
+                kind = "text"
+            elif v.str.contains(_DATE_TXT).mean() >= 0.9:
+                kind = "date"
+            elif v.str.contains(_NUM_TXT).mean() >= 0.9:
+                kind = "number"
+            else:
+                kind = "text"
+        out.append({"name": c, "kind": kind, "distinct": int(s.n_unique()), "rows": df.height})
+    return out
+
+
 def analyse(lf: pl.LazyFrame, spec: dict, columns: list[str] | None = None) -> dict:
     """Both halves of the Analysis tab in one pass over the same frame."""
     columns = columns if columns is not None else lf.collect_schema().names()
@@ -988,7 +1025,7 @@ def analyse(lf: pl.LazyFrame, spec: dict, columns: list[str] | None = None) -> d
             "items": dashboard(lf, an.get("items") or [], columns, filters),
             "tabs": summaries(lf, su.get("tabs") or [], columns, filters),
             "facets": fx, "filters": filters, "filter_text": describe_filters(filters),
-            "notes": notes, "columns": columns}
+            "notes": notes, "columns": columns, "fields": profile(lf)}
 
 
 def detail(lf: pl.LazyFrame, filters: list[dict], columns: list[str] | None = None,

@@ -399,7 +399,28 @@ textarea.fx{width:100%;font-family:var(--mono);font-size:12px;min-height:52px;re
 .pv td.cell{cursor:pointer}.pv td.cell:hover{outline:1px solid var(--teal);outline-offset:-1px}
 .valrow{display:inline-flex;gap:5px;align-items:center;flex-wrap:wrap;margin-right:6px}
 .iform .args{padding:5px 0 0}
-.qadd{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.qadd{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.annote{text-transform:none;letter-spacing:0;font-weight:400;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.anhint{text-transform:none;letter-spacing:0;font-weight:400}
+.mode{font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.mode:empty{display:none}
+.mode.sample{background:var(--amber-soft);color:#7a4a00;border:1px solid #ecd6ac}
+.mode.all{background:var(--teal-soft);color:var(--teal-2);border:1px solid var(--teal-2)}
+.addpop{min-width:300px}
+.addpop button b{display:block;font-weight:600;font-size:12px}
+.addpop button span{display:block;font-size:11px;color:var(--faint)}
+.menu-pop .mchk{display:flex;gap:6px;align-items:center;padding:5px 10px;font-size:12px;cursor:pointer}
+.menu-pop .mchk:hover{background:var(--teal-soft)}
+.cmenu .menu-pop{min-width:190px}
+.anempty{grid-column:1/-1;text-align:center;padding:28px 12px}
+.anempty h3{margin:0 0 6px;font-size:14px}
+.anempty p{color:var(--muted);font-size:12px;margin:0 auto 12px;max-width:520px}
+.iform .moreopts{border-top:1px dashed var(--line);margin-top:6px;padding-top:6px}
+.wpick{display:flex;gap:2px;padding:0 6px 4px}
+.menu-pop .wpick button{width:auto;flex:1;text-align:center;padding:4px 0}
+.menu-pop .wpick button.on{background:var(--teal-soft);font-weight:600}
+.menu-pop button.danger{color:var(--red)}
+.card.item .tools:has(.menu.open){opacity:1}
 .menu{position:relative;display:inline-block}
 .menu-pop{display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:0 8px 24px rgba(14,20,24,.14);z-index:30;min-width:250px;padding:4px}
 .menu.open .menu-pop{display:block}
@@ -944,12 +965,15 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <!-- ANALYSIS -->
     <section class="pane" id="p-anal" role="tabpanel">
       <div class="anbar">
-        <label class="lbl">Data</label><select id="anSource" style="max-width:380px;height:25px" title="A group's own extract, or a table made on the Combine tab"></select>
-        <span class="lbl" id="anHint" style="text-transform:none;letter-spacing:0;font-weight:400">Each group and each combined table has its own dashboard and summaries.</span>
+        <label class="lbl">Data</label><select id="anSource" style="max-width:340px;height:25px" title="Each group and each combined table has its own dashboard and summaries"></select>
+        <span class="mode" id="anMode" title="What the numbers below were worked out from"></span>
+        <span class="lbl annote" id="anNote"></span>
       </div>
       <div class="anbar">
-        <button class="btn sm" id="anRunActive" title="Quick: the file you're looking at, or the workspace preview">Refresh from this file</button>
-        <button class="btn sm" id="anRunAll" title="Every file — like Count">Run on every ticked file</button>
+        <button class="btn sm" id="anRunActive" title="Read the first rows of each ticked file again — quick, light on memory">↻ Refresh sample</button>
+        <label class="f" style="gap:4px;font-size:11.5px" title="How many rows of each file the sample reads. Nothing reads a whole file until you press “Every file”.">
+          <input type="number" id="anSample" min="10" max="100000" step="10" value="100" style="width:72px;height:24px"> rows per file</label>
+        <button class="btn sm pri" id="anRunAll" title="Every row of every ticked file, file by file — like Count">▶ Every file</button>
         <button class="btn sm" id="anRunDash" title="Every dashboard of this setup — each group's, each combined table's and the Overview — over every file, in one pass. Nothing is written.">Run all dashboards</button>
         <div class="menu"><button class="btn sm" id="anExportBtn">Export ▾</button>
           <div class="menu-pop" id="anExportMenu" style="left:0;right:auto">
@@ -964,26 +988,30 @@ table.matrix tr.unas td.fn{color:var(--faint)}
             <button data-exp="csv:both">Every table → CSV files</button>
             <hr><div class="mh">Web page</div>
             <button data-exp="html:studio" title="Every Studio visual with the numbers shown now — one page that opens in any browser">Studio visuals → HTML page</button>
+            <hr><div class="mh">With every Run</div>
+            <label class="mchk" title="Ride along with the extract as sheets"><input type="checkbox" id="anExport"> Dashboard in the output</label>
+            <label class="mchk"><input type="checkbox" id="suExport"> Summaries in the output</label>
           </div></div>
-        <span class="lbl" id="anNote" style="text-transform:none;letter-spacing:0;font-weight:400;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
-        <label class="f" style="gap:5px;font-size:11.5px" title="Ride along with the extract as sheets"><input type="checkbox" id="anExport"> Dashboard in the output</label>
-        <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="suExport"> Summaries in the output</label>
       </div>
       <div class="subtabs" id="anTabs"></div>
       <div class="fbar" id="anFilterBar" style="display:none"></div>
       <div id="anDash">
-        <div class="anbar"><div class="qadd" id="anQuick"><label class="lbl">Add</label>
-            <select id="anAddFrom" style="display:none;max-width:170px;height:24px" title="The table the next visual reads"></select>
-            <button class="btn sm" data-q="kpi" title="One number">＃ Number</button>
-            <button class="btn sm" data-q="slicer" title="Click values to filter the whole dashboard">☰ Slicer</button>
-            <button class="btn sm" data-q="breakdown">▮ Columns</button>
-            <button class="btn sm" data-q="trend">∿ Trend</button>
-            <button class="btn sm" data-q="pie">◔ Donut</button>
-            <button class="btn sm" data-q="crosstab">▦ Matrix</button>
-            <button class="btn sm" data-q="records">≡ Table</button>
-            <button class="btn sm" data-q="studio" title="A visual designed in Measure Studio — KPI cards, bar lists, charts, tables — drawing this dashboard's numbers, with its DAX for Power BI">✦ Studio</button>
-            <button class="btn sm ghost" data-q="blank">Other…</button></div>
-          <span class="lbl" style="text-transform:none;letter-spacing:0;font-weight:400">Click a bar, slice or row to filter every other visual (Ctrl-click for several) · right-click to see the rows behind it · drag ⠿ to rearrange.</span></div>
+        <div class="anbar"><div class="qadd" id="anQuick">
+            <div class="menu"><button class="btn sm pri" id="anAddBtn" title="Put a visual on the dashboard">＋ Add visual ▾</button>
+              <div class="menu-pop addpop" id="anAddMenu" style="left:0;right:auto">
+                <button data-q="kpi"><b>＃ Number</b><span>One total, count or average</span></button>
+                <button data-q="slicer"><b>☰ Slicer</b><span>Click values to filter every other visual</span></button>
+                <button data-q="breakdown"><b>▮ Columns</b><span>A total for each value, biggest first</span></button>
+                <button data-q="trend"><b>∿ Trend</b><span>A total by day, month or year</span></button>
+                <button data-q="pie"><b>◔ Donut</b><span>Each value's share of the whole</span></button>
+                <button data-q="crosstab"><b>▦ Matrix</b><span>Rows × columns, shaded by size</span></button>
+                <button data-q="records"><b>≡ Table</b><span>The top rows, sorted</span></button>
+                <button data-q="studio"><b>✦ Studio</b><span>Designed in Measure Studio — cards, charts, DAX for Power BI</span></button>
+                <hr><button data-q="blank"><b>⚙ Other…</b><span>Pick any kind and set it up yourself</span></button>
+              </div></div>
+            <button class="btn sm" data-q="suggest" title="A slicer, two totals, a breakdown and a trend, from the columns that look right">✨ Suggest a dashboard</button>
+            <select id="anAddFrom" style="display:none;max-width:170px;height:24px" title="The table the next visual reads"></select></div>
+          <span class="lbl anhint" id="anHint">Click a bar, slice or row to filter the rest (Ctrl-click for several) · right-click for the rows behind it · drag ⠿ to move.</span></div>
         <div class="cards" id="anCards"></div>
       </div>
       <div id="anSum" style="display:none">
@@ -2137,15 +2165,15 @@ function drawAnal(){
   const af = $("#anAddFrom");
   af.style.display = at.overview ? "" : "none";
   $("#anHint").textContent = at.overview
-    ? "One dashboard over several tables: pick the table each visual reads in “Add”. A slicer or a click filters every card whose table has that field."
-    : "Each group and each combined table has its own dashboard and summaries" + (isMulti() ? " — the Overview puts cards from all of them together." : ".");
+    ? "Pick the table the next visual reads beside “Add visual”. A slicer or a click filters every card whose table has that field."
+    : "Click a bar, slice or row to filter the rest (Ctrl-click for several) · right-click for the rows behind it · drag ⠿ to move.";
+  $("#anSample").value = WS.sample_rows || 100;
+  drawMode();
   if (at.overview){
     const names = ovTables(); ovCtx(names.includes(S.anAddFrom) ? S.anAddFrom : null);
     af.innerHTML = names.map(n => `<option ${n === (S.anAddFrom || S.anCtx) ? "selected" : ""}>${esc(n)}</option>`).join("");
   }
   $("#anRunDash").style.display = (isMulti() || anCount()) ? "" : "none";
-  $("#anRunActive").textContent = viaSetup ? "Refresh (preview)" : "Refresh from this file";
-  $("#anRunAll").textContent = viaSetup ? "Run on every file" : "Run on every ticked file";
   const tabs = [`<button class="subtab" data-v="dash" aria-selected="${S.anView === "dash"}">Dashboard <span class="n">${at.analysis.items.length}</span></button>`]
     .concat(at.summaries.tabs.map(t => `<button class="subtab" data-v="${t.id}" aria-selected="${S.anView === t.id}">${esc(t.name)}<span class="x" data-del="${t.id}" title="Remove this summary">✕</span></button>`))
     .concat([`<button class="subtab" data-v="__new" title="Add a summary tab">＋ Summary</button>`]);
@@ -2209,7 +2237,8 @@ async function anRun(scope){
   if (!at.report && !S.active){ say("Pick a file first.", "err"); return; }
   if (S.anBusy){ S.anAgain = scope; return; }
   S.anBusy = true; S.anScope = scope; busy(true);
-  say(scope === "all" ? "Running the analysis over every file…" : "Working out the analysis…");
+  say(scope === "all" ? "Running the analysis over every file, one file at a time…"
+                     : `Working out the analysis from the first ${(WS.sample_rows || 100).toLocaleString()} rows of each file…`);
   const viaSetup = at.report || (groupRel() ? groupReport() : null);
   const r = viaSetup
     ? await api().ws_analyse({workspace: setupPayload(), report: viaSetup, scope: scope === "all" ? "all" : "preview"})
@@ -2220,14 +2249,15 @@ async function anRun(scope){
   if (!r?.ok){ say(r?.error || "Analysis failed.", "err"); $("#anNote").textContent = r?.error || ""; return; }
   S.anData = r;
   if (scope === "all") S.anCache[target] = {...r, __at: clock()};
-  $("#anNote").textContent = `${r.note}${r.sampled ? ` (first ${r.sampled.toLocaleString()} rows)` : ""} · ${r.elapsed}s` +
+  $("#anNote").textContent = `${plainNote(r.note)} · ${r.elapsed}s` +
     (r.peak_memory ? ` · peak ${human(r.peak_memory)}` : "") + ((r.notes || []).length ? ` · ${r.notes.join(" · ")}` : "");
+  drawMode();
   if (S.anView === "dash") drawCards(); else drawPivotResult();   // editor keeps focus and text
-  say(`Analysis ready — ${r.note}.`, "ok");
+  say(`Analysis ready — ${plainNote(r.note)}.`, "ok");
 }
 /* Full-data dashboards — from Run all dashboards, a run with "then dashboards", or Run
    on every file — are kept per dashboard, so switching Data shows them again without
-   reading every file once more. Refresh (preview) or any edit works them out anew. */
+   reading every file once more. Refresh sample or any edit works them out anew. */
 const clock = () => new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
 function human(n){
   if (!n) return "0 MB";
@@ -2238,10 +2268,29 @@ function anFromCache(){
   const c = S.anCache[anKey()];
   if (!c) return false;
   S.anData = c; S.anScope = "all";
-  $("#anNote").textContent = `${c.note || ""} · every file, from ${c.__from || "the last full run"} at ${c.__at}` +
+  $("#anNote").textContent = `${plainNote(c.note)} · from ${c.__from || "the last full run"} at ${c.__at}` +
     ((c.notes || []).length ? ` · ${c.notes.join(" · ")}` : "");
+  drawMode();
   return true;
 }
+/* the badge says what the numbers come from: a sample (the first rows of each file —
+   quick, never a whole file) or every row of every file */
+function plainNote(n){ return String(n || "").replace(/^sample — /, "").replace(/ \((preview|sample)\)$/, ""); }
+function drawMode(){
+  const m = $("#anMode");
+  if (!S.anData){ m.textContent = ""; m.className = "mode"; return; }
+  const all = S.anScope === "all";
+  m.className = "mode " + (all ? "all" : "sample");
+  m.textContent = all ? "Every file" : `Sample · ${(WS.sample_rows || 100).toLocaleString()} rows per file`;
+  m.title = all ? "Every row of every ticked file"
+                : "The first rows of each ticked file — press “▶ Every file” for the full numbers";
+}
+$("#anSample").onchange = e => {
+  const n = Math.max(10, Math.min(100000, Math.round(+e.target.value || 100)));
+  e.target.value = n; WS.sample_rows = n;
+  if (S.anScope !== "all" && (AT().report || S.active)) anRun("active");
+  else drawMode();
+};
 function takeDashboards(map, from){
   const keys = Object.keys(map || {}).filter(k => map[k] && map[k].ok !== false);
   const at = clock();
@@ -2458,7 +2507,9 @@ function itemField(it, r){
 const drawCards = guarded(function(){
   const at = AT(), box = $("#anCards");
   if (!at.analysis.items.length){
-    box.innerHTML = `<div class="empty" style="grid-column:1/-1;padding:18px 0">Nothing on the dashboard yet — add a visual above. Start with a slicer and a couple of totals, then click a bar to filter everything else.</div>`;
+    box.innerHTML = `<div class="card anempty"><h3>Start your dashboard</h3>
+      <p>ColSift can lay out a slicer, a couple of totals, a breakdown and a trend from the columns that look right — change or remove any of them after. Or add visuals one at a time with “＋ Add visual”.</p>
+      <button class="btn pri" data-sug="1">✨ Suggest a dashboard</button></div>`;
     return;
   }
   box.innerHTML = at.analysis.items.map((it, i) => {
@@ -2467,18 +2518,22 @@ const drawCards = guarded(function(){
     let inner;
     if (at.overview) S.anCtx = it.table || "";
     if (editing) inner = itemForm(it, i);
-    else if (!r) inner = `<div class="sub">Not worked out yet — press Refresh.</div>`;
+    else if (!r) inner = `<div class="sub">Not worked out yet — press ↻ Refresh sample.</div>`;
     else if (r.error) inner = `<div class="itemerr">${esc(r.error)}</div>`;
     else inner = itemBody(it, r, width);
     return `<div class="card item ${width} ${editing ? "editing full" : ""}" data-i="${i}" draggable="${editing ? "false" : "true"}">
       <div class="tools">
-        ${kind !== "slicer" && kind !== "kpi" && kind !== "studio" && !editing ? `<button class="btn sm ghost" data-act="rows" title="Show the rows behind this visual">⤓ rows</button>` : ""}
-        ${kind === "studio" ? `<button class="btn sm ghost" data-act="msedit" title="Open it in Measure Studio">✦ Design</button>
-          <button class="btn sm ghost" data-act="mshtml" title="Save this visual, with the numbers shown now, as a web page">⤓ HTML</button>` : ""}
-        <button class="btn sm ghost" data-act="edit" title="Edit">${editing ? "Done" : "Edit"}</button>
-        <button class="btn sm ghost" data-act="wide" title="Width: third, half, full">${esc((WIDTHS.find(w => w[0] === width) || WIDTHS[1])[1])}</button>
-        <button class="btn sm ghost" data-act="copy" title="Duplicate">⧉</button>
-        <button class="btn x" data-act="del" title="Remove">✕</button>
+        ${kind === "studio" ? `<button class="btn sm ghost" data-act="msedit" title="Open it in Measure Studio">✦ Design</button>` : ""}
+        <button class="btn sm ${editing ? "pri" : "ghost"}" data-act="edit" title="${editing ? "Close the editor" : "Change what this visual shows"}">${editing ? "Done" : "Edit"}</button>
+        <div class="menu cmenu"><button class="btn sm ghost" data-act="cmenu" title="More: rows, width, duplicate, remove">⋯</button>
+          <div class="menu-pop">
+            ${kind !== "slicer" && kind !== "kpi" && kind !== "studio" ? `<button data-act="rows">⤓ Show the rows behind it</button>` : ""}
+            ${kind === "studio" ? `<button data-act="mshtml">⤓ Save as a web page</button>` : ""}
+            <div class="mh">Width</div>
+            <div class="wpick">${WIDTHS.map(([w, l]) => `<button data-act="w" data-w="${w}" class="${w === width ? "on" : ""}">${l}</button>`).join("")}</div>
+            <hr><button data-act="copy">⧉ Duplicate</button>
+            <button data-act="del" class="danger">✕ Remove</button>
+          </div></div>
       </div>
       <h4><span class="grip" title="Drag to move">⠿</span>${esc(it.name || (r && r.name) || "Visual")}${at.overview ? `<span class="srcchip" title="The table this card reads">${esc(it.table || "no data")}</span>` : ""}${it.ignore_filters ? ` <span class="sub" title="This visual ignores the dashboard filters">· unfiltered</span>` : ""}</h4>
       ${inner}</div>`;
@@ -2522,7 +2577,7 @@ function itemBody(it, r, width){
                                                                 maxh: ch ? "240px" : "360px"});
   return ch + tbl;
 }
-function valuesEditor(it, multi){
+function valuesEditor(it, multi, more){
   const vals = it.values && it.values.length ? it.values : (it.values = [{column: anCols()[0] || "", agg: "sum"}]);
   const aggGroups = [];
   AM().aggs.forEach(a => { let g = aggGroups.find(x => x.g === a.group); if (!g) aggGroups.push(g = {g: a.group, as: []}); g.as.push(a); });
@@ -2531,7 +2586,7 @@ function valuesEditor(it, multi){
       ${v.expr != null ? `<input type="text" data-f="vexpr" value="${esc(v.expr || "")}" placeholder="AMOUNT * RATE" style="width:150px;font-family:var(--mono)">` : ""}
       <select data-f="vagg">${aggGroups.map(g => `<optgroup label="${esc(g.g)}">${g.as.map(a =>
         `<option value="${a.id}" ${(v.agg || "sum") === a.id ? "selected" : ""}>${esc(a.label)}</option>`).join("")}</optgroup>`).join("")}</select>
-      <select data-f="vfmt" style="width:118px" title="Number format">${NUMFMTS.map(f => `<option ${f === (v.fmt || "") ? "selected" : ""}>${esc(f)}</option>`).join("")}</select>
+      ${more ? `<select data-f="vfmt" style="width:118px" title="Number format">${NUMFMTS.map(f => `<option ${f === (v.fmt || "") ? "selected" : ""}>${esc(f)}</option>`).join("")}</select>` : ""}
       ${multi && j ? `<button class="btn x" data-act="vdel" title="Remove this value">✕</button>` : ""}</span>`).join("") +
     (multi ? `<button class="btn sm ghost" data-act="vadd" title="Another value — shown side by side">＋ value</button>` : "");
 }
@@ -2545,26 +2600,29 @@ function itemForm(it, i){
   const ovRow = AT().overview ? `<div class="args"><label class="lbl">Data</label><select data-f="table" style="max-width:220px">${
     ovTables().map(n => `<option ${n === it.table ? "selected" : ""}>${esc(n)}</option>`).join("")}${it.table && !ovTables().includes(it.table) ? `<option selected>${esc(it.table)}</option>` : ""}</select>
     <span class="sub" style="margin:0">Each card reads its own group or table; slicers and clicks filter every card whose table has that field.</span></div>` : "";
+  const more = !!it.__more;
   return `<div class="iform">${ovRow}
-    <div class="args"><label class="lbl">Name</label><input type="text" data-f="name" value="${esc(it.name || "")}" placeholder="automatic" style="width:190px">
-      <label class="lbl">Shows</label><select data-f="kind">${groups.map(g => `<optgroup label="${esc(g.g)}">${g.ks.map(k =>
+    <div class="args"><label class="lbl">Shows</label><select data-f="kind">${groups.map(g => `<optgroup label="${esc(g.g)}">${g.ks.map(k =>
         `<option value="${k.id}" ${kind === k.id ? "selected" : ""}>${esc(k.label)}</option>`).join("")}</optgroup>`).join("")}</select>
-      ${charts.length ? `<label class="lbl">Visual</label><select data-f="chart">${charts.map(c => `<option value="${c.id}" ${(it.chart || charts[0].id) === c.id ? "selected" : ""}>${esc(c.label)}</option>`).join("")}</select>` : ""}
-      <label class="f" style="gap:4px;font-size:11px" title="Show every row even when the dashboard is filtered"><input type="checkbox" data-f="ignore" ${it.ignore_filters ? "checked" : ""}>Ignore filters</label>
-      ${charts.length ? `<label class="f" style="gap:4px;font-size:11px"><input type="checkbox" data-f="hidetable" ${it.hide_table ? "checked" : ""}>Chart only</label>` : ""}</div>
-    ${needs.includes("values") || needs.includes("values1") ? `<div class="args"><label class="lbl">Measure</label>${valuesEditor(it, needs.includes("values"))}</div>` : ""}
+      ${charts.length ? `<label class="lbl">As</label><select data-f="chart">${charts.map(c => `<option value="${c.id}" ${(it.chart || charts[0].id) === c.id ? "selected" : ""}>${esc(c.label)}</option>`).join("")}</select>` : ""}
+      <label class="lbl">Title</label><input type="text" data-f="name" value="${esc(it.name || "")}" placeholder="automatic" style="width:190px"></div>
+    ${needs.includes("values") || needs.includes("values1") ? `<div class="args"><label class="lbl">Measure</label>${valuesEditor(it, needs.includes("values"), more)}</div>` : ""}
     ${needs.includes("by") || needs.includes("field") ? `<div class="args"><label class="lbl">${kind === "slicer" ? "Slice by" : kind === "crosstab" ? "Rows" : "By"}</label><select data-f="bcolumn">${anColOptions(by.column)}</select>
-      ${kind === "distribution" ? "" : `<select data-f="bgroup" title="Group the values">${groupOptions(by.group || (kind === "trend" ? "month" : "none"), kind === "trend" ? "Date" : "")}</select>`}
-      ${needs.includes("sort") ? `<label class="lbl">Sort</label><select data-f="bsort">${[["asc", "A to Z"], ["desc", "Z to A"], ["value_desc", "Biggest first"], ["value", "Smallest first"]].map(([v, l]) =>
+      ${kind === "distribution" ? "" : `<select data-f="bgroup" title="Group the values">${groupOptions(by.group || (kind === "trend" ? "month" : "none"), kind === "trend" ? "Date" : "")}</select>`}</div>` : ""}
+    ${more ? `<div class="moreopts">
+    ${needs.includes("sort") ? `<div class="args"><label class="lbl">Sort</label><select data-f="bsort">${[["asc", "A to Z"], ["desc", "Z to A"], ["value_desc", "Biggest first"], ["value", "Smallest first"]].map(([v, l]) =>
         `<option value="${v}" ${(by.sort || "asc") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
-        <label class="lbl">Top</label><input type="number" data-f="btop" value="${top.n || ""}" placeholder="all" min="1" style="width:64px">` : ""}</div>` : ""}
-    ${needs.includes("by2") ? `<div class="args"><label class="lbl">Columns</label><select data-f="b2column">${anColOptions(by2.column)}</select>
-      <select data-f="b2group">${groupOptions(by2.group || "none")}</select></div>` : ""}
-    ${needs.includes("size") ? `<div class="args"><label class="lbl">Range size</label><input type="number" data-f="size" value="${it.size || 100}" style="width:90px"></div>` : ""}
+        <label class="lbl">Top</label><input type="number" data-f="btop" value="${top.n || ""}" placeholder="all" min="1" style="width:64px"></div>` : ""}
+    <div class="args"><label class="f" style="gap:4px;font-size:11px" title="Show every row even when the dashboard is filtered"><input type="checkbox" data-f="ignore" ${it.ignore_filters ? "checked" : ""}>Ignore the dashboard's filters</label>
+      ${charts.length ? `<label class="f" style="gap:4px;font-size:11px"><input type="checkbox" data-f="hidetable" ${it.hide_table ? "checked" : ""}>Chart only — hide the table under it</label>` : ""}</div>
     ${needs.includes("target") ? `<div class="args"><label class="lbl">Target</label><input type="text" data-f="target" value="${esc(it.target ?? "")}" placeholder="optional, e.g. 250000" style="width:130px">
       <label class="lbl">Trend by</label><select data-f="scolumn">${anColOptions((it.spark || {}).column, "— no sparkline —")}</select>
       <select data-f="sgroup">${groupOptions((it.spark || {}).group || "month", "Date")}</select>
       <span class="sub" style="margin:0">A sparkline, and the change from the period before the last.</span></div>` : ""}
+    </div>` : ""}
+    ${needs.includes("by2") ? `<div class="args"><label class="lbl">Columns</label><select data-f="b2column">${anColOptions(by2.column)}</select>
+      <select data-f="b2group">${groupOptions(by2.group || "none")}</select></div>` : ""}
+    ${needs.includes("size") ? `<div class="args"><label class="lbl">Range size</label><input type="number" data-f="size" value="${it.size || 100}" style="width:90px"></div>` : ""}
     ${needs.includes("cols") ? `<div class="args"><label class="lbl">Sort by</label><select data-f="rsort">${anColOptions(it.sort_by || "", "— file order —")}</select>
       <select data-f="rdesc"><option value="1" ${it.desc !== false ? "selected" : ""}>biggest first</option><option value="0" ${it.desc === false ? "selected" : ""}>smallest first</option></select>
       <label class="lbl">Rows</label><input type="number" data-f="rlimit" value="${it.limit || 25}" min="1" max="5000" style="width:76px"></div>
@@ -2572,34 +2630,82 @@ function itemForm(it, i){
         `<label><input type="checkbox" data-f="rcol" value="${esc(c)}" ${(it.columns || []).includes(c) ? "checked" : ""}>${esc(c)}</label>`).join("")}</div></div>` : ""}
     ${needs.includes("columns") ? `<div class="args"><label class="lbl">Columns to check</label><div class="multi">${anCols().map(c =>
       `<label><input type="checkbox" data-f="qcol" value="${esc(c)}" ${(it.columns || []).includes(c) ? "checked" : ""}>${esc(c)}</label>`).join("")}</div></div>` : ""}
+    <div class="args"><button class="btn sm ghost" data-act="more">${more ? "Fewer options ▴" : "More options ▾ — sort, top N, number format, target, filters"}</button></div>
   </div>`;
 }
 const QUICK = {
   kpi: c => ({kind: "kpi", values: [{column: c.num, agg: "sum"}]}),
   slicer: c => ({kind: "slicer", by: {column: c.cat}}),
   breakdown: c => ({kind: "breakdown", chart: "bar", by: {column: c.cat, sort: "value_desc"}, values: [{column: c.num, agg: "sum"}]}),
-  trend: c => ({kind: "trend", chart: "line", by: {column: c.date, group: "month"}, values: [{column: c.num, agg: "sum"}]}),
+  trend: c => ({kind: "trend", chart: "line", by: {column: c.date || c.cat, group: c.date ? "month" : "none"}, values: [{column: c.num, agg: "sum"}]}),
   pie: c => ({kind: "breakdown", chart: "donut", by: {column: c.cat, sort: "value_desc"}, values: [{column: c.num, agg: "sum"}]}),
-  crosstab: c => ({kind: "crosstab", chart: "heatmap", width: "full", by: {column: c.cat}, by2: {column: c.date, group: "month"}, values: [{column: c.num, agg: "sum"}]}),
+  crosstab: c => ({kind: "crosstab", chart: "heatmap", width: "full", by: {column: c.cat},
+                   by2: c.date ? {column: c.date, group: "month"} : {column: c.cat2 || c.cat}, values: [{column: c.num, agg: "sum"}]}),
   records: c => ({kind: "records", width: "full", columns: anCols().slice(0, 6), sort_by: c.num, limit: 25}),
   studio: c => ({kind: "studio", width: "full", project: null, blocks: {},
                  measures: [{name: "Total " + c.num, agg: "sum", column: c.num}, {name: "Rows", agg: "rows"}]}),
 };
+/* the columns a new visual starts from. With the last analysis' look at the data (numbers,
+   dates, text and how many values each has) it picks by content; without it, by name. */
+const IDISH = /(^|_)(ID|NO|NUM|NBR|NUMBER|KEY|REF|DOC)$/i;
 function guessCols(){
   const cols = anCols(), pv = S.lastPreview;
-  const find = rx => cols.find(c => rx.test(c));
-  const num = find(/AMOUNT|AMT|FARE|TOTAL|VALUE|PRICE|TAX$|SUM|QTY|COUNT/i) || cols[0] || "";
-  const date = find(/DATE|_DT$|DAY|MONTH|PERIOD/i) || cols[0] || "";
-  const cat = find(/CODE|TYPE|CATEGORY|STATUS|CURRENCY|CUR$|REGION|COUNTRY|SOURCE/i) || cols.find(c => c !== num && c !== date) || cols[0] || "";
-  return {num, date, cat, pv};
+  const fl = (S.anData?.fields || []).filter(f => cols.includes(f.name));
+  const info = Object.fromEntries(fl.map(f => [f.name, f]));
+  const is = k => c => !fl.length || info[c]?.kind === k;
+  const pick = (rx, ok) => cols.find(c => rx.test(c) && ok(c)) || cols.find(ok);
+  const numOk = c => is("number")(c) && !IDISH.test(c) && (!fl.length || info[c].distinct > 1);
+  const numFound = pick(/AMOUNT|AMT|FARE|TOTAL|VALUE|PRICE|TAX$|SUM|QTY|COUNT|COST|SALES|REVENUE/i, numOk);
+  const num = numFound || cols[0] || "";
+  const dateRx = /DATE|_DT$|DAY|MONTH|PERIOD|TIME/i;   // by name only when nothing says what's in it
+  const date = (fl.length ? pick(dateRx, is("date")) : cols.find(c => dateRx.test(c))) || "";
+  const catOk = c => c !== num && c !== date && !IDISH.test(c) &&
+    (!fl.length || (info[c]?.kind === "text" && info[c].distinct > 1 && info[c].distinct <= 60));
+  const cat = pick(/CODE|TYPE|CATEGORY|STATUS|CURRENCY|CUR$|REGION|COUNTRY|SOURCE|CITY|AGENT|ROUTE|PRODUCT|CLASS/i, catOk)
+    || cols.find(c => c !== num && c !== date) || cols[0] || "";
+  const cat2 = cols.find(c => c !== cat && catOk(c)) || "";
+  const id = cols.find(c => IDISH.test(c)) || cols[0] || "";
+  return {num, numFound: !!numFound, date, cat, cat2, id, pv};
 }
-$("#anQuick").addEventListener("click", async e => {
-  const b = e.target.closest("[data-q]"); if (!b) return;
+/* a first dashboard: a slicer and two numbers across the top, a breakdown and a trend
+   under them, and a donut when there's a second good column to split by */
+function suggestItems(c){
+  const out = [], val = c.numFound ? [{column: c.num, agg: "sum"}] : [{column: c.id, agg: "count"}];
+  const what = c.numFound ? c.num : "Rows";
+  if (c.cat) out.push({kind: "slicer", name: c.cat, by: {column: c.cat}, width: "third"});
+  if (c.numFound) out.push({kind: "kpi", name: `Total ${c.num}`, values: [{column: c.num, agg: "sum"}], width: "third"});
+  out.push({kind: "kpi", name: "Rows", values: [{column: c.id, agg: "count"}], width: "third"});
+  if (c.cat) out.push({kind: "breakdown", chart: "bar", name: `${what} by ${c.cat}`, width: "half",
+                       by: {column: c.cat, sort: "value_desc", top: {n: 15, mode: "top"}}, values: val, hide_table: true});
+  if (c.date) out.push({kind: "trend", chart: "line", name: `${what} by month`, width: "half",
+                        by: {column: c.date, group: "month"}, values: val, hide_table: true});
+  if (c.cat2) out.push({kind: "breakdown", chart: "donut", name: `${what} by ${c.cat2}`, width: "half",
+                        by: {column: c.cat2, sort: "value_desc", top: {n: 8, mode: "top"}}, values: val, hide_table: true});
+  return out.map(x => ({id: uid(), ...x}));
+}
+$("#anAddBtn").onclick = e => {
+  e.stopPropagation();
+  const m = $("#anAddMenu").parentElement, was = m.classList.contains("open");
+  $$(".menu.open").forEach(x => x.classList.toggle("open", false));
+  m.classList.toggle("open", !was);
+};
+$("#anQuick").addEventListener("click", e => {
+  const b = e.target.closest("[data-q]"); if (b) addVisual(b.dataset.q);
+});
+async function addVisual(q){
   if (AT().overview) ovCtx($("#anAddFrom").value);
   if (AT().report || groupRel()) await wsSchemaFresh();                // the table's fields, now
   if (!anCols().length && AT().report) await wsSchemaNow();
   if (!anCols().length){ say("Pick a file (or a report table) first.", "err"); return; }
-  const it = {id: uid(), name: "", __edit: b.dataset.q === "blank", ...(QUICK[b.dataset.q] || QUICK.kpi)(guessCols()),
+  if (q === "suggest"){
+    if (!S.anData?.fields && (AT().report || S.active)) await anRun(S.anScope || "active");   // a look at the data first
+    const add = suggestItems(guessCols()).map(x => ({...x, ...(AT().overview ? {table: S.anCtx} : {})}));
+    AT().analysis.items.push(...add);
+    anCounts(); drawCards(); anRefresh(true);
+    say(`Added ${add.length} visuals — Edit changes one, ⋯ resizes or takes it off.`, "ok");
+    return;
+  }
+  const it = {id: uid(), name: "", __edit: q === "blank", ...(QUICK[q] || QUICK.kpi)(guessCols()),
               ...(AT().overview ? {table: S.anCtx} : {})};
   if (it.kind === "studio"){                 // a first design from its measures, its rows bound
     try {
@@ -2611,18 +2717,26 @@ $("#anQuick").addEventListener("click", async e => {
   AT().analysis.items.push(it);
   anCounts();
   drawCards(); if (!it.__edit) anRefresh(true);
-});
+}
 
 /* card events — bound once; the cards are redrawn often */
 $("#anCards").addEventListener("click", e => {
+  if (e.target.closest("[data-sug]")){ addVisual("suggest"); return; }
   const card = e.target.closest(".card.item"); if (!card) return;
   const items = AT().analysis.items, i = +card.dataset.i, it = items[i], r = itemResult(it.id);
   if (AT().overview) S.anCtx = it.table || "";
   const act = e.target.closest("[data-act]")?.dataset.act;
   if (act){
     if (act === "edit"){ it.__edit = !it.__edit; drawCards(); if (!it.__edit) anRefresh(true); }
-    else if (act === "wide"){ const w = it.width || (it.kind === "kpi" || it.kind === "slicer" ? "third" : "half");
-      it.width = WIDTHS[(WIDTHS.findIndex(x => x[0] === w) + 1) % WIDTHS.length][0]; drawCards(); }
+    else if (act === "cmenu"){
+      e.stopPropagation();
+      const m = e.target.closest(".menu"), was = m.classList.contains("open");
+      $$(".menu.open").forEach(x => x.classList.toggle("open", false));
+      m.classList.toggle("open", !was);
+      return;
+    }
+    else if (act === "w"){ it.width = e.target.closest("[data-w]").dataset.w; drawCards(); }
+    else if (act === "more"){ it.__more = !it.__more; drawCards(); }
     else if (act === "copy"){ items.splice(i + 1, 0, {...JSON.parse(JSON.stringify(it)), id: uid(), __edit: false}); drawCards(); anRefresh(); }
     else if (act === "del"){ items.splice(i, 1); drawCards(); }
     else if (act === "vadd"){ it.values.push({column: anCols()[0] || "", agg: "sum"}); drawCards(); }
@@ -2890,7 +3004,7 @@ async function msSaveHtml(items){
     if (!it.project || !r || r.error) continue;
     parts.push({name: it.name || r.name || "Studio visual", html: ms.render(it.project, msLive(r, true))});
   }
-  if (!parts.length){ say("Work the dashboard out first — press Refresh.", "err"); return; }
+  if (!parts.length){ say("Work the dashboard out first — press ↻ Refresh sample.", "err"); return; }
   const title = parts.length === 1 ? parts[0].name : (AT().report ? AT().report.name : (S.output.basename || "Dashboard"));
   const when = new Date().toLocaleString();
   const note = (S.anData && S.anData.note) || "";
@@ -2966,9 +3080,10 @@ $("#drillCopy").onclick = async () => {
 $("#anExportBtn").onclick = e => { e.stopPropagation(); $("#anExportMenu").parentElement.classList.toggle("open"); };
 document.addEventListener("click", () => $$(".menu.open").forEach(m => m.classList.remove("open")));
 $("#anExportMenu").addEventListener("click", async e => {
+  if (e.target.closest(".mchk")){ e.stopPropagation(); return; }     // tick both without the menu closing
   const b = e.target.closest("[data-exp]"); if (!b) return;
   const [fmt, which] = b.dataset.exp.split(":");
-  if (!S.anData){ say("Work the analysis out first — press Refresh.", "err"); return; }
+  if (!S.anData){ say("Work the analysis out first — press ↻ Refresh sample.", "err"); return; }
   if (fmt === "html"){ msSaveHtml(AT().analysis.items.filter(x => x.kind === "studio")); return; }
   const at = AT(), parts = which === "both" ? ["dashboard", "summaries"] : [which];
   const res = {...S.anData, tabs: (S.anData.tabs || []).map(t => {
@@ -3255,7 +3370,7 @@ function makeGroup(name, setup, files, match){
 function newSetup(){
   const g = makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null);
   return {kind: "colsift.setup", version: 2, name: "", groups: [g], steps: [], relationships: [], reports: [],
-          params: [], param_values: {}, checks: []};
+          params: [], param_values: {}, checks: [], sample_rows: 100};
 }
 let WS = newSetup();                     // S.output holds the setup's output while it is open
 S.group = WS.groups[0].id;
@@ -3934,6 +4049,7 @@ async function openSetup(st, name){
   WS.groups.forEach(g => g.folders = g.folders || []);
   WS.params = st.params || []; WS.param_values = st.param_values || {};
   WS.checks = st.checks || []; S.checkRes = {};
+  WS.sample_rows = +st.sample_rows || 100;
   await refreshParams(true);
   applyOutput(st.output || {});
   S.processing = st.processing || "sequential"; syncOutputControls();
@@ -3978,7 +4094,8 @@ function job(){        // the open group as the engine's job: its settings, its 
     batch_dupes: (S.batch_dupes.keys || []).length ? S.batch_dupes : null,
     output: S.output, processing: S.processing,
     analysis: S.analysis, summaries: S.summaries,
-    params: WS.params || [], param_values: WS.param_values || {}
+    params: WS.params || [], param_values: WS.param_values || {},
+    sample_rows: WS.sample_rows || 100
   };
 }
 /* the same, with the file you clicked first: Preview, the dashboard and its drill-through
