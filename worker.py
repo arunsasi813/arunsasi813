@@ -38,6 +38,9 @@ def _jobs():
                                                     int(p.get("limit") or 500)),
         "dashboards": lambda p, prog, cancel: W.run_dashboards(p["workspace"], "all", prog, cancel, p.get("only")),
         "checks": lambda p, prog, cancel: W.test_checks(p["workspace"], "all", prog, cancel),
+        "convert": lambda p, prog, cancel: E.convert_to_parquet(p["job"], prog, cancel),
+        "find_export": lambda p, prog, cancel: E.find_export(p["job"], p.get("params") or {}, prog, cancel),
+        "stats": lambda p, prog, cancel: E.column_stats(p["job"], p.get("column") or "", "all", prog),
         "_selftest": _selftest,
     }
 
@@ -60,7 +63,7 @@ def _selftest(p: dict, prog, cancel) -> dict:
     return {"ok": True, "pid": os.getpid(), "echo": p.get("echo")}
 
 
-KINDS = ("run_setup", "run", "count", "find", "analyse", "drill", "ws_analyse", "ws_drill", "dashboards", "checks")
+KINDS = ("run_setup", "run", "count", "find", "analyse", "drill", "ws_analyse", "ws_drill", "dashboards", "checks", "convert", "find_export", "stats")
 
 
 def main(kind: str, payload: dict, q, cancel, settings: dict) -> None:

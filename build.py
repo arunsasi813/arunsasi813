@@ -5,6 +5,14 @@
     python build.py --cli               also colsift-cli.exe for scheduled runs
     python build.py --lean              drop the openpyxl fallback too (~10 MB less)
     python build.py --check             only check the environment, build nothing
+    python build.py --company "Acme Ltd"   the publisher name shown in the exe's properties
+
+Signing (so Windows SmartScreen shows a publisher instead of "unrecognised app";
+see README "Sharing the exe"): set one of these before building and every exe is
+signed when it is built —
+    COLSIFT_SIGN_PFX=C:\certs\code.pfx  COLSIFT_SIGN_PASSWORD=...   signtool with a .pfx
+    COLSIFT_SIGN_CMD=<command with {file}>   any signing tool, e.g. a cloud HSM's CLI
+    COLSIFT_SIGN_TIMESTAMP=<url>             timestamp server (default DigiCert's)
 
 build.bat runs this inside a clean virtual environment, which is the single biggest
 size saving: Nuitka follows every import it can see, and a Python that also has
@@ -103,7 +111,8 @@ def check(lean: bool, gui: bool) -> list[str]:
     return problems
 
 
-def nuitka_cmd(target: str, mode: str, out: Path, name: str, gui: bool, lean: bool, jobs: int | None) -> list[str]:
+def nuitka_cmd(target: str, mode: str, out: Path, name: str, gui: bool, lean: bool, jobs: int | None,
+               company: str = "ColSift") -> list[str]:
     v = nuitka_version() or (0,)
     cmd = [sys.executable, "-m", "nuitka"]
     cmd += [f"--mode={mode}"] if v >= (2, 5) else (["--standalone"] + (["--onefile"] if mode == "onefile" else []))
@@ -134,8 +143,8 @@ def nuitka_cmd(target: str, mode: str, out: Path, name: str, gui: bool, lean: bo
         # a fixed unpack folder per version: the first start unpacks, later ones reuse it
         cmd += ["--onefile-tempdir-spec={CACHE_DIR}/ColSift/" + VERSION + ("" if gui else "-cli")]
     if sys.platform.startswith("win"):
-        cmd += ['--company-name=ColSift', '--product-name=ColSift', f"--file-version={VERSION}",
-                f"--product-version={VERSION}",
+        cmd += [f"--company-name={company}", "--product-name=ColSift", f"--file-version={VERSION}",
+                f"--product-version={VERSION}", f"--copyright=© {time.strftime('%Y')} {company}",
                 "--file-description=" + ("Column extractor for large text and Excel extracts" if gui
                                          else "ColSift command line")]
         if (HERE / "colsift.ico").exists():
@@ -144,8 +153,39 @@ def nuitka_cmd(target: str, mode: str, out: Path, name: str, gui: bool, lean: bo
     return cmd
 
 
-def build(target: str, mode: str, out: Path, name: str, gui: bool, lean: bool, jobs: int | None) -> Path:
-    cmd = nuitka_cmd(target, mode, out, name, gui, lean, jobs)
+def signtool() -> str | None:
+    """signtool.exe: on PATH, or the newest Windows SDK's."""
+    found = shutil.which("signtool")
+    if found:
+        return found
+    kits = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10" / "bin"
+    tools = sorted(kits.glob("10.*/x64/signtool.exe")) if kits.is_dir() else []
+    return str(tools[-1]) if tools else None
+
+
+def sign(exe: Path) -> str:
+    """Authenticode-sign one exe when the environment says how; returns what happened."""
+    cmd_tpl = os.environ.get("COLSIFT_SIGN_CMD", "").strip()
+    pfx = os.environ.get("COLSIFT_SIGN_PFX", "").strip()
+    stamp = os.environ.get("COLSIFT_SIGN_TIMESTAMP", "").strip() or "http://timestamp.digicert.com"
+    if cmd_tpl:
+        subprocess.run(cmd_tpl.replace("{file}", str(exe)), shell=True, check=True)
+        return "signed (COLSIFT_SIGN_CMD)"
+    if pfx:
+        tool = signtool()
+        if not tool:
+            raise SystemExit("COLSIFT_SIGN_PFX is set but signtool.exe was not found (install the Windows SDK)")
+        cmd = [tool, "sign", "/fd", "SHA256", "/tr", stamp, "/td", "SHA256", "/f", pfx]
+        if os.environ.get("COLSIFT_SIGN_PASSWORD"):
+            cmd += ["/p", os.environ["COLSIFT_SIGN_PASSWORD"]]
+        subprocess.run(cmd + [str(exe)], check=True)
+        return "signed (signtool)"
+    return "not signed"
+
+
+def build(target: str, mode: str, out: Path, name: str, gui: bool, lean: bool, jobs: int | None,
+          company: str = "ColSift") -> Path:
+    cmd = nuitka_cmd(target, mode, out, name, gui, lean, jobs, company)
     print("\n$ " + " ".join(cmd) + "\n", flush=True)
     t0 = time.time()
     subprocess.run(cmd, cwd=str(HERE), check=True)
@@ -156,6 +196,10 @@ def build(target: str, mode: str, out: Path, name: str, gui: bool, lean: bool, j
     if mode == "onefile" and not result.exists():
         result = next((p for p in out.iterdir() if p.name.startswith(Path(name).stem) and p.is_file()), result)
     print(f"\nBuilt {result} in {time.time() - t0:,.0f}s — {human(size_of(result))}", flush=True)
+    if sys.platform.startswith("win"):
+        exe = result if result.is_file() else result / name
+        if exe.exists():
+            print(f"{exe.name}: {sign(exe)}", flush=True)
     return result
 
 
@@ -168,6 +212,8 @@ def main() -> int:
     ap.add_argument("--out", default="dist")
     ap.add_argument("--jobs", type=int, default=None)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--company", default=os.environ.get("COLSIFT_COMPANY") or "ColSift",
+                    help="publisher name in the exe's properties (or COLSIFT_COMPANY)")
     a = ap.parse_args()
     exe = ".exe" if sys.platform.startswith("win") else ""
     out = HERE / a.out
@@ -183,9 +229,9 @@ def main() -> int:
     out.mkdir(exist_ok=True)
     made = []
     if not a.cli_only:
-        made.append(build("app.py", a.mode, out, f"ColSift{exe}", True, a.lean, a.jobs))
+        made.append(build("app.py", a.mode, out, f"ColSift{exe}", True, a.lean, a.jobs, a.company))
     if a.cli or a.cli_only:
-        made.append(build("engine.py", a.mode, out, f"colsift-cli{exe}", False, a.lean, a.jobs))
+        made.append(build("engine.py", a.mode, out, f"colsift-cli{exe}", False, a.lean, a.jobs, a.company))
     print("\nDone:")
     for m in made:
         print(f"  {human(size_of(m)):>10}  {m}")

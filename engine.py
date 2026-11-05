@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -33,7 +34,8 @@ TEXT_EXT = {".csv", ".txt", ".tsv", ".tab", ".dlt", ".del", ".dat",
             ".prn", ".psv", ".pip", ".asc", ".out"}
 EXT_DELIM = {".csv": ",", ".tsv": "\t", ".tab": "\t", ".psv": "|", ".pip": "|"}
 EXCEL_EXT = {".xlsx", ".xlsm", ".xlsb", ".xls"}
-ALL_EXT = TEXT_EXT | EXCEL_EXT
+PARQUET_EXT = {".parquet", ".pq", ".parq"}
+ALL_EXT = TEXT_EXT | EXCEL_EXT | PARQUET_EXT
 
 DELIMS = {"comma": ",", "tab": "\t", "pipe": "|", "semicolon": ";", "space": " ", "caret": "^"}
 XLSX_MAX_ROWS = 1_048_575  # minus header row
@@ -337,6 +339,14 @@ def is_excel(path: Path) -> bool:
     return path.suffix.lower() in EXCEL_EXT
 
 
+def is_parquet(path: Path) -> bool:
+    return path.suffix.lower() in PARQUET_EXT
+
+
+def file_kind(path: Path) -> str:
+    return "excel" if is_excel(path) else "parquet" if is_parquet(path) else "text"
+
+
 def resolve_delim(name_or_char: str) -> str:
     if not name_or_char:
         return ","
@@ -378,7 +388,7 @@ def list_folder(folder: str, recursive: bool = False, pattern: str = "") -> dict
                     "path": str(p),
                     "rel": str(p.relative_to(root)),
                     "ext": p.suffix.lower(),
-                    "kind": "excel" if is_excel(p) else "text",
+                    "kind": file_kind(p),
                     "size": st.st_size,
                     "size_h": human_size(st.st_size),
                     "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
@@ -450,6 +460,19 @@ def raw_peek(path: str, n: int = 40, encoding: str = "utf-8", sheet: str | None 
     p = _norm(path)
     if not p.exists():
         return {"ok": False, "error": f"File not found: {p}"}
+
+    if is_parquet(p):
+        try:
+            lf = pl.scan_parquet(p, glob=False)
+            names = lf.collect_schema().names()
+            df = parquet_text(lf.head(max(0, n - 1))).collect()
+            total = int(lf.select(pl.len()).collect().item())
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": brief(exc)}
+        rows = [list(names)] + [["" if v is None else v for v in r] for r in df.iter_rows()]
+        lines = [" | ".join(str(c) for c in r) for r in rows]
+        return {"ok": True, "kind": "parquet", "lines": lines, "cells": rows, "delimiter": None,
+                "rows_est": total + 1, "fast": True}
 
     if is_excel(p):
         rows, extra = None, {}
@@ -965,6 +988,10 @@ class Source:
 
     def resolved(self) -> "Source":
         """Fill in whatever was left on Auto, per file."""
+        if is_parquet(_norm(self.path)):          # the labels are the file's own column names
+            out = Source(**{k: getattr(self, k) for k in Source.__dataclass_fields__})
+            out.has_header, out.header_row, out.skip_after_header = True, 1, 0
+            return out
         if not (self.auto_header or (self.auto_delimiter and not is_excel(_norm(self.path)))):
             return self
         peek = _peek_cached(self.path, self.encoding, self.sheet)
@@ -1006,6 +1033,14 @@ def load_lazy(src: Source, needed: set[str] | None = None) -> pl.LazyFrame:
     p = _norm(src.path)
     if not p.exists():
         raise FileNotFoundError(f"File not found: {p}")
+
+    if is_parquet(p):
+        lf = pl.scan_parquet(p, glob=False)
+        if needed:
+            keep = [c for c in lf.collect_schema().names() if c in needed]
+            if keep:
+                lf = lf.select(keep)
+        return _finish(parquet_text(lf), src, needed)
 
     if is_excel(p):
         lf = None
@@ -1050,6 +1085,98 @@ def load_lazy(src: Source, needed: set[str] | None = None) -> pl.LazyFrame:
         lf = pl.scan_csv(target, skip_rows=skip, schema={n: pl.String for n in names}, **kw)
 
     return _finish(lf, src, needed)
+
+
+def parquet_text(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """A Parquet file's typed columns as the text every ColSift step works on: dates
+    as yyyy-mm-dd (a midnight time dropped), lists joined, structs as JSON, bytes as
+    hex. The run's column formats (or Parquet output's detection) type them again."""
+    conv = []
+    for c, t in lf.collect_schema().items():
+        e = pl.col(c)
+        if t == pl.String:
+            continue
+        if t == pl.Date:
+            conv.append(e.dt.to_string("%Y-%m-%d").alias(c))
+        elif isinstance(t, pl.Datetime):
+            conv.append(e.dt.to_string("%Y-%m-%d %H:%M:%S").str.replace(r" 00:00:00$", "").alias(c))
+        elif isinstance(t, (pl.List, pl.Array)):
+            inner = t.inner
+            if inner is not None and (inner.is_numeric() or inner in (pl.String, pl.Boolean, pl.Categorical)):
+                lst = e.arr.to_list() if isinstance(t, pl.Array) else e
+                conv.append(lst.cast(pl.List(pl.String)).list.join(", ").alias(c))
+            else:
+                conv.append(pl.struct(e).struct.json_encode().str.replace(r'^\{"[^"]*":(.*)\}$', "$1").alias(c))
+        elif isinstance(t, pl.Struct):
+            conv.append(pl.when(e.is_null()).then(None).otherwise(e.struct.json_encode()).alias(c))
+        elif t == pl.Binary:
+            conv.append(e.bin.encode("hex").alias(c))
+        elif isinstance(t, pl.Duration):
+            conv.append(e.dt.total_seconds().cast(pl.String).alias(c))
+        else:
+            conv.append(e.cast(pl.String).alias(c))
+    return lf.with_columns(conv) if conv else lf
+
+
+_IDLIKE_NAME = re.compile(r"(^|[_\s.])(NO|NUM|NUMBER|ID|CODE|KEY|REF|TKT|DOC|PNR)([_\s.]|$)", re.I)
+
+
+def parquet_plan(lf: pl.LazyFrame, formats: dict | None = None, detect: bool = True) -> list[pl.Expr]:
+    """How each text column is stored in a Parquet output. Column formats set on the
+    Output tab win; with `detect`, a text column whose every value reads as a number
+    (or a date) becomes one, in one streaming pass. IDs stay text: ID-like names
+    (…_NO, CODE, TICKET…), values with leading zeros, and long digit strings."""
+    sch = lf.collect_schema()
+    exprs: list[pl.Expr] = []
+    given = {c: v for c, v in (formats or {}).items() if c in sch and sch[c] == pl.String}
+    for c, fm in given.items():
+        t = (fm or {}).get("type") or "text"
+        if t == "number":
+            exprs.append(F.clean_number(pl.col(c)).alias(c))
+        elif t == "date":
+            code = F.to_strftime((fm or {}).get("fmt") or "")
+            fn = F.parse_datetime if F.has_time(code) else F.parse_date
+            exprs.append(fn(pl.col(c), (fm or {}).get("date_in")).alias(c))
+    rest = [c for c, t in sch.items() if t == pl.String and c not in given and not _IDLIKE_NAME.search(c)] if detect else []
+    if not rest:
+        return exprs
+    probes = []
+    for i, c in enumerate(rest):
+        v = pl.col(c).str.strip_chars()
+        nn = v.is_not_null() & (v != "")
+        probes += [nn.sum().alias(f"n{i}"),
+                   (nn & F.clean_number(v).is_null()).sum().alias(f"x{i}"),
+                   (nn & ~v.str.contains(r"^-?[\d,]+$")).sum().alias(f"f{i}"),
+                   (nn & v.str.contains(r"^-?0\d[\d,]*(\.\d+)?$")).sum().alias(f"z{i}"),
+                   (nn & v.str.contains(r"^\d{12,}$")).sum().alias(f"L{i}"),
+                   (nn & (F.parse_date(v).is_null() | ~v.str.contains(r"[/\-.A-Za-z]"))).sum().alias(f"d{i}"),
+                   (nn & v.str.contains(r"[ T]\d{1,2}:\d{2}")).sum().alias(f"t{i}")]
+    try:
+        st = lf.select(probes).collect(engine="streaming").row(0, named=True)
+    except Exception:  # noqa: BLE001 — a plan the probe can't take: write as text
+        return exprs
+    for i, c in enumerate(rest):
+        if not st[f"n{i}"]:
+            continue
+        v = pl.col(c).str.strip_chars()
+        if st[f"x{i}"] == 0 and not st[f"z{i}"] and not st[f"L{i}"]:
+            num = F.clean_number(v)
+            exprs.append((num.cast(pl.Int64) if st[f"f{i}"] == 0 else num).alias(c))
+        elif st[f"d{i}"] == 0:
+            exprs.append((F.parse_datetime(v) if st[f"t{i}"] else F.parse_date(v)).alias(c))
+    return exprs
+
+
+def write_parquet(lf: pl.LazyFrame, path: Path, plan: list[pl.Expr] | None = None) -> Path:
+    """Stream to .parquet (zstd), through a .part file so a failed write leaves nothing."""
+    tmp = path.with_name(path.name + ".part")
+    lf = lf.with_columns(plan) if plan else lf
+    try:
+        lf.sink_parquet(tmp, compression="zstd")
+    except Exception:  # noqa: BLE001 — a plan the streaming sink can't take
+        lf.collect(engine="streaming").write_parquet(tmp, compression="zstd")
+    _replace(tmp, path)
+    return path
 
 
 def _finish(lf: pl.LazyFrame, src: "Source", needed: set[str] | None) -> pl.LazyFrame:
@@ -1120,7 +1247,7 @@ def _line_candidates(src: "Source", probe: list[str], fold: bool,
     file normally. Measured: 1.08 s -> 0.16 s on a 400k-row, 40-column extract."""
     src = src.resolved()
     p = _norm(src.path)
-    if is_excel(p) or not probe:
+    if is_excel(p) or is_parquet(p) or not probe:
         return None
     sep, q = resolve_delim(src.delimiter), (src.quote_char or "")
     # A value holding the separator, a quote or a line break can be split across
@@ -2280,7 +2407,7 @@ def _write_xlsx_classic(df: pl.DataFrame, path: Path, out: dict) -> list[Path]:
 def _out_path(out: dict, stem: str, fmt: str) -> Path:
     folder = _norm(out.get("folder") or ".")
     folder.mkdir(parents=True, exist_ok=True)
-    ext = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx"}[fmt]
+    ext = {"csv": ".csv", "txt": ".txt", "xlsx": ".xlsx", "parquet": ".parquet"}[fmt]
     name = stem
     if out.get("timestamp"):
         name = f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -2506,7 +2633,7 @@ def write_parts(lf: pl.LazyFrame, total: int, out: dict, stem: str, fmt: str,
             e["name"] = A.sheet_name(e["name"], used)
     one_book = fmt == "xlsx" and (into == "sheets" or len(parts) == 1)
     if extra and not one_book:
-        if fmt == "xlsx":
+        if fmt in ("xlsx", "parquet"):              # summaries are for people: a workbook
             path = _out_path(out, f"{stem}_analysis", "xlsx")
             write_xlsx_book(path, extra, out, cancel)
             written.append(str(path))
@@ -2528,12 +2655,17 @@ def write_parts(lf: pl.LazyFrame, total: int, out: dict, stem: str, fmt: str,
         write_xlsx_book(path, sheets + extra, out, cancel, progress)
         return [str(path), *written]
     used = set()
+    plan = parquet_plan(lf, out.get("formats"), out.get("autotype", True) is not False) if fmt == "parquet" else None
     for pt in parts:
         _check_cancel(cancel)
         name = stem + (f"_{_safe_name(pt['label'], 60)}" if pt["label"] else "") + \
             (f"_part{pt['idx']:03d}" if pt["of"] > 1 else "")
         path = _out_path(out, _unique(name, used), fmt)
-        if fmt == "xlsx":
+        if fmt == "parquet":
+            write_parquet(pt["lf"], path, plan)
+            if progress:
+                progress(pt["rows"], pt["rows"], path.name)
+        elif fmt == "xlsx":
             write_xlsx_book(path, [{"name": base, "lf": pt["lf"], "rows": pt["rows"]}, *extra], out, cancel, progress)
             extra = []
         else:
@@ -2819,6 +2951,54 @@ def _align_stage(paths: list[Path]) -> None:
             os.replace(tmp, pth)
 
 
+def convert_to_parquet(job: dict, on_progress=None, cancel=None) -> dict:
+    """Convert to Parquet: each file as the source settings read it (sheet, header row,
+    separator) — every column, no filters — saved as <name>.parquet in `folder`, with
+    numbers and dates typed and IDs left as text. Parquet files are skipped."""
+    t0 = time.time()
+    job = apply_params(job)
+    files = [f for f in job.get("files") or [] if f]
+    folder = job.get("folder") or (job.get("output") or {}).get("folder")
+    if not files:
+        return {"ok": False, "error": "Tick at least one file."}
+    if not folder:
+        return {"ok": False, "error": "Choose an output folder on the Output tab."}
+    dest_dir = _norm(folder)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    notify = (lambda **k: on_progress(k)) if on_progress else (lambda **k: None)
+    detect = job.get("detect", True) is not False
+    written, per_file, used = [], [], set()
+    for i, f in enumerate(files, 1):
+        _check_cancel(cancel)
+        p = _norm(f)
+        notify(stage="read", file=p.name, index=i, total=len(files))
+        if is_parquet(p):
+            per_file.append({"file": p.name, "rows": None, "note": "already Parquet — left as it is"})
+            continue
+        try:
+            src = Source.from_dict({**(job.get("source") or {}), "path": str(p)})
+            if is_excel(p) and cache_on():
+                build_sheet_cache(str(p), src.sheet)
+            lf = load_lazy(src)
+            stem = _unique(_safe_name(p.stem, 120), used)
+            dest = dest_dir / f"{stem}.parquet"
+            notify(stage="write", part=dest.name)
+            write_parquet(lf, dest, parquet_plan(lf, None, detect))
+            sch = pl.scan_parquet(dest).collect_schema()
+            n = int(pl.scan_parquet(dest).select(pl.len()).collect().item())
+            typed = [c for c, t in sch.items() if t != pl.String]
+            written.append(str(dest))
+            per_file.append({"file": p.name, "rows": n, "note": f"{len(typed)} of {len(sch)} columns typed" if typed else None})
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one bad file doesn't stop the rest
+            per_file.append({"file": p.name, "rows": None, "error": brief(exc)})
+    errors = [f"{x['file']} — {x['error']}" for x in per_file if x.get("error")]
+    return {"ok": bool(written) or not errors, "written": written, "files": per_file, "errors": errors,
+            "rows": sum(x.get("rows") or 0 for x in per_file), "elapsed": round(time.time() - t0, 2),
+            "error": errors[0] if errors and not written else None}
+
+
 def _write_log(out: dict, job: dict, per_file: list, written: list, errors: list,
                warnings: list, total: int, elapsed: float, checks: list[str] | None = None) -> str:
     path = _norm(out["folder"]) / f"{_safe_name(out.get('basename') or 'extract')}_log.txt"
@@ -3031,8 +3211,8 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
                 warnings += format_warnings(lf, out["formats"], f"{label}: " if label else "")
         if checks and checks.get("grid") and len(groups) > 1 and written:
             stem = f"{_safe_name(out.get('basename') or 'extract')}_{checks['grid']['name']}"
-            path = _out_path(out, stem, fmt)
-            if fmt == "xlsx":
+            path = _out_path(out, stem, "xlsx" if fmt == "parquet" else fmt)
+            if fmt in ("xlsx", "parquet"):
                 write_xlsx_book(path, [dict(checks["grid"])], out, cancel)
             else:
                 _write_grid_csv(checks["grid"]["grid"], path, out)
@@ -3091,36 +3271,61 @@ def _scope_columns(scope: str, column: str, job: dict, available: list[str]) -> 
     return available
 
 
-def find(job: dict, params: dict, on_progress=None) -> dict:
-    """Look up specific values across the selected files.
+def _key_expr(e: pl.Expr, norm: dict, fold: bool) -> pl.Expr:
+    """A cell as Find compares it: optionally 123.0 -> 123, no spaces or symbols,
+    no leading zeros, and lower case when the values have case."""
+    if norm.get("intlike"):
+        e = e.str.replace(r"^(-?\d+)\.0+$", "${1}")
+    if norm.get("symbols"):
+        e = e.str.replace_all(r"[^\p{L}\p{N}]", "")
+    if norm.get("zeros"):
+        e = e.str.replace(r"^0+(.)", "${1}")
+    return e.str.to_lowercase() if fold else e
 
-    Exact mode builds a hash set and lets polars probe it — the same cost whether you
-    hand it one ticket number or fifty thousand. Every file's probe runs in one
-    parallel batch; a second batch only happens for files that overflow the row cap.
-    """
-    t0 = time.time()
+
+def _key_py(v: str, norm: dict, fold: bool) -> str:
+    if norm.get("intlike"):
+        v = re.sub(r"^(-?\d+)\.0+$", r"\1", v)
+    if norm.get("symbols"):
+        v = re.sub(r"[\W_]", "", v)
+    if norm.get("zeros"):
+        v = re.sub(r"^0+(.)", r"\1", v)
+    return v.lower() if fold else v
+
+
+FIND_MODES = ("exact", "contains", "starts", "ends")
+
+
+def _find_plans(job: dict, params: dict, on_progress=None, key: bool = False) -> dict:
+    """What Find and Export matches share: the values to look for, cleaned the same
+    way as the cells, and per file a lazy plan of the matching rows with
+    MATCHED_IN, SOURCE_FILE (and, with `key`, MATCH_KEY: the cleaned value matched)."""
     files = job.get("files") or []
     if not files:
         return {"ok": False, "error": "Tick at least one file."}
-
     cs = bool(params.get("case_sensitive"))
+    norm = {k: bool(params.get(k)) for k in ("intlike", "symbols", "zeros")}
     needles = _needles(params.get("values", ""), cs)
     if not needles:
         return {"ok": False, "error": "Type at least one value to look for."}
     # Ticket and doc numbers have no letters, so lower-casing every cell of every
     # column buys nothing. Only fold case when a search value actually has case.
     fold = not cs and any(n.lower() != n.upper() for n in needles)
-    probe = [n.lower() for n in needles] if fold else list(needles)
-    probe_set = set(probe)
+    lookup: dict[str, str] = {}
+    for n in needles:
+        k = _key_py(n, norm, fold)
+        if k:
+            lookup.setdefault(k, n)
+    probe = list(lookup)
+    if not probe:
+        return {"ok": False, "error": "Nothing left to look for once the values are cleaned."}
     mode = params.get("mode", "exact")
+    mode = mode if mode in FIND_MODES else "exact"
     scope = params.get("scope", "all")
-    limit = int(params.get("limit") or 500)
-    want_missing = bool(params.get("missing", True)) and mode == "exact"
 
     prep = prepare(files, job.get("source"), on_progress, workers=1 if _sequential(job) else None)
     per_file, plans, errors = [], [], []
     fast_files = 0
-
     for f in files:
         p = _norm(f)
         if str(p) in prep["errors"]:
@@ -3135,33 +3340,55 @@ def find(job: dict, params: dict, on_progress=None) -> dict:
                 continue
             need = set(cols) | needed_columns(job, available)
             lf = None
-            if params.get("linescan", True) and mode in ("exact", "contains", "starts") \
+            # cleaned values need not appear in the raw line, so the line scan is off then
+            if params.get("linescan", True) and mode in FIND_MODES and not any(norm.values()) \
                     and len(cols) >= LINESCAN_MIN_COLS:
                 lf = _line_candidates(src, probe, fold, available, need)
                 if lf is not None:
                     fast_files += 1
             if lf is None:
                 lf = load_lazy(src, need)
+            keys = [_key_expr(pl.col(c).fill_null(""), norm, fold) for c in cols]
             tests = []
-            for c in cols:
-                col = pl.col(c).fill_null("")
-                col = col.str.to_lowercase() if fold else col
+            for col in keys:
                 if mode == "exact":
                     tests.append(col.is_in(probe))
                 elif mode == "starts":
                     tests.append(pl.any_horizontal([col.str.starts_with(v) for v in probe]))
+                elif mode == "ends":
+                    tests.append(pl.any_horizontal([col.str.ends_with(v) for v in probe]))
                 else:
                     tests.append(col.str.contains_any(probe))
-            matched = lf.filter(pl.any_horizontal(tests)).with_columns(
-                pl.coalesce([pl.when(t).then(pl.lit(c)) for c, t in zip(cols, tests)])
-                  .alias("MATCHED_IN"),
-                pl.lit(p.name).alias("SOURCE_FILE"),
-            )
+            extra = [pl.coalesce([pl.when(t).then(pl.lit(c)) for c, t in zip(cols, tests)]).alias("MATCHED_IN"),
+                     pl.lit(p.name).alias("SOURCE_FILE")]
+            if key:
+                extra.append(pl.coalesce([pl.when(t).then(k) for k, t in zip(keys, tests)]).alias("MATCH_KEY"))
+            matched = lf.filter(pl.any_horizontal(tests)).with_columns(extra)
             plans.append({"i": len(per_file), "lf": matched, "cols": cols})
             per_file.append({"file": p.name, "hits": 0})
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{p.name} — {brief(exc)}")
             per_file.append({"file": p.name, "hits": 0, "error": brief(exc)})
+    return {"ok": True, "needles": needles, "lookup": lookup, "probe": probe, "fold": fold, "norm": norm,
+            "mode": mode, "plans": plans, "per_file": per_file, "errors": errors, "fast_files": fast_files}
+
+
+def find(job: dict, params: dict, on_progress=None) -> dict:
+    """Look up specific values across the selected files.
+
+    Exact mode builds a hash set and lets polars probe it — the same cost whether you
+    hand it one ticket number or fifty thousand. Every file's probe runs in one
+    parallel batch; a second batch only happens for files that overflow the row cap.
+    """
+    t0 = time.time()
+    ctx = _find_plans(job, params, on_progress)
+    if not ctx["ok"]:
+        return ctx
+    needles, lookup, probe, fold, norm = ctx["needles"], ctx["lookup"], ctx["probe"], ctx["fold"], ctx["norm"]
+    plans, per_file, errors = ctx["plans"], ctx["per_file"], ctx["errors"]
+    probe_set = set(probe)
+    limit = int(params.get("limit") or 500)
+    want_missing = bool(params.get("missing", True)) and ctx["mode"] == "exact"
 
     # Pass 1 — limit+1 rows from every file at once. If a file did not fill the cap,
     # its height IS its hit count and its rows are the whole story.
@@ -3184,7 +3411,7 @@ def find(job: dict, params: dict, on_progress=None) -> dict:
         for o, res in zip(overflow, counts):
             per_file[o["i"]]["hits"] = 0 if isinstance(res, Exception) else int(res.item())
         if want_missing:
-            full = _collect_many([o["lf"].select(o["cols"], _sequential(job)) for o in overflow])
+            full = _collect_many([o["lf"].select(o["cols"]) for o in overflow], _sequential(job))
             for o, res in zip(overflow, full):
                 o["vals"] = None if isinstance(res, Exception) else res
 
@@ -3198,9 +3425,9 @@ def find(job: dict, params: dict, on_progress=None) -> dict:
         if want_missing:
             src_df = plan.get("vals") if plan in overflow else df
             if src_df is not None and src_df.height:
-                vals = (src_df.select([c for c in plan["cols"] if c in src_df.columns])
+                vals = (src_df.select([_key_expr(pl.col(c).fill_null(""), norm, fold).alias(c)
+                                       for c in plan["cols"] if c in src_df.columns])
                         .unpivot(value_name="__v").get_column("__v").drop_nulls())
-                vals = vals.str.to_lowercase() if fold else vals
                 found |= set(vals.unique().to_list()) & probe_set
         if df.height and len(hit_rows) < limit:
             header = header or df.columns
@@ -3211,19 +3438,177 @@ def find(job: dict, params: dict, on_progress=None) -> dict:
                          for r in aligned.head(room).iter_rows()]
 
     total = sum(x["hits"] for x in per_file)
-    missing = []
-    if want_missing:
-        lookup = {(n.lower() if fold else n): n for n in needles}
-        missing = [lookup[k] for k in probe if k not in found]
+    missing = [lookup[k] for k in probe if k not in found] if want_missing else []
 
     return {
         "ok": True, "total": total, "searched": len(needles),
         "files": per_file, "columns": header, "rows": hit_rows,
-        "found": len(needles) - len(missing), "missing": missing,
+        "found": len(probe) - len(missing), "missing": missing,
         "capped": total > len(hit_rows), "errors": errors,
-        "line_scanned": fast_files,
+        "line_scanned": ctx["fast_files"],
         "elapsed": round(time.time() - t0, 2),
     }
+
+
+def find_export(job: dict, params: dict, on_progress=None, cancel=None) -> dict:
+    """Export matches: every matching row of every ticked file (no row cap), with
+    SOURCE_FILE, MATCHED_IN and MATCH_KEY, and the values that were not found — in
+    the Output tab's folder and format. A workbook gets a Matches and a Not found
+    sheet; CSV / TXT two files; Parquet the matches, and the list in a workbook."""
+    t0 = time.time()
+    job = apply_params(job)
+    out = dict(job.get("output") or {})
+    if not out.get("folder"):
+        return {"ok": False, "error": "Choose an output folder on the Output tab."}
+    ctx = _find_plans(job, params, on_progress, key=True)
+    if not ctx["ok"]:
+        return ctx
+    plans, per_file = ctx["plans"], ctx["per_file"]
+    if not plans:
+        return {"ok": False, "error": ctx["errors"][0] if ctx["errors"] else "No file could be searched.",
+                "files": per_file}
+    fmt = (out.get("format") or "xlsx").lower()
+    notify = (lambda **k: on_progress(k)) if on_progress else (lambda **k: None)
+    stage = _stage_dir()
+    written: list[str] = []
+    try:
+        staged = []
+        for n, plan in enumerate(plans, 1):
+            _check_cancel(cancel)
+            notify(stage="read", file=per_file[plan["i"]]["file"], index=n, total=len(plans))
+            dst = stage / f"m{n:05d}.parquet"
+            try:
+                plan["lf"].sink_parquet(dst, compression="lz4")
+            except Exception:  # noqa: BLE001
+                plan["lf"].collect(engine="streaming").write_parquet(dst, compression="lz4")
+            per_file[plan["i"]]["hits"] = int(pl.scan_parquet(dst).select(pl.len()).collect().item())
+            staged.append(dst)
+        both = pl.concat([pl.scan_parquet(x) for x in staged], how="diagonal_relaxed")
+        lead = ["SOURCE_FILE", "MATCHED_IN", "MATCH_KEY"]
+        both = both.select([*lead, *[c for c in both.collect_schema().names() if c not in lead]])
+        total = int(both.select(pl.len()).collect().item())
+        missing = []
+        if ctx["mode"] == "exact":
+            got = set(both.select(pl.col("MATCH_KEY").unique()).collect()["MATCH_KEY"].drop_nulls().to_list())
+            missing = [ctx["lookup"][k] for k in ctx["probe"] if k not in got]
+        base = _safe_name(out.get("basename") or "lookup") + "_matches"
+        miss = {"name": "Not found", "fmts": [],
+                "grid": [{"cells": ["NOT_FOUND"], "nums": [None], "kind": "head"}] +
+                        [{"cells": [v], "nums": [None], "kind": "data"} for v in missing]}
+        notify(stage="write", rows=0, total=total, part=base)
+        out_w = {**out, "split": {"by": "none"}}
+        if fmt == "xlsx":
+            parts = max(1, -(-total // XLSX_MAX_ROWS))
+            sheets = [{"name": "Matches" if parts == 1 else f"Matches_{i + 1}",
+                       "lf": both.slice(i * XLSX_MAX_ROWS, XLSX_MAX_ROWS),
+                       "rows": min(XLSX_MAX_ROWS, total - i * XLSX_MAX_ROWS)} for i in range(parts)]
+            path = _out_path(out_w, base, "xlsx")
+            write_xlsx_book(path, sheets + ([miss] if ctx["mode"] == "exact" else []), out_w, cancel)
+            written.append(str(path))
+        else:
+            written += write_parts(both, total, out_w, base, fmt, cancel)
+            if ctx["mode"] == "exact":
+                mfmt = "xlsx" if fmt == "parquet" else fmt
+                path = _out_path(out_w, base.replace("_matches", "_not_found"), mfmt)
+                if mfmt == "xlsx":
+                    write_xlsx_book(path, [miss], out_w, cancel)
+                else:
+                    _write_grid_csv(miss["grid"], path, out_w)
+                written.append(str(path))
+        return {"ok": True, "written": written, "rows": total, "files": per_file, "errors": ctx["errors"],
+                "searched": len(ctx["needles"]), "missing": missing, "found": len(ctx["probe"]) - len(missing),
+                "elapsed": round(time.time() - t0, 2)}
+    except Cancelled:
+        for w in written:
+            try:
+                Path(w).unlink()
+            except OSError:
+                pass
+        return {"ok": False, "cancelled": True, "error": "Cancelled — nothing was kept.", "files": per_file}
+    except (OutputLocked, ValueError) as exc:
+        return {"ok": False, "error": str(exc), "files": per_file}
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def key_list(path: str, column: str = "", sheet: str | None = None, source: dict | None = None) -> dict:
+    """Values to look for, from a column of an Excel, CSV or Parquet file: the named
+    column, else one that looks like a key (DOC, TICKET, REF, INVOICE, …_NO), else
+    the first. Its labels row is found the same way as for any other file."""
+    p = _norm(path)
+    if not p.exists():
+        return {"ok": False, "error": f"File not found: {p}"}
+    try:
+        src = Source.from_dict({**(source or {}), "path": str(p), "sheet": sheet or None,
+                                "auto_header": True, "has_header": True})
+        lf = load_lazy(src)
+        names = lf.collect_schema().names()
+        if not names:
+            return {"ok": False, "error": f"No columns in {p.name}"}
+        want = (column or "").strip().lower()
+        col = next((c for c in names if c.strip().lower() == want), None) if want else None
+        col = col or next((c for c in names if re.search(r"doc|ticket|tkt|ref|invoice|key|(^|_)no$|number", c, re.I)),
+                          names[0])
+        s = lf.select(pl.col(col)).collect()[col].drop_nulls().str.strip_chars()
+        s = s.filter(s != "")
+        vals = s.to_list()
+        return {"ok": True, "file": p.name, "columns": names, "column": col, "count": len(vals),
+                "unique": int(s.n_unique()) if len(vals) else 0, "values": vals[:500_000],
+                "sheets": sheet_names(str(p))}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": brief(exc)}
+
+
+def column_stats(job: dict, column: str, scope: str = "active", on_progress=None) -> dict:
+    """What a column holds, as read (before filters): rows, blanks, distinct values,
+    the 10 most common, and the range when it is all numbers or dates. `scope`
+    "active" reads the open file; "all" every ticked file."""
+    t0 = time.time()
+    files = job.get("files") or []
+    if scope != "all":
+        files = [job.get("active") or (files[0] if files else "")]
+    files = [f for f in files if f]
+    if not files or not column:
+        return {"ok": False, "error": "Pick a file and a column."}
+    parts, skipped = [], []
+    for f in files:
+        src = Source.from_dict({**(job.get("source") or {}), "path": str(_norm(f))})
+        try:
+            if column not in _schema_names(src):
+                skipped.append(_norm(f).name)
+                continue
+            parts.append(load_lazy(src, {column}).select(pl.col(column)))
+        except Exception as exc:  # noqa: BLE001
+            skipped.append(f"{_norm(f).name} ({brief(exc, 80)})")
+    if not parts:
+        return {"ok": False, "error": f"No file has the column {column}."}
+    lf = pl.concat(parts, how="vertical_relaxed")
+    c = pl.col(column)
+    num = F.clean_number(c)
+    st = lf.select(pl.len().alias("rows"), c.null_count().alias("blank"), c.n_unique().alias("distinct"),
+                   num.is_not_null().sum().alias("numeric"), num.min().alias("nmin"), num.max().alias("nmax"),
+                   num.sum().alias("nsum"), num.mean().alias("nmean"),
+                   c.str.len_chars().min().alias("lmin"), c.str.len_chars().max().alias("lmax"),
+                   (c.str.contains(r"[/\-.A-Za-z]") & F.parse_date(c).is_not_null()).sum().alias("dates"),
+                   F.parse_date(c).min().alias("dmin"), F.parse_date(c).max().alias("dmax"),
+                   ).collect(engine="streaming").row(0, named=True)
+    filled = st["rows"] - st["blank"]
+    distinct = int(st["distinct"]) - (1 if st["blank"] else 0)
+    top = (lf.filter(c.is_not_null()).group_by(column).agg(pl.len().alias("n"))
+           .sort(["n", column], descending=[True, False]).head(10).collect(engine="streaming"))
+    out = {"ok": True, "column": column, "files": len(parts), "skipped": skipped,
+           "rows": int(st["rows"]), "blank": int(st["blank"]), "filled": int(filled), "distinct": distinct,
+           "unique_key": filled > 0 and distinct == filled,
+           "length": [st["lmin"], st["lmax"]] if filled else None,
+           "top": [[str(v), int(n)] for v, n in top.iter_rows()],
+           "elapsed": round(time.time() - t0, 2)}
+    if filled and st["numeric"] == filled:
+        out.update(kind="number", min=st["nmin"], max=st["nmax"], sum=st["nsum"], mean=st["nmean"])
+    elif filled and st["dates"] == filled:
+        out.update(kind="date", min=str(st["dmin"]), max=str(st["dmax"]))
+    else:
+        out["kind"] = "text"
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -3498,7 +3883,7 @@ def peek_all(files: list[str], source: dict | None, rows: int = 5, reference: li
     out = []
     for f in files:
         p = _norm(f)
-        item: dict[str, Any] = {"file": p.name, "path": str(p), "kind": "excel" if is_excel(p) else "text"}
+        item: dict[str, Any] = {"file": p.name, "path": str(p), "kind": file_kind(p)}
         try:
             st = p.stat()
             item["size_h"] = human_size(st.st_size)
@@ -3506,7 +3891,11 @@ def peek_all(files: list[str], source: dict | None, rows: int = 5, reference: li
             names = _schema_names(src)
             pk = _peek_cached(str(p), src.encoding, src.sheet)
             top = (src.header_row if src.has_header else 0) + src.skip_after_header
-            if is_excel(p):
+            if is_parquet(p):                     # the row count is in the file's footer
+                data = [list(r) for r in (pk.get("cells") or [])[1:1 + rows]]
+                item["rows_est"] = max(0, int(pk.get("rows_est") or 1) - 1)
+                item["rows_exact"] = True
+            elif is_excel(p):
                 data = [list(r) for r in (pk.get("cells") or [])[top:top + rows]]
                 cached = _cached_sheet(p, src.sheet)
                 if cached is not None:

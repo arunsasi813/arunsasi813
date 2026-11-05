@@ -45,8 +45,27 @@ jobs:
           python-version: "3.12"
       - name: Install (the same clean set build.bat installs)
         run: python -m pip install -r requirements.txt -r requirements-build.txt
+      # Signing is optional: add a repository secret COLSIFT_SIGN_PFX_B64 (the .pfx,
+      # base64) and COLSIFT_SIGN_PASSWORD, and every exe is signed as it is built.
+      # A variable COLSIFT_COMPANY sets the publisher name in the exe's properties.
+      - name: Signing certificate (when one is configured)
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.COLSIFT_SIGN_PFX_B64 }}
+          PFX_PASSWORD: ${{ secrets.COLSIFT_SIGN_PASSWORD }}
+        run: |
+          if (-not $env:PFX_B64) { Write-Output "No signing certificate configured — the exes will be unsigned."; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "colsift-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
+          "COLSIFT_SIGN_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:PFX_PASSWORD) { "COLSIFT_SIGN_PASSWORD=$env:PFX_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
       - name: Build ColSift.exe and colsift-cli.exe
+        env:
+          COLSIFT_COMPANY: ${{ vars.COLSIFT_COMPANY }}
         run: python build.py --cli
+      - name: Signature
+        shell: pwsh
+        run: Get-AuthenticodeSignature dist\*.exe | ForEach-Object { "{0,-20} {1}  {2}" -f (Split-Path $_.Path -Leaf), $_.Status, $_.SignerCertificate.Subject }
       - name: Self-test the exe (worker process, memory, a run)
         shell: pwsh
         run: |

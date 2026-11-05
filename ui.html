@@ -683,6 +683,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
         <button class="btn sm" id="cPaste">Tick from a list…</button>
         <span class="stat" style="margin-left:auto" id="colSummary"></span>
       </div>
+      <div id="colStats"></div>
       <div class="collist" id="collist"><div class="empty">Pick a file to load its columns.</div></div>
     </section>
 
@@ -745,7 +746,10 @@ table.matrix tr.unas td.fn{color:var(--faint)}
       <div class="card">
         <h3>Look for</h3>
         <div style="display:grid;grid-template-columns:1fr 300px;gap:14px;align-items:start">
-          <textarea id="findVals" rows="7" placeholder="One value per line — paste a whole column from Excel if you like" style="width:100%;font-family:var(--mono);font-size:11.5px;resize:vertical"></textarea>
+          <div><textarea id="findVals" rows="7" placeholder="One value per line — paste a whole column from Excel if you like" style="width:100%;font-family:var(--mono);font-size:11.5px;resize:vertical"></textarea>
+            <div class="f" style="margin-top:6px;gap:8px;flex-wrap:wrap"><button class="btn sm" id="findLoad" title="Take the values from a column of an Excel, CSV or Parquet file">Load from a file…</button>
+              <span id="findListInfo" style="font-size:11.5px;color:var(--muted)"></span>
+              <select id="findListCol" style="display:none;width:170px" title="The column the values come from"></select></div></div>
           <div>
             <div class="f" style="margin-bottom:7px"><label class="lbl" style="width:56px">Where</label>
               <select id="findScope" style="flex:1">
@@ -760,16 +764,22 @@ table.matrix tr.unas td.fn{color:var(--faint)}
                 <option value="exact">Exact value</option>
                 <option value="contains">Contains</option>
                 <option value="starts">Starts with</option>
+                <option value="ends">Ends with</option>
               </select></div>
             <div class="f" style="margin-bottom:7px"><label class="lbl" style="width:56px">Show</label>
               <input type="number" id="findLimit" value="500" min="10" max="20000" style="width:88px">
               <span style="font-size:11.5px;color:var(--muted)">rows</span></div>
             <label class="f" style="gap:6px;font-size:11.5px;margin-bottom:5px"><input type="checkbox" id="findCase"> Case sensitive</label>
             <label class="f" style="gap:6px;font-size:11.5px"><input type="checkbox" id="findMissing" checked> Report values that were not found</label>
+            <div style="font-size:11px;color:var(--muted);margin:8px 0 3px">Clean both sides before matching</div>
+            <label class="f" style="gap:6px;font-size:11.5px"><input type="checkbox" id="findZeros"> Ignore leading zeros <span style="color:var(--muted)">(00123 = 123)</span></label>
+            <label class="f" style="gap:6px;font-size:11.5px"><input type="checkbox" id="findIntlike"> 123.0 = 123</label>
+            <label class="f" style="gap:6px;font-size:11.5px"><input type="checkbox" id="findSymbols"> Ignore spaces and symbols <span style="color:var(--muted)">(AB-12 = AB12)</span></label>
           </div>
         </div>
         <div class="f" style="margin-top:10px">
           <button class="btn pri" id="doFind">Search</button>
+          <button class="btn" id="findExport" title="Every matching row of every ticked file — no row cap — with SOURCE_FILE, MATCHED_IN and MATCH_KEY, and the values not found, written to the Output tab's folder and format">Export every match</button>
           <button class="btn sm" id="findFromCol">Use the ticked column</button>
           <span class="stat" style="margin-left:auto" id="findInfo"></span>
         </div>
@@ -807,6 +817,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
               <option value="csv">CSV (.csv)</option>
               <option value="txt">Delimited text (.txt)</option>
               <option value="xlsx">Excel (.xlsx)</option>
+              <option value="parquet">Parquet (.parquet) — typed, compact, quick to reopen</option>
             </select>
           </div>
           <div class="f"><label class="lbl" style="width:64px">File name</label>
@@ -846,7 +857,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
         <div class="f" style="justify-content:space-between;margin-bottom:4px"><label class="lbl">Tables to write — the name box is the sheet or file name</label>
           <div class="f"><button class="btn sm ghost" id="outTAll">All</button><button class="btn sm ghost" id="outTNone">None</button></div></div>
         <div id="outTables"></div>
-        <p class="hint" style="margin:6px 0 0">CSV / TXT: one file per table, named &lt;file name&gt;_&lt;table&gt;. A table past Excel's 1,048,575 rows carries on in a second sheet. Splitting by rows or by value, and one output per input file, apply to a setup with a single group.</p>
+        <p class="hint" style="margin:6px 0 0">CSV / TXT / Parquet: one file per table, named &lt;file name&gt;_&lt;table&gt;. A table past Excel's 1,048,575 rows carries on in a second sheet. Splitting by rows or by value, and one output per input file, apply to a setup with a single group.</p>
       </div>
 
       <div class="card">
@@ -862,6 +873,11 @@ table.matrix tr.unas td.fn{color:var(--faint)}
           <label class="f" style="gap:6px" id="afGrp"><input type="checkbox" id="outAutofilter" checked> Excel: freeze and filter the header</label>
         </div>
 
+      </div>
+      <div class="card" id="pqCard">
+        <div class="f" style="justify-content:space-between"><h3 style="margin:0">Convert to Parquet</h3>
+          <button class="btn sm" id="pqConvert">Convert the ticked files</button></div>
+        <p class="hint" style="margin:6px 0 0">Each ticked file as it is read — sheet, header row and separator from the settings above, every column, no filters — saved as <code>&lt;name&gt;.parquet</code> in the output folder. Numbers and dates are stored as numbers and dates; IDs, codes and values with leading zeros stay text. A Parquet file opens in seconds next time — here, in Power BI or in Python — and is a fraction of the size. Parquet files can be ticked and used like any other file.</p>
       </div>
       <div class="card" id="txtOpts">
         <h3>Text file options</h3>
@@ -1394,7 +1410,7 @@ function drawCols(){
       <span class="ix">${i+1}</span>
       <span class="nm" title="${esc(c.name)}">${esc(c.name)}</span>
       <input type="text" data-k="alias" value="${esc(c.alias||"")}" placeholder="rename to…">
-      <span class="mv"><button class="btn sm" data-k="up">▲</button><button class="btn sm" data-k="dn">▼</button></span>
+      <span class="mv"><button class="btn sm" data-k="stats" title="What this column holds">Σ</button><button class="btn sm" data-k="up">▲</button><button class="btn sm" data-k="dn">▼</button></span>
     </div>`;
   }).join("") || `<div class="empty">No column matches “${esc(q)}”.</div>`;
 
@@ -1402,9 +1418,31 @@ function drawCols(){
     const i = +row.dataset.i;
     row.querySelector('[data-k=inc]').onchange = e => { S.columns[i].include = e.target.checked; drawCols(); };
     row.querySelector('[data-k=alias]').onchange = e => { S.columns[i].alias = e.target.value.trim(); };
+    row.querySelector('[data-k=stats]').onclick = () => colStats(S.columns[i].name, "active");
     row.querySelector('[data-k=up]').onclick = () => move(i,-1);
     row.querySelector('[data-k=dn]').onclick = () => move(i, 1);
   });
+}
+/* a column's profile: blanks, distinct values, range, the most common values */
+async function colStats(name, scope){
+  const box = $("#colStats");
+  box.innerHTML = `<div class="card" style="margin-bottom:8px"><div class="sub" style="margin:0">Reading ${esc(name)}${scope === "all" ? " in every ticked file" : ""}…</div></div>`;
+  const r = await api().column_stats({job: {...job(), active: S.active}, column: name, scope});
+  if (!r?.ok){ box.innerHTML = ""; say(r?.error || "Could not read the column.", "err"); return; }
+  const n = v => v == null ? "–" : (typeof v === "number" ? (Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, {maximumFractionDigits: 2})) : esc(v));
+  const range = r.kind === "number" ? `Min ${n(r.min)} · Max ${n(r.max)} · Sum ${n(r.sum)} · Average ${n(r.mean)}`
+              : r.kind === "date" ? `From ${esc(r.min)} to ${esc(r.max)}` : (r.length ? `Length ${r.length[0]}–${r.length[1]} characters` : "");
+  const max = Math.max(1, ...r.top.map(t => t[1]));
+  box.innerHTML = `<div class="card" style="margin-bottom:8px" data-col="${esc(name)}">
+    <div class="f" style="justify-content:space-between"><h3 style="margin:0;text-transform:none;letter-spacing:0">${esc(name)} <span class="chip2">${r.kind}</span></h3>
+      <span class="f"><button class="btn sm" id="colStatsAll" ${scope === "all" ? "disabled" : ""}>Every ticked file</button><button class="btn x" id="colStatsX" title="Close">✕</button></span></div>
+    <div class="cs-sum" style="margin:6px 0;font-size:12px">${r.rows.toLocaleString()} rows${r.files > 1 ? ` in ${r.files} files` : ""} · ${r.blank.toLocaleString()} blank · ${r.distinct.toLocaleString()} different${r.unique_key ? " — every value once (a key)" : ""}</div>
+    ${range ? `<div class="cs-range" style="margin:0 0 6px;font-size:12px;font-family:var(--mono)">${range}</div>` : ""}
+    <table class="tops" style="font-size:11.5px;border-collapse:collapse">${r.top.map(([v, c]) => `<tr><td style="font-family:var(--mono);padding:1px 10px 1px 0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v)}">${esc(v)}</td>
+      <td style="width:160px"><div style="height:8px;background:var(--teal);opacity:.55;border-radius:2px;width:${Math.max(2, 160 * c / max)}px"></div></td><td style="padding-left:8px;text-align:right">${c.toLocaleString()}</td></tr>`).join("")}</table>
+    ${(r.skipped || []).length ? `<div class="sub" style="margin:6px 0 0">Not in: ${r.skipped.map(esc).join(", ")}</div>` : ""}</div>`;
+  $("#colStatsX").onclick = () => { box.innerHTML = ""; };
+  $("#colStatsAll").onclick = () => colStats(name, "all");
 }
 function move(i,d){ const j=i+d; if(j<0||j>=S.columns.length) return;
   [S.columns[i],S.columns[j]]=[S.columns[j],S.columns[i]]; drawCols(); }
@@ -1743,11 +1781,11 @@ $("#outOverwrite").onchange = e => S.output.overwrite = e.target.checked;
 $("#outAutofilter").onchange = e => S.output.autofilter = e.target.checked;
 $$("input[name=omode]").forEach(r => r.onchange = e => S.output.mode = e.target.value);
 function syncOutput(){
-  const x = S.output.format === "xlsx";
-  $("#outDelimGrp").style.display = x ? "none" : "";
-  $("#outQuoteGrp").style.display = x ? "none" : "";
+  const x = S.output.format === "xlsx", pq = S.output.format === "parquet";
+  $("#outDelimGrp").style.display = x || pq ? "none" : "";
+  $("#outQuoteGrp").style.display = x || pq ? "none" : "";
   $("#afGrp").style.display = x ? "" : "none";
-  $("#txtOpts").style.display = x ? "none" : "";
+  $("#txtOpts").style.display = x || pq ? "none" : "";
   if (S.output.format === "txt" && S.output.delimiter === "comma"){
     S.output.delimiter = "pipe"; $("#outDelim").value = "pipe";
   }
@@ -1852,7 +1890,8 @@ function syncSplit(){
     ? (sp.by === "none" ? "Excel holds 1,048,576 rows a sheet; a longer output carries on in Data_2, Data_3 …"
       : sp.by === "rows" ? `Parts of up to ${(+sp.rows || 0).toLocaleString()} rows — capped at Excel's 1,048,575 plus the header.`
       : "One part per value, named after it. A part over Excel's limit carries on in a second sheet or file.")
-    : (sp.by === "none" ? "One file." : sp.by === "rows" ? "Files named …_part001, …_part002 …" : "One file per value, named after it.");
+    : (sp.by === "none" ? "One file." : sp.by === "rows" ? "Files named …_part001, …_part002 …" : "One file per value, named after it.") +
+      (S.output.format === "parquet" ? " Dashboards, summaries and checks go to a workbook beside it." : "");
 }
 $("#splitBy").onchange = e => { S.output.split.by = e.target.value; syncSplit(); };
 $("#splitRows").onchange = e => { S.output.split.rows = Math.max(1000, +e.target.value || 1000000); syncSplit(); };
@@ -3815,6 +3854,8 @@ $("#btnRun").onclick = async () => {
 };
 window.onProgress = p => {
   if (p.mem) showMem({worker: p.mem});
+  // a progress line that arrives after the work finished must not cover its result
+  if (!S.busy && ["build", "analyse", "read", "write"].includes(p.stage)) return;
   if (p.stage === "build") say(`Building ${p.part}…`);
   if (p.stage === "analyse") say(`Working out ${p.part}…`);
   if (p.stage === "prepare") say(`First read of ${p.file} (${p.index} of ${p.total}) — cached after this…`);
@@ -3883,15 +3924,51 @@ $("#findFromCol").onclick = () => {
   $("#findScope").value = "column"; syncFind(); $("#findCol").value = first.name;
 };
 
+function findParams(){
+  return {values: $("#findVals").value.trim(), scope: $("#findScope").value, column: $("#findCol").value,
+          mode: $("#findMode").value, case_sensitive: $("#findCase").checked,
+          missing: $("#findMissing").checked, limit: +$("#findLimit").value || 500,
+          zeros: $("#findZeros").checked, intlike: $("#findIntlike").checked, symbols: $("#findSymbols").checked};
+}
+/* the values from a column of a file */
+let FINDLIST = null;
+async function loadKeyFile(path, column){
+  const r = await api().key_list({path, column: column || ""});
+  if (!r?.ok){ say(r?.error || "Could not read that file.", "err"); return; }
+  FINDLIST = {path, column: r.column};
+  $("#findVals").value = r.values.join("\n");
+  $("#findListInfo").textContent = `${r.count.toLocaleString()} values (${r.unique.toLocaleString()} different) from ${r.file}, column`;
+  $("#findListCol").innerHTML = r.columns.map(c => `<option ${c === r.column ? "selected" : ""}>${esc(c)}</option>`).join("");
+  $("#findListCol").style.display = "";
+  say(`Loaded ${r.count.toLocaleString()} values from ${r.file} — column ${r.column}.`, "ok");
+}
+$("#findLoad").onclick = async () => {
+  const d = await api().open_dialog({folder: S.folder, types: ["Lists (*.xlsx;*.xlsm;*.xls;*.csv;*.txt;*.tsv;*.parquet)", "All files (*.*)"]});
+  if (d?.paths?.[0]) loadKeyFile(d.paths[0]);
+};
+$("#findListCol").onchange = e => { if (FINDLIST) loadKeyFile(FINDLIST.path, e.target.value); };
+$("#findExport").onclick = async () => {
+  const params = findParams();
+  if (!S.sel.size){ say("Tick at least one file.", "err"); return; }
+  if (!params.values){ say("Type, paste or load at least one value to look for.", "err"); return; }
+  if (!S.output.folder){ say("Choose an output folder on the Output tab.", "err"); show("out"); return; }
+  busy(true); $("#btnCancel").style.display = ""; say("Exporting every match…");
+  const r = await api().find_export({job: {...job(), find_scope: params.scope === "column" ? [params.column] : []}, params});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "Export failed.", r?.cancelled ? "" : "err"); return; }
+  $("#findFiles").innerHTML = `<table>` + r.files.map(f =>
+    `<tr><td>${esc(f.file)}</td><td class="${f.error ? "bad" : ""}">${f.error ? esc(f.error) : f.hits.toLocaleString() + " hit" + (f.hits === 1 ? "" : "s")}</td></tr>`).join("") +
+    r.written.map(p => `<tr><td colspan="2"><a class="link" data-open="${esc(p)}">${esc(p)}</a></td></tr>`).join("") + `</table>`;
+  $("#findFiles").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
+  say(`Exported ${r.rows.toLocaleString()} matching row${r.rows === 1 ? "" : "s"}` +
+      (params.mode === "exact" ? ` — ${r.found.toLocaleString()} of ${r.searched.toLocaleString()} values found, ${r.missing.length.toLocaleString()} not` : "") +
+      ` · ${r.elapsed}s.`, "ok");
+};
 $("#doFind").onclick = async () => {
   const vals = $("#findVals").value.trim();
   if (!S.sel.size){ say("Tick at least one file.", "err"); return; }
   if (!vals){ say("Type or paste at least one value to look for.", "err"); return; }
-  const params = {
-    values: vals, scope: $("#findScope").value, column: $("#findCol").value,
-    mode: $("#findMode").value, case_sensitive: $("#findCase").checked,
-    missing: $("#findMissing").checked, limit: +$("#findLimit").value || 500
-  };
+  const params = findParams();
   busy(true); say("Searching…");
   const r = await api().find({job:{...job(), find_scope: params.scope==="column"?[params.column]:[]},
                               params});
@@ -4146,6 +4223,32 @@ $("#checkNow").onclick = async () => {
   takeChecks(r.checks); drawChecks();
   say(r.failed ? `Checks: ${r.passed} pass, ${r.failed} fail${r.stop ? " — a run now would write nothing" : " (warnings only)"}.`
                : `All ${r.passed} check${r.passed === 1 ? "" : "s"} pass.`, r.failed ? "err" : "ok");
+};
+
+/* ---------------- convert to parquet ---------------- */
+$("#pqConvert").onclick = async () => {
+  const files = S.files.filter(f => S.sel.has(f.path)).map(f => f.path);
+  if (!files.length){ say("Tick at least one file.", "err"); return; }
+  if (!S.output.folder){ say("Choose an output folder first.", "err"); $("#outFolder").focus(); return; }
+  const j = job();
+  busy(true); $("#btnCancel").style.display = ""; say(`Converting ${files.length} file${files.length === 1 ? "" : "s"} to Parquet…`);
+  const r = await api().convert_parquet({files, source: j.source, folder: S.output.folder,
+                                         params: WS.params || [], param_values: WS.param_values || {}});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "Could not convert.", r?.cancelled ? "" : "err"); return; }
+  const head = t => `<tr><td colspan="2" style="font-family:var(--ui);font-weight:600;color:var(--muted);padding-top:8px;text-align:left">${t}</td></tr>`;
+  const row = f => `<tr><td>${esc(f.file)}${f.note ? ` <span style="color:var(--amber);font-family:var(--ui)">· ${esc(f.note)}</span>` : ""}</td>
+    <td class="${f.error ? "bad" : ""}">${f.error ? esc(f.error) : f.rows == null ? "skipped" : f.rows.toLocaleString() + " rows"}</td></tr>`;
+  $("#runResults").innerHTML = `<table>${head("Converted to Parquet")}${(r.files || []).map(row).join("")}` +
+    head("Written") + r.written.map(p => `<tr><td colspan="2"><a class="link" data-open="${esc(p)}">${esc(p)}</a></td></tr>`).join("") + `</table>`;
+  $("#runResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
+  show("res");
+  const line = `Converted ${r.written.length} file${r.written.length === 1 ? "" : "s"} — ${(r.rows || 0).toLocaleString()} rows in ${r.elapsed}s.` +
+      ((r.errors || []).length ? ` ${r.errors.length} failed.` : "");
+  // written into a folder that is open: list the new .parquet files too
+  const norm = x => String(x || "").replace(/[\\/]+$/, "").toLowerCase();
+  if (S.folders.some(f => norm(f.path) === norm(S.output.folder))) await refreshFiles({noSync: true, keepActive: true, message: line});
+  else say(line, (r.errors || []).length ? "err" : "ok");
 };
 
 /* ---------------- memory meter ---------------- */

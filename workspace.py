@@ -1489,12 +1489,15 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
                                               "lf": fr["lf"].slice(i * E.XLSX_MAX_ROWS, E.XLSX_MAX_ROWS),
                                               "rows": min(E.XLSX_MAX_ROWS, fr["rows"] - i * E.XLSX_MAX_ROWS),
                                               "formats": fr["formats"]} for i in range(parts)], out, cancel)
+                elif fmt == "parquet":         # typed: numbers and dates stay numbers and dates
+                    path = E._out_path(out, stem, "parquet")
+                    E.write_parquet(fr["lf"], path, E.parquet_plan(fr["lf"], fr["formats"], detect=False))
                 else:
                     path = E._out_path(out, stem, fmt)
                     E._write_csv_part(_as_text(fr["lf"]), path, {**out, "formats": fr["formats"]})
                 written.append(str(path))
             if extra:
-                if fmt == "xlsx":
+                if fmt in ("xlsx", "parquet"):
                     path = E._out_path(out, f"{base}_analysis", "xlsx")
                     used = set()
                     for e in extra:
@@ -1507,8 +1510,8 @@ def run(ws: dict, on_progress=None, cancel=None) -> dict:
                         E._write_grid_csv(e["grid"], pth, out)
                         written.append(str(pth))
             if check_grid:
-                pth = E._out_path(out, f"{base}_{C.SHEET}", fmt)
-                if fmt == "xlsx":
+                pth = E._out_path(out, f"{base}_{C.SHEET}", "xlsx" if fmt == "parquet" else fmt)
+                if fmt in ("xlsx", "parquet"):
                     E.write_xlsx_book(pth, [check_grid], out, cancel)
                 else:
                     E._write_grid_csv(check_grid["grid"], pth, out)

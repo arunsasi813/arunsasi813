@@ -409,8 +409,64 @@ def run_checks(ui: UI, d: dict) -> None:
     assert ui.js("WS.checks.map(c => c.on_fail)") == ["stop", "warn"]
 
 
+def parquet_and_lookup(ui: UI, d: dict) -> None:
+    """A Parquet source, column stats, Convert to Parquet, Parquet output, and Find with
+    a list from a file, cleaned keys and Export every match."""
+    import polars as pl
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "pq_src"
+    src.mkdir(exist_ok=True)
+    pl.DataFrame({"DOC_NO": ["000123", "000456", "000789"], "AMOUNT": [10.5, 20.0, 30.25],
+                  "TAX_CODE": ["YQ", "XT", "YQ"]}).write_parquet(src / "tickets.parquet")
+    (src / "more.csv").write_text("DOC_NO,AMOUNT,TAX_CODE\n000999,5,YR\n", encoding="utf-8")
+    (d["jan"].parent / "wanted.csv").write_text("Ticket\n123\n999\n555\n", encoding="utf-8")
+    ui.folders(src)
+    assert sorted(ui.files_shown()) == ["more.csv", "tickets.parquet"], ui.files_shown()
+    page.click("#filelist .file:has(.nm:text-is('tickets.parquet'))")
+    page.wait_for_function("S.allCols.length === 3 && S.active && S.active.endsWith('tickets.parquet')")
+    ui.tab("cols")
+    page.click("#collist .col:has(.nm:text-is('AMOUNT')) [data-k=stats]")
+    page.wait_for_selector("#colStats .cs-range")
+    assert page.inner_text("#colStats .cs-range").startswith("Min 10.5"), page.inner_text("#colStats")
+    page.click("#colStatsAll")
+    page.wait_for_function("document.querySelector('#colStats .cs-sum')?.textContent.startsWith('4 rows in 2 files')")
+    ui.shot("column_stats")
+
+    out = d["out"] / "pq"
+    ui.tab("out")
+    page.fill("#outFolder", str(out))
+    page.dispatch_event("#outFolder", "change")
+    ui.then("Converted", lambda: page.click("#pqConvert"))
+    assert (out / "more.parquet").exists() and not (out / "tickets.parquet").exists()
+    assert "skipped" in page.inner_text("#runResults")
+    ui.tab("out")
+    page.select_option("#outFormat", "parquet")
+    page.dispatch_event("#outFormat", "change")
+    assert not page.is_visible("#txtOpts")
+    page.uncheck("#runDash")
+    ui.then("Done", lambda: page.click("#btnRun"))
+    got = pl.read_parquet(next(out.glob("extract*.parquet")))
+    assert got.height == 4 and got.schema["AMOUNT"] == pl.Float64 and got.schema["DOC_NO"] == pl.String
+
+    ui.tab("find")
+    ui.js(f"loadKeyFile({json.dumps(str(d['jan'].parent / 'wanted.csv'))})")
+    page.wait_for_function("document.querySelector('#findVals').value.split('\\n').length === 3")
+    assert page.inner_text("#findListInfo").startswith("3 values")
+    page.select_option("#findScope", "column")
+    page.wait_for_timeout(200)
+    page.select_option("#findCol", "DOC_NO")
+    page.check("#findZeros")
+    ui.then("hits", lambda: page.click("#doFind"))
+    assert "1 of 3 not found" in page.inner_text("#findMissBox"), page.inner_text("#findMissBox")
+    ui.js("S.output.format = 'xlsx'")
+    ui.then("Exported 2 matching rows", lambda: page.click("#findExport"))
+    assert (out / "extract_matches.xlsx").exists()
+    ui.shot("find_export")
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
-            "params": parameters, "checks": run_checks}
+            "params": parameters, "checks": run_checks, "data": parquet_and_lookup}
 
 
 def main() -> int:

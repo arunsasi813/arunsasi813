@@ -489,6 +489,31 @@ class Api:
                       lambda: _m()[0].find(job, params, on_progress=lambda x: _js("onProgress", x)))
 
     @guard
+    @_params
+    def find_export(self, p: dict) -> dict:
+        """Export matches: every matching row (no cap) and the values not found, written
+        to the Output tab's folder and format, in a worker."""
+        job, params = p.get("job") or {}, p.get("params") or {}
+        return _heavy("find_export", {"job": job, "params": params}, lambda: _m()[0].find_export(
+            job, params, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
+    @_reading
+    def key_list(self, p: dict) -> dict:
+        """Values to look for, from a column of an Excel / CSV / Parquet file."""
+        return _m()[0].key_list(p.get("path") or "", p.get("column") or "", p.get("sheet") or None)
+
+    @guard
+    def column_stats(self, p: dict) -> dict:
+        """A column's profile: the open file (quick) or every ticked file (in a worker)."""
+        job, col, scope = p.get("job") or {}, p.get("column") or "", p.get("scope") or "active"
+        E = _m()[0]
+        if scope != "all":
+            with _READ:
+                return E.column_stats(job, col, "active")
+        return _heavy("stats", {"job": job, "column": col}, lambda: E.column_stats(job, col, "all"))
+
+    @guard
     def describe_filters(self, spec: dict) -> dict:
         return {"ok": True, "text": _m()[0].describe_filters(spec)}
 
@@ -622,6 +647,14 @@ class Api:
         ws, only = p.get("workspace") or {}, p.get("only")
         return _heavy("dashboards", {"workspace": ws, "only": only}, lambda: _m()[3].run_dashboards(
             ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL, only=only))
+
+    @guard
+    @_params
+    def convert_parquet(self, job: dict) -> dict:
+        """Convert to Parquet: the ticked files as read, one .parquet each, in a worker."""
+        E = _m()[0]
+        return _heavy("convert", {"job": job}, lambda: E.convert_to_parquet(
+            job, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
 
     @guard
     @_params

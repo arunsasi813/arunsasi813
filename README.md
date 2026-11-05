@@ -86,6 +86,25 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
   file without writing. Results show on the Output and Result tabs, in a `Checks` sheet (or
   `<name>_Checks.csv`) beside the output and in the run log. `colsift-cli` exits with **3**
   when a check stopped the run, so a scheduled script can tell that from a failure (1).
+- **Parquet in and out.** `.parquet` / `.pq` / `.parq` files are listed with the rest and work
+  everywhere — peek, columns, filters, groups, Find, Count, dashboards — reading only the
+  columns a step needs; the labels are the file's own column names. **Parquet** is an output
+  format too: columns stay typed (numbers, dates), while IDs, codes, values with leading zeros
+  and long digit strings stay text; column formats set on the Output tab win. Dashboards,
+  summaries and checks go to a workbook beside it.
+- **Convert to Parquet** (Output tab): each ticked file as the source settings read it (sheet,
+  header row, separator), every column, saved as `<name>.parquet` with numbers and dates typed —
+  one click, in the worker. A workbook that takes a minute to open reads in a second as Parquet.
+- **Column profile** (Σ on a column, Columns tab): rows, blanks, distinct values, whether it is a
+  key, min / max / sum / average or the date range, and the ten most common values — for the
+  open file, or *Every ticked file*.
+- **Find, as a lookup.** *Load from a file…* takes the values from a column of an Excel, CSV or
+  Parquet file (the column named like DOC / TICKET / REF / INVOICE / …_NO, or pick another).
+  *Clean both sides*: ignore leading zeros (00123 = 123), 123.0 = 123, ignore spaces and symbols
+  (AB-12 = AB12). *Ends with* joins exact / contains / starts with. **Export every match** writes
+  every matching row of every ticked file — no row cap — with `SOURCE_FILE`, `MATCHED_IN` and
+  `MATCH_KEY`, plus the values not found, in the Output tab's folder and format (a workbook gets
+  *Matches* and *Not found* sheets).
 - **Checked on Windows by GitHub Actions** (`.github/workflows/colsift.yml`): the unit tests
   run on Windows and Linux on every push. With `[build]` in the commit message (or run by
   hand), it builds `ColSift.exe` and `colsift-cli.exe` on Windows, starts the exe once with
@@ -385,6 +404,45 @@ python engine.py --job monthly.json
 group is placed by hand takes every readable file there, as before). Setups saved as
 "workspaces" by earlier 2.0 builds load as ordinary setups with their groups, and
 `--workspace NAME` / `--workspace-file` still run them.
+
+## Sharing the exe — "Windows protected your PC"
+
+That blue Microsoft Defender SmartScreen screen is not a virus detection. SmartScreen warns about
+any program that came from the internet (a browser download, an Outlook or Teams attachment, a
+zip from one of those) unless it is **signed** by a publisher it already knows. ColSift.exe is
+not signed, and every new build is a new file that starts with no reputation. What helps, best
+first:
+
+1. **Sign the exe.** The prompt then names your company instead of "Unknown publisher", and the
+   reputation builds on your certificate, so new versions inherit it rather than starting again.
+   - *Microsoft's Trusted Signing service on Azure* — a monthly fee (around US$10 at the time of
+     writing), Microsoft validates your organisation and manages the certificate; check its
+     current eligibility rules for your country and whether you sign as a company or a person.
+   - *A code-signing certificate from a certificate authority* (DigiCert, Sectigo, GlobalSign,
+     SSL.com, …). Since 2023 the key lives on a hardware token or the CA's cloud signing service.
+     An EV certificate no longer skips the SmartScreen reputation step, so a standard (OV) one is
+     usually enough.
+   - *Inside a company*: IT can sign with the company's own certificate, which company PCs
+     already trust, or allow the exe through Defender / Intune / AppLocker.
+
+   Once you have one, every build signs itself: set `COLSIFT_SIGN_PFX` and
+   `COLSIFT_SIGN_PASSWORD` (a .pfx), or `COLSIFT_SIGN_CMD` (any signing tool's command, with
+   `{file}` where the exe goes) before `build.bat`. On GitHub Actions, add the repository
+   secrets `COLSIFT_SIGN_PFX_B64` (the .pfx as base64) and `COLSIFT_SIGN_PASSWORD`; the run's
+   *Signature* step shows the result. `--company "Your Company"` (or the variable
+   `COLSIFT_COMPANY`) puts your name in the exe's properties.
+2. **Hand it over the way company software travels.** SmartScreen checks files that carry the
+   "came from the internet" mark. Copying ColSift.exe from a company network share, or deploying
+   it through IT (Intune, Configuration Manager, a software centre), does not add that mark.
+3. **Unblock it once.** Right-click ColSift.exe → Properties → tick *Unblock* → OK (or
+   PowerShell: `Unblock-File .\ColSift.exe`). Or, on the warning, *More info* → *Run anyway*.
+   Either is needed once per new version on each PC.
+4. **Smart App Control** (on some new Windows 11 installs) blocks unsigned programs with no
+   *Run anyway*; only signing gets past it.
+5. If Defender itself flags the file (a named detection, not the SmartScreen screen), submit the
+   exe to Microsoft as a false positive on its security intelligence submission page. Packed
+   one-file programs trip that more often; `build.bat --mode standalone` makes a folder instead,
+   which is less often flagged — zip it or wrap it in an installer.
 
 ## Moving setups between machines
 
