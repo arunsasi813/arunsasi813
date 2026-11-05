@@ -44,7 +44,10 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
   evaluated against ColSift's values; a block with nothing bound stays empty on the dashboard
   rather than showing sample numbers. *Copy DAX* puts the same design on the clipboard as a
   measure for Power BI's HTML Content visual. The design is saved with the setup; the workbook
-  and PDF list the card's measures.
+  and PDF list the card's measures. *⤓ HTML* on a card (or *Export → Studio visuals → HTML page*)
+  saves the visual with the numbers on screen as a web page that opens in any browser.
+- **Page through a file** on the Result tab: *Prev* / *Next* move the preview through the first
+  ticked file a page at a time (the rows you set), reading only up to that page.
 - **Parquet in and out.** `.parquet` / `.pq` / `.parq` files are listed with the rest and work
   everywhere — peek, columns, filters, groups, Find, Count, dashboards — reading only the
   columns a step needs; the labels are the file's own column names. **Parquet** is an output

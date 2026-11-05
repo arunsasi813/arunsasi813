@@ -106,3 +106,12 @@ def test_a_bad_file_does_not_stop_the_others(data):
     bad.write_bytes(b"not a workbook")
     r = E.convert_to_parquet({"files": [str(bad), str(f["feb"])], "folder": str(tmp / "pq")})
     assert len(r["written"]) == 1 and r["errors"] and "bad.xlsx" in r["errors"][0]
+
+
+def test_preview_pages_through_a_big_file(tmp_path):
+    f = sales_parquet(tmp_path / "big.parquet", 25)
+    job = {"files": [str(f)], "columns": cols("DOC_NO")}
+    first = E.preview(job, 10)
+    assert first["shown"] == 10 and first["more"] and first["rows"][0] == ["000000"]
+    last = E.preview(job, 10, 20)
+    assert last["offset"] == 20 and last["shown"] == 5 and not last["more"] and last["rows"][0] == ["000020"]

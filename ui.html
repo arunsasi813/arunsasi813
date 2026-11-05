@@ -962,6 +962,8 @@ table.matrix tr.unas td.fn{color:var(--faint)}
             <button data-exp="xlsx:dashboard">Dashboard → Excel</button>
             <button data-exp="xlsx:summaries">Summaries → Excel</button>
             <button data-exp="csv:both">Every table → CSV files</button>
+            <hr><div class="mh">Web page</div>
+            <button data-exp="html:studio" title="Every Studio visual with the numbers shown now — one page that opens in any browser">Studio visuals → HTML page</button>
           </div></div>
         <span class="lbl" id="anNote" style="text-transform:none;letter-spacing:0;font-weight:400;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
         <label class="f" style="gap:5px;font-size:11.5px" title="Ride along with the extract as sheets"><input type="checkbox" id="anExport"> Dashboard in the output</label>
@@ -997,6 +999,8 @@ table.matrix tr.unas td.fn{color:var(--faint)}
         <button class="btn" id="doPreview">Refresh preview</button>
         <label class="lbl">Rows</label>
         <input type="number" id="prevRows" value="200" min="10" max="5000" style="width:76px;height:25px">
+        <button class="btn sm" id="prevBack" title="The rows before these" disabled>‹ Prev</button>
+        <button class="btn sm" id="prevNext" title="The next rows of this file" disabled>Next ›</button>
         <button class="btn" id="doCount">Count every match</button>
         <span class="stat" style="margin-left:auto" id="resInfo"></span>
       </div>
@@ -2469,7 +2473,8 @@ const drawCards = guarded(function(){
     return `<div class="card item ${width} ${editing ? "editing full" : ""}" data-i="${i}" draggable="${editing ? "false" : "true"}">
       <div class="tools">
         ${kind !== "slicer" && kind !== "kpi" && kind !== "studio" && !editing ? `<button class="btn sm ghost" data-act="rows" title="Show the rows behind this visual">⤓ rows</button>` : ""}
-        ${kind === "studio" ? `<button class="btn sm ghost" data-act="msedit" title="Open it in Measure Studio">✦ Design</button>` : ""}
+        ${kind === "studio" ? `<button class="btn sm ghost" data-act="msedit" title="Open it in Measure Studio">✦ Design</button>
+          <button class="btn sm ghost" data-act="mshtml" title="Save this visual, with the numbers shown now, as a web page">⤓ HTML</button>` : ""}
         <button class="btn sm ghost" data-act="edit" title="Edit">${editing ? "Done" : "Edit"}</button>
         <button class="btn sm ghost" data-act="wide" title="Width: third, half, full">${esc((WIDTHS.find(w => w[0] === width) || WIDTHS[1])[1])}</button>
         <button class="btn sm ghost" data-act="copy" title="Duplicate">⧉</button>
@@ -2626,6 +2631,7 @@ $("#anCards").addEventListener("click", e => {
     else if (act === "rows") openDrill(it.ignore_filters ? [] : dFilters(), it.name || r?.name || "Rows");
     else if (act === "msedit") msEdit(it);
     else if (act === "msdax") msCopyDax(it);
+    else if (act === "mshtml") msSaveHtml([it]);
     else if (act === "madd"){ const nm = e.target.closest("[data-name]")?.dataset.name || "";
       (it.measures = it.measures || []).push(nm ? {name: nm, agg: "sum", column: guessCols().num} : {name: "", agg: "sum", column: guessCols().num});
       drawCards(); if (nm) anRefresh(true); }
@@ -2871,6 +2877,36 @@ async function msEditDone(project){
   drawCards(); anRefresh(true);
   say("Studio visual saved — its blocks read this dashboard's data.", "ok");
 }
+/* Studio visuals as a web page: each in a frame of its own (two designs may share
+   block names), with the numbers on screen now and where they came from */
+async function msSaveHtml(items){
+  if (!items.length){ say("There is no Studio visual on this dashboard.", "err"); return; }
+  let ms;
+  try { ms = await msRenderer(); } catch (err){ say(err.message || String(err), "err"); return; }
+  const doc = h => `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent}body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#252423}</style></head><body><div id="htmlContent">${h}</div></body></html>`;
+  const parts = [];
+  for (const it of items){
+    const r = itemResult(it.id);
+    if (!it.project || !r || r.error) continue;
+    parts.push({name: it.name || r.name || "Studio visual", html: ms.render(it.project, msLive(r, true))});
+  }
+  if (!parts.length){ say("Work the dashboard out first — press Refresh.", "err"); return; }
+  const title = parts.length === 1 ? parts[0].name : (AT().report ? AT().report.name : (S.output.basename || "Dashboard"));
+  const when = new Date().toLocaleString();
+  const note = (S.anData && S.anData.note) || "";
+  const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title><style>body{margin:0;background:#eef1f4;font-family:'Segoe UI',system-ui,sans-serif;color:#252423}
+.page{max-width:1320px;margin:0 auto;padding:18px}iframe{width:100%;border:0;display:block;background:#fff;border-radius:10px;margin:0 0 18px}
+footer{color:#6b7785;font-size:12px;margin:4px 2px 24px}</style></head><body><div class="page">
+${parts.map(x => `<iframe title="${esc(x.name)}" style="height:640px" srcdoc="${esc(doc(x.html))}"></iframe>`).join("\n")}
+<footer>${esc(note)}${note ? " · " : ""}as of ${esc(when)} · ColSift</footer></div>
+<script>for (const f of document.querySelectorAll("iframe")) f.onload = () => { f.style.height = f.contentDocument.documentElement.scrollHeight + "px"; };<\/script>
+</body></html>`;
+  const r = await api().save_html({name: title.replace(/[\\/:*?"<>|]+/g, "_"), html: page, folder: S.output.folder});
+  if (!r?.ok){ if (!r?.cancelled) say(r?.error || "Not saved.", "err"); return; }
+  say(`Saved ${parts.length} Studio visual${parts.length === 1 ? "" : "s"} as a web page.`, "ok");
+  $("#anNote").innerHTML = `Written: ` + r.written.map(p => `<a class="link" data-openf="${esc(p)}">${esc(p.split(/[\\/]/).pop())}</a>`).join(", ");
+}
 async function msCopyDax(it){
   try {
     const dax = (await msRenderer()).dax(it.project);
@@ -2933,6 +2969,7 @@ $("#anExportMenu").addEventListener("click", async e => {
   const b = e.target.closest("[data-exp]"); if (!b) return;
   const [fmt, which] = b.dataset.exp.split(":");
   if (!S.anData){ say("Work the analysis out first — press Refresh.", "err"); return; }
+  if (fmt === "html"){ msSaveHtml(AT().analysis.items.filter(x => x.kind === "studio")); return; }
   const at = AT(), parts = which === "both" ? ["dashboard", "summaries"] : [which];
   const res = {...S.anData, tabs: (S.anData.tabs || []).map(t => {
     const spec = at.summaries.tabs.find(x => x.id === t.id)?.pivot || {};
@@ -3983,17 +4020,21 @@ function applyOutput(o){
 }
 
 /* ---------------- preview / count / run ---------------- */
-async function preview(){
+async function preview(offset){
   if (!S.sel.size){ say("Tick at least one file.", "err"); return; }
-  show("res"); busy(true); say("Building preview…");
-  const r = await api().preview({job:job(), rows:+$("#prevRows").value||200});
+  offset = typeof offset === "number" ? Math.max(0, offset) : 0;
+  show("res"); busy(true); say(offset ? "Reading the next rows…" : "Building preview…");
+  const r = await api().preview({job:job(), rows:+$("#prevRows").value||200, offset});
   busy(false);
   if (!r?.ok){
     $("#gridwrap").innerHTML = `<div class="empty">${esc(r?.error||"Preview failed.")}</div>`;
     $("#resInfo").textContent = ""; say(r?.error||"Preview failed.", "err"); return;
   }
   S.lastPreview = r;
-  $("#resInfo").textContent = `${r.shown} rows from ${r.file} · ${r.elapsed}s` +
+  S.prevOffset = r.offset || 0;
+  $("#prevBack").disabled = !S.prevOffset; $("#prevNext").disabled = !r.more;
+  $("#resInfo").textContent = (S.prevOffset || r.more ? `Rows ${(S.prevOffset + 1).toLocaleString()}–${(S.prevOffset + r.shown).toLocaleString()}` : `${r.shown} rows`) +
+    ` from ${r.file} · ${r.elapsed}s` +
     (r.sampled ? ` · from its first ${r.sampled.toLocaleString()} rows — the workbook isn't read in full until you count or extract` : "");
   const dupes = r.columns.filter((c,i)=>r.columns.indexOf(c)!==i);
   $("#resWarn").innerHTML =
@@ -4010,8 +4051,10 @@ async function preview(){
   }
   say(`Preview ready — ${r.shown} rows.`, "ok");
 }
-$("#doPreview").onclick = preview;
-$("#btnPreview").onclick = preview;
+$("#doPreview").onclick = () => preview(0);
+$("#btnPreview").onclick = () => preview(0);
+$("#prevNext").onclick = () => preview((S.prevOffset || 0) + (+$("#prevRows").value || 200));
+$("#prevBack").onclick = () => preview((S.prevOffset || 0) - (+$("#prevRows").value || 200));
 
 $("#doCount").onclick = async () => {
   if (!S.sel.size){ say("Tick at least one file.", "err"); return; }

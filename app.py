@@ -474,7 +474,7 @@ class Api:
     @_reading
     @_params
     def preview(self, p: dict) -> dict:
-        return _m()[0].preview(p.get("job") or {}, int(p.get("rows") or 200))
+        return _m()[0].preview(p.get("job") or {}, int(p.get("rows") or 200), int(p.get("offset") or 0))
 
     @guard
     @_params
@@ -648,6 +648,24 @@ class Api:
         ws, only = p.get("workspace") or {}, p.get("only")
         return _heavy("dashboards", {"workspace": ws, "only": only}, lambda: _m()[3].run_dashboards(
             ws, "all", on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL, only=only))
+
+    @guard
+    def save_html(self, p: dict) -> dict:
+        """Save a page the window built (Studio visuals with their numbers) where the
+        person chooses."""
+        path = p.get("path") or ""
+        if not path:
+            d = self.save_dialog({"filename": f"{p.get('name') or 'visual'}.html", "folder": p.get("folder") or "",
+                                  "types": ["Web page (*.html)"]})
+            path = d.get("path") or ""
+            if not path:
+                return {"ok": False, "cancelled": True, "error": "Not saved."}
+        target = Path(path)
+        if target.suffix.lower() not in (".html", ".htm"):
+            target = target.with_suffix(".html")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(p.get("html") or ""), encoding="utf-8")
+        return {"ok": True, "written": [str(target)]}
 
     @guard
     def studio_html(self) -> dict:

@@ -507,6 +507,20 @@ def studio_visual(ui: UI, d: dict) -> None:
     ui.then("Studio visual saved", lambda: ed.locator(".top .acts button:has-text('Use in ColSift')").click())
     assert not page.is_visible("#msEd")
     ui.then("DAX copied", lambda: page.evaluate("msCopyDax(AT().analysis.items.find(x => x.kind === 'studio'))"))
+    # the visual as a web page, with the numbers on screen (the YQ slice)
+    ui.then("as a web page", lambda: page.locator(f"{card} [data-act=mshtml]").click())
+    saved_page = next((Path(os.environ["COLSIFT_SAVED"])).glob("*.html")).read_text(encoding="utf-8")
+    assert saved_page.count("<iframe") == 1 and "3,281" in saved_page and "ms-kv" in saved_page
+    # the preview pages through the file
+    ui.tab("res")
+    page.fill("#prevRows", "10")
+    page.click("#doPreview")
+    page.wait_for_function("document.querySelector('#resInfo').textContent.startsWith('Rows 1–10')")
+    page.click("#prevNext")
+    page.wait_for_function("document.querySelector('#resInfo').textContent.startsWith('Rows 11–20')")
+    assert not page.is_disabled("#prevBack")
+    page.fill("#prevRows", "200")
+    ui.tab("anal")
     # saved with the setup, drawn again after loading it
     page.fill("#profileName", "Studio")
     ui.then("Saved", lambda: page.click("#saveProfile"))
@@ -540,6 +554,7 @@ def main() -> int:
     env = {**os.environ, "COLSIFT_PROFILES": str(tmp / "profiles"), "COLSIFT_CACHE": str(tmp / "cache")}
     (tmp / "profiles").mkdir()
     os.environ.update({k: env[k] for k in ("COLSIFT_PROFILES", "COLSIFT_CACHE")})
+    os.environ["COLSIFT_SAVED"] = str(tmp / "saved")
     port = free_port()
     srv = subprocess.Popen([sys.executable, str(ROOT / "devserver.py"), "--port", str(port), "--no-browser",
                             "--token", TOKEN, "--save-dir", str(tmp / "saved")], env=env, cwd=str(ROOT),

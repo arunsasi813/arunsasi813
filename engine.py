@@ -1900,8 +1900,9 @@ def build_pipeline(src: Source, job: dict, for_preview: bool = False,
     return lf
 
 
-def preview(job: dict, rows: int = 200) -> dict:
-    """Run the whole pipeline against the first file only, capped."""
+def preview(job: dict, rows: int = 200, offset: int = 0) -> dict:
+    """Run the whole pipeline against the first file only, capped; `offset` pages
+    through it (Next / Prev) — only the rows up to the page are read."""
     files = job.get("files") or []
     if not files:
         return {"ok": False, "error": "Pick at least one file first."}
@@ -1920,9 +1921,12 @@ def preview(job: dict, rows: int = 200) -> dict:
             lf = across_files(lf, job)
             notes.append("Duplicates across files: the preview looks within this file only — "
                          "Run, Count and the dashboards on every file look across all of them")
-        df = lf.head(int(rows)).collect()
+        offset, rows = max(0, int(offset or 0)), max(1, int(rows))
+        df = lf.slice(offset, rows + 1).collect()       # one more row says whether there is a next page
     except Exception as exc:
         return {"ok": False, "error": brief(exc)}
+    more = df.height > rows
+    df = df.head(rows)
     return {
         "ok": True,
         "notes": notes,
@@ -1932,7 +1936,7 @@ def preview(job: dict, rows: int = 200) -> dict:
         "columns": df.columns,
         "all_columns": raw_cols,
         "rows": [["" if v is None else str(v) for v in r] for r in df.iter_rows()],
-        "shown": df.height,
+        "shown": df.height, "offset": offset, "more": more,
         "elapsed": round(time.time() - t0, 2),
     }
 
