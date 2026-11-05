@@ -9,15 +9,17 @@ import pytest
 import engine as E
 
 
-def tricky(path, n=400):
+def tricky(path, n=400, nl="\n"):
+    """Written as bytes, so the line ends are `nl` on every system (Windows text mode
+    would turn each \\n into \\r\\n, the one inside quotes too)."""
     rows = ["report header line", "ID,NAME,NOTE,AMOUNT"]
     for i in range(n):
-        note = {0: "plain", 1: '"has, a comma"', 2: '"spans\ntwo lines"', 3: '"say ""hi"""', 4: ""}[i % 5]
+        note = {0: "plain", 1: '"has, a comma"', 2: f'"spans{nl}two lines"', 3: '"say ""hi"""', 4: ""}[i % 5]
         tail = ",extra" if i % 37 == 0 else ""                 # a ragged, wider row
         rows.append(f"{i:05d},name {i},{note},{i * 1.5}{tail}")
         if i % 50 == 0:
             rows.append("")                                    # a blank line
-    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    path.write_bytes((nl.join(rows) + nl).encode("utf-8"))
     return path
 
 
@@ -38,8 +40,9 @@ def plain(src):
         E.set_cache(True)
 
 
-def test_block_by_block_reads_exactly_what_the_plain_reader_does(tmp_path, small_blocks):
-    f = tricky(tmp_path / "t.csv")
+@pytest.mark.parametrize("nl", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_block_by_block_reads_exactly_what_the_plain_reader_does(tmp_path, small_blocks, nl):
+    f = tricky(tmp_path / "t.csv", nl=nl)
     src = E.Source(path=str(f), header_row=2, auto_delimiter=False, delimiter="comma")
     want = plain(src)
     assert E.cached_text(src) is None
@@ -47,7 +50,7 @@ def test_block_by_block_reads_exactly_what_the_plain_reader_does(tmp_path, small
     assert E.cached_text(src) is not None, "the first full read leaves a Parquet copy"
     assert got.columns == want.columns == ["ID", "NAME", "NOTE", "AMOUNT", "col_5"]
     assert got.equals(want), (got.head(8), want.head(8))
-    assert got.filter(pl.col("NOTE") == "spans\ntwo lines").height == 80
+    assert got.filter(pl.col("NOTE") == f"spans{nl}two lines").height == 80
     assert E.load_lazy(src).collect().equals(want), "and reads it back the same"
 
 
