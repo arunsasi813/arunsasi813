@@ -26,6 +26,13 @@ from typing import Any, Iterable
 
 import polars as pl
 
+# Every query prefers polars' streaming engine: aggregations over staged Parquet then
+# read row groups as they go instead of loading whole columns first.
+try:
+    pl.Config.set_engine_affinity("streaming")
+except Exception:  # noqa: BLE001 — an older polars without the switch
+    pass
+
 import analysis as A
 import formula as F
 import xlsxfast
@@ -604,7 +611,12 @@ def clear_cache() -> None:
 # the columns and row groups a query touches. The raw copy is header-independent,
 # so moving the header row or changing filters never invalidates it.
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
+# Row groups of ColSift's own Parquet files (caches, staged files): reading one is
+# what a streaming query holds per thread, so small groups keep a pass over a big
+# file to tens of MB — measured: copying 1.5M rows x 12 columns took +270 MB with the
+# default groups, +84 MB with these.
+STAGE_RG = 16_384
 CACHE_CAP_GB = float(os.environ.get("COLSIFT_CACHE_GB") or 10)
 _CACHE_ON = os.environ.get("COLSIFT_NO_CACHE", "").lower() not in {"1", "true", "yes"}
 _CACHE_DIR: Path | None = None
@@ -689,7 +701,7 @@ def build_sheet_cache(path: str, sheet: str | None = None) -> dict:
         t0 = time.time()
         df = _read_sheet_raw(p, target)
         tmp = d / f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
-        df.write_parquet(tmp, compression="lz4", statistics=True, row_group_size=65_536)
+        df.write_parquet(tmp, compression="lz4", statistics=True, row_group_size=STAGE_RG)
         os.replace(tmp, pq)       # atomic — a crash never leaves a half-written cache
         st = p.stat()
         (d / f"{key}.json").write_text(json.dumps({
@@ -708,7 +720,7 @@ def _prune(d: Path, keep: str, source: str, sheet: str) -> None:
     for tmp in d.glob("*.tmp"):
         try:
             if now - tmp.stat().st_mtime > 3600:
-                tmp.unlink()
+                shutil.rmtree(tmp, ignore_errors=True) if tmp.is_dir() else tmp.unlink()
         except OSError:
             pass
     for meta in d.glob("*.json"):
@@ -724,34 +736,54 @@ def _prune(d: Path, keep: str, source: str, sheet: str) -> None:
                     f.unlink()
                 except OSError:
                     pass
-    entries = []
-    for pq in d.glob("*.parquet"):
-        try:
-            st = pq.stat()
-            entries.append((st.st_mtime, st.st_size, pq))
-        except OSError:
-            pass
-    total, cap = sum(e[1] for e in entries), CACHE_CAP_GB * 1024 ** 3
-    for _, size, pq in sorted(entries):
+            shutil.rmtree(d / meta.stem, ignore_errors=True)        # a text file's folder of blocks
+    total, cap = 0, CACHE_CAP_GB * 1024 ** 3
+    entries = _cache_entries(d)
+    total = sum(e[1] for e in entries)
+    for _, size, entry in sorted(entries):
         if total <= cap:
             break
-        if pq.stem == keep:
+        if entry.stem == keep or entry.name == keep:
             continue
-        for f in (pq, pq.with_suffix(".json")):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+        _drop_entry(entry)
         total -= size
+
+
+def _cache_entries(d: Path) -> list[tuple[float, int, Path]]:
+    """(last used, bytes, path) of every cached sheet (a file) and text file (a folder)."""
+    out = []
+    for e in list(d.glob("*.parquet")) + [x for x in d.glob("t_*") if x.is_dir() and not x.name.endswith(".tmp")]:
+        try:
+            size = sum(f.stat().st_size for f in e.glob("*.parquet")) if e.is_dir() else e.stat().st_size
+            out.append((e.stat().st_mtime, size, e))
+        except OSError:
+            pass
+    return out
+
+
+def _drop_entry(entry: Path) -> None:
+    if entry.is_dir():
+        shutil.rmtree(entry, ignore_errors=True)
+        meta = entry.with_name(entry.name + ".json")
+    else:
+        try:
+            entry.unlink()
+        except OSError:
+            pass
+        meta = entry.with_suffix(".json")
+    try:
+        meta.unlink()
+    except OSError:
+        pass
 
 
 def cache_info() -> dict:
     d = cache_dir()
     if d is None:
         return {"ok": True, "on": False, "dir": "", "entries": 0, "bytes": 0, "size_h": "0 B"}
-    files = list(d.glob("*.parquet"))
-    size = sum(f.stat().st_size for f in files if f.exists())
-    return {"ok": True, "on": _CACHE_ON, "dir": str(d), "entries": len(files),
+    entries = _cache_entries(d)
+    size = sum(e[1] for e in entries)
+    return {"ok": True, "on": _CACHE_ON, "dir": str(d), "entries": len(entries),
             "bytes": size, "size_h": human_size(size)}
 
 
@@ -759,14 +791,203 @@ def cache_clear() -> dict:
     d = cache_dir()
     n = 0
     if d is not None:
-        for f in list(d.glob("*.parquet")) + list(d.glob("*.json")) + list(d.glob("*.tmp")):
+        for _, _, entry in _cache_entries(d):
+            _drop_entry(entry)
+            n += 1
+        for f in list(d.glob("*.json")) + list(d.glob("*.tmp")):
+            if f.is_dir():
+                shutil.rmtree(f, ignore_errors=True)
+                continue
             try:
                 f.unlink()
-                n += f.suffix == ".parquet"
             except OSError:
                 pass
     clear_cache()
     return {"ok": True, "removed": n}
+
+
+# --------------------------------------------------------------------------
+# text cache — big CSV / TXT read once, in blocks, into Parquet
+# --------------------------------------------------------------------------
+# polars' CSV reader loads a whole file into memory before it parses a row — even for
+# head(100), even when streaming — so a 2 GB extract cost 2 GB (more, while
+# parsing) for every read. A text file over TEXT_CACHE_MB is now read once, 8 MB at
+# a time cut at record boundaries, into a Parquet copy in the cache; every read
+# after that (run, count, Find, dashboards) scans the copy, which streams in row
+# groups. A sample of a file not cached yet reads only its first few MB.
+
+TEXT_CACHE_MB = float(os.environ.get("COLSIFT_TEXT_CACHE_MB") or 48)
+TEXT_BLOCK = 8 << 20
+TEXT_SAMPLE_BYTES = 8 << 20
+TEXT_CACHE_VERSION = 2
+
+
+def big_text(p: Path) -> bool:
+    try:
+        return not is_excel(p) and not is_parquet(p) and p.stat().st_size > TEXT_CACHE_MB * 1024 ** 2
+    except OSError:
+        return False
+
+
+def _sample_width(target: Path, skip: int, sep: str, q: str) -> int:
+    """Widest row within the first TEXT_SAMPLE_BYTES — a sample's columns, without
+    reading the rest of the file."""
+    first = next(_text_blocks(target, skip, q, TEXT_SAMPLE_BYTES, TEXT_SAMPLE_BYTES), b"")
+    if not first:
+        return 0
+    if q and q.encode("utf-8") in first:
+        rdr = _csv.reader(io.StringIO(first.decode("utf-8", "replace"), newline=""), delimiter=sep, quotechar=q)
+        return max((len(r) for r in rdr), default=0)
+    return max(ln.count(sep.encode("utf-8")) for ln in first.split(b"\n")) + 1
+
+
+def _text_layout(src: "Source", sample: bool = False) -> tuple[Path, list[str], int, str, str]:
+    """(UTF-8 file, column names, lines to skip, separator, quote) — what scan_csv got.
+    With `sample`, the width comes from the start of the file only."""
+    p = _norm(src.path)
+    sep, q = resolve_delim(src.delimiter), (src.quote_char or "")
+    target = as_utf8(p, src.encoding)
+    skip = (src.header_row + src.skip_after_header) if src.has_header else src.skip_after_header
+    names: list[str] = []
+    if src.has_header:
+        names = _csv_header(p, src)
+        if not names:
+            raise ValueError(f"No header found at row {src.header_row} in {p.name}")
+    width = max(len(names), _sample_width(target, skip, sep, q) if sample else _data_width(target, skip, sep, q))
+    names += [f"col_{i + 1}" for i in range(len(names), width)]
+    return target, names, skip, sep, q
+
+
+def _record_cut(buf: bytes, bq: bytes) -> int:
+    """The last line end in `buf` outside quotes (an even number of quote marks before
+    it — a doubled "" counts twice, so it never flips the parity), or -1."""
+    pos = buf.rfind(b"\n")
+    if not bq:
+        return pos
+    for _ in range(2000):
+        if pos < 0 or buf.count(bq, 0, pos) % 2 == 0:
+            return pos
+        pos = buf.rfind(b"\n", 0, pos)
+    return -1
+
+
+def _text_blocks(target: Path, skip: int, q: str, block: int, limit: int | None = None):
+    """The file after `skip` lines, as byte pieces that each end on a whole record."""
+    bq = q.encode("utf-8") if q else b""
+    with open(target, "rb") as fh:
+        for _ in range(skip):
+            if not fh.readline():
+                return
+        carry, seen = b"", 0
+        while True:
+            data = fh.read(block)
+            seen += len(data)
+            if not data:
+                if carry.strip():
+                    yield carry
+                return
+            buf = carry + data
+            cut = _record_cut(buf, bq)
+            if cut < 0:
+                carry = buf
+                continue
+            yield buf[:cut + 1]
+            carry = buf[cut + 1:]
+            if limit and seen >= limit:
+                return
+
+
+def _parse_block(piece: bytes, names: list[str], sep: str, q: str, comment: str) -> pl.DataFrame:
+    kw: dict[str, Any] = dict(has_header=False, separator=sep, quote_char=q or None,
+                              schema={n: pl.String for n in names}, truncate_ragged_lines=True,
+                              ignore_errors=True, encoding="utf8-lossy", raise_if_empty=False,
+                              missing_columns="insert")       # a block may hold no row as wide as the file's widest
+    if comment:
+        kw["comment_prefix"] = comment
+    return pl.read_csv(io.BytesIO(piece), **kw)
+
+
+def _text_key(p: Path, src: "Source", names: list[str]) -> str:
+    st = p.stat()
+    raw = (f"t{TEXT_CACHE_VERSION}|{p}|{st.st_mtime_ns}|{st.st_size}|{src.header_row}|{src.has_header}|"
+           f"{src.skip_after_header}|{src.delimiter}|{src.quote_char}|{src.comment_prefix}|{src.encoding}|"
+           + "\x1f".join(names))
+    return "t_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def cached_text(src: "Source") -> Path | None:
+    """The cached copy of a text file read with these settings: a folder of Parquet
+    blocks (renamed into place only when complete), or None."""
+    d = cache_dir()
+    if d is None:
+        return None
+    p = _norm(src.path)
+    try:
+        folder = d / _text_key(p, src, _text_layout(src)[1])
+    except Exception:  # noqa: BLE001
+        return None
+    return folder if folder.is_dir() else None
+
+
+def scan_text_cache(folder: Path | str) -> pl.LazyFrame:
+    return pl.scan_parquet(sorted(str(x) for x in Path(folder).glob("*.parquet")))
+
+
+def build_text_cache(src: "Source", on_block=None) -> dict:
+    """Read one text file into the cache, a block at a time. Memory: one block parsed
+    (about three times TEXT_BLOCK), whatever the file's size."""
+    d = cache_dir()
+    if d is None:
+        raise RuntimeError("No writable cache folder")
+    p = _norm(src.path)
+    target, names, skip, sep, q = _text_layout(src)
+    key = _text_key(p, src, names)
+    folder = d / key
+    if folder.is_dir():
+        try:
+            os.utime(folder)
+        except OSError:
+            pass
+        return {"ok": True, "path": str(folder), "built": False}
+    with _LOCKS_GUARD:
+        lock = _LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        if folder.is_dir():
+            return {"ok": True, "path": str(folder), "built": False}
+        t0 = time.time()
+        parts = d / f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+        shutil.rmtree(parts, ignore_errors=True)
+        parts.mkdir(parents=True)
+        rows = n = 0
+        try:
+            for n, piece in enumerate(_text_blocks(target, skip, q, TEXT_BLOCK), 1):
+                df = _parse_block(piece, names, sep, q, src.comment_prefix)
+                rows += df.height
+                df.write_parquet(parts / f"{n:06d}.parquet", compression="lz4", row_group_size=STAGE_RG)
+                del df
+                if on_block:
+                    on_block(rows)
+            if n == 0:
+                pl.DataFrame(schema={c: pl.String for c in names}).write_parquet(parts / "000000.parquet")
+            os.replace(parts, folder)       # complete, or not there at all
+        finally:
+            shutil.rmtree(parts, ignore_errors=True)
+        st = p.stat()
+        (d / f"{key}.json").write_text(json.dumps({
+            "source": str(p), "sheet": "(text)", "mtime_ns": st.st_mtime_ns, "size": st.st_size,
+            "rows": rows, "cols": len(names), "seconds": round(time.time() - t0, 2),
+            "built": datetime.now().isoformat(timespec="seconds")}), encoding="utf-8")
+    _prune(d, keep=key, source=str(p), sheet="(text)")
+    return {"ok": True, "path": str(folder), "built": True, "rows": rows}
+
+
+def _text_sample_lazy(src: "Source") -> pl.LazyFrame:
+    """The first TEXT_SAMPLE_BYTES of a big text file, parsed — for previews and samples."""
+    target, names, skip, sep, q = _text_layout(src, sample=True)
+    first = next(_text_blocks(target, skip, q, TEXT_SAMPLE_BYTES, TEXT_SAMPLE_BYTES), b"")
+    if not first:
+        return pl.DataFrame(schema={c: pl.String for c in names}).lazy()
+    return _parse_block(first, names, sep, q, src.comment_prefix).lazy()
 
 
 def _excel_lazy(src: "Source") -> pl.LazyFrame:
@@ -812,6 +1033,19 @@ def prepare(files: list[str], source: dict | None, on_progress=None, workers: in
     it falls back to one at a time rather than failing."""
     if not cache_on():
         return {"built": 0, "errors": {}}
+    errors: dict[str, str] = {}
+    texts = [_norm(f) for f in files if big_text(_norm(f))]
+    built = 0
+    for i, p in enumerate(texts, 1):
+        try:
+            src = Source.from_dict({**(source or {}), "path": str(p)}).resolved()
+            if cached_text(src) is None:
+                if on_progress:
+                    on_progress({"stage": "prepare", "file": p.name, "index": i, "total": len(texts)})
+                build_text_cache(src)
+                built += 1
+        except Exception as exc:  # noqa: BLE001
+            errors[str(p)] = brief(exc)
     sheet = (source or {}).get("sheet") or None
     todo = []
     for f in files:
@@ -825,9 +1059,8 @@ def prepare(files: list[str], source: dict | None, on_progress=None, workers: in
         except Exception:
             continue
     if not todo:
-        return {"built": 0, "errors": {}}
+        return {"built": built, "errors": errors}
 
-    errors: dict[str, str] = {}
     done = 0
 
     def tick(path: str) -> None:
@@ -867,7 +1100,8 @@ def prepare(files: list[str], source: dict | None, on_progress=None, workers: in
             build_sheet_cache(p, s)
         except Exception as exc:  # noqa: BLE001
             errors[p] = brief(exc)
-    return {"built": len(todo) - len(errors), "errors": errors, "workers": workers}
+    return {"built": built + len(todo) - len([e for e in errors if is_excel(Path(e))]), "errors": errors,
+            "workers": workers}
 
 
 def _calamine_sheet(p: Path, sheet: str | None, skip: int = 0, n: int | None = None,
@@ -1054,6 +1288,15 @@ def load_lazy(src: Source, needed: set[str] | None = None) -> pl.LazyFrame:
         if lf is None:
             lf = _excel_frame(p, src.sheet, src.header_row, src.skip_after_header,
                               src.has_header, needed).lazy()
+    elif (src.sample_rows and p.stat().st_size > TEXT_SAMPLE_BYTES and not (cache_on() and cached_text(src))) \
+            or (big_text(p) and cache_on()):
+        cached = cached_text(src) if cache_on() else None
+        if cached is not None:
+            lf = scan_text_cache(cached)
+        elif src.sample_rows:              # a sample: the first few MB, never the whole file
+            lf = _text_sample_lazy(src)
+        else:
+            lf = scan_text_cache(build_text_cache(src)["path"])
     else:
         sep = resolve_delim(src.delimiter)
         kw: dict[str, Any] = dict(
@@ -1065,6 +1308,7 @@ def load_lazy(src: Source, needed: set[str] | None = None) -> pl.LazyFrame:
             ignore_errors=True,
             encoding="utf8-lossy",
             raise_if_empty=False,
+            missing_columns="insert",     # a first row narrower than the widest one is fine
         )
         if src.comment_prefix:
             kw["comment_prefix"] = src.comment_prefix
@@ -1200,25 +1444,42 @@ _WIDTH_CACHE: dict[tuple, int] = {}
 
 
 def _data_width(target: Path, skip: int, sep: str, q: str) -> int:
-    """Widest row after `skip`. One raw pass counting separators, cached per file.
-    Quotes can hide separators inside fields, so quoted files are measured with a
-    proper CSV reader over a sample instead of the raw count."""
+    """Widest row after `skip`, cached per file. One pass over the bytes in 8 MB blocks,
+    counting separators per line — constant memory whatever the file's size (a polars
+    scan of every line held about twice the file). Quotes can hide separators inside
+    fields, so a quoted file is measured with a proper CSV reader over a sample."""
     st = target.stat()
     key = (str(target), st.st_mtime_ns, st.st_size, skip, sep, q)
     if key in _WIDTH_CACHE:
         return _WIDTH_CACHE[key]
-    raw = pl.scan_csv(target, has_header=False, separator="\x1f", quote_char=None,
-                      infer_schema=False, skip_rows=skip, new_columns=["line"],
-                      encoding="utf8-lossy", truncate_ragged_lines=True, raise_if_empty=False)
-    line = pl.col("line").fill_null("")
-    probes = [line.str.count_matches(sep, literal=True).max().alias("seps")]
-    if q:
-        probes.append(line.str.contains(q, literal=True).any().alias("quoted"))
-    try:
-        row = raw.select(probes).collect(engine="streaming").row(0, named=True)
-    except Exception:  # noqa: BLE001
-        row = {"seps": None, "quoted": True}
-    if row.get("quoted"):
+    bsep, bq = sep.encode("utf-8"), q.encode("utf-8") if q else b""
+    widest, quoted, line_no, carry = 0, False, 0, b""
+    with open(target, "rb") as fh:
+        while True:
+            block = fh.read(8 << 20)
+            if not block:
+                break
+            block = carry + block
+            cut = block.rfind(b"\n")
+            if cut < 0:
+                carry = block
+                continue
+            carry = block[cut + 1:]
+            lines = block[:cut].split(b"\n")
+            if line_no < skip:
+                drop = min(skip - line_no, len(lines))
+                line_no += len(lines)
+                lines = lines[drop:]
+            else:
+                line_no += len(lines)
+            if lines:
+                widest = max(widest, max(ln.count(bsep) for ln in lines))
+                if bq and not quoted and any(bq in ln for ln in lines[:1] + [block[:cut]]):
+                    quoted = True
+        if carry and line_no >= skip:
+            widest = max(widest, carry.count(bsep))
+            quoted = quoted or bool(bq and bq in carry)
+    if quoted:
         import itertools
         with open(target, "r", encoding="utf-8", errors="replace", newline="") as fh:
             for _ in range(skip):
@@ -1227,7 +1488,7 @@ def _data_width(target: Path, skip: int, sep: str, q: str) -> int:
             rdr = _csv.reader(itertools.islice(fh, 5000), delimiter=sep, quotechar=q)
             width = max((len(r) for r in rdr), default=0)
     else:
-        width = int(row.get("seps") or 0) + 1
+        width = widest + 1
     _WIDTH_CACHE[key] = width
     return width
 
@@ -1247,7 +1508,7 @@ def _line_candidates(src: "Source", probe: list[str], fold: bool,
     file normally. Measured: 1.08 s -> 0.16 s on a 400k-row, 40-column extract."""
     src = src.resolved()
     p = _norm(src.path)
-    if is_excel(p) or is_parquet(p) or not probe:
+    if is_excel(p) or is_parquet(p) or not probe or (big_text(p) and cache_on()):
         return None
     sep, q = resolve_delim(src.delimiter), (src.quote_char or "")
     # A value holding the separator, a quote or a line break can be split across
@@ -1834,6 +2095,13 @@ def _excel_sample_lazy(src: "Source") -> pl.LazyFrame | None:
 
 def _schema_names(src: Source) -> list[str]:
     p = _norm(src.path)
+    if big_text(p) and cache_on():          # the labels and the widest row — no conversion just for names
+        cached = cached_text(src.resolved())
+        if cached is not None:
+            return scan_text_cache(cached).collect_schema().names()
+        return _text_layout(src.resolved(), sample=bool(src.sample_rows))[1]
+    if src.sample_rows and not is_excel(p) and not is_parquet(p) and p.stat().st_size > TEXT_SAMPLE_BYTES:
+        return _text_layout(src.resolved(), sample=True)[1]
     if is_excel(p) and _cached_sheet(p, src.sheet) is None:
         names = _excel_fast_names(src)
         if names is not None:
@@ -1853,7 +2121,10 @@ def _ctx_for(p: Path, sheet: str | None) -> dict:
 
 def build_pipeline(src: Source, job: dict, for_preview: bool = False,
                    available: list[str] | None = None,
-                   notes: list[str] | None = None) -> pl.LazyFrame:
+                   notes: list[str] | None = None, distinct: bool = True) -> pl.LazyFrame:
+    """`distinct=False` leaves distinct rows to dedupe_files(), which works them out
+    from row fingerprints instead of holding the whole file (a row limit keeps them
+    here: the first N distinct rows)."""
     available = available if available is not None else _schema_names(src)
     need = needed_columns(job, available)
     lf = load_lazy(src, need or None)
@@ -1892,7 +2163,7 @@ def build_pipeline(src: Source, job: dict, for_preview: bool = False,
         exprs += [pl.col(n) for n in added]
         lf = lf.select(exprs)
 
-    if job.get("distinct"):
+    if job.get("distinct") and (distinct or job.get("limit")):
         lf = lf.unique(maintain_order=True)
     limit = job.get("limit")
     if limit and not for_preview:
@@ -1914,6 +2185,8 @@ def preview(job: dict, rows: int = 200, offset: int = 0) -> dict:
                and bool(_peek_cached(str(p0), src.encoding, src.sheet).get("fast")))
     if sampled:
         src.sample_rows = PREVIEW_SAMPLE
+    elif not offset and not is_excel(p0) and not is_parquet(p0):
+        src.sample_rows = PREVIEW_SAMPLE       # the first page of a big text file: its first MB only
     try:
         raw_cols = _schema_names(src)
         lf = build_pipeline(src, job, for_preview=True, available=raw_cols, notes=notes)
@@ -1986,21 +2259,23 @@ def count_rows(job: dict, on_progress=None) -> dict:
             per_file.append({"file": name, "rows": 0, "error": brief(exc)})
 
     total = 0
-    if batch_dupes(job) and lfs:
-        # rows per file after duplicates are found over every file together
-        whole = [build_pipeline(Source.from_dict({**(job.get("source") or {}), "path": files[k]}), job)
+    if (batch_dupes(job) or (job.get("distinct") and not job.get("limit"))) and lfs:
+        # rows per file after distinct rows (per file) or duplicates (over every file
+        # together) — from each row's fingerprint, never the rows themselves
+        whole = [build_pipeline(Source.from_dict({**(job.get("source") or {}), "path": files[k]}), job, distinct=False)
                  for k, row in enumerate(per_file) if not row.get("error")]
+        stage = _stage_dir()
         try:
-            got = (across_files(stacked(whole), job).group_by(SRC_COL).len()
-                   .collect(engine="streaming"))
-            n = {int(r[0]): int(r[1]) for r in got.iter_rows()}
+            got = dedupe_files(whole, job, stage, write=False, separately=not batch_dupes(job))
             for j, i in enumerate(owners):
-                per_file[i]["rows"] = n.get(j, 0)
+                per_file[i]["rows"] = got[j]
                 total += per_file[i]["rows"]
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": brief(exc), "files": per_file}
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
         return {"ok": True, "total": total, "files": per_file, "elapsed": round(time.time() - t0, 2),
-                "note": "Counted after duplicates across files"}
+                "note": "Counted after duplicates across files" if batch_dupes(job) else "Counted after distinct rows"}
     for i, res in zip(owners, _collect_many(lfs, _sequential(job))):
         if isinstance(res, Exception):
             per_file[i]["error"] = brief(res)
@@ -2727,6 +3002,63 @@ def _write_grid_csv(grid: list[dict], path: Path, out: dict) -> None:
     _replace(tmp, path)
 
 
+SAMPLE_ROWS = 100          # rows per file the dashboard and previews read, unless asked for every file
+SAMPLE_FILES = 200         # files a sample reads at most
+
+
+def sample_rows(job: dict) -> int:
+    try:
+        return max(1, min(int(job.get("sample_rows") or SAMPLE_ROWS), 100_000))
+    except (TypeError, ValueError):
+        return SAMPLE_ROWS
+
+
+def sample_source(src: "Source", n: int) -> "Source":
+    """A source set to read only the start of its file: workbooks stream their first
+    rows, big text files their first few MB; Parquet and cached copies read row groups."""
+    p = _norm(src.path)
+    if is_excel(p):
+        if p.suffix.lower() in xlsxfast.FAST_EXT and _cached_sheet(p, src.sheet) is None \
+                and bool(_peek_cached(str(p), src.encoding, src.sheet).get("fast")):
+            src.sample_rows = max(n, PREVIEW_SAMPLE)
+    elif not is_parquet(p):
+        src.sample_rows = max(n, PREVIEW_SAMPLE)
+    return src
+
+
+def sample_frame(job: dict, on_progress=None) -> tuple[pl.DataFrame, str, int]:
+    """The first N rows (after the setup's filters) of each ticked file, one file at a
+    time — what the dashboard shows until it is asked for every file. Nothing reads a
+    whole file: a workbook streams its first rows, a big text file its first few MB."""
+    files = job.get("files") or []
+    if not files:
+        raise ValueError("Pick at least one file first.")
+    n = sample_rows(job)
+    take = files[:SAMPLE_FILES]
+    parts, read = [], 0
+    for i, f in enumerate(take):
+        src = sample_source(Source.from_dict({**(job.get("source") or {}), "path": f}), n)
+        if on_progress:
+            on_progress({"stage": "read", "file": _norm(f).name, "index": i + 1, "total": len(take)})
+        try:
+            df = build_pipeline(src, job, for_preview=True).head(n).collect()
+        except Exception:  # noqa: BLE001 — one unreadable file doesn't empty the sample
+            continue
+        read += 1
+        parts.append(df.with_columns(pl.lit(i, dtype=pl.UInt32).alias(SRC_COL)))
+    if not parts:
+        raise ValueError("No file could be read.")
+    both = pl.concat(parts, how="diagonal_relaxed")
+    if batch_dupes(job) or job.get("distinct"):
+        both = across_files(both.lazy(), job).collect()
+    df = both.drop(SRC_COL)
+    note = (f"sample — the first {n:,} rows of {_norm(take[0]).name}" if read == 1 else
+            f"sample — the first {n:,} rows of each of {read} files")
+    if len(files) > len(take):
+        note += f" (the first {len(take)} of {len(files)} files)"
+    return df, f"{note}, {df.height:,} rows", n
+
+
 def _analysis_frame(job: dict, scope: str = "active", on_progress=None, rows: int = 0) -> tuple[pl.DataFrame, str, int]:
     """The extracted frame the Analysis tab works on: the current file (a sampled
     workbook stays sampled) or, for scope 'all', every ticked file stacked."""
@@ -2734,42 +3066,40 @@ def _analysis_frame(job: dict, scope: str = "active", on_progress=None, rows: in
     if not files:
         raise ValueError("Pick at least one file first.")
     if scope == "all":
-        prep = prepare(files, job.get("source"), on_progress, workers=1 if _sequential(job) else None)
-        lfs = []
-        for f in files:
-            p = _norm(f)
-            if str(p) in prep["errors"]:
-                continue
-            src = Source.from_dict({**(job.get("source") or {}), "path": str(p)})
-            lfs.append(build_pipeline(src, job))
-        if not lfs:
-            raise ValueError("No file could be read.")
-        frames = [d for d in _collect_many(lfs, _sequential(job)) if not isinstance(d, Exception)]
-        if not frames:
-            raise ValueError("No file could be read.")
-        if batch_dupes(job) or job.get("distinct"):
-            df = across_files(stacked([f.lazy() for f in frames]), job).drop(SRC_COL).collect()
-        else:
-            df = pl.concat(frames, how="diagonal_relaxed")
-        return df, f"{len(frames)} file{'s' if len(frames) != 1 else ''}, {df.height:,} rows", 0
-    src = Source.from_dict({**(job.get("source") or {}), "path": files[0]})
-    p0 = _norm(files[0])
-    sampled = (PREVIEW_SAMPLE if p0.suffix.lower() in xlsxfast.FAST_EXT
-               and _cached_sheet(p0, src.sheet) is None
-               and bool(_peek_cached(str(p0), src.encoding, src.sheet).get("fast")) else 0)
-    src.sample_rows = sampled
-    lf = build_pipeline(src, job, for_preview=bool(sampled))
-    if batch_dupes(job):            # within this one file — "every file" looks across all of them
-        lf = across_files(lf, job)
-    df = lf.head(int(rows)).collect() if rows else lf.collect(engine="streaming")
-    return df, f"{p0.name}, {df.height:,} rows", sampled
+        raise ValueError("every file is read by every_file_frame()")
+    return sample_frame(job, on_progress)
+
+
+def every_file_frame(job: dict, stage: Path, on_progress=None, cancel=None) -> tuple[pl.LazyFrame, str, int]:
+    """Every ticked file, file by file: each goes through the setup into its own staged
+    Parquet (one at a time in sequential mode), duplicates and distinct rows are worked
+    out from key fingerprints, and the dashboard reads the staged files lazily — so
+    memory follows what a card computes, not the size of the data."""
+    results = stage_inputs(job, stage, on_progress, cancel)
+    good = [r["_path"] for r in results if not r.get("error")]
+    if not good:
+        raise ValueError("No file could be read.")
+    _align_stage(good)
+    files = len(good)
+    if batch_dupes(job) or job.get("distinct"):
+        good = [x for o in dedupe_files([pl.scan_parquet(p) for p in good], job, stage,
+                                        (lambda **k: on_progress(k)) if on_progress else None, cancel) for x in o]
+    lf = pl.scan_parquet([str(p) for p in good])
+    n = int(lf.select(pl.len()).collect().item())
+    return lf, f"{files} file{'s' if files != 1 else ''}, {n:,} rows", n
 
 
 def analyse(job: dict, scope: str = "active", on_progress=None, rows: int = 0) -> dict:
     """What the Analysis tab draws. scope 'active' reads the current file only
     (fast, and a sampled workbook stays sampled); 'all' runs the whole batch."""
     t0 = time.time()
+    stage = _stage_dir() if scope == "all" else None
     try:
+        if stage is not None:
+            lf, note, seen = every_file_frame(job, stage, on_progress)
+            res = A.analyse(lf, job)
+            return {**res, "scope": scope, "note": note, "sampled": 0, "rows_seen": seen,
+                    "elapsed": round(time.time() - t0, 2)}
         df, note, sampled = _analysis_frame(job, scope, on_progress, rows)
         res = A.analyse(df.lazy(), job)
         return {**res, "scope": scope, "note": note, "sampled": sampled, "rows_seen": df.height,
@@ -2778,6 +3108,9 @@ def analyse(job: dict, scope: str = "active", on_progress=None, rows: int = 0) -
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": brief(exc)}
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def drill(job: dict, scope: str = "active", filters: list[dict] | None = None, limit: int = 500,
@@ -2785,7 +3118,19 @@ def drill(job: dict, scope: str = "active", filters: list[dict] | None = None, l
     """The rows behind a clicked bar, slice or pivot cell — after the dashboard's own
     filters when asked (a card that follows them), plus the clicked path."""
     t0 = time.time()
+    stage = _stage_dir() if scope == "all" else None
     try:
+        if stage is not None:
+            if batch_dupes(job) or job.get("distinct"):
+                lf, note, _n = every_file_frame(job, stage, on_progress)
+            else:                  # straight through every file: only the matching rows are kept
+                prep = prepare(job.get("files") or [], job.get("source"), on_progress)
+                lf = pl.concat([build_pipeline(Source.from_dict({**(job.get("source") or {}), "path": f}), job)
+                                for f in job.get("files") or [] if str(_norm(f)) not in prep["errors"]],
+                               how="diagonal_relaxed")
+                note = f"{len(job.get('files') or [])} files"
+            res = A.detail(lf, list(filters or []), lf.collect_schema().names(), limit)
+            return {**res, "note": note, "sampled": 0, "elapsed": round(time.time() - t0, 2)}
         df, note, sampled = _analysis_frame(job, scope, on_progress)
         cols = df.columns
         res = A.detail(df.lazy(), list(filters or []), cols, limit)
@@ -2794,6 +3139,9 @@ def drill(job: dict, scope: str = "active", filters: list[dict] | None = None, l
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": brief(exc)}
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 # ---- the run ---------------------------------------------------------------------
@@ -2929,14 +3277,158 @@ def across_files(lf: pl.LazyFrame, job: dict) -> pl.LazyFrame:
     return lf.drop(["__dr", "__dc", "__df", "__do", *kk])
 
 
+# --------------------------------------------------------------------------
+# duplicates and distinct rows over every file — without holding the rows
+# --------------------------------------------------------------------------
+# across_files() above works on frames in memory (a sample). Over every file it would
+# hold every row at once. dedupe_files() keeps only a 16-byte fingerprint per key —
+# two 64-bit hashes of the cleaned key (or of the whole row, for distinct rows) —
+# and works those out in buckets of at most DEDUPE_BUCKET_ROWS keys, then goes back
+# over the files one at a time and keeps the rows asked for.
+
+DEDUPE_BUCKET_ROWS = 500_000      # keys worked out at once (measured: 2M a bucket held ~750 MB, 500k ~300 MB)
+DEDUPE_SLICE_ROWS = 1_000_000     # rows of one file joined to their flags at once
+_U32 = 1 << 32
+
+
+def _fingerprints(lf: pl.LazyFrame, cols: list[str], have: list[str], fold: bool, whole_row: bool) -> pl.LazyFrame:
+    """__r (row number), __h1 / __h2 (the key's two hashes) and __blank for every row."""
+    pick = [pl.col(c) if c in have else pl.lit(None, dtype=pl.String) for c in cols]
+    if whole_row:
+        st, blank = pl.struct([e.alias(f"c{i}") for i, e in enumerate(pick)]), pl.lit(False)
+    else:
+        norm = []
+        for e in pick:
+            e = e.cast(pl.String).str.strip_chars().fill_null("")
+            norm.append(e.str.to_lowercase() if fold else e)
+        st = pl.struct([e.alias(f"k{i}") for i, e in enumerate(norm)])
+        blank = pl.all_horizontal([e == "" for e in norm])
+    return lf.select(st.hash(11).alias("__h1"), st.hash(29).alias("__h2"), blank.alias("__blank")).with_row_index("__r")
+
+
+def _sink(lf: pl.LazyFrame, path: Path) -> Path:
+    try:
+        lf.sink_parquet(path, compression="lz4", row_group_size=STAGE_RG)
+    except Exception:  # noqa: BLE001 — a plan the streaming sink can't take
+        lf.collect().write_parquet(path, compression="lz4", row_group_size=STAGE_RG)
+    return path
+
+
+def _flag_pass(keyfiles: list[Path], keep: str, want_occ: bool, sub: Path, tag: str, cancel=None) -> list[list[Path]]:
+    """Per file, flags for each row: __r, __keep, __dc (rows with the key), __df (files
+    with it), __do (its occurrence number). Memory: the keys of one bucket."""
+    total = sum(int(pl.scan_parquet(k).select(pl.len()).collect().item()) for k in keyfiles)
+    buckets = max(1, -(-total // DEDUPE_BUCKET_ROWS))
+    pos = pl.col("__f").cast(pl.UInt64) * _U32 + pl.col("__r").cast(pl.UInt64)
+    keyed = lambda i: pl.scan_parquet(keyfiles[i]).with_columns(pl.lit(i, dtype=pl.UInt32).alias("__f"))  # noqa: E731
+    keep_blank = keep in ("all", "first", "last", "unique")
+    out: list[list[Path]] = [[] for _ in keyfiles]
+    for b in range(buckets):
+        _check_cancel(cancel)
+        inb = ~pl.col("__blank") & ((pl.col("__h1") % buckets) == b)
+        pairs = (pl.concat([keyed(i).filter(inb) for i in range(len(keyfiles))])
+                 .group_by("__h1", "__h2", "__f").agg(pl.len().alias("c"), pos.min().alias("lo"), pos.max().alias("hi"))
+                 .collect())
+        stats = pairs.group_by("__h1", "__h2").agg(pl.col("c").sum().alias("n"), pl.len().alias("files"),
+                                                   pl.col("lo").min().alias("first"), pl.col("hi").max().alias("last"))
+        before = (pairs.sort("__h1", "__h2", "__f")
+                  .with_columns((pl.col("c").cum_sum().over(["__h1", "__h2"]) - pl.col("c")).alias("before"))
+                  .select("__h1", "__h2", "__f", "before")) if want_occ else None
+        del pairs
+        n, files = pl.col("n"), pl.col("files")
+        kept = {"all": pl.lit(True), "dups": n > 1, "files": files > 1, "first": pl.col("__pos") == pl.col("first"),
+                "last": pl.col("__pos") == pl.col("last"), "unique": n == 1}[keep]
+        for i in range(len(keyfiles)):
+            j = keyed(i).filter(inb).with_columns(pos.alias("__pos")).join(
+                stats.lazy(), on=["__h1", "__h2"], how="left", maintain_order="left")
+            occ = pl.lit(1, dtype=pl.Int64)
+            if before is not None:
+                j = j.join(before.lazy().filter(pl.col("__f") == i).drop("__f"), on=["__h1", "__h2"], how="left",
+                           maintain_order="left")
+                occ = (pl.col("before") + pl.int_range(pl.len()).over(["__h1", "__h2"]) + 1).cast(pl.Int64)
+            flags = j.select("__r", kept.alias("__keep"), n.cast(pl.Int64).alias("__dc"),
+                             files.cast(pl.Int64).alias("__df"), occ.alias("__do"))
+            out[i].append(_sink(flags, sub / f"{tag}{i:05d}_{b:03d}.parquet"))
+    for i in range(len(keyfiles)):            # a blank key never repeats
+        blanks = keyed(i).filter(pl.col("__blank")).select(
+            "__r", pl.lit(keep_blank).alias("__keep"), pl.lit(1, dtype=pl.Int64).alias("__dc"),
+            pl.lit(1, dtype=pl.Int64).alias("__df"), pl.lit(1, dtype=pl.Int64).alias("__do"))
+        out[i].append(_sink(blanks, sub / f"{tag}{i:05d}_blank.parquet"))
+    return out
+
+
+def dedupe_files(frames: list[pl.LazyFrame], job: dict, stage: Path, notify=None, cancel=None,
+                 separately: bool = False, write: bool = True) -> list:
+    """Distinct rows (the first of each) and the duplicates step over every file, the
+    rows never all in memory. `frames` are re-readable (staged Parquet, or pipelines
+    over cached files); `separately` makes distinct rows per file. Returns, per input,
+    the list of files holding its kept rows (in order) — or, with write=False, how
+    many rows each keeps."""
+    d, distinct = batch_dupes(job), bool(job.get("distinct"))
+    sub = stage / f"dd_{time.time_ns()}"
+    sub.mkdir(parents=True, exist_ok=True)
+    names = [lf.collect_schema().names() for lf in frames]
+    union: list[str] = []
+    for ns in names:
+        union += [c for c in ns if c not in union]
+    if d:
+        miss = [k for k in d["keys"] if k not in union]
+        if miss:
+            raise ValueError(f"Duplicates across files: the output has no column {', '.join(miss)} — "
+                             "keep it on the Columns tab (under its new name, if renamed)")
+    say = notify or (lambda **k: None)
+    flags: list[list[Path]] | None = None
+    if distinct:
+        say(stage="build", part="distinct rows")
+        keyfiles = [_sink(_fingerprints(lf, union, ns, False, True), sub / f"rk{i:05d}.parquet")
+                    for i, (lf, ns) in enumerate(zip(frames, names))]
+        if separately:
+            flags = [_flag_pass([k], "first", False, sub, f"rf{i:05d}_", cancel)[0] for i, k in enumerate(keyfiles)]
+        else:
+            flags = _flag_pass(keyfiles, "first", False, sub, "rf", cancel)
+    if d:
+        say(stage="build", part="duplicates across files")
+        keyfiles = []
+        for i, (lf, ns) in enumerate(zip(frames, names)):
+            _check_cancel(cancel)
+            fp = _fingerprints(lf, d["keys"], ns, d["fold"], False)
+            if flags is not None:          # only the rows distinct kept
+                fp = fp.join(pl.scan_parquet(flags[i]).filter(pl.col("__keep")).select("__r"), on="__r",
+                             how="semi", maintain_order="left")
+            keyfiles.append(_sink(fp, sub / f"dk{i:05d}.parquet"))
+        flags = _flag_pass(keyfiles, d["keep"], bool(d["occ_col"]), sub, "df", cancel)
+    if flags is None:
+        raise ValueError("Nothing to de-duplicate")
+    if not write:
+        return [int(pl.scan_parquet(f).select(pl.col("__keep").sum()).collect().item()) for f in flags]
+    outs = []
+    adds = [(src, name) for src, name in (("__dc", (d or {}).get("count_col")), ("__df", (d or {}).get("files_col")),
+                                          ("__do", (d or {}).get("occ_col"))) if name]
+    for i, (lf, f) in enumerate(zip(frames, flags)):
+        _check_cancel(cancel)
+        say(stage="build", part=f"file {i + 1} of {len(frames)}")
+        rows = int(lf.select(pl.len()).collect().item())
+        mine = []
+        for k in range(max(1, -(-rows // DEDUPE_SLICE_ROWS))):     # a slice of the file and its flags at a time
+            lo, hi = k * DEDUPE_SLICE_ROWS, (k + 1) * DEDUPE_SLICE_ROWS
+            fl = pl.scan_parquet(f).filter((pl.col("__r") >= lo) & (pl.col("__r") < hi))
+            res = (lf.with_row_index("__r").slice(lo, DEDUPE_SLICE_ROWS)
+                   .join(fl, on="__r", how="inner", maintain_order="left").filter(pl.col("__keep")))
+            if adds:
+                res = res.with_columns([pl.col(src).cast(pl.String).alias(name) for src, name in adds])
+            mine.append(_sink(res.drop(["__r", "__keep", "__dc", "__df", "__do"]), sub / f"out{i:05d}_{k:04d}.parquet"))
+        outs.append(mine)
+    return outs
+
+
 def _materialised(lf: pl.LazyFrame, stage: Path, name: str) -> pl.LazyFrame:
     """Work a plan out once into the staging folder: written in chunks later, a window
     over every file must not be recomputed for each chunk."""
     path = stage / f"{name}_{time.time_ns()}.parquet"
     try:
-        lf.sink_parquet(path, compression="lz4")
+        lf.sink_parquet(path, compression="lz4", row_group_size=STAGE_RG)
     except Exception:  # noqa: BLE001 — a plan the streaming sink can't take
-        lf.collect(engine="streaming").write_parquet(path, compression="lz4")
+        lf.collect(engine="streaming").write_parquet(path, compression="lz4", row_group_size=STAGE_RG)
     return pl.scan_parquet(path)
 
 
@@ -2951,7 +3443,7 @@ def _align_stage(paths: list[Path]) -> None:
         if names != union:
             tmp = pth.with_suffix(".align.parquet")
             pl.scan_parquet(pth).select([pl.col(c) if c in names else pl.lit(None, dtype=pl.String).alias(c)
-                                        for c in union]).sink_parquet(tmp)
+                                        for c in union]).sink_parquet(tmp, row_group_size=STAGE_RG)
             os.replace(tmp, pth)
 
 
@@ -3058,7 +3550,7 @@ def stage_inputs(job: dict, stage: Path, on_progress=None, cancel=None, prefix: 
             build_sheet_cache(str(p), src.sheet)        # this workbook's one full parse
         notes: list[str] = []
         dst = stage / f"{prefix}{i:05d}.parquet"
-        build_pipeline(src, job, notes=notes).sink_parquet(dst, compression="lz4")
+        build_pipeline(src, job, notes=notes, distinct=False).sink_parquet(dst, compression="lz4", row_group_size=STAGE_RG)
         n = pl.scan_parquet(dst).select(pl.len()).collect().item()
         return {"file": p.name, "path": str(p), "rows": int(n), "note": "; ".join(notes) or None, "_path": dst}
 
@@ -3134,41 +3626,43 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
         if not good:
             return {"ok": False, "error": "Nothing to write — every file failed.", "files": per_file, "errors": errors}
 
-        if batch_dupes(job):
-            # duplicates are found over every file together, then (one output per
-            # input) each file gets its own rows back
-            notify(stage="build", part="duplicates across files")
-            both = _materialised(across_files(stacked([pl.scan_parquet(p) for _, p in good]), job), stage, "across")
-            kept = both.select(pl.len()).collect().item()
-            read = sum(int(r.get("rows") or 0) for r in results if not r.get("error"))
-            label = dict(DUP_KEEP)[batch_dupes(job)["keep"]].split(" —")[0].lower()
-            dup_note = f"Duplicates across files ({label}): {kept:,} of the {read:,} rows read were kept"
+        deduped = None
+        if batch_dupes(job) or job.get("distinct"):
+            # distinct rows and duplicates across files: two passes over the staged
+            # files, holding only each key's fingerprint, then each file's kept rows
+            # written out on their own — never every row in memory at once
+            pths = [p for _, p in good]
+            if not per_input or batch_dupes(job):
+                _align_stage(pths)
+            deduped = dedupe_files([pl.scan_parquet(p) for p in pths], job, stage, notify, cancel,
+                                   separately=per_input and not batch_dupes(job))
+            flat = [x for o in deduped for x in o]
+            if batch_dupes(job):
+                kept = sum(int(pl.scan_parquet(o).select(pl.len()).collect().item()) for o in deduped if o)
+                read = sum(int(r.get("rows") or 0) for r in results if not r.get("error"))
+                label = dict(DUP_KEEP)[batch_dupes(job)["keep"]].split(" —")[0].lower()
+                dup_note = f"Duplicates across files ({label}): {kept:,} of the {read:,} rows read were kept"
             if per_input:
-                groups = [(Path(name).stem + str(out.get("suffix") or ""),
-                           both.filter(pl.col(SRC_COL) == i).drop(SRC_COL), name) for i, (name, _) in enumerate(good)]
+                groups = [(Path(name).stem + str(out.get("suffix") or ""), o, name)
+                          for (name, _), o in zip(good, deduped)]
             else:
-                groups = [(out.get("basename") or "extract", both.drop(SRC_COL), "")]
+                groups = [(out.get("basename") or "extract", flat, "")]
         elif per_input:
             groups = [(Path(name).stem + str(out.get("suffix") or ""), [pth], name) for name, pth in good]
         else:
             _align_stage([pth for _, pth in good])
             groups = [(out.get("basename") or "extract", [pth for _, pth in good], "")]
-        warnings: list[str] = [dup_note] if batch_dupes(job) else []
+        warnings: list[str] = [dup_note] if batch_dupes(job) and deduped is not None else []
         total_rows = 0
         analysis_back = None
         # the setup's checks, over everything this run read, before anything is written
         checks = None
         if job.get("_checks"):
             notify(stage="build", part="checks")
-            if batch_dupes(job):
-                whole = both.drop(SRC_COL)
-            else:                  # what is written: distinct rows per output
-                parts = [pl.scan_parquet(p) for _, p in good]
-                if job.get("distinct") and per_input:
-                    parts = [x.unique(maintain_order=True) for x in parts]
-                whole = stacked(parts).drop(SRC_COL)
-                if job.get("distinct") and not per_input:
-                    whole = whole.unique(maintain_order=True)
+            if deduped is not None:            # what is written: after distinct rows and duplicates
+                whole = pl.concat([pl.scan_parquet(o) for o in deduped if o], how="diagonal_relaxed")
+            else:
+                whole = stacked([pl.scan_parquet(p) for _, p in good]).drop(SRC_COL)
             checks = job["_checks"](whole)
             if checks["stop"]:
                 return {"ok": False, "stopped": True, "error": checks["error"], "files": per_file, "errors": errors,
@@ -3180,8 +3674,6 @@ def run(job: dict, on_progress=None, cancel=None) -> dict:
                 lf = paths
             else:
                 lf = pl.scan_parquet(paths if len(paths) > 1 else paths[0])
-                if job.get("distinct"):
-                    lf = lf.unique(maintain_order=True)
             total = lf.select(pl.len()).collect().item()
             if total == 0 and not out.get("write_empty"):
                 continue
@@ -3482,9 +3974,9 @@ def find_export(job: dict, params: dict, on_progress=None, cancel=None) -> dict:
             notify(stage="read", file=per_file[plan["i"]]["file"], index=n, total=len(plans))
             dst = stage / f"m{n:05d}.parquet"
             try:
-                plan["lf"].sink_parquet(dst, compression="lz4")
+                plan["lf"].sink_parquet(dst, compression="lz4", row_group_size=STAGE_RG)
             except Exception:  # noqa: BLE001
-                plan["lf"].collect(engine="streaming").write_parquet(dst, compression="lz4")
+                plan["lf"].collect(engine="streaming").write_parquet(dst, compression="lz4", row_group_size=STAGE_RG)
             per_file[plan["i"]]["hits"] = int(pl.scan_parquet(dst).select(pl.len()).collect().item())
             staged.append(dst)
         both = pl.concat([pl.scan_parquet(x) for x in staged], how="diagonal_relaxed")

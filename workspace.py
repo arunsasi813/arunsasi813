@@ -162,6 +162,7 @@ def normalize(ws: dict | None) -> dict:
     ws["processing"] = ws.get("processing") or "sequential"
     ws["params"] = [p for p in ws.get("params") or [] if isinstance(p, dict) and str(p.get("name") or "").strip()]
     ws["param_values"] = dict(ws.get("param_values") or {})
+    ws["sample_rows"] = E.sample_rows(ws)
     ws["checks"] = [C.normalize(c) for c in ws.get("checks") or [] if isinstance(c, dict)]
     ov = ws.get("overview") or {}
     ws["overview"] = {"name": ov.get("name") or "Overview",
@@ -631,7 +632,7 @@ class Builder:
 
     # -- groups -------------------------------------------------------------
     def _group_job(self, g: dict, files: list[str]) -> dict:
-        job = {**copy.deepcopy(g["setup"]), "files": files}
+        job = {**copy.deepcopy(g["setup"]), "files": files, "sample_rows": E.sample_rows(self.ws)}
         job["processing"] = self.ws.get("processing") or job.get("processing") or "sequential"
         # A relationship on a column the group doesn't keep still works: the column is
         # read alongside and dropped again from the group's own table (see get()).
@@ -657,19 +658,17 @@ class Builder:
             raise WorkspaceError(f"“{g['name']}” has no files — tick its files on the left, or give it a file rule")
         if self.scope == "all":
             return self._group_all(g, files)
-        take = files[:1] if self.scope == "schema" else files[:PREVIEW_FILES]
+        # a preview reads the first rows of each file (the sample size), never a whole file
+        n = E.sample_rows(self.ws)
+        take = files[:1] if self.scope == "schema" else files[:E.SAMPLE_FILES]
         job = self._group_job(g, take)
         frames = []
         for f in take:
-            src = E.Source.from_dict({**(job.get("source") or {}), "path": f})
-            p = E._norm(f)
-            if (p.suffix.lower() in E.xlsxfast.FAST_EXT and E._cached_sheet(p, src.sheet) is None
-                    and bool(E._peek_cached(str(p), src.encoding, src.sheet).get("fast"))):
-                src.sample_rows = E.PREVIEW_SAMPLE if self.scope == "schema" else PREVIEW_ROWS
+            src = E.sample_source(E.Source.from_dict({**(job.get("source") or {}), "path": f}), n)
             lf = E.build_pipeline(src, job, for_preview=True)
             if self.scope == "schema":       # the columns, the duplicate counts included
                 return E.across_files(lf, job) if E.batch_dupes(job) else lf
-            frames.append(lf.head(PREVIEW_ROWS))
+            frames.append(lf.head(n))
         got = E._collect_many(frames, sequential=True)
         ok = [d for d in got if not isinstance(d, Exception)]
         for d, f in zip(got, take):
@@ -678,8 +677,8 @@ class Builder:
         if not ok:
             raise WorkspaceError(f"“{g['name']}”: none of its files could be read")
         if len(files) > len(take):
-            self.notes.append(f"{g['name']}: preview uses {len(take)} of {len(files)} files, "
-                              f"up to {PREVIEW_ROWS:,} rows each")
+            self.notes.append(f"{g['name']}: the sample reads {len(take)} of {len(files)} files, "
+                              f"up to {n:,} rows each")
         if E.batch_dupes(g["setup"]):
             return E.across_files(E.stacked([d.lazy() for d in ok]), g["setup"]).drop(E.SRC_COL)
         return pl.concat(ok, how="diagonal_relaxed").lazy()
@@ -694,23 +693,23 @@ class Builder:
         good = [r["_path"] for r in results if not r.get("error")]
         if not good:
             raise WorkspaceError(f"“{g['name']}”: every file failed")
-        if E.batch_dupes(g["setup"]):          # duplicates over every file of the group, worked out once
-            whole = E.across_files(E.stacked([pl.scan_parquet(p) for p in good]), g["setup"]).drop(E.SRC_COL)
-            return self._materialise(f"{g['name']} duplicates", whole)
         E._align_stage(good)
-        lf = pl.scan_parquet(good if len(good) > 1 else good[0])
-        if g["setup"].get("distinct"):
-            lf = lf.unique(maintain_order=True)
-        return lf
+        if E.batch_dupes(g["setup"]) or g["setup"].get("distinct"):
+            # distinct rows and duplicates over every file of the group, from key
+            # fingerprints, each file's kept rows written on their own
+            outs = E.dedupe_files([pl.scan_parquet(p) for p in good], g["setup"], sub,
+                                  (lambda **k: self.on_progress(k)) if self.on_progress else None, self.cancel)
+            return pl.scan_parquet([str(x) for o in outs for x in o])
+        return pl.scan_parquet(good if len(good) > 1 else good[0])
 
     def _materialise(self, name: str, lf: pl.LazyFrame) -> pl.LazyFrame:
         path = self.stage / f"t_{re.sub(r'[^A-Za-z0-9]+', '_', name)[:40]}_{uuid.uuid4().hex[:6]}.parquet"
         if self.on_progress:
             self.on_progress({"stage": "build", "part": name})
         try:
-            lf.sink_parquet(path, compression="lz4")
+            lf.sink_parquet(path, compression="lz4", row_group_size=E.STAGE_RG)
         except Exception:  # noqa: BLE001 — a plan the streaming sink can't take: collect instead
-            lf.collect(engine="streaming").write_parquet(path, compression="lz4")
+            lf.collect(engine="streaming").write_parquet(path, compression="lz4", row_group_size=E.STAGE_RG)
         return pl.scan_parquet(path)
 
     # -- steps --------------------------------------------------------------
