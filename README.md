@@ -30,6 +30,26 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
 
+## What's new in 2.4 — picking columns while you write a formula
+
+- **Suggestions as you type.** In any formula box — an added column, a filter formula, a
+  dashboard value (*ƒ formula…*), a Combine step's *Keep rows where* or new column — type a
+  few letters and the matching columns are listed under the cursor, best match first
+  (`tax` finds `TAX_CODE`, `tc` does too), then the matching functions. ↑ ↓ choose, Enter or
+  Tab inserts, Esc closes; `[` lists every column for a bracketed name; **Ctrl+Space** lists
+  them all. A column whose name has spaces goes in as `[Pax Name]` by itself.
+- **The columns beside the formula.** Clicking into a formula box opens a **▦ Columns** list
+  on the right: the file's columns and, for an added column, **the columns added above it**
+  — the ones it can use. Click a column to put it at the cursor, as many times as the formula
+  needs; drag one onto the formula to put it where you drop it (never inside another name).
+  Columns already in the formula are ticked, or show ×2, ×3. Buttons for `+ − × ÷ & = <> > <
+  ( ) , ""` sit above the list, and **ƒ Functions** is the second tab. *Close* hides the list
+  for that box; ▦ Columns under an added column brings it back.
+- **A formula can use the columns added above it.** `TAX_CODE & "-" & DOUBLE`, where DOUBLE
+  is an added column above, now runs and passes *Check*; before, a formula that named an
+  added column lost track of the file's columns it also used, and failed with
+  "Unknown column TAX_CODE".
+
 ## What's new in 2.3 — memory and a simpler dashboard
 
 - **A sample unless you ask for every file.** Opening the Analysis tab, a slicer click, the
@@ -260,9 +280,12 @@ The **col** toggle on =, ≠, contains, starts/ends with, >, ≥, <, ≤ and dat
 
 ## Formulas
 
-Excel-style, compiled to polars expressions, so they run at column speed, not row by row. [FORMULAS.md](FORMULAS.md) lists all 73 functions with examples; **ƒ Formula reference** in the app is the same list, searchable, with Insert.
+Excel-style, compiled to polars expressions, so they run at column speed, not row by row. [FORMULAS.md](FORMULAS.md) lists all 73 functions with examples; **ƒ Functions** in the app is the same list, searchable, with Insert.
+
+While you write one, typing a few letters suggests the matching columns and functions, and the **▦ Columns** list beside it has every column the formula can use — click one in at the cursor (the same column as often as needed) or drag it into place.
 
 - Columns by name — `AMOUNT` — or in brackets when the name has spaces or clashes with a function: `[Pax Name]`, `[LEFT]`.
+- An added formula column can use the file's columns and every added column above it in the list. A filter formula uses the file's columns: filters run before the added columns are made.
 - Text in double quotes, `""` for a quote inside. `&` joins text. `+ - * / ^ %` and `= <> < <= > >=` as in Excel; text comparisons ignore case. `;` works as the argument separator too.
 - Blank is 0 in arithmetic and "" in text. A row that can't be worked out (divide by zero, a bad date) comes out blank instead of failing the run; wrap it in `IFERROR` to choose the fallback.
 - `COLSUM`, `COLCOUNT`, `COLMIN`, `COLMAX`, `COLAVG` total a column over the file, optionally per group: `AMOUNT / COLSUM(AMOUNT, DOC_NO)` is each row's share of its document.

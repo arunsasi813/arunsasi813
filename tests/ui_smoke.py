@@ -524,8 +524,15 @@ def studio_visual(ui: UI, d: dict) -> None:
     ui.then("DAX copied", lambda: page.evaluate("msCopyDax(AT().analysis.items.find(x => x.kind === 'studio'))"))
     # the visual as a web page, with the numbers on screen (the YQ slice)
     page.locator(f"{card} [data-act=cmenu]").click()
-    ui.then("as a web page", lambda: page.locator(f"{card} [data-act=mshtml]").click())
-    saved_page = next((Path(os.environ["COLSIFT_SAVED"])).glob("*.html")).read_text(encoding="utf-8")
+    page.locator(f"{card} [data-act=mshtml]").click()
+    # the file, not the status line: the refresh the designer's save asked for can
+    # replace "Saved … as a web page" a few milliseconds later
+    saved_dir = Path(os.environ["COLSIFT_SAVED"])
+    for _ in range(300):
+        if saved_dir.exists() and list(saved_dir.glob("*.html")):
+            break
+        time.sleep(0.1)
+    saved_page = next(saved_dir.glob("*.html")).read_text(encoding="utf-8")
     assert saved_page.count("<iframe") == 1 and "3,281" in saved_page and "ms-kv" in saved_page
     # the preview pages through the file
     ui.tab("res")
@@ -599,9 +606,120 @@ def dashboard_basics(ui: UI, d: dict) -> None:
     assert WS_sample == 10, WS_sample
 
 
+def formula_helper(ui: UI, d: dict) -> None:
+    """Writing a formula: the side list of columns (the added ones above included) to
+    click — the same column as often as needed — or drag in, and suggestions as you type."""
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "fx_src"
+    src.mkdir(exist_ok=True)
+    (src / "sales_JAN.csv").write_bytes((d["jan"] / "sales_JAN.csv").read_bytes())
+    ui.folders(src)
+    page.wait_for_function("S.allCols.length === 5")
+    ui.tab("add")
+    page.click("#addFormula")
+    page.fill('#adds input[data-a=name][data-i="0"]', "DOUBLE")
+    page.dispatch_event('#adds input[data-a=name][data-i="0"]', "change")
+    first = '#adds textarea[data-i="0"]'
+    page.click(first)
+    page.wait_for_selector("#refPanel.on #refBody [data-col=AMOUNT]")
+    page.click("#refBody [data-col=AMOUNT]")
+    page.click('#refBody [data-fxop=" * "]')
+    page.click("#refBody [data-col=AMOUNT]")
+    assert page.input_value(first) == "AMOUNT * AMOUNT", page.input_value(first)
+    assert page.inner_text("#refBody [data-col=AMOUNT] i") == "×2"
+    page.wait_for_function("document.querySelector('#fxmsg0').textContent.startsWith('✓')")
+
+    # a second formula: the first one is offered too, and typing suggests
+    page.click("#addFormula")
+    page.fill('#adds input[data-a=name][data-i="1"]', "LABEL")
+    page.dispatch_event('#adds input[data-a=name][data-i="1"]', "change")
+    second = '#adds textarea[data-i="1"]'
+    page.click(second)
+    page.wait_for_selector("#refBody .fxchip.added[data-col=DOUBLE]")
+    page.keyboard.type("dou")
+    page.wait_for_selector("#fxSug .fxs.on")
+    assert page.inner_text("#fxSug .fxs.on b") == "DOUBLE"
+    page.keyboard.press("Enter")
+    page.keyboard.type(" & tax")
+    page.wait_for_function("document.querySelector('#fxSug .fxs.on b')?.textContent === 'TAX_CODE'")
+    page.keyboard.press("Tab")
+    page.keyboard.type(" & [cur")
+    page.wait_for_function("document.querySelector('#fxSug .fxs.on b')?.textContent === 'CURRENCY'")
+    ui.shot("formula_suggestions")
+    page.keyboard.press("Enter")
+    page.keyboard.type(" & ro")                    # a function: ROUND(
+    page.wait_for_function("[...document.querySelectorAll('#fxSug .fxs b')].some(b => b.textContent === 'ROUND')")
+    page.keyboard.press("Escape")
+    assert not page.is_visible("#fxSug")
+    page.keyboard.type("und(DOUBLE, 0)")
+    want = "DOUBLE & TAX_CODE & [CURRENCY] & round(DOUBLE, 0)"
+    assert page.input_value(second) == want, page.input_value(second)
+    # drag a column into the formula: after the text …
+    page.keyboard.type(" & ")
+    box = page.locator(second).bounding_box()
+    page.drag_and_drop("#refBody [data-col=ISSUE_DATE]", second,
+                       target_position={"x": box["width"] - 8, "y": box["height"] - 6})
+    page.wait_for_function(f"document.querySelector({json.dumps(second)}).value.includes('ISSUE_DATE')")
+    assert page.input_value(second) == want + " & ISSUE_DATE", page.input_value(second)
+    page.wait_for_function("document.querySelector('#fxmsg1').textContent.startsWith('✓')")
+    assert ui.js("S.add_columns[1].value") == want + " & ISSUE_DATE"
+    # … and onto the middle of a name: it lands after the name, never inside it
+    assert ui.js("fxSnap('AMOUNT*2', 3, 'TAX')") == [" TAX", 6]
+    assert ui.js("fxSnap('[Pax Name] & 1', 4, 'X')") == [" X", 10]
+    ui.shot("formula_columns")
+    # the result: an added column used by the one below it
+    page.click("#refClose")
+    ui.tab("res")
+    ui.then("Preview ready", lambda: page.click("#doPreview"))
+    heads = page.locator("#gridwrap th").all_inner_texts()
+    assert "LABEL" in [h.strip() for h in heads], heads
+    # a dashboard value written as a formula: the card redraws on each change, the box keeps going
+    ui.tab("anal")
+    ui.then("Analysis ready", lambda: add_visual(ui, "kpi"))
+    card = "#anCards .card.item:nth-child(1)"
+    page.hover(card)
+    page.locator(f"{card} [data-act=edit]").click()
+    page.select_option(f"{card} [data-f=vcolumn]", "__expr")
+    vexpr = f"{card} input[data-f=vexpr]"
+    page.click(vexpr)
+    page.wait_for_selector("#refPanel.on #refBody .fxchip[data-col=LABEL]")
+    page.click("#refBody [data-col=AMOUNT]")
+    page.click('#refBody [data-fxop=" * "]')
+    page.click("#refBody [data-col=DOUBLE]")
+    page.wait_for_function("AT().analysis.items[0].values[0].expr === 'AMOUNT * DOUBLE'")
+    assert page.input_value(vexpr) == "AMOUNT * DOUBLE"
+    # a filter formula: the file's columns only — filters run before the added ones are made
+    ui.tab("filt")
+    ui.js("S.filters.children.push({...newRule(), op: 'formula'}); drawRules()")
+    page.click("#rules input[data-fx]")
+    page.wait_for_selector("#refPanel.on #refBody .fxchip[data-col=TAX_CODE]")
+    assert page.locator("#refBody .fxchip[data-col=DOUBLE]").count() == 0
+    assert "before the added columns" in page.inner_text("#refBody")
+    page.click("#refBody [data-col=TAX_CODE]")
+    page.click('#refBody [data-fxop=" = "]')
+    page.click('#refBody [data-fxop=\'""\']')
+    page.keyboard.type("YQ")
+    assert page.input_value("#rules input[data-fx]") == 'TAX_CODE = "YQ"'
+    # a Combine step: its table's columns, and its new columns above
+    ui.tab("ws")
+    ui.js("""S.wsView = 'steps'; WS.steps.push({id: uid(), kind: 'transform', enabled: true, name: 'Tidy', input: WS.groups[0].name, where: '',
+             add_columns: [{name: 'FIRST', value: 'AMOUNT'}, {name: 'SECOND', value: ''}]}); wsDraw(); wsSchemaRefresh()""")
+    page.wait_for_function("(S.wsSchema?.tables || []).some(t => t.columns.includes('AMOUNT'))")
+    page.click('#wsSteps [data-ai="1"] input[data-k=aval]')
+    page.wait_for_selector("#refPanel.on #refBody .fxchip.added[data-col=FIRST]")
+    page.click("#refBody [data-col=FIRST]")
+    page.click('#refBody [data-fxop=" + "]')
+    page.click("#refBody [data-col=AMOUNT]")
+    assert ui.js("WS.steps.at(-1).add_columns[1].value") == "FIRST + AMOUNT"
+    page.click("#wsSteps input[data-k=where]")
+    page.wait_for_function("document.querySelector('#refBody').textContent.includes('keep rows where')")
+    assert page.locator("#refBody .fxchip[data-col=FIRST]").count() == 0
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
             "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual,
-            "basics": dashboard_basics}
+            "basics": dashboard_basics, "formulas": formula_helper}
 
 
 def main() -> int:

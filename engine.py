@@ -2019,6 +2019,7 @@ def referenced_columns(job: dict, available: list[str]) -> set[str]:
         if c.get("include", True) and c.get("name"):
             need.add(c["name"])
     need |= filter_columns(job.get("filters"), available)
+    made: list[str] = []          # added columns so far: a formula may use the ones above it
     for a in job.get("add_columns") or []:
         if a.get("enabled") is False:
             continue
@@ -2026,12 +2027,15 @@ def referenced_columns(job: dict, available: list[str]) -> set[str]:
             need.add(a["source"])
         need.update(a.get("sources") or [])
         if a.get("kind") == "formula":
-            need |= F.referenced(str(a.get("value") or ""), available)
+            need |= F.referenced(str(a.get("value") or ""), available + made) - (set(made) - set(available))
         if a.get("kind") == "sql":
             text = str(a.get("value") or "")
             for col in available:
                 if re.search(rf'"{re.escape(col)}"|(?<![\w."]){re.escape(col)}(?![\w."])', text):
                     need.add(col)
+        name = str(a.get("name") or "").strip()
+        if name:
+            made.append(name)
     for c in job.get("find_scope") or []:
         need.add(c)
     return need

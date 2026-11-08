@@ -325,6 +325,32 @@ textarea.fx{width:100%;font-family:var(--mono);font-size:12px;min-height:52px;re
 .refpanel header{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
 .refpanel header h3{margin:0;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);flex:1}
 .refbody{overflow:auto;padding:4px 14px 24px}
+.rtabs{display:flex;gap:2px;flex:1}
+.rtabs button{border:1px solid transparent;background:none;padding:4px 9px;border-radius:4px;font-size:12px;color:var(--muted);cursor:pointer}
+.rtabs button.on{background:var(--teal-soft);color:var(--teal-2);font-weight:600;border-color:var(--teal-soft)}
+.refctx{font-size:11.5px;color:var(--muted);margin:10px 0 8px;line-height:1.5}
+.refctx b{color:var(--ink)}
+.refcat .n{font-weight:400;color:var(--faint);letter-spacing:0;margin-left:4px}
+.fxops{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px}
+.fxops .btn{font-family:var(--mono);min-width:30px;justify-content:center}
+.fxchips{display:flex;flex-wrap:wrap;gap:4px}
+.fxchip{font-family:var(--mono);font-size:11.5px;border:1px solid var(--line);background:var(--surface);border-radius:12px;
+  padding:3px 9px;cursor:grab;display:inline-flex;gap:5px;align-items:center;color:var(--ink)}
+.fxchip:hover{border-color:var(--teal-2);background:var(--teal-soft)}
+.fxchip.added{border-style:dashed;color:var(--teal-2)}
+.fxchip.used{border-color:var(--teal-2)}
+.fxchip i{font-style:normal;font-size:10px;color:var(--teal-2);font-family:var(--ui)}
+.fxsug{position:fixed;display:none;z-index:400;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:0 8px 24px rgba(14,20,24,.18);min-width:240px;max-width:460px;max-height:300px;overflow:auto;padding:3px}
+.fxs{display:flex;gap:7px;align-items:center;padding:4px 8px;border-radius:3px;cursor:pointer;font-size:12px}
+.fxs.on,.fxs:hover{background:var(--teal-soft)}
+.fxs b{font-family:var(--mono);font-weight:500}
+.fxs b u{text-decoration:none;font-weight:700;color:var(--teal-2)}
+.fxs .ic{width:16px;text-align:center;color:var(--faint)}.fxs .ic.fn{color:#b26a00;font-style:italic}
+.fxs .h{margin-left:auto;font-size:10.5px;color:var(--faint);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.fxkeys{font-size:10px;color:var(--faint);padding:4px 8px 2px;border-top:1px solid var(--line-2);margin-top:2px}
+@media (min-width:1100px){body.refopen main{padding-right:390px}}
+.fxdrop{outline:2px dashed var(--teal-2);outline-offset:1px}
 .refcat{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--teal-2);margin:16px 0 4px;font-weight:700}
 .refitem{padding:7px 0;border-bottom:1px solid var(--line-2)}
 .refitem code{font-family:var(--mono);font-size:11.5px;color:var(--ink);font-weight:600}
@@ -1059,9 +1085,11 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 </div></div>
 
 <aside class="refpanel" id="refPanel">
-  <header><h3>Formula reference</h3><input type="text" id="refSearch" placeholder="Search" style="width:140px;height:24px"><button class="btn sm" id="refClose">Close</button></header>
+  <header><div class="rtabs" id="refTabs"><button data-rt="cols" class="on">▦ Columns</button><button data-rt="fns">ƒ Functions</button></div>
+    <input type="text" id="refSearch" placeholder="Find a column" style="width:130px;height:24px"><button class="btn sm" id="refClose">Close</button></header>
   <div class="refbody" id="refBody"></div>
 </aside>
+<div class="fxsug" id="fxSug" role="listbox"></div>
 
 <script>
 "use strict";
@@ -1756,7 +1784,8 @@ function drawAdds(){
       if (type==="formula") return `<div style="flex-basis:100%">
           <textarea data-a="${k}" data-i="${i}" data-fx="1" class="fx" placeholder='IF(AMOUNT > 1000, "REVIEW", "OK")'>${esc(v)}</textarea>
           <div class="fxline"><button class="btn sm" data-a="check" data-i="${i}">Check</button>
-            <button class="btn sm ghost" data-a="ref" data-i="${i}">ƒ Reference</button><span class="fxmsg" id="fxmsg${i}"></span></div></div>`;
+            <button class="btn sm ghost" data-a="cols" data-i="${i}" title="Every column this formula can use — click or drag one in">▦ Columns</button>
+            <button class="btn sm ghost" data-a="ref" data-i="${i}">ƒ Functions</button><span class="fxmsg" id="fxmsg${i}"></span></div></div>`;
       return `<label class="lbl">${label}</label><input type="${type}" data-a="${k}" data-i="${i}" value="${esc(v)}" style="width:${type==="number"?"78px":(k==="value"&&a.kind==="sql"?"280px":"150px")}">`;
     }).join("");
     return `<div class="addcol" data-i="${i}">
@@ -1775,7 +1804,7 @@ function drawAdds(){
     const i = +el.dataset.i, k = el.dataset.a, a = S.add_columns[i];
     if (k === "del"){ el.onclick = () => { S.add_columns.splice(i,1); drawAdds(); }; return; }
     if (k === "check"){ el.onclick = () => checkAddFormula(i); return; }
-    if (k === "ref"){ el.onclick = () => { S.fxTarget = $(`#adds textarea[data-i="${i}"][data-fx]`); openRef(); }; return; }
+    if (k === "ref" || k === "cols"){ el.onclick = () => { S.fxTarget = $(`#adds textarea[data-i="${i}"][data-fx]`); openRef(k === "ref" ? "fns" : "cols"); }; return; }
     if (k === "sources"){ el.onchange = () => { a.sources = [...$$(`#adds [data-i="${i}"][data-a=sources]`)].filter(c=>c.checked).map(c=>c.value); }; return; }
     if (el.dataset.fx) el.onfocus = () => { S.fxTarget = el; };
     el.onchange = e => {
@@ -1790,7 +1819,8 @@ async function checkAddFormula(i){
   const a = S.add_columns[i], box = $(`#fxmsg${i}`);
   if (!box || !a) return;
   if (!String(a.value || "").trim()){ box.textContent = ""; return; }
-  const r = await api().formula_check({text: a.value, columns: S.allCols});
+  const above = S.add_columns.slice(0, i).filter(x => x.enabled !== false).map(x => String(x.name || "").trim()).filter(Boolean);
+  const r = await api().formula_check({text: a.value, columns: [...S.allCols, ...above.filter(n => !S.allCols.includes(n))]});
   box.className = "fxmsg " + (r?.ok ? "ok" : "err");
   box.textContent = r?.ok ? `✓ gives ${r.type}${r.columns?.length ? " · uses " + r.columns.join(", ") : ""}`
                           : `✗ ${r?.error || "invalid"}${r?.pos != null ? ` — at character ${r.pos + 1}` : ""}`;
@@ -1992,13 +2022,110 @@ $("#peekAllBtn").onclick = async () => {
       differ ? "err" : "ok");
 };
 
-/* ---- formula reference ---- */
+/* ---- formula helper ----
+   Every formula box (an added column, a filter formula, a dashboard value, a Combine
+   step's filter or new column) knows the columns it can use: the file's, plus the
+   added columns made before it. Typing a few letters lists the matching columns and
+   functions under the cursor; the side panel lists every column to click (as often as
+   you like) or drag into the formula. */
 let REF = null;
-async function openRef(){
+const FX = {el: null, key: "", ctx: null, tab: "cols", tok: null, sug: [], pick: 0, closedKey: null};
+const FX_SEL = "input[data-fx], textarea[data-fx]";
+async function fxLoadRef(){
   if (!REF){ const r = await api().formula_reference(); REF = r?.ok ? r : {functions: [], notes: []}; }
-  $("#refPanel").classList.add("on"); drawRef();
+  return REF;
 }
-function drawRef(){
+const fxName = c => /^[A-Za-z_][A-Za-z0-9_.]*$/.test(c) && !/^(TRUE|FALSE)$/i.test(c) ? c : `[${c}]`;
+function fxCtx(el){
+  const made = list => list.map(x => String(x.name || "").trim()).filter(Boolean);
+  if (el.closest("#adds")){
+    const i = +el.dataset.i, a = S.add_columns[i] || {};
+    const above = made(S.add_columns.slice(0, i).filter(x => x.enabled !== false));
+    return {key: `add:${i}`, title: `New column “${a.name || "unnamed"}”`,
+            groups: [{label: "From the file", cols: S.allCols},
+                     {label: "Added above this one", cols: above, tag: "added",
+                      empty: "Columns added above this one can be used here too."}]};
+  }
+  if (el.closest("#rules"))
+    return {key: `rule:${el.closest("[data-path]")?.dataset.path}`, title: "Filter formula",
+            groups: [{label: "From the file", cols: S.allCols}],
+            note: "Filters run before the added columns are made, so those can't be used here."};
+  const card = el.closest("#anCards .card.item");
+  if (card){
+    const it = AT().analysis.items[+card.dataset.i] || {};
+    if (AT().overview) S.anCtx = it.table || "";
+    return {key: `card:${it.id}:${el.closest("[data-vj]")?.dataset.vj}`, title: `A value in “${it.name || "this visual"}”`,
+            groups: [{label: AT().overview ? (it.table || "Fields") : "Fields", cols: anCols()}]};
+  }
+  const st = el.closest("#wsSteps") ? stepOf(el) : null;
+  if (st){
+    const cols = wsCols(st.input), label = st.input || "Table";
+    if (el.dataset.k === "where")
+      return {key: `step:${st.id}:where`, title: `${st.name} — keep rows where`, groups: [{label, cols}],
+              note: "The step's new columns are made after this filter."};
+    const ai = +el.closest("[data-ai]").dataset.ai;
+    return {key: `step:${st.id}:a${ai}`, title: `${st.name} — new column “${(st.add_columns[ai] || {}).name || "unnamed"}”`,
+            groups: [{label, cols}, {label: "Added above this one", cols: made((st.add_columns || []).slice(0, ai)), tag: "added",
+                      empty: "New columns above this one can be used here too."}]};
+  }
+  return {key: "", title: "Formula", groups: [{label: "Columns", cols: S.allCols}]};
+}
+/* the box a click inserts into — found again after a redraw */
+function fxEl(){
+  if (FX.el && document.body.contains(FX.el)) return FX.el;
+  if (FX.key){
+    const el = [...$$(FX_SEL)].find(x => fxCtx(x).key === FX.key);
+    if (el){ FX.el = el; return el; }
+  }
+  return null;
+}
+function fxFocus(el){
+  FX.el = el; S.fxTarget = el;
+  FX.ctx = fxCtx(el);
+  if (FX.ctx.key !== FX.key){ FX.key = FX.ctx.key; $("#refSearch").value = ""; }
+  fxLoadRef();
+  if (!$("#refPanel").classList.contains("on")){
+    if (FX.closedKey === FX.key) return;        // closed for this box: stays closed until another one
+    FX.tab = "cols";
+    refShow(true);
+  }
+  drawRef();
+}
+/* the column names a formula uses, and how many times */
+function fxUsed(text){
+  const used = {}, t = String(text || "").replace(/"(?:[^"]|"")*"?/g, " ");
+  const bump = n => { const k = n.toLowerCase(); used[k] = (used[k] || 0) + 1; };
+  t.replace(/\[([^\]]*)\]/g, (m, n) => { bump(n); return " "; })
+   .replace(/[A-Za-z_][A-Za-z0-9_.]*(?!\s*\()/g, m => { bump(m); return m; });
+  return used;
+}
+function fxColumnsHTML(){
+  const el = fxEl(), ctx = el ? (FX.ctx = fxCtx(el)) : FX.ctx;
+  if (!ctx) return `<div class="empty">Click into a formula box — its columns are listed here.</div>`;
+  const q = $("#refSearch").value.trim().toLowerCase(), used = fxUsed(el?.value);
+  const ops = [["+", " + "], ["−", " - "], ["×", " * "], ["÷", " / "], ["&", " & "], ["=", " = "], ["<>", " <> "],
+               [">", " > "], ["<", " < "], ["( )", "()", 1], [",", ", "], ['" "', '""', 1]];
+  let html = `<div class="refctx"><b>${esc(ctx.title)}</b><br>Click a column to put it at the cursor — as many times as you need — or drag it into the formula. In the formula, type a few letters for suggestions; Ctrl+Space lists them all.</div>
+    <div class="fxops">${ops.map(([l, v, b]) => `<button class="btn sm" data-fxop="${esc(v)}" data-back="${b || 0}" title="Insert ${esc(v.trim() || v)}">${esc(l)}</button>`).join("")}</div>`;
+  for (const g of ctx.groups){
+    const all = g.cols || [], cols = all.filter(c => !q || c.toLowerCase().includes(q));
+    if (!all.length){
+      if (!q) html += `<div class="refcat">${esc(g.label)}</div><p class="refnote">${esc(g.empty || "No columns yet — click a file on the left.")}</p>`;
+      continue;
+    }
+    if (!cols.length) continue;
+    html += `<div class="refcat">${esc(g.label)} <span class="n">${cols.length}</span></div><div class="fxchips">${cols.map(c => {
+      const n = used[c.toLowerCase()] || 0;
+      return `<button class="fxchip ${g.tag || ""} ${n ? "used" : ""}" draggable="true" data-col="${esc(c)}" title="Insert ${esc(fxName(c))}${n ? ` — used ${n}× in this formula` : ""}">${esc(c)}${n ? `<i>${n > 1 ? "×" + n : "✓"}</i>` : ""}</button>`;
+    }).join("")}</div>`;
+  }
+  if (q && !ctx.groups.some(g => (g.cols || []).some(c => c.toLowerCase().includes(q))))
+    html += `<div class="empty">No column matches “${esc(q)}”.</div>`;
+  if (ctx.note) html += `<p class="refnote" style="margin-top:12px">${esc(ctx.note)}</p>`;
+  return html;
+}
+function fxFunctionsHTML(){
+  if (!REF) return `<div class="empty">Loading…</div>`;
   const q = $("#refSearch").value.trim().toLowerCase();
   const fns = REF.functions.filter(f => !q || f.name.toLowerCase().includes(q) ||
     f.description.toLowerCase().includes(q) || f.category.toLowerCase().includes(q));
@@ -2011,21 +2138,226 @@ function drawRef(){
       <code>${esc(f.syntax)}</code><button class="btn sm" data-ins="${esc(f.name)}">Insert</button></div>
       <p>${esc(f.description)}</p><div class="ex">${esc(f.example)}</div></div>`;
   }
-  $("#refBody").innerHTML = html || `<div class="empty">No function matches “${esc(q)}”.</div>`;
+  return html || `<div class="empty">No function matches “${esc(q)}”.</div>`;
+}
+function refShow(on){
+  $("#refPanel").classList.toggle("on", on);
+  document.body.classList.toggle("refopen", on);
+}
+function drawRef(){
+  $$("#refTabs [data-rt]").forEach(b => b.classList.toggle("on", b.dataset.rt === FX.tab));
+  $("#refSearch").placeholder = FX.tab === "cols" ? "Find a column" : "Find a function";
+  $("#refBody").innerHTML = FX.tab === "cols" ? fxColumnsHTML() : fxFunctionsHTML();
+}
+async function openRef(tab = "fns"){
+  FX.tab = tab;
+  const el = S.fxTarget && document.body.contains(S.fxTarget) ? S.fxTarget : null;
+  if (el){ FX.el = el; FX.ctx = fxCtx(el); FX.key = FX.ctx.key; }
+  refShow(true); drawRef();
+  await fxLoadRef(); drawRef();
+}
+/* put text at the cursor of the formula box, then tell the page it changed */
+function fxInsert(text, back = 0){
+  const el = fxEl();
+  if (!el){ say("Click into a formula box first.", "err"); return; }
+  const s0 = el.selectionStart ?? el.value.length, s1 = el.selectionEnd ?? s0;
+  el.focus();
+  el.setRangeText(text, s0, s1, "end");
+  if (back) el.selectionStart = el.selectionEnd = el.selectionEnd - back;
+  fxCommit(el);
+}
+function fxCommit(el){
+  const pos = el.selectionEnd;
+  el.dispatchEvent(new Event("input", {bubbles: true}));
+  el.dispatchEvent(new Event("change", {bubbles: true}));
+  if (!document.body.contains(el)){                  // the box was drawn again: carry on in the new one
+    const nu = fxEl();
+    if (nu){ nu.focus(); nu.selectionStart = nu.selectionEnd = Math.min(pos, nu.value.length); }
+  }
+  if ($("#refPanel").classList.contains("on") && FX.tab === "cols") drawRef();
 }
 $("#refSearch").oninput = drawRef;
-$("#refClose").onclick = () => $("#refPanel").classList.remove("on");
+$("#refClose").onclick = () => { refShow(false); FX.closedKey = FX.key; };
+$("#refTabs").addEventListener("click", async e => {
+  const b = e.target.closest("[data-rt]"); if (!b) return;
+  FX.tab = b.dataset.rt; $("#refSearch").value = ""; drawRef();
+  if (FX.tab === "fns"){ await fxLoadRef(); drawRef(); }
+});
+// keep the cursor in the formula: a click on a column or operator must not take focus
+// (not the columns: holding the mouse down on one starts a drag; a click puts the cursor back itself)
+$("#refBody").addEventListener("mousedown", e => { if (e.target.closest("[data-fxop], [data-ins]")) e.preventDefault(); });
 $("#refBody").addEventListener("click", e => {
-  const b = e.target.closest("[data-ins]"); if (!b) return;
-  const t = S.fxTarget;
-  if (!t || !document.body.contains(t)){ say("Click into a formula box first, then Insert.", "err"); return; }
-  const ins = `${b.dataset.ins}()`, s0 = t.selectionStart ?? t.value.length, s1 = t.selectionEnd ?? s0;
-  t.value = t.value.slice(0, s0) + ins + t.value.slice(s1);
-  t.focus(); t.selectionStart = t.selectionEnd = s0 + ins.length - 1;
-  t.dispatchEvent(new Event("input", {bubbles: true})); t.dispatchEvent(new Event("change", {bubbles: true}));
+  const c = e.target.closest("[data-col]"), op = e.target.closest("[data-fxop]"), fn = e.target.closest("[data-ins]");
+  if (c) fxInsert(fxName(c.dataset.col));
+  else if (op) fxInsert(op.dataset.fxop, +op.dataset.back);
+  else if (fn) fxInsert(`${fn.dataset.ins}()`, 1);
+});
+$("#refBody").addEventListener("dragstart", e => {
+  const c = e.target.closest("[data-col]"); if (!c) return;
+  FX.dragging = fxName(c.dataset.col);
+  e.dataTransfer.setData("text/plain", FX.dragging);
+  e.dataTransfer.effectAllowed = "copy";
+});
+$("#refBody").addEventListener("dragend", () => { FX.dragging = null; $$(".fxdrop").forEach(x => x.classList.toggle("fxdrop", false)); });
+
+/* suggestions as you type */
+function fxToken(el){
+  const v = el.value, c = el.selectionEnd ?? v.length, pre = v.slice(0, c);
+  if ((pre.match(/"/g) || []).length % 2) return null;                 // inside "text"
+  let m = pre.match(/\[([^\[\]]*)$/);
+  if (m) return {q: m[1], start: c - m[1].length - 1, end: c + (v[c] === "]" ? 1 : 0), bracket: true};
+  m = pre.match(/[A-Za-z_][A-Za-z0-9_.]*$/);
+  if (m && !/[0-9.]$/.test(pre.slice(0, c - m[0].length))) return {q: m[0], start: c - m[0].length, end: c, bracket: false};
+  return {q: "", start: c, end: c, bracket: false};
+}
+function fxMatches(tok, ctx, all){
+  const q = tok.q.toLowerCase(), qn = q.replace(/[^a-z0-9]/g, "");
+  const score = name => {
+    const l = name.toLowerCase();
+    if (!q) return 3;
+    if (l === q) return 0;
+    if (l.startsWith(q)) return 1;
+    if (l.includes(q)) return 2;
+    if (qn && l.replace(/[^a-z0-9]/g, "").includes(qn)) return 3;
+    const ini = name.split(/[^A-Za-z0-9]+/).filter(Boolean).map(w => w[0]).join("").toLowerCase();
+    return q.length > 1 && ini.startsWith(q) ? 3 : -1;
+  };
+  const seen = new Set(), out = [];
+  ctx.groups.forEach(g => (g.cols || []).forEach(c => {
+    if (seen.has(c)) return; seen.add(c);
+    const s = score(c); if (s >= 0) out.push({name: c, kind: "col", hint: g.tag === "added" ? "added column" : "", s, o: out.length});
+  }));
+  if (!tok.bracket && q && REF) REF.functions.forEach(f => {
+    const l = f.name.toLowerCase();
+    if (l.startsWith(q)) out.push({name: f.name, kind: "fn", hint: f.syntax, s: l === q ? 0.5 : 1.5, o: 1e6 + out.length});
+  });
+  return out.sort((a, b) => a.s - b.s || a.o - b.o).slice(0, all || !q ? 60 : 12);
+}
+function fxSuggest(el, force){
+  const tok = fxToken(el);
+  if (!tok || (!tok.q && !tok.bracket && !force)) return fxHideSug();
+  const sug = fxMatches(tok, FX.ctx || fxCtx(el), force);
+  if (!sug.length || (sug.length === 1 && sug[0].s === 0 && !force && !tok.bracket)) return fxHideSug();
+  FX.tok = tok; FX.sug = sug; FX.pick = 0;
+  const box = $("#fxSug"), q = tok.q;
+  const mark = n => { const i = q ? n.toLowerCase().indexOf(q.toLowerCase()) : -1;
+    return i < 0 ? esc(n) : esc(n.slice(0, i)) + `<u>${esc(n.slice(i, i + q.length))}</u>` + esc(n.slice(i + q.length)); };
+  box.innerHTML = sug.map((s, i) => `<div class="fxs ${i ? "" : "on"}" data-si="${i}"><span class="ic ${s.kind}">${s.kind === "fn" ? "ƒ" : "▦"}</span>
+      <b>${mark(s.name)}</b><span class="h">${esc(s.hint)}</span></div>`).join("") +
+    `<div class="fxkeys">↑ ↓ choose · Enter or Tab inserts · Esc closes</div>`;
+  const xy = fxCaretXY(el);
+  box.style.display = "block";
+  const w = box.offsetWidth, h = box.offsetHeight;
+  box.style.left = Math.max(4, Math.min(xy.x, innerWidth - w - 8)) + "px";
+  box.style.top = (xy.y + h + 8 > innerHeight ? Math.max(4, xy.top - h - 4) : xy.y + 2) + "px";
+}
+function fxHideSug(){ $("#fxSug").style.display = "none"; FX.sug = []; FX.tok = null; }
+function fxAccept(i){
+  const el = fxEl(), t = FX.tok, s = FX.sug[i];
+  if (!el || !t || !s) return fxHideSug();
+  el.focus();
+  if (s.kind === "fn"){ el.setRangeText(`${s.name}()`, t.start, t.end, "end"); el.selectionStart = el.selectionEnd = el.selectionEnd - 1; }
+  else el.setRangeText(t.bracket ? `[${s.name}]` : fxName(s.name), t.start, t.end, "end");
+  fxHideSug(); fxCommit(el);
+}
+/* where the cursor is on screen — a hidden copy of the box measures it */
+function fxCaretXY(el){
+  const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+  if (el.tagName !== "TEXTAREA") return {x: r.left + 6, y: r.bottom, top: r.top};
+  const m = document.createElement("div");
+  FX_MIRROR.forEach(p => m.style[p] = cs[p]);
+  Object.assign(m.style, {position: "absolute", visibility: "hidden", left: "-9999px", top: "0", whiteSpace: "pre-wrap", overflowWrap: "break-word"});
+  const pos = el.selectionEnd ?? el.value.length;
+  m.textContent = el.value.slice(0, pos);
+  const sp = document.createElement("span"); sp.textContent = "​"; m.appendChild(sp);
+  document.body.appendChild(m);
+  const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3;
+  const x = r.left + sp.offsetLeft - el.scrollLeft, top = r.top + sp.offsetTop - el.scrollTop;
+  m.remove();
+  return {x: Math.min(x, r.right - 20), y: Math.min(top + lh, r.bottom), top};
+}
+document.addEventListener("focusin", e => { const el = e.target.closest?.(FX_SEL); if (el) fxFocus(el); });
+document.addEventListener("focusout", e => { if (e.target === FX.el) setTimeout(() => { if (document.activeElement !== FX.el) fxHideSug(); }, 150); });
+document.addEventListener("input", e => {
+  const el = e.target; if (!el.matches?.(FX_SEL)) return;
+  if (el !== FX.el) fxFocus(el);
+  if (e.isTrusted && e.inputType !== "insertFromDrop") fxSuggest(el);
+  if ($("#refPanel").classList.contains("on") && FX.tab === "cols") drawRef();
+});
+document.addEventListener("keydown", e => {
+  const el = e.target; if (!el.matches?.(FX_SEL)) return;
+  if (e.ctrlKey && (e.key === " " || e.code === "Space")){ e.preventDefault(); FX.ctx = fxCtx(el); fxSuggest(el, true); return; }
+  if (!FX.sug.length || $("#fxSug").style.display === "none") return;
+  const n = FX.sug.length;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){ e.preventDefault(); e.stopPropagation();
+    FX.pick = (FX.pick + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+    $$("#fxSug .fxs").forEach((x, i) => x.classList.toggle("on", i === FX.pick));
+    $(`#fxSug .fxs[data-si="${FX.pick}"]`)?.scrollIntoView({block: "nearest"}); }
+  else if (e.key === "Enter" || e.key === "Tab"){ e.preventDefault(); e.stopPropagation(); fxAccept(FX.pick); }
+  else if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); fxHideSug(); }
+}, true);
+document.addEventListener("keyup", e => {
+  if (!e.target.matches?.(FX_SEL) || !FX.sug.length) return;
+  if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) fxSuggest(e.target);
+});
+document.addEventListener("click", e => { if (FX.sug.length && !e.target.closest("#fxSug") && !e.target.matches?.(FX_SEL)) fxHideSug(); });
+$("#fxSug").addEventListener("mousedown", e => {
+  const r = e.target.closest("[data-si]"); e.preventDefault();
+  if (r) fxAccept(+r.dataset.si);
+});
+/* a column dragged from the side list lands where it is dropped: a hidden copy of the
+   box, a span per character, says which character the mouse is over */
+const FX_MIRROR = ["boxSizing", "width", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+  "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "fontFamily", "fontSize", "fontWeight", "fontStyle",
+  "letterSpacing", "lineHeight", "tabSize", "textTransform", "wordSpacing"];
+function fxIndexAt(el, cx, cy){
+  const r = el.getBoundingClientRect(), cs = getComputedStyle(el), area = el.tagName === "TEXTAREA", v = el.value;
+  const m = document.createElement("div");
+  FX_MIRROR.forEach(p => m.style[p] = cs[p]);
+  Object.assign(m.style, {position: "absolute", visibility: "hidden", left: "-9999px", top: "0",
+                          whiteSpace: area ? "pre-wrap" : "pre", overflowWrap: area ? "break-word" : "normal"});
+  if (!area) m.style.width = "auto";
+  const spans = [];
+  for (let i = 0; i < v.length; i++){ const sp = document.createElement("span"); sp.textContent = v[i]; m.appendChild(sp); spans.push(sp); }
+  document.body.appendChild(m);
+  const x = cx - r.left - (parseFloat(cs.borderLeftWidth) || 0) + el.scrollLeft;
+  const y = cy - r.top - (parseFloat(cs.borderTopWidth) || 0) + el.scrollTop;
+  const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3;
+  let best = v.length, bestD = Infinity;
+  spans.forEach((sp, i) => {
+    const top = sp.offsetTop, dy = area ? (y < top ? top - y : y > top + lh ? y - top - lh : 0) : 0;
+    [[i, sp.offsetLeft], [i + 1, sp.offsetLeft + sp.offsetWidth]].forEach(([at, bx]) => {
+      const d = dy * 1000 + Math.abs(x - bx); if (d < bestD){ bestD = d; best = at; }
+    });
+  });
+  document.body.removeChild(m);
+  return best;
+}
+/* never inside a name: a drop in the middle of AMOUNT or [Pax Name] lands after it,
+   with a space either side where it would otherwise run into a name */
+function fxSnap(v, at, text){
+  const w = ch => /[A-Za-z0-9_.]/.test(ch || "");
+  const open = v.lastIndexOf("[", at - 1);
+  if (open >= 0 && v.lastIndexOf("]", at - 1) < open && v.indexOf("]", open) >= 0) at = v.indexOf("]", open) + 1;
+  else while (at < v.length && w(v[at - 1]) && w(v[at])) at++;
+  const before = v[at - 1], after = v[at];
+  return [(before && /[A-Za-z0-9_.\])"]/.test(before) ? " " : "") + text + (after && /[A-Za-z0-9_.\[("]/.test(after) ? " " : ""), at];
+}
+document.addEventListener("dragover", e => {
+  const el = e.target.closest?.(FX_SEL); if (!el || !FX.dragging) return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "copy"; el.classList.add("fxdrop");
+});
+document.addEventListener("dragleave", e => { const el = e.target.closest?.(FX_SEL); if (el) el.classList.toggle("fxdrop", false); });
+document.addEventListener("drop", e => {
+  const el = e.target.closest?.(FX_SEL); if (!el || !FX.dragging) return;
+  e.preventDefault(); el.classList.toggle("fxdrop", false);
+  const [text, at] = fxSnap(el.value, fxIndexAt(el, e.clientX, e.clientY), FX.dragging);
+  FX.dragging = null;
+  FX.el = el; FX.ctx = fxCtx(el); FX.key = FX.ctx.key;          // the box it landed in
+  el.focus(); el.setRangeText(text, at, at, "end"); fxCommit(el);
 });
 $("#addFormula").onclick = () => { S.add_columns.push({name:"", kind:"formula", value:"", enabled:true}); drawAdds(); };
-$("#openRef").onclick = () => openRef();
+$("#openRef").onclick = () => openRef("fns");
 
 /* ======================= analysis: interactive dashboard + pivot summaries ======================= */
 const AM = () => S.meta.analysis || {aggs:[], show_as:[], groupings:[], item_kinds:[], default_formats:{}, charts:{}};
@@ -2506,6 +2838,8 @@ function itemField(it, r){
 }
 const drawCards = guarded(function(){
   const at = AT(), box = $("#anCards");
+  // a refresh that lands while a card's ⋯ menu is open keeps it open
+  const menuOpen = $("#anCards .cmenu.open")?.closest(".card.item")?.dataset.id;
   if (!at.analysis.items.length){
     box.innerHTML = `<div class="card anempty"><h3>Start your dashboard</h3>
       <p>ColSift can lay out a slicer, a couple of totals, a breakdown and a trend from the columns that look right — change or remove any of them after. Or add visuals one at a time with “＋ Add visual”.</p>
@@ -2521,7 +2855,7 @@ const drawCards = guarded(function(){
     else if (!r) inner = `<div class="sub">Not worked out yet — press ↻ Refresh sample.</div>`;
     else if (r.error) inner = `<div class="itemerr">${esc(r.error)}</div>`;
     else inner = itemBody(it, r, width);
-    return `<div class="card item ${width} ${editing ? "editing full" : ""}" data-i="${i}" draggable="${editing ? "false" : "true"}">
+    return `<div class="card item ${width} ${editing ? "editing full" : ""}" data-i="${i}" data-id="${esc(it.id)}" draggable="${editing ? "false" : "true"}">
       <div class="tools">
         ${kind === "studio" ? `<button class="btn sm ghost" data-act="msedit" title="Open it in Measure Studio">✦ Design</button>` : ""}
         <button class="btn sm ${editing ? "pri" : "ghost"}" data-act="edit" title="${editing ? "Close the editor" : "Change what this visual shows"}">${editing ? "Done" : "Edit"}</button>
@@ -2538,6 +2872,7 @@ const drawCards = guarded(function(){
       <h4><span class="grip" title="Drag to move">⠿</span>${esc(it.name || (r && r.name) || "Visual")}${at.overview ? `<span class="srcchip" title="The table this card reads">${esc(it.table || "no data")}</span>` : ""}${it.ignore_filters ? ` <span class="sub" title="This visual ignores the dashboard filters">· unfiltered</span>` : ""}</h4>
       ${inner}</div>`;
   }).join("");
+  if (menuOpen) $(`#anCards .card.item[data-id="${CSS.escape(menuOpen)}"] .cmenu`)?.classList.add("open");
   if (at.analysis.items.some(x => x.kind === "studio")) msPaint();
 });
 function itemBody(it, r, width){
@@ -2583,7 +2918,7 @@ function valuesEditor(it, multi, more){
   AM().aggs.forEach(a => { let g = aggGroups.find(x => x.g === a.group); if (!g) aggGroups.push(g = {g: a.group, as: []}); g.as.push(a); });
   return (multi ? vals : vals.slice(0, 1)).map((v, j) => `<span class="valrow" data-vj="${j}">
       <select data-f="vcolumn" style="max-width:190px"><option value="__expr" ${v.expr ? "selected" : ""}>ƒ formula…</option>${anColOptions(v.expr ? "" : v.column)}</select>
-      ${v.expr != null ? `<input type="text" data-f="vexpr" value="${esc(v.expr || "")}" placeholder="AMOUNT * RATE" style="width:150px;font-family:var(--mono)">` : ""}
+      ${v.expr != null ? `<input type="text" data-f="vexpr" data-fx="1" value="${esc(v.expr || "")}" placeholder="AMOUNT * RATE" style="width:190px;font-family:var(--mono)">` : ""}
       <select data-f="vagg">${aggGroups.map(g => `<optgroup label="${esc(g.g)}">${g.as.map(a =>
         `<option value="${a.id}" ${(v.agg || "sum") === a.id ? "selected" : ""}>${esc(a.label)}</option>`).join("")}</optgroup>`).join("")}</select>
       ${more ? `<select data-f="vfmt" style="width:118px" title="Number format">${NUMFMTS.map(f => `<option ${f === (v.fmt || "") ? "selected" : ""}>${esc(f)}</option>`).join("")}</select>` : ""}
@@ -3786,10 +4121,10 @@ function stepForm(s){
     const cols = wsCols(s.input);
     const adds = s.add_columns || (s.add_columns = []);
     return `<div class="args"><label class="lbl">Table</label><select data-k="input">${tableOptions(s.input, s.name, "—")}</select>
-      <label class="lbl">Keep rows where</label><input type="text" data-k="where" value="${esc(s.where || "")}" placeholder='formula, e.g. AND(AMOUNT > 500, TAX_CODE <> "XT")' style="flex:1;min-width:260px;font-family:var(--mono)"></div>
+      <label class="lbl">Keep rows where</label><input type="text" data-k="where" data-fx="1" value="${esc(s.where || "")}" placeholder='formula, e.g. AND(AMOUNT > 500, TAX_CODE <> "XT")' style="flex:1;min-width:260px;font-family:var(--mono)"></div>
     <div class="args"><label class="lbl">New columns</label><div style="flex:1">${adds.map((a, i) => `<div class="keyrow" data-ai="${i}">
         <input type="text" data-k="aname" value="${esc(a.name || "")}" placeholder="NAME" style="width:130px">
-        <span class="sub" style="margin:0">=</span><input type="text" data-k="aval" value="${esc(a.value || "")}" placeholder="ROUND(AMOUNT * RATE, 2)" style="flex:1;font-family:var(--mono)">
+        <span class="sub" style="margin:0">=</span><input type="text" data-k="aval" data-fx="1" value="${esc(a.value || "")}" placeholder="ROUND(AMOUNT * RATE, 2)" style="flex:1;font-family:var(--mono)">
         <button class="btn x" data-k="adel">✕</button></div>`).join("")}
       <button class="btn sm ghost" data-k="aadd">＋ formula column</button> <button class="btn sm ghost" data-k="ref">ƒ reference</button></div></div>
     <div class="args"><label class="lbl">Keep columns</label>${checks(cols.concat(adds.map(a => a.name).filter(Boolean)), (s.columns || []).map(c => c.name), "tcols")}
@@ -3910,7 +4245,7 @@ $("#wsSteps").addEventListener("click", e => {
   else if (k === "adel"){ s.add_columns.splice(+b.closest("[data-ai]").dataset.ai, 1); syncTransform(s); }
   else if (k === "vadd") s.values.push({column: wsCols(s.input)[0] || "", agg: "sum"});
   else if (k === "vdel") s.values.splice(+b.closest("[data-vi]").dataset.vi, 1);
-  else if (k === "ref"){ openRef(); return; }
+  else if (k === "ref"){ openRef("fns"); return; }
   wsDraw(); wsSchemaRefresh();
 });
 $("#wsSteps").addEventListener("focusin", e => { if (e.target.dataset.k === "aval" || e.target.dataset.k === "where") S.fxTarget = e.target; });
