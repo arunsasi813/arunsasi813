@@ -40,8 +40,19 @@ class MainActivity : AppCompatActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true          // persists the deck's own progress
             allowFileAccess = true
+            allowContentAccess = false
             cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+            // Honour the deck's <meta viewport> so the mobile layout applies.
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            // Let the reader pinch-zoom dense formulas, without on-screen buttons.
+            setSupportZoom(true)
+            builtInZoomControls = true
+            displayZoomControls = false
+            textZoom = 100
         }
+        web.isScrollbarFadingEnabled = true
+        web.overScrollMode = android.view.View.OVER_SCROLL_IF_CONTENT_SCROLLS
         web.addJavascriptInterface(JsBridge(applicationContext), "CMA")
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String?) {
