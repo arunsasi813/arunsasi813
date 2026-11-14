@@ -304,6 +304,12 @@ table.dtable tr:nth-child(even) td{background:#fafcfc}
   .bp-seg{flex-direction:row;align-items:center;gap:10px;padding:11px 14px;border-right:0;border-bottom:1px solid rgba(255,255,255,.16)}
   .bp-seg .w{font-size:16px}
   .segbar{position:static;box-shadow:none}
+  /* phone top bar: shrink controls so it never overflows the viewport */
+  .topbar{gap:8px}
+  .tb-title,.tb-sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40vw}
+  .tb-search{min-width:0;padding:7px 10px}
+  .tb-search .sp,.tb-search kbd{display:none}
+  .tb-test span{display:none}
 }
 @media print{
   .sidebar,.topbar,.segbar,.pager,.crumb,.tool,.tb-test,.cheat-tabs{display:none!important}

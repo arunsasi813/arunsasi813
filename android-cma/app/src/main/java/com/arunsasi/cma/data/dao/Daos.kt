@@ -17,8 +17,14 @@ interface ReviewDao {
     @Query("SELECT * FROM review_mark WHERE synced = 0 LIMIT :limit")
     fun unsynced(limit: Int): List<ReviewMark>
 
-    @Query("UPDATE review_mark SET synced = 1 WHERE key IN (:keys)")
-    fun markSynced(keys: List<String>)
+    /**
+     * Mark exactly the row that was pushed: scoped by owner+key AND the
+     * markedAt it had when pushed. If the user re-toggled the flag during the
+     * network round-trip (new markedAt), this no-ops and the change is re-sent
+     * on the next sync instead of being silently lost.
+     */
+    @Query("UPDATE review_mark SET synced = 1 WHERE owner = :owner AND key = :key AND markedAt = :markedAt")
+    fun markSynced(owner: String, key: String, markedAt: Long)
 }
 
 @Dao

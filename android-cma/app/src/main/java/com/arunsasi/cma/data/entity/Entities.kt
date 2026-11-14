@@ -3,10 +3,15 @@ package com.arunsasi.cma.data.entity
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-/** A question/flashcard the user flagged for review (mirrored from the deck). */
-@Entity(tableName = "review_mark")
+/**
+ * A question/flashcard the user flagged for review (mirrored from the deck).
+ * The question key is identical across users, so the primary key is composite
+ * on (owner, key) — otherwise a second user on the same phone would overwrite
+ * the first user's flag for the same question.
+ */
+@Entity(tableName = "review_mark", primaryKeys = ["owner", "key"])
 data class ReviewMark(
-    @PrimaryKey val key: String,          // e.g. "mcq:fsa:12" or "flash:cf:03"
+    val key: String,                      // e.g. "mcq:fsa:12" or "flash:cf:03"
     val owner: String,
     val kind: String,                     // "mcq" | "flashcard"
     val label: String?,

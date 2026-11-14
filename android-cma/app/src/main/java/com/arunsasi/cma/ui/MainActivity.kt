@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ViewGroup
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
@@ -22,7 +25,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val session by lazy { SessionManager.get(this) }
 
-    @SuppressLint("SetJavaScriptEnabled")
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -61,7 +64,19 @@ class MainActivity : AppCompatActivity() {
         }
         web.loadUrl("file:///android_asset/deck/index.html")
 
-        binding.gear.setOnClickListener { onGear() }
+        // Hidden owner entry: long-press the top-left corner. No visible control
+        // sits over the deck, so nothing steals a tap region from a borrower.
+        val corner = 72f * resources.displayMetrics.density
+        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) {
+                if (e.x <= corner && e.y <= corner) onGear()
+            }
+        })
+        web.setOnTouchListener { v, ev ->
+            detector.onTouchEvent(ev)
+            if (ev.actionMasked == MotionEvent.ACTION_UP) v.performClick()
+            false   // never consume: the WebView scrolls/taps normally
+        }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -72,6 +87,26 @@ class MainActivity : AppCompatActivity() {
         })
 
         SyncManager.requestSync(applicationContext)
+    }
+
+    // ---- WebView lifecycle: stop JS/timers off-screen, release on destroy ----
+    override fun onResume() {
+        super.onResume()
+        if (::binding.isInitialized) binding.webview.apply { onResume(); resumeTimers() }
+    }
+
+    override fun onPause() {
+        if (::binding.isInitialized) binding.webview.apply { onPause(); pauseTimers() }
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        if (::binding.isInitialized) binding.webview.apply {
+            (parent as? ViewGroup)?.removeView(this)
+            removeAllViews()
+            destroy()
+        }
+        super.onDestroy()
     }
 
     private fun injectBridge(view: WebView) {
@@ -137,7 +172,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startPinning() {
         runCatching { startLockTask() }
-            .onSuccess { toast("Locked to the quiz. Confirm the system prompt. To unlock later: Owner → Unlock.") }
+            .onSuccess { toast("Locked to the quiz. Confirm the system prompt. To unlock later: long-press the top-left corner → Owner → Unlock.") }
             .onFailure { toast("Could not lock. Enable Settings → Security → Screen pinning.") }
     }
 

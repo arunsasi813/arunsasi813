@@ -11,7 +11,7 @@ import com.arunsasi.cma.data.entity.ScoreEvent
 
 @Database(
     entities = [ReviewMark::class, ScoreEvent::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -27,7 +27,11 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "cma.db"
-                ).build().also { INSTANCE = it }
+                )
+                    // Only local study stats; dropping them on a schema change is
+                    // acceptable and avoids a crash for anyone on the v1 schema.
+                    .fallbackToDestructiveMigration()
+                    .build().also { INSTANCE = it }
             }
     }
 }

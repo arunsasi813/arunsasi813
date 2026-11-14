@@ -20,7 +20,8 @@ before you hand it over.
 - **Mark for review.** Tap the ☆ on any question or flashcard to flag it; a
   floating "★ Review (n)" panel lists everything you've marked. Flags are kept
   in the WebView and mirrored into the database.
-- **Owner area (PIN-gated).** Reachable only via the small ⚙ button + an owner
+- **Owner area (PIN-gated).** Reachable only via a hidden gesture — long-press
+  the top-left corner — plus an owner
   PIN. Shows *your own* study stats and lets you point the app at a backend.
   Invisible to anyone you lend the phone to.
 - **Lock to quiz (screen pinning).** Owner → "Lock phone to quiz" calls Android
@@ -61,10 +62,13 @@ for your file manager / browser).
 ## First-run setup on the phone
 
 1. Launch, set a study password (used for auto sign-in).
-2. Tap ⚙ (bottom-left), set an **owner PIN** — keep this private.
-3. Before lending: ⚙ → owner PIN → **Lock phone to quiz**.
-4. To get it back: ⚙ → owner PIN → **Unlock phone** (while pinned, use the
-   Android unpin gesture — hold Back + Overview — then re-enter via ⚙).
+2. **Long-press the top-left corner** to open owner entry, set an **owner
+   PIN** — keep this private. (There is no visible owner button, so a borrower
+   can't find it.)
+3. Before lending: long-press top-left → owner PIN → **Lock phone to quiz**.
+4. To get it back: long-press top-left → owner PIN → **Unlock phone** (while
+   pinned, use the Android unpin gesture — hold Back + Overview — then re-enter
+   via the long-press).
 
 ## Backend (optional)
 

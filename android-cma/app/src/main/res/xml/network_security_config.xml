@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The owner can configure an arbitrary backend Base URL, which may be an
+         http:// server on a home/LAN network. Permit cleartext so that works;
+         the bundled study content itself makes no network requests. -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

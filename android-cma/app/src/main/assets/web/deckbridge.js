@@ -3,11 +3,11 @@
  * State lives in localStorage AND is mirrored to the native bridge
  * (window.CMA); with no bridge it degrades to localStorage only.
  *
- * Performance: the deck mutates the DOM on every scroll frame (reading-progress
- * bar, animated counters, reveal classes). This script therefore NEVER reacts
- * to attribute/text mutations — it re-decorates only on boot, on route change,
- * and when new element nodes are added (the mock test), debounced to idle, with
- * the observer disconnected while it inserts so it can't trigger itself. */
+ * Performance: the deck mutates the DOM constantly while scrolling (reading
+ * bar, animated counters, reveal classes). This script therefore reacts only
+ * to added ELEMENT nodes (new questions / a redrawn flashcard), debounced to
+ * idle, with the observer disconnected while it inserts so it can't trigger
+ * itself. It never reacts to attribute or text mutations. */
 (function () {
   if (window.__cmaBridge) return;
   window.__cmaBridge = true;
@@ -46,83 +46,92 @@
     updateReviewButton();
   }
 
-  function makeStar(key, kind, labelFn, cls) {
-    var b = document.createElement("button");
-    b.type = "button";
-    b.className = "cma-star " + (cls || "");
-    b.textContent = isMarked(key) ? "★" : "☆";
-    if (isMarked(key)) b.classList.add("on");
-    b.title = "Mark for review";
-    b.onclick = function (ev) {
-      ev.stopPropagation(); ev.preventDefault();
-      var now = !isMarked(key);
-      setReview(key, kind, labelFn(), now);
-      b.textContent = now ? "★" : "☆";
-      b.classList.toggle("on", now);
-    };
-    return b;
-  }
-
   /* ---------- MCQ: star + score mirror ---------- */
   function decorateMCQ(root) {
     (root || document).querySelectorAll(".q").forEach(function (q) {
       if (q.__cma) return; q.__cma = true;
       var stem = q.querySelector(".q-stem") || q.querySelector(".q-text");
       var txt = (stem || q).textContent.trim().slice(0, 160);
-      var key = "mcq:" + sectionOf(q) + ":" + hash(txt);  // key stays stable
-      var label = txt.replace(/^\s*\d+[.)]?\s*/, "");      // drop leading question number for display
+      var key = "mcq:" + sectionOf(q) + ":" + hash(txt);   // key stays stable
+      var label = txt.replace(/^\s*\d+[.)]?\s*/, "");       // drop leading number for display
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "cma-star cma-star-q";
+      b.textContent = isMarked(key) ? "★" : "☆";
+      if (isMarked(key)) b.classList.add("on");
+      b.title = "Mark for review";
+      b.onclick = function (ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        var now = !isMarked(key);
+        setReview(key, "mcq", label, now);
+        b.textContent = now ? "★" : "☆";
+        b.classList.toggle("on", now);
+      };
       q.style.position = q.style.position || "relative";
-      q.appendChild(makeStar(key, "mcq", function () { return label; }, "cma-star-q"));
+      q.appendChild(b);
     });
   }
-  // Score mirror: one delegated listener; reads the deck's own answered state.
+  // Score mirror: one delegated capture listener. Reads the deck's own answered
+  // state AFTER its click handler has run. Section quizzes set data-ok; the mock
+  // test does NOT set it at click time (graded later), so we skip those to avoid
+  // recording every mock-test answer as wrong under a bogus "test" section.
   document.addEventListener("click", function (e) {
     var o = e.target.closest && e.target.closest(".q-opt");
     if (!o) return;
     setTimeout(function () {
       var q = o.closest(".q");
-      if (!q || q.dataset.done !== "1" || q.__scored) return;
+      if (!q || q.dataset.done !== "1" || q.dataset.ok == null || q.__scored) return;
       q.__scored = true;
-      try { if (AND && AND.recordAnswer) AND.recordAnswer(sectionOf(q), q.dataset.ok === "1"); } catch (e) {}
+      var sec = q.dataset.sec || sectionOf(q);   // real section even in the mock test
+      try { if (AND && AND.recordAnswer) AND.recordAnswer(sec, q.dataset.ok === "1"); } catch (e) {}
     }, 30);
   }, true);
 
-  /* ---------- Flashcards: star on the current card ---------- */
+  /* ---------- Flashcards: star on the current card ----------
+   * The deck rebuilds #v-cards .fc-host via innerHTML on every flip/advance,
+   * which wipes our star and the node we observe. So setupCardStar is
+   * idempotent and re-runs on every decorate() pass (decorate fires on the
+   * redraw's childList mutation): it re-adds the star if missing and re-points
+   * a single observer at the current card node. */
+  var cardObs = null;
+  function cardFrontText(host) {
+    var f = host.querySelector(".fc-front .txt");
+    return f ? f.textContent.trim().slice(0, 160) : "";
+  }
+  function refreshCardStar(host, star) {
+    var t = cardFrontText(host);
+    if (!t) { star.style.display = "none"; return; }
+    star.style.display = "";
+    var k = "flash:" + hash(t), m = isMarked(k);
+    star.textContent = m ? "★" : "☆";
+    star.classList.toggle("on", m);
+    star.onclick = function (ev) {
+      ev.stopPropagation(); ev.preventDefault();
+      var now = !isMarked(k);
+      setReview(k, "flashcard", t, now);
+      star.textContent = now ? "★" : "☆";
+      star.classList.toggle("on", now);
+    };
+  }
   function setupCardStar() {
     var host = document.querySelector("#v-cards .fc-host");
-    if (!host || host.__cma) return; host.__cma = true;
-    var meta = host.querySelector(".fc-meta") || host;
-    var star = makeStar("", "flashcard", function () { return frontText(); }, "cma-star-card");
-    meta.appendChild(star);
-    var lastKey = null;
-    function frontText() {
-      var f = host.querySelector(".fc-front .txt");
-      return f ? f.textContent.trim().slice(0, 160) : "";
+    if (!host) return;
+    var meta = host.querySelector(".fc-meta");
+    if (!meta) return;                       // cards view not built yet
+    var star = meta.querySelector(".cma-star-card");
+    if (!star) {
+      star = document.createElement("button");
+      star.type = "button"; star.className = "cma-star cma-star-card";
+      star.textContent = "☆"; star.title = "Mark this card for review";
+      meta.appendChild(star);
     }
-    function keyFor(t) { return "flash:" + hash(t); }
-    function refresh() {
-      var t = frontText();
-      if (!t) { star.style.display = "none"; lastKey = null; return; }
-      var k = keyFor(t);
-      if (k === lastKey) return;          // no change -> no DOM write -> no loop
-      lastKey = k;
-      star.style.display = "";
-      var m = isMarked(k);
-      star.textContent = m ? "★" : "☆";
-      star.classList.toggle("on", m);
-      star.onclick = function (ev) {
-        ev.stopPropagation(); ev.preventDefault();
-        var now = !isMarked(k);
-        setReview(k, "flashcard", t, now);
-        star.textContent = now ? "★" : "☆";
-        star.classList.toggle("on", now);
-      };
-    }
-    // Observe the CARD element only (not the meta bar that holds the star),
-    // so updating the star never re-triggers this observer.
     var card = host.querySelector(".fcard3") || host.querySelector(".fc-inner");
-    if (card) new MutationObserver(refresh).observe(card, { subtree: true, childList: true, characterData: true });
-    refresh();
+    if (card && !card.__cmaObs) {
+      card.__cmaObs = true;
+      if (cardObs) cardObs.disconnect();
+      cardObs = new MutationObserver(function () { refreshCardStar(host, star); });
+      cardObs.observe(card, { subtree: true, childList: true, characterData: true });
+    }
+    refreshCardStar(host, star);
   }
 
   /* ---------- floating "Review (n)" panel ---------- */
@@ -131,8 +140,7 @@
   function updateReviewButton() { if (fab) fab.textContent = "★ Review (" + count() + ")"; }
   function buildFab() {
     fab = document.createElement("button");
-    fab.className = "cma-fab";
-    fab.type = "button";
+    fab.className = "cma-fab"; fab.type = "button";
     fab.onclick = openPanel;
     document.body.appendChild(fab);
     panel = document.createElement("div");
@@ -160,7 +168,9 @@
         var meta = readReview()[k] || {};
         setReview(k, meta.kind || "", meta.label || "", false);
         // reflect on any visible star for this key
-        document.querySelectorAll(".cma-star.on").forEach(function () {});
+        document.querySelectorAll(".cma-star.on").forEach(function (s) {
+          if (s.__key === k) { s.textContent = "☆"; s.classList.remove("on"); }
+        });
         openPanel();
       };
     });
@@ -169,8 +179,9 @@
   /* ---------- styles ---------- */
   function injectCss() {
     var css = ''
-      + '.cma-star{background:transparent;border:0;font-size:20px;line-height:1;color:#b9832a;cursor:pointer;padding:2px 8px;-webkit-tap-highlight-color:transparent}'
-      + '.cma-star-q{position:absolute;top:6px;right:6px;z-index:2}'
+      + '.q .q-stem{padding-right:38px}'
+      + '.cma-star{background:transparent;border:0;font-size:20px;line-height:1;color:#b9832a;cursor:pointer;padding:6px 9px;-webkit-tap-highlight-color:transparent;min-width:40px;min-height:40px}'
+      + '.cma-star-q{position:absolute;top:2px;right:2px;z-index:2}'
       + '.cma-star-card{font-size:22px}'
       + '.cma-fab{position:fixed;right:14px;bottom:14px;z-index:60;background:#0f7a5a;color:#fff;border:0;border-radius:22px;padding:11px 16px;font:700 13px/1 "Segoe UI",system-ui,sans-serif;box-shadow:0 6px 18px rgba(13,31,45,.3);cursor:pointer}'
       + '.cma-panel{position:fixed;right:14px;bottom:62px;z-index:60;width:min(360px,92vw);max-height:62vh;overflow:auto;background:#fff;border:1px solid #d3dcdf;border-radius:14px;box-shadow:0 18px 48px rgba(13,31,45,.3);padding:12px;display:none}'
@@ -183,7 +194,6 @@
       + '.cma-kind{font-size:10px;font-weight:800;text-transform:uppercase;color:#0f7a5a;flex:0 0 auto}'
       + '.cma-lbl{flex:1;color:inherit;word-break:break-word}'
       + '.cma-un{background:transparent;border:1px solid #d3dcdf;border-radius:6px;font-size:11px;padding:3px 7px;cursor:pointer;color:inherit;flex:0 0 auto}'
-      // perf: backdrop blur on the sticky bar is expensive to repaint while scrolling
       + '.topbar{backdrop-filter:none !important;-webkit-backdrop-filter:none !important;background:#f5f7f8 !important}'
       + 'body.dark .topbar{background:#0d1f2d !important}';
     var s = document.createElement("style");
@@ -191,7 +201,7 @@
     document.head.appendChild(s);
   }
 
-  /* ---------- scheduling: decorate on boot / route change / added nodes ---------- */
+  /* ---------- scheduling ---------- */
   var obs = null, scheduled = false;
   function decorate() {
     if (obs) obs.disconnect();           // our inserts must not re-trigger us
@@ -208,10 +218,14 @@
   function boot() {
     injectCss();
     buildFab();
-    // childList ONLY: ignore the attribute/text churn the deck emits on scroll.
+    // React ONLY to added element nodes; ignore the text-node churn from the
+    // deck's animated counters and the attribute churn from scrolling.
     obs = new MutationObserver(function (muts) {
       for (var i = 0; i < muts.length; i++) {
-        if (muts[i].addedNodes && muts[i].addedNodes.length) { schedule(); return; }
+        var a = muts[i].addedNodes;
+        for (var j = 0; j < a.length; j++) {
+          if (a[j].nodeType === 1) { schedule(); return; }
+        }
       }
     });
     decorate();                          // first pass sets up obs via finally

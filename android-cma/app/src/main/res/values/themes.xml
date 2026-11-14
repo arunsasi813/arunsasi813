@@ -1,5 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.CMA" parent="Theme.Material3.DayNight.NoActionBar">
+    <!-- Locked Light: the login/owner UI uses a light paper background with dark
+         text. Under DayNight, device dark mode flipped text to light-on-light
+         (invisible). The deck has its own in-page dark toggle, independent of this. -->
+    <style name="Theme.CMA" parent="Theme.Material3.Light.NoActionBar">
         <item name="colorPrimary">@color/emerald</item>
         <item name="colorPrimaryDark">@color/emerald_dark</item>
         <item name="android:statusBarColor">@color/ink</item>

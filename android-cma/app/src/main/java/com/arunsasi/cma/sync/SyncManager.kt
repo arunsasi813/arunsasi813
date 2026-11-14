@@ -31,7 +31,9 @@ object SyncManager {
 
                 val reviews = db.reviews().unsynced(200)
                 if (reviews.isNotEmpty() && cloud.pushReviews(reviews)) {
-                    db.reviews().markSynced(reviews.map { it.key })
+                    // Mark each pushed row by its exact (owner, key, markedAt) so a
+                    // re-toggle that happened mid-push is not marked synced.
+                    reviews.forEach { db.reviews().markSynced(it.owner, it.key, it.markedAt) }
                 }
             } catch (_: Exception) {
                 // best-effort; retried on the next write / app start
