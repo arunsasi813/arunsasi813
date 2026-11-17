@@ -23,6 +23,7 @@ import traceback
 
 
 def _jobs():
+    import datamgr as D
     import engine as E
     import workspace as W
 
@@ -41,6 +42,9 @@ def _jobs():
         "convert": lambda p, prog, cancel: E.convert_to_parquet(p["job"], prog, cancel),
         "find_export": lambda p, prog, cancel: E.find_export(p["job"], p.get("params") or {}, prog, cancel),
         "stats": lambda p, prog, cancel: E.column_stats(p["job"], p.get("column") or "", "all", prog),
+        "data_count": lambda p, prog, cancel: D.count(p["p"], prog, cancel),
+        "data_combine": lambda p, prog, cancel: D.combine(p["p"], prog, cancel),
+        "data_export": lambda p, prog, cancel: D.export(p["p"], prog, cancel),
         "_selftest": _selftest,
     }
 
@@ -63,7 +67,8 @@ def _selftest(p: dict, prog, cancel) -> dict:
     return {"ok": True, "pid": os.getpid(), "echo": p.get("echo")}
 
 
-KINDS = ("run_setup", "run", "count", "find", "analyse", "drill", "ws_analyse", "ws_drill", "dashboards", "checks", "convert", "find_export", "stats")
+KINDS = ("run_setup", "run", "count", "find", "analyse", "drill", "ws_analyse", "ws_drill", "dashboards", "checks", "convert", "find_export", "stats",
+         "data_count", "data_combine", "data_export")
 
 
 def main(kind: str, payload: dict, q, cancel, settings: dict) -> None:

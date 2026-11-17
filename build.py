@@ -45,7 +45,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 # never imported by ColSift (depscan.py measures this; re-run it after adding features)
 EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL", "sqlalchemy",
@@ -59,7 +59,10 @@ EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL"
            # drops the unused ones itself and refuses a build that names them here too.
            "PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy", "gi", "cefpython3"]
 HEAVY_INSTALLED = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "PyQt5", "PyQt6", "PySide6"]
-MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "checks", "pdfout", "worker"]
+MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "checks", "pdfout", "worker", "datamgr"]
+# the PDF module's page and the libraries it is written with (pdf.js, pdf-lib): data, not code
+PDF_FILES = ["pdf.html", "pdfapp.js", "vendor/pdf.min.mjs", "vendor/pdf.worker.min.mjs", "vendor/pdf-lib.min.js",
+             "vendor/LICENSE.pdfjs.txt", "vendor/LICENSE.pdf-lib.txt"]
 
 
 def human(n: float) -> str:
@@ -135,6 +138,7 @@ def nuitka_cmd(target: str, mode: str, out: Path, name: str, gui: bool, lean: bo
     if gui:
         cmd += ["--include-data-files=ui.html=ui.html", "--include-data-files=studio.html=studio.html",
                 "--include-package-data=webview"]
+        cmd += [f"--include-data-files={f}={f}" for f in PDF_FILES]
         if sys.platform.startswith("win"):
             cmd += ["--windows-console-mode=disable", "--include-package=clr_loader",
                     "--include-package-data=clr_loader", "--include-package-data=pythonnet"]

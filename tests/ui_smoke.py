@@ -82,7 +82,12 @@ class UI:
         self.wait_msg(text)
 
     def tab(self, p: str) -> None:
-        self.page.click(f"button.tab[data-p={p}]")
+        """A tab, through its module (Extract, Analytics, Data, PDF) when that isn't open."""
+        mod = self.js(f"PANE_MOD[{json.dumps(p)}]")
+        if self.js("S.mod") != mod or mod in ("analytics", "pdf"):
+            self.page.click(f"#modBar [data-m={mod}]")
+        if mod in ("extract", "data"):
+            self.page.click(f"button.tab[data-p={p}]")
 
     def folders(self, *paths) -> None:
         """What Browse / ＋ would do, minus the native dialog the browser can't show."""
@@ -169,8 +174,13 @@ def folders_and_loading(ui: UI, d: dict) -> None:
 
 
 def new_setup(ui: UI) -> None:
+    """New: a fresh setup object. Waited for by the setup itself — a file read finishing
+    meanwhile can replace the "New setup" status line before it is seen."""
     page = ui.page
-    ui.then("New setup", lambda: page.click("#newProfile"))
+    ui.js("window.__ws_before = WS")
+    page.click("#newProfile")
+    page.wait_for_function("WS !== window.__ws_before && !WS.name && WS.groups.length === 1 && !S.busy")
+    page.wait_for_timeout(300)
 
 
 def group_card(ui: UI, n: int, name: str, mode: str = "", value: str = "") -> None:
@@ -452,9 +462,10 @@ def parquet_and_lookup(ui: UI, d: dict) -> None:
     ui.tab("out")
     page.fill("#outFolder", str(out))
     page.dispatch_event("#outFolder", "change")
+    ui.tab("conv")
     ui.then("Converted", lambda: page.click("#pqConvert"))
     assert (out / "more.parquet").exists() and not (out / "tickets.parquet").exists()
-    assert "skipped" in page.inner_text("#runResults")
+    assert "skipped" in page.inner_text("#dmResults")
     ui.tab("out")
     page.select_option("#outFormat", "parquet")
     page.dispatch_event("#outFormat", "change")
@@ -717,9 +728,192 @@ def formula_helper(ui: UI, d: dict) -> None:
     assert page.locator("#refBody .fxchip[data-col=FIRST]").count() == 0
 
 
+def make_pdfs(folder: Path) -> None:
+    """Two PDFs with known text, from ColSift's own PDF writer."""
+    sys.path.insert(0, str(ROOT))
+    import pdfout
+    doc = pdfout.PDF("A4", landscape=False)
+    for p in range(1, 4):
+        doc.new_page()
+        doc.text(50, 50, f"Statement page {p}", 16)
+        for r in range(10):
+            k = (p - 1) * 10 + r
+            doc.text(50, 100 + r * 18, f"2026-01-{r + 1:02d}", 10)
+            doc.text(160, 100 + r * 18, f"176{1000000 + k:07d}", 10)
+            doc.text(330, 100 + r * 18, f"{100 + k * 7.5:.2f}", 10)
+    doc.save(folder / "statement.pdf")
+    other = pdfout.PDF("A4", landscape=True)
+    for p in range(1, 3):
+        other.new_page()
+        other.text(60, 60, f"Annex {p}", 20)
+    other.save(folder / "annex.pdf")
+
+
+def data_module(ui: UI, d: dict) -> None:
+    """The Data module: browse a file through a view, count, combine into one Parquet,
+    export the view — on the files ticked on the left."""
+    import polars as pl
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "dm_src"
+    src.mkdir(exist_ok=True)
+    (src / "sales_JAN.csv").write_bytes((d["jan"] / "sales_JAN.csv").read_bytes())
+    (src / "sales_FEB.csv").write_bytes((d["feb"] / "sales_FEB.csv").read_bytes())
+    pl.DataFrame({"DOC_NO": [f"P{i}" for i in range(300)], "AMOUNT": [i * 1.5 for i in range(300)],
+                  "TAX_CODE": ["YQ", "YR", "XT"] * 100}).write_parquet(src / "more.parquet")
+    ui.folders(src)
+    page.wait_for_function("S.files.length === 3")
+    ui.tab("browse")
+    page.click("#filelist .file:has(.nm:text-is('more.parquet'))")
+    page.wait_for_selector("#dmGrid table")
+    assert page.inner_text("#dmPage").startswith("1–200 of 300"), page.inner_text("#dmPage")
+    assert "number" in page.inner_text("#dmCols"), "Parquet's own types are shown"
+    ui.then("rows 201", lambda: page.click("#dmNext"))
+    # a view: one tax code, biggest amount first, two columns
+    page.click("#dmAddF")
+    page.select_option("#dmFilters [data-k=column]", "TAX_CODE")
+    page.fill("#dmFilters [data-k=value]", "YR")
+    page.dispatch_event("#dmFilters [data-k=value]", "input")
+    page.select_option("#dmSort", "AMOUNT")
+    page.check("#dmDesc")
+    page.uncheck("#dmCols [data-dc=TAX_CODE]")
+    ui.then("rows 1–100", lambda: page.click("#dmApply"))
+    assert page.locator("#dmGrid thead th").all_inner_texts()[1:] == ["DOC_NO\ntext", "AMOUNT\nnumber"]
+    assert page.inner_text("#dmGrid tbody tr:first-child").split("\t")[1:] == ["P298", "447.0"]
+    ui.shot("data_browse")
+    # the same view counted over the ticked files: the CSVs have no TAX_CODE = YR rows? they do: 9 + 9
+    ui.then("This view leaves", lambda: page.click("#dmCount"))
+    assert "This view leaves 118 rows" in ui.msg(), ui.msg()
+    # combine every ticked file into one Parquet file, then export the view to Excel
+    out = d["out"] / "dm"
+    ui.tab("conv")
+    ui.js(f"S.output.folder = {json.dumps(str(out))}; dmConvDraw()")
+    ui.then("One Parquet file", lambda: page.click("#dmCombine"))
+    got = pl.read_parquet(out / "combined.parquet")
+    assert got.height == 372 and got.columns[-1] == "SOURCE_FILE" and got.schema["AMOUNT"] == pl.Float64
+    page.select_option("#exFmt", "xlsx")
+    ui.then("Exported 118 rows", lambda: page.click("#dmExport"))
+    import openpyxl
+    rows = list(openpyxl.load_workbook(out / "export.xlsx").active.iter_rows(values_only=True))
+    assert rows[0] == ("DOC_NO", "AMOUNT", "SOURCE_FILE") and len(rows) == 119
+    assert "export.xlsx" in page.inner_text("#dmResults")
+    ui.shot("data_convert")
+    # the view is saved with the setup
+    page.fill("#profileName", "DataView")
+    ui.then("Saved", lambda: page.click("#saveProfile"))
+    saved = json.loads((Path(os.environ["COLSIFT_PROFILES"]) / "DataView.json").read_text())
+    assert saved["data_view"]["sort"] == {"column": "AMOUNT", "desc": True}
+
+
+def pdf_module(ui: UI, d: dict) -> None:
+    """The PDF module: open from the folders, reorder, rotate, delete, write on a page,
+    stamp, protect, save, open it again with its password, split, read a table, search."""
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "pdf_src"
+    src.mkdir(exist_ok=True)
+    make_pdfs(src)
+    out = d["out"] / "pdf"
+    out.mkdir(parents=True, exist_ok=True)
+    # a folder of PDFs only: ColSift lists no data files, the PDF module lists its PDFs
+    ui.js(f"setFolders({json.dumps([str(src)])}); refreshFiles(); S.output.folder = {json.dumps(str(out))}")
+    ui.answers[:] = []
+    ui.tab("pdf")
+    page.wait_for_selector("#pdfFrame", state="visible", timeout=30000)
+    fr = page.frame_locator("#pdfFrame")
+    app = "document.querySelector('#pdfFrame').contentWindow.pdfApp"
+    fr.locator("#folderList [data-open]").first.wait_for()
+    assert fr.locator("#folderList .nm").all_inner_texts() == ["annex.pdf", "statement.pdf"]
+    fr.locator("#folderList [data-open]:has-text('statement.pdf')").click()
+    fr.locator("#grid .th").nth(2).wait_for()
+    fr.locator("#folderList [data-open]:has-text('annex.pdf')").click()
+    fr.locator("#grid .th").nth(4).wait_for()
+    # delete statement p2, rotate p1, bring annex p1 to the front
+    fr.locator("#grid .th").nth(1).click()
+    fr.locator("#tbPages [data-a=del]").click()
+    fr.locator("#grid .th").nth(0).click()
+    fr.locator("#tbPages [data-a=rotr]").click()
+    fr.locator("#grid .th").nth(2).click()
+    fr.locator("#tbPages [data-a=first]").click()
+    names = lambda: ui.js(f"{app}.state.pages.map(p => p.index + ':' + p.rot + ':' + {app}.state.docs.find(d => d.id === p.doc).name)")  # noqa: E731
+    assert names() == ["0:0:annex.pdf", "0:90:statement.pdf", "2:0:statement.pdf", "1:0:annex.pdf"], names()
+    fr.locator("#tbPages [data-a=undo]").click()
+    assert names()[0] == "0:90:statement.pdf"
+    fr.locator("#grid .th").nth(2).click()
+    fr.locator("#tbPages [data-a=first]").click()
+    ui.shot("pdf_board")
+    # write on the rotated page
+    fr.locator("#grid .th").nth(1).dblclick()
+    fr.locator("#layer").wait_for()
+    fr.locator("#edTools [data-t=text]").click()
+    box = fr.locator("#layer").bounding_box()
+    page.mouse.click(box["x"] + 120, box["y"] + 80)
+    page.wait_for_timeout(200)
+    page.keyboard.type("APPROVED")
+    page.mouse.click(box["x"] + box["width"] - 30, box["y"] + box["height"] - 30)
+    fr.locator("#edTools [data-t=cover]").click()
+    page.mouse.move(box["x"] + 60, box["y"] + 200)
+    page.mouse.down()
+    page.mouse.move(box["x"] + 260, box["y"] + 240, steps=5)
+    page.mouse.up()
+    page.wait_for_timeout(200)
+    assert ui.js(f"{app}.state.pages[1].ov.map(o => o.type + ':' + (o.text || ''))") == ["text:APPROVED", "cover:"]
+    ui.shot("pdf_edit")
+    # stamps and a password, then save (the dev server's save dialog writes to its folder)
+    fr.locator(".tab[data-v=tools]").click()
+    fr.locator("#pnOn").check()
+    fr.locator("#wmOn").check()
+    fr.locator("#pwOn").check()
+    fr.locator("#pwUser").fill("pw123")
+    fr.locator("#saveAll").click()
+    fr.locator("#status.ok:has-text('Saved 4 pages')").wait_for(timeout=30000)
+    saved = fr.locator("#status").inner_text().split(" — ")[-1]
+    assert Path(saved).name == "annex_edited.pdf" and Path(saved).read_bytes()[:5] == b"%PDF-"
+    # open it again: it asks for the password; page numbers and the text are in it
+    ui.answers[:] = ["pw123"]
+    ui.js(f"{app}.openPaths([{json.dumps(saved)}])")
+    page.wait_for_function(f"{app}.state.pages.length === 8")
+    text = ui.js(f"""(async () => {{ const d = {app}.state.docs.at(-1);
+        const out = []; for (let n = 1; n <= d.n; n++) out.push((await {app}.pageLines(d.js, n, 6)).map(c => c.join(' ')).join('|'));
+        return out; }})()""")
+    assert "Page 2 of 4" in text[1] and "APPROVED" in text[1] and "CONFIDENTIAL" in text[0], text
+    assert ui.js(f"{app}.state.docs.at(-1).js.getPage(2).then(p => p.rotate)") == 90
+    fr.locator("#docs [data-close]").last.click()
+    for box_id in ("#pwOn", "#pnOn", "#wmOn"):
+        fr.locator(".tab[data-v=tools]").click()
+        fr.locator(box_id).uncheck()
+    # split: one PDF a page, into the output folder
+    fr.locator(".tab[data-v=pages]").click()
+    fr.locator("#tbPages [data-a=split]").click()
+    fr.locator("#spGo").click()
+    fr.locator("#status.ok:has-text('Split into 4 PDFs')").wait_for(timeout=30000)
+    assert sorted(x.name for x in out.glob("part_*.pdf")) == ["part_01.pdf", "part_02.pdf", "part_03.pdf", "part_04.pdf"]
+    # a table out of the statement pages
+    fr.locator(".tab[data-v=convert]").click()
+    fr.locator("#tbGo").click()
+    fr.locator("#status.ok:has-text('rows in')").wait_for(timeout=30000)
+    import openpyxl
+    table = Path(fr.locator("#status").inner_text().split(" — ")[-1])
+    rows = list(openpyxl.load_workbook(table).active.iter_rows(values_only=True))
+    assert rows[0][:5] == ("FILE", "PAGE", "COL_1", "COL_2", "COL_3")
+    assert ("statement.pdf", "2", "2026-01-01", "1761000000", "100.00") in [r[:5] for r in rows], rows[:6]
+    # search inside the PDFs ticked in the folders
+    fr.locator(".tab[data-v=search]").click()
+    for name in ("annex.pdf", "statement.pdf"):
+        fr.locator(f"#folderList [data-tick$='{name}']").check()
+    fr.locator("#sqScope").select_option("folder")
+    fr.locator("#sqVals").fill("1761000005\n1761000025\n9999999")
+    fr.locator("#sqGo").click()
+    fr.locator("#status.ok:has-text('2 hits in 2 files')").wait_for(timeout=30000)
+    assert "1 of 3 not found: 9999999" in fr.locator("#sqMiss").inner_text()
+    ui.shot("pdf_search")
+    fr.locator("#sqExport").click()
+    fr.locator("#status.ok:has-text('2 hits saved')").wait_for(timeout=30000)
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
             "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual,
-            "basics": dashboard_basics, "formulas": formula_helper}
+            "basics": dashboard_basics, "formulas": formula_helper, "datamod": data_module, "pdf": pdf_module}
 
 
 def main() -> int:

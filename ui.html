@@ -462,6 +462,35 @@ textarea.fx{width:100%;font-family:var(--mono);font-size:12px;min-height:52px;re
 .modal .mbody{overflow:auto;padding:0}
 .modal .minfo{padding:6px 12px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--line-2)}
 /* ---------- 2.0: groups ---------- */
+.modbar{display:flex;gap:3px;align-items:center;background:var(--rail);padding:5px 10px 0;border-bottom:1px solid var(--rail-line)}
+.mod{border:0;background:transparent;color:var(--rail-ink);padding:6px 14px 7px;border-radius:5px 5px 0 0;font-weight:500;cursor:pointer;font-size:12.5px}
+.mod:hover{background:var(--rail-2);color:#fff}
+.mod.on{background:var(--paper);color:var(--teal-2);font-weight:600}
+.modhint{margin-left:auto;color:#7f959c;font-size:11px;padding-bottom:4px}
+body[data-mod=analytics] .groupbar,body[data-mod=analytics] .srcbar,body[data-mod=analytics] .tabs,
+body[data-mod=data] .groupbar,body[data-mod=pdf] .groupbar,body[data-mod=pdf] .srcbar,body[data-mod=pdf] .tabs{display:none}
+body[data-mod=data] #btnPreview,body[data-mod=data] #btnRun,body[data-mod=data] .rdash,
+body[data-mod=pdf] #btnPreview,body[data-mod=pdf] #btnRun,body[data-mod=pdf] .rdash,body[data-mod=pdf] .status .stat:not(.mem){display:none}
+body[data-mod=pdf]{grid-template-columns:0 1fr}
+body[data-mod=pdf] aside.rail{visibility:hidden;overflow:hidden}
+body[data-mod=pdf] .body{padding:0;overflow:hidden}
+#p-pdf.on{display:flex;height:100%;position:relative}
+#pdfFrame{border:0;flex:1;width:100%;height:100%;display:none}
+#pdfLoading{position:absolute;inset:0}
+.dmwrap{display:grid;grid-template-columns:268px 1fr;gap:12px;align-items:start}
+.dmside{position:sticky;top:0}
+.dmcols{max-height:220px;overflow:auto;border:1px solid var(--line-2);border-radius:var(--r);padding:3px}
+.dmcols label{display:flex;gap:6px;align-items:center;font-size:11.5px;padding:1px 3px;font-family:var(--mono)}
+.dmcols label .t{margin-left:auto;font-family:var(--ui);font-size:10px;color:var(--faint)}
+.dmmain{min-width:0}
+.dmbar{gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.dmf{display:flex;gap:4px;align-items:center;margin-bottom:4px;flex-wrap:wrap}
+.dmf select,.dmf input{height:24px;min-width:0}
+.dmf .c{width:100px}.dmf .o{width:120px}.dmf .v{flex:1;min-width:70px}
+#dmGrid th .t{display:block;font-size:9.5px;color:var(--faint);font-weight:400;text-transform:none;letter-spacing:0}
+#dmGrid td.rn,#dmGrid th.rn{color:var(--faint);text-align:right;background:#f7f8f7}
+.cards2{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:10px;align-items:start}
+.cards2 .card{margin:0}
 .groupbar{background:#f4f6f5;border-bottom:1px solid var(--line);padding:6px 14px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .gchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);border-radius:14px;padding:2px 10px 2px 8px;font-size:12px;cursor:pointer;max-width:240px}
 .gchip i{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
@@ -586,6 +615,13 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 </aside>
 
 <main>
+  <nav class="modbar" id="modBar" role="tablist" aria-label="Modules">
+    <button class="mod on" data-m="extract" title="Pick columns and rows out of many files, combine them and write the output">⇲ Extract</button>
+    <button class="mod" data-m="analytics" title="Dashboards, summaries and Studio visuals over your data">◔ Analytics</button>
+    <button class="mod" data-m="data" title="Browse, search, convert and export any data file — Parquet, CSV, Excel — however big">⛁ Data</button>
+    <button class="mod" data-m="pdf" title="Merge, split, reorder, edit, sign, stamp, protect and search PDFs">▤ PDF</button>
+    <span class="modhint" id="modHint"></span>
+  </nav>
   <div class="groupbar" id="groupBar"></div>
   <div class="srcbar">
     <div class="grp" id="sheetGrp" style="display:none">
@@ -643,11 +679,14 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <button class="tab" role="tab" data-p="cols">Columns <span class="n" id="nCols">0</span></button>
     <button class="tab" role="tab" data-p="filt">Filters <span class="n" id="nFilt">0</span></button>
     <button class="tab" role="tab" data-p="add">Add columns <span class="n" id="nAdd">0</span></button>
-    <button class="tab" role="tab" data-p="find">Find</button>
     <button class="tab" role="tab" data-p="ws" title="After every group's own work: append, merge, lookup, SQL, relationships between the groups' results">Combine <span class="n" id="nWs">0</span></button>
-    <button class="tab" role="tab" data-p="anal">Analysis <span class="n" id="nAnal">0</span></button>
     <button class="tab" role="tab" data-p="out">Output</button>
     <button class="tab" role="tab" data-p="res">Result</button>
+    <button class="tab" role="tab" data-p="anal" style="display:none">Dashboards <span class="n" id="nAnal">0</span></button>
+    <button class="tab" role="tab" data-p="browse" style="display:none" title="Any file a page at a time: columns, filters, sort, profile">Browse</button>
+    <button class="tab" role="tab" data-p="find" style="display:none" title="Look up a list of values in every ticked file">Bulk search</button>
+    <button class="tab" role="tab" data-p="conv" style="display:none" title="To Parquet — one per file or all in one — and export the Browse view">Convert &amp; export</button>
+    <button class="tab" role="tab" data-p="pdf" style="display:none">PDF</button>
   </div>
 
   <div class="bar" id="bar"><i></i></div>
@@ -840,6 +879,84 @@ table.matrix tr.unas td.fn{color:var(--faint)}
       <div class="results" id="findFiles"></div>
     </section>
 
+
+    <!-- DATA: BROWSE -->
+    <section class="pane" id="p-browse">
+      <div class="dmwrap">
+        <div class="card dmside">
+          <div class="f" style="justify-content:space-between"><h3 style="margin:0">View</h3><button class="btn sm ghost" id="dmReset" title="Every column, no filter, no sort">Reset</button></div>
+          <div class="lbl" style="margin-top:8px">Columns</div>
+          <input type="text" id="dmColQ" placeholder="Find a column" style="width:100%;margin:4px 0">
+          <div id="dmCols" class="dmcols"><div class="sub">Click a file on the left.</div></div>
+          <div class="f" style="margin-top:4px"><button class="btn sm" id="dmColsAll">All</button><button class="btn sm" id="dmColsNone">None</button><span class="sub" id="dmColN" style="margin:0 0 0 auto"></span></div>
+          <div class="lbl" style="margin-top:10px">Filters</div>
+          <div id="dmFilters"></div>
+          <div class="f" style="margin-top:4px"><button class="btn sm" id="dmAddF">＋ Filter</button>
+            <select id="dmJoin" style="flex:1"><option value="and">All must match</option><option value="or">Any may match</option></select></div>
+          <div class="lbl" style="margin-top:10px">Sort</div>
+          <div class="f" style="margin-top:4px"><select id="dmSort" style="flex:1"></select>
+            <label class="f" style="gap:4px;font-size:11.5px" title="Biggest / Z first"><input type="checkbox" id="dmDesc"> desc</label></div>
+          <label class="f" style="gap:6px;font-size:11.5px;margin-top:8px"><input type="checkbox" id="dmUnique"> Distinct rows only</label>
+          <button class="btn pri" id="dmApply" style="width:100%;margin-top:10px">Apply</button>
+          <p class="sub" style="margin:6px 0 0">With no filter, sort or distinct, a page reads only the start of the file. Otherwise the whole file is read once (big text files and workbooks keep a fast copy after that).</p>
+          <div class="lbl" style="margin-top:12px">Column profile</div>
+          <div class="f" style="margin-top:4px"><select id="dmStatCol" style="flex:1"></select><button class="btn sm" id="dmStat">Profile</button></div>
+        </div>
+        <div class="dmmain">
+          <div class="f dmbar">
+            <b id="dmFile" style="font-family:var(--mono);font-size:12px">Click a file on the left</b>
+            <span class="stat" id="dmInfo"></span>
+            <span style="margin-left:auto"></span>
+            <label class="lbl">Rows</label><input type="number" id="dmRows" value="200" min="10" max="5000" style="width:72px;height:24px">
+            <button class="btn sm" id="dmPrev" disabled>‹ Prev</button><span class="stat" id="dmPage"></span><button class="btn sm" id="dmNext" disabled>Next ›</button>
+            <button class="btn sm" id="dmCount" title="How many rows this view leaves — in this file and in every ticked file">Count rows</button>
+          </div>
+          <div id="dmStatOut"></div>
+          <div class="gridwrap" id="dmGrid"><div class="empty">Click a file on the left — Parquet, CSV, TXT or Excel, of any size. Its first rows show here; set columns, filters and a sort on the left.</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- DATA: CONVERT AND EXPORT -->
+    <section class="pane" id="p-conv">
+      <div class="card">
+        <div class="f" style="gap:10px;flex-wrap:wrap"><label class="lbl">Write to</label>
+          <code id="dmFolder" style="font-size:12px">—</code><button class="btn sm" id="dmFolderPick">Change…</button>
+          <span class="sub" style="margin:0">The same folder as the Output tab. Files are read with the settings in the bar above (sheet, header row, separator).</span></div>
+      </div>
+      <div class="cards2">
+      <div class="card" id="pqCard">
+        <div class="f" style="justify-content:space-between"><h3 style="margin:0">One Parquet file per file</h3>
+          <button class="btn sm" id="pqConvert">Convert the ticked files</button></div>
+        <p class="hint" style="margin:6px 0 0">Each ticked file as it is read — sheet, header row and separator from the settings above, every column, no filters — saved as <code>&lt;name&gt;.parquet</code> in the folder above. Numbers and dates are stored as numbers and dates; IDs, codes and values with leading zeros stay text. A Parquet file opens in seconds next time — here, in Power BI or in Python — and is a fraction of the size. Parquet files can be ticked and used like any other file.</p>
+      </div>
+        <div class="card">
+          <div class="f" style="justify-content:space-between"><h3 style="margin:0">Combine into one Parquet file</h3>
+            <button class="btn sm pri" id="dmCombine">Combine the ticked files</button></div>
+          <p class="hint" style="margin:6px 0">Every ticked file — Excel, CSV, TXT, Parquet — stacked into one Parquet file, one file at a time, so even many big files fit in memory. Columns are matched by name; a file without a column leaves it blank.</p>
+          <div class="f" style="gap:8px;flex-wrap:wrap"><label class="lbl">Name</label><input type="text" id="cbName" value="combined" style="width:150px"><span class="sub" style="margin:0">.parquet</span>
+            <label class="lbl">Compression</label><select id="cbComp"><option value="zstd">zstd — small</option><option value="snappy">snappy — fast, for older tools</option><option value="gzip">gzip</option><option value="uncompressed">none</option></select></div>
+          <div class="f" style="gap:14px;flex-wrap:wrap;margin-top:6px">
+            <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="cbSource" checked> SOURCE_FILE column</label>
+            <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="cbType" checked> Store numbers and dates as numbers and dates</label>
+            <label class="f" style="gap:5px;font-size:11.5px" title="Only the columns, rows and order set on the Browse tab"><input type="checkbox" id="cbView"> Through the Browse view</label></div>
+        </div>
+        <div class="card">
+          <div class="f" style="justify-content:space-between"><h3 style="margin:0">Export the Browse view</h3>
+            <button class="btn sm pri" id="dmExport">Export the ticked files</button></div>
+          <p class="hint" style="margin:6px 0">The columns, filters, sort and distinct rows set on the Browse tab, over every ticked file. Excel output is split at its 1,048,575-row limit; text options (separator, quotes) come from the Output tab.</p>
+          <div class="f" style="gap:8px;flex-wrap:wrap"><label class="lbl">Name</label><input type="text" id="exName" value="export" style="width:150px">
+            <label class="lbl">As</label><select id="exFmt"><option value="xlsx">Excel .xlsx</option><option value="csv">CSV</option><option value="txt">Text .txt</option><option value="parquet">Parquet</option></select>
+            <select id="exMode"><option value="one">One file, all rows</option><option value="per_file">One file per input</option></select>
+            <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="exSource" checked> SOURCE_FILE column</label></div>
+        </div>
+      </div>
+      <div class="results" id="dmResults"></div>
+    </section>
+
+    <!-- PDF -->
+    <section class="pane" id="p-pdf"><div class="empty" id="pdfLoading">Loading the PDF tools…</div><iframe id="pdfFrame" title="PDF tools"></iframe></section>
+
     <!-- OUTPUT -->
     <section class="pane" id="p-out">
       <div class="card" id="paramCard">
@@ -924,11 +1041,6 @@ table.matrix tr.unas td.fn{color:var(--faint)}
           <label class="f" style="gap:6px" id="afGrp"><input type="checkbox" id="outAutofilter" checked> Excel: freeze and filter the header</label>
         </div>
 
-      </div>
-      <div class="card" id="pqCard">
-        <div class="f" style="justify-content:space-between"><h3 style="margin:0">Convert to Parquet</h3>
-          <button class="btn sm" id="pqConvert">Convert the ticked files</button></div>
-        <p class="hint" style="margin:6px 0 0">Each ticked file as it is read — sheet, header row and separator from the settings above, every column, no filters — saved as <code>&lt;name&gt;.parquet</code> in the output folder. Numbers and dates are stored as numbers and dates; IDs, codes and values with leading zeros stay text. A Parquet file opens in seconds next time — here, in Power BI or in Python — and is a fraction of the size. Parquet files can be ticked and used like any other file.</p>
       </div>
       <div class="card" id="txtOpts">
         <h3>Text file options</h3>
@@ -1140,7 +1252,27 @@ function guarded(fn){
 
 /* ---------------- tabs ---------------- */
 $$(".tab").forEach(t => t.onclick = () => show(t.dataset.p));
+/* ---------------- modules: Extract | Analytics | Data | PDF ----------------
+   Each module shows its own tabs; the bars above them (groups, how files are read)
+   only where they apply. show(pane) switches to the pane's module by itself. */
+const MODS = {extract: ["peek", "cols", "filt", "add", "ws", "out", "res"], analytics: ["anal"],
+              data: ["browse", "find", "conv"], pdf: ["pdf"]};
+const PANE_MOD = Object.fromEntries(Object.entries(MODS).flatMap(([m, ps]) => ps.map(x => [x, m])));
+const MOD_HINT = {extract: "", analytics: "Dashboards over each group, combined table or the Overview",
+                  data: "Works on the files ticked on the left — any size, one file at a time",
+                  pdf: "Everything stays on this computer"};
+S.mod = "extract"; S.modPane = {extract: "peek", analytics: "anal", data: "browse", pdf: "pdf"};
+function applyModule(m){
+  S.mod = m; document.body.dataset.mod = m;
+  $$("#modBar .mod").forEach(b => { b.classList.toggle("on", b.dataset.m === m); b.setAttribute("aria-selected", String(b.dataset.m === m)); });
+  $$(".tabs .tab").forEach(t => t.style.display = PANE_MOD[t.dataset.p] === m ? "" : "none");
+  $("#modHint").textContent = MOD_HINT[m] || "";
+}
+$("#modBar").addEventListener("click", e => { const b = e.target.closest("[data-m]"); if (b) show(S.modPane[b.dataset.m]); });
 function show(p){
+  const m = PANE_MOD[p] || "extract";
+  if (m !== S.mod) applyModule(m);
+  S.modPane[m] = p;
   $$(".tab").forEach(t => t.setAttribute("aria-selected", String(t.dataset.p===p)));
   $$(".pane").forEach(x => x.classList.remove("on"));
   $("#p-"+p).classList.add("on");
@@ -1151,6 +1283,9 @@ function show(p){
                      drawAnal(); if (S.wsDirty && (AT().report || groupRel())) wsSchemaFresh();
                      if (!S.anData && (S.active || AT().report)) anRun("active"); }
   if (p === "ws"){ syncBack(); wsDraw(); if (!S.wsSchema) wsSchemaRefresh(true); }
+  if (p === "browse") dmEnter();
+  if (p === "conv") dmConvDraw();
+  if (p === "pdf") pdfEnter();
 }
 
 /* ---------------- folder + files ---------------- */
@@ -1361,6 +1496,7 @@ async function setActive(path){
     $("#sheet").value = S.source.sheet;
   } else { S.source.sheet = ""; }
   await doPeek(true);
+  if (S.mod === "data" && S.modPane.data === "browse" && S.active === path){ S.dm.offset = 0; dmBrowse(); }
 }
 
 /* ---------------- peek ---------------- */
@@ -1490,10 +1626,10 @@ function drawCols(){
   });
 }
 /* a column's profile: blanks, distinct values, range, the most common values */
-async function colStats(name, scope){
-  const box = $("#colStats");
+async function colStats(name, scope, where = "#colStats", jobFor = () => ({...job(), active: S.active})){
+  const box = $(where);
   box.innerHTML = `<div class="card" style="margin-bottom:8px"><div class="sub" style="margin:0">Reading ${esc(name)}${scope === "all" ? " in every ticked file" : ""}…</div></div>`;
-  const r = await api().column_stats({job: {...job(), active: S.active}, column: name, scope});
+  const r = await api().column_stats({job: jobFor(), column: name, scope});
   if (!r?.ok){ box.innerHTML = ""; say(r?.error || "Could not read the column.", "err"); return; }
   const n = v => v == null ? "–" : (typeof v === "number" ? (Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, {maximumFractionDigits: 2})) : esc(v));
   const range = r.kind === "number" ? `Min ${n(r.min)} · Max ${n(r.max)} · Sum ${n(r.sum)} · Average ${n(r.mean)}`
@@ -1507,8 +1643,8 @@ async function colStats(name, scope){
     <table class="tops" style="font-size:11.5px;border-collapse:collapse">${r.top.map(([v, c]) => `<tr><td style="font-family:var(--mono);padding:1px 10px 1px 0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v)}">${esc(v)}</td>
       <td style="width:160px"><div style="height:8px;background:var(--teal);opacity:.55;border-radius:2px;width:${Math.max(2, 160 * c / max)}px"></div></td><td style="padding-left:8px;text-align:right">${c.toLocaleString()}</td></tr>`).join("")}</table>
     ${(r.skipped || []).length ? `<div class="sub" style="margin:6px 0 0">Not in: ${r.skipped.map(esc).join(", ")}</div>` : ""}</div>`;
-  $("#colStatsX").onclick = () => { box.innerHTML = ""; };
-  $("#colStatsAll").onclick = () => colStats(name, "all");
+  box.querySelector("#colStatsX").onclick = () => { box.innerHTML = ""; };
+  box.querySelector("#colStatsAll").onclick = () => colStats(name, "all", where, jobFor);
 }
 function move(i,d){ const j=i+d; if(j<0||j>=S.columns.length) return;
   [S.columns[i],S.columns[j]]=[S.columns[j],S.columns[i]]; drawCols(); }
@@ -2046,6 +2182,8 @@ function fxCtx(el){
                      {label: "Added above this one", cols: above, tag: "added",
                       empty: "Columns added above this one can be used here too."}]};
   }
+  if (el.closest("#dmFilters"))
+    return {key: `dm:${el.closest("[data-fi]")?.dataset.fi}`, title: "Browse filter formula", groups: [{label: "In this file", cols: S.dm.all}]};
   if (el.closest("#rules"))
     return {key: `rule:${el.closest("[data-path]")?.dataset.path}`, title: "Filter formula",
             groups: [{label: "From the file", cols: S.allCols}],
@@ -4385,6 +4523,7 @@ async function openSetup(st, name){
   WS.params = st.params || []; WS.param_values = st.param_values || {};
   WS.checks = st.checks || []; S.checkRes = {};
   WS.sample_rows = +st.sample_rows || 100;
+  S.dm.view = st.data_view ? JSON.parse(JSON.stringify(st.data_view)) : dmBlankView(); WS.data_view = S.dm.view;
   await refreshParams(true);
   applyOutput(st.output || {});
   S.processing = st.processing || "sequential"; syncOutputControls();
@@ -4920,7 +5059,7 @@ $("#checkNow").onclick = async () => {
 $("#pqConvert").onclick = async () => {
   const files = S.files.filter(f => S.sel.has(f.path)).map(f => f.path);
   if (!files.length){ say("Tick at least one file.", "err"); return; }
-  if (!S.output.folder){ say("Choose an output folder first.", "err"); $("#outFolder").focus(); return; }
+  if (!S.output.folder){ say("Choose a folder to write to first (Change… above).", "err"); return; }
   const j = job();
   busy(true); $("#btnCancel").style.display = ""; say(`Converting ${files.length} file${files.length === 1 ? "" : "s"} to Parquet…`);
   const r = await api().convert_parquet({files, source: j.source, folder: S.output.folder,
@@ -4930,10 +5069,9 @@ $("#pqConvert").onclick = async () => {
   const head = t => `<tr><td colspan="2" style="font-family:var(--ui);font-weight:600;color:var(--muted);padding-top:8px;text-align:left">${t}</td></tr>`;
   const row = f => `<tr><td>${esc(f.file)}${f.note ? ` <span style="color:var(--amber);font-family:var(--ui)">· ${esc(f.note)}</span>` : ""}</td>
     <td class="${f.error ? "bad" : ""}">${f.error ? esc(f.error) : f.rows == null ? "skipped" : f.rows.toLocaleString() + " rows"}</td></tr>`;
-  $("#runResults").innerHTML = `<table>${head("Converted to Parquet")}${(r.files || []).map(row).join("")}` +
+  $("#dmResults").innerHTML = `<table>${head("Converted to Parquet")}${(r.files || []).map(row).join("")}` +
     head("Written") + r.written.map(p => `<tr><td colspan="2"><a class="link" data-open="${esc(p)}">${esc(p)}</a></td></tr>`).join("") + `</table>`;
-  $("#runResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
-  show("res");
+  $("#dmResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
   const line = `Converted ${r.written.length} file${r.written.length === 1 ? "" : "s"} — ${(r.rows || 0).toLocaleString()} rows in ${r.elapsed}s.` +
       ((r.errors || []).length ? ` ${r.errors.length} failed.` : "");
   // written into a folder that is open: list the new .parquet files too
@@ -4941,6 +5079,178 @@ $("#pqConvert").onclick = async () => {
   if (S.folders.some(f => norm(f.path) === norm(S.output.folder))) await refreshFiles({noSync: true, keepActive: true, message: line});
   else say(line, (r.errors || []).length ? "err" : "ok");
 };
+
+
+/* ======================= Data module: browse, convert, export ======================= */
+const dmBlankView = () => ({columns: [], filters: [], join: "and", sort: {column: "", desc: false}, unique: false});
+S.dm = {view: dmBlankView(), offset: 0, all: [], dtypes: {}, file: "", more: false};
+WS.data_view = S.dm.view;
+const dmTicked = () => S.files.filter(f => S.sel.has(f.path)).map(f => f.path);
+const dmFile = () => S.active || dmTicked()[0] || "";
+function dmEnter(){
+  dmDrawView();
+  if (dmFile() && (S.dm.file !== dmFile() || !$("#dmGrid table"))) dmBrowse();
+}
+function dmReadView(){
+  const v = S.dm.view;
+  v.join = $("#dmJoin").value; v.sort = {column: $("#dmSort").value, desc: $("#dmDesc").checked}; v.unique = $("#dmUnique").checked;
+  WS.data_view = v;
+  return v;
+}
+function dmDrawView(){
+  const v = S.dm.view, q = $("#dmColQ").value.trim().toLowerCase(), all = S.dm.all;
+  const on = new Set(v.columns.length ? v.columns : all);
+  $("#dmCols").innerHTML = all.length ? all.filter(c => !q || c.toLowerCase().includes(q)).map(c =>
+    `<label><input type="checkbox" data-dc="${esc(c)}" ${on.has(c) ? "checked" : ""}>${esc(c)}<span class="t">${esc(dmType(S.dm.dtypes[c]))}</span></label>`).join("")
+    : `<div class="sub">Click a file on the left.</div>`;
+  $("#dmColN").textContent = all.length ? `${v.columns.length || all.length} of ${all.length}` : "";
+  $("#dmFilters").innerHTML = v.filters.map((f, i) => {
+    const m = opMeta(f.op), two = TWO.includes(f.op), fx = f.op === "formula";
+    return `<div class="dmf" data-fi="${i}">${fx ? "" : `<select class="c" data-k="column">${all.map(c => `<option ${c === f.column ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`}
+      <select class="o" data-k="op">${opOptions(f.op)}</select>
+      ${m.needs_value ? `<input type="text" class="v" data-k="value" value="${esc(f.value || "")}" ${fx ? 'data-fx="1" style="flex-basis:100%"' : ""} placeholder="${fx ? "formula, e.g. AMOUNT > 500" : "value"}">` : ""}
+      ${two ? `<input type="text" class="v" data-k="value2" value="${esc(f.value2 || "")}" placeholder="to">` : ""}
+      <button class="btn x" data-k="del" title="Remove">✕</button></div>`;
+  }).join("");
+  $("#dmJoin").value = v.join || "and";
+  $("#dmSort").innerHTML = `<option value="">— file order —</option>` + all.map(c => `<option ${c === v.sort?.column ? "selected" : ""}>${esc(c)}</option>`).join("");
+  $("#dmDesc").checked = !!v.sort?.desc; $("#dmUnique").checked = !!v.unique;
+  $("#dmStatCol").innerHTML = all.map(c => `<option>${esc(c)}</option>`).join("");
+}
+const dmType = t => !t ? "" : /^(String|Utf8)$/.test(t) ? "text" : /Int|UInt/.test(t) ? "whole" : /Float|Decimal/.test(t) ? "number" : /Date/.test(t) ? "date" : /Bool/.test(t) ? "yes/no" : t.toLowerCase();
+async function dmBrowse(){
+  const file = dmFile();
+  if (!file){ $("#dmGrid").innerHTML = `<div class="empty">Click a file on the left — Parquet, CSV, TXT or Excel, of any size.</div>`; return; }
+  const limit = Math.max(10, Math.min(5000, +$("#dmRows").value || 200));
+  $("#dmFile").textContent = file.split(/[\\/]/).pop(); $("#dmFile").title = file;
+  $("#dmInfo").textContent = "Reading…";
+  const r = await api().data_browse({path: file, source: job().source, view: dmReadView(), offset: S.dm.offset, limit});
+  if (!r?.ok){ $("#dmInfo").textContent = ""; $("#dmGrid").innerHTML = `<div class="empty">${esc(r?.error || "Could not read the file.")}</div>`; say(r?.error || "Could not read the file.", "err"); return; }
+  const fresh = S.dm.file !== file;
+  S.dm.file = file; S.dm.more = r.more;
+  S.dm.all = r.all_columns; S.dm.dtypes = Object.fromEntries(r.all_columns.map((c, i) => [c, null]));
+  r.columns.forEach((c, i) => S.dm.dtypes[c] = r.dtypes[i]);
+  if (fresh){ // the view's columns are kept only where this file has them
+    const v = S.dm.view; v.columns = v.columns.filter(c => r.all_columns.includes(c));
+    v.filters = v.filters.filter(f => f.op === "formula" || r.all_columns.includes(f.column));
+    if (v.sort?.column && !r.all_columns.includes(v.sort.column)) v.sort = {column: "", desc: false};
+    api().data_schema({path: file, source: job().source}).then(sc => { if (sc?.ok){ sc.columns.forEach((c, i) => S.dm.dtypes[c] = sc.dtypes[i]); dmDrawView(); } });
+  }
+  dmDrawView();
+  const from = r.offset + 1, to = r.offset + r.rows.length;
+  $("#dmPage").textContent = r.rows.length ? `${from.toLocaleString()}–${to.toLocaleString()}${r.total != null ? ` of ${r.total.toLocaleString()}` : r.more ? "" : ` of ${to.toLocaleString()}`}` : "no rows";
+  $("#dmPrev").disabled = !r.offset; $("#dmNext").disabled = !r.more;
+  $("#dmInfo").textContent = `${r.columns.length} of ${r.all_columns.length} columns · ${r.elapsed}s${r.whole ? " · whole file" : ""}`;
+  const head = `<tr><th class="rn">#</th>${r.columns.map((c, i) => `<th title="${esc(c)}">${esc(c)}<span class="t">${esc(dmType(r.dtypes[i]))}</span></th>`).join("")}</tr>`;
+  const body = r.rows.map((row, k) => `<tr><td class="rn">${(r.offset + k + 1).toLocaleString()}</td>${row.map(v => `<td>${esc(v)}</td>`).join("")}</tr>`).join("");
+  $("#dmGrid").innerHTML = r.rows.length ? `<table class="grid"><thead>${head}</thead><tbody>${body}</tbody></table>`
+    : `<div class="empty">No row matches this view.</div>`;
+  say(`${r.file}: rows ${r.rows.length ? `${from.toLocaleString()}–${to.toLocaleString()}` : "none"}.`, "ok");
+}
+$("#dmCols").addEventListener("change", e => {
+  const c = e.target.dataset.dc; if (c == null) return;
+  const v = S.dm.view, on = v.columns.length ? v.columns : [...S.dm.all];
+  v.columns = e.target.checked ? S.dm.all.filter(x => on.includes(x) || x === c) : on.filter(x => x !== c);
+  if (v.columns.length === S.dm.all.length) v.columns = [];
+  $("#dmColN").textContent = `${v.columns.length || S.dm.all.length} of ${S.dm.all.length}`;
+});
+$("#dmColQ").oninput = dmDrawView;
+$("#dmColsAll").onclick = () => { S.dm.view.columns = []; dmDrawView(); };
+$("#dmColsNone").onclick = () => { S.dm.view.columns = S.dm.all.slice(0, 1); dmDrawView(); };
+$("#dmAddF").onclick = () => { dmReadView(); S.dm.view.filters.push({column: S.dm.all[0] || "", op: "equals", value: ""}); dmDrawView();
+  $(`#dmFilters [data-fi="${S.dm.view.filters.length - 1}"] [data-k=value]`)?.focus(); };
+$("#dmFilters").addEventListener("input", e => {
+  const row = e.target.closest("[data-fi]"), k = e.target.dataset.k; if (!row || !k || k === "op") return;
+  S.dm.view.filters[+row.dataset.fi][k] = e.target.value;
+});
+$("#dmFilters").addEventListener("change", e => {
+  const row = e.target.closest("[data-fi]"), k = e.target.dataset.k; if (!row || !k) return;
+  const f = S.dm.view.filters[+row.dataset.fi];
+  f[k] = e.target.value;
+  if (k === "op") dmDrawView();
+});
+$("#dmFilters").addEventListener("click", e => {
+  const b = e.target.closest("[data-k=del]"); if (!b) return;
+  S.dm.view.filters.splice(+b.closest("[data-fi]").dataset.fi, 1); dmDrawView();
+});
+$("#dmFilters").addEventListener("keydown", e => { if (e.key === "Enter" && !e.target.dataset.fx){ S.dm.offset = 0; dmBrowse(); } });
+$("#dmApply").onclick = () => { S.dm.offset = 0; dmBrowse(); };
+$("#dmReset").onclick = () => { S.dm.view = dmBlankView(); WS.data_view = S.dm.view; S.dm.offset = 0; dmDrawView(); dmBrowse(); };
+$("#dmPrev").onclick = () => { S.dm.offset = Math.max(0, S.dm.offset - (+$("#dmRows").value || 200)); dmBrowse(); };
+$("#dmNext").onclick = () => { S.dm.offset += (+$("#dmRows").value || 200); dmBrowse(); };
+$("#dmRows").onchange = () => { S.dm.offset = 0; dmBrowse(); };
+$("#dmStat").onclick = () => {
+  const c = $("#dmStatCol").value; if (!c){ say("Click a file first.", "err"); return; }
+  colStats(c, "active", "#dmStatOut", () => ({...job(), columns: [], filters: {}, add_columns: [], distinct: false, batch_dupes: null,
+                                              files: dmTicked().length ? dmTicked() : [dmFile()], active: dmFile()}));
+};
+$("#dmCount").onclick = async () => {
+  const files = dmTicked().length ? dmTicked() : [dmFile()].filter(Boolean);
+  if (!files.length){ say("Tick some files first.", "err"); return; }
+  busy(true); $("#btnCancel").style.display = ""; say(`Counting the rows of ${files.length} file${files.length === 1 ? "" : "s"}…`);
+  const r = await api().data_count({files, source: job().source, view: dmReadView()});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "Could not count.", r?.cancelled ? "" : "err"); return; }
+  const bad = r.files.filter(f => f.error);
+  $("#dmInfo").textContent = `${r.total.toLocaleString()} rows in ${files.length} file${files.length === 1 ? "" : "s"}`;
+  say(`This view leaves ${r.total.toLocaleString()} rows in ${files.length} ticked file${files.length === 1 ? "" : "s"} (${r.elapsed}s)` +
+      (bad.length ? ` · ${bad.length} unreadable: ${bad.map(f => f.file).join(", ")}` : "") + ".", bad.length ? "err" : "ok");
+};
+/* convert and export */
+function dmConvDraw(){ $("#dmFolder").textContent = S.output.folder || "— not chosen —"; }
+$("#dmFolderPick").onclick = async () => {
+  const r = await api().pick_folder(S.output.folder || S.folder || "");
+  if (r?.folder){ S.output.folder = r.folder; $("#outFolder").value = r.folder; dmConvDraw(); }
+};
+function dmResultTable(title, r){
+  const head = t => `<tr><td colspan="2" style="font-family:var(--ui);font-weight:600;color:var(--muted);padding-top:8px;text-align:left">${t}</td></tr>`;
+  const row = f => `<tr><td>${esc(f.file)}</td><td class="${f.error ? "bad" : ""}">${f.error ? esc(f.error) : (f.rows ?? 0).toLocaleString() + " rows"}</td></tr>`;
+  $("#dmResults").innerHTML = `<table>${head(title)}${(r.files || []).map(row).join("")}${head("Written")}` +
+    (r.written || []).map(x => `<tr><td colspan="2"><a class="link" data-open="${esc(x)}">${esc(x)}</a></td></tr>`).join("") + `</table>`;
+  $("#dmResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
+}
+async function dmHeavy(kind, payload, what){
+  const files = dmTicked();
+  if (!files.length){ say("Tick the files on the left first.", "err"); return; }
+  if (!S.output.folder){ say("Choose a folder to write to (Change… above).", "err"); return; }
+  busy(true); $("#btnCancel").style.display = ""; say(`${what} ${files.length} file${files.length === 1 ? "" : "s"}…`);
+  const r = await api()[kind]({files, source: job().source, folder: S.output.folder, ...payload});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "It did not work.", r?.cancelled ? "" : "err"); if (r?.files) dmResultTable(what, r); return null; }
+  dmResultTable(what, r);
+  return r;
+}
+$("#dmCombine").onclick = async () => {
+  const r = await dmHeavy("data_combine", {name: $("#cbName").value, compression: $("#cbComp").value, add_source: $("#cbSource").checked,
+                                           detect: $("#cbType").checked, view: $("#cbView").checked ? dmReadView() : null}, "Combining");
+  if (r){
+    const line = `One Parquet file: ${r.rows.toLocaleString()} rows, ${r.columns} columns (${r.typed.length} typed), ${human(r.size)} in ${r.elapsed}s` +
+      ((r.errors || []).length ? ` · ${r.errors.length} file(s) failed` : "") + ".";
+    const norm = x => String(x || "").replace(/[\\/]+$/, "").toLowerCase();
+    if (S.folders.some(f => norm(f.path) === norm(S.output.folder))) await refreshFiles({noSync: true, keepActive: true, message: line});
+    else say(line, (r.errors || []).length ? "err" : "ok");
+  }
+};
+$("#dmExport").onclick = async () => {
+  const r = await dmHeavy("data_export", {name: $("#exName").value, format: $("#exFmt").value, mode: $("#exMode").value,
+                                          add_source: $("#exSource").checked, view: dmReadView(), output: S.output}, "Exporting");
+  if (r) say(`Exported ${r.rows.toLocaleString()} rows into ${r.written.length} file${r.written.length === 1 ? "" : "s"} in ${r.elapsed}s` +
+             ((r.errors || []).length ? ` · ${r.errors.length} file(s) failed` : "") + ".", (r.errors || []).length ? "err" : "ok");
+};
+
+/* ======================= PDF module ======================= */
+window.pdfHost = {api: () => api(), say: (m, k) => say(m, k),
+                  folders: () => S.folders.map(f => ({path: f.path, recursive: f.recursive})), outFolder: () => S.output.folder || ""};
+let PDF_LOADED = false;
+async function pdfEnter(){
+  const fr = $("#pdfFrame");
+  if (PDF_LOADED){ try { fr.contentWindow.pdfApp?.scanFolders(); } catch (_){ } return; }
+  PDF_LOADED = true;
+  const r = await api().pdf_html();
+  if (!r?.ok){ PDF_LOADED = false; $("#pdfLoading").textContent = r?.error || "The PDF tools could not load."; say(r?.error || "The PDF tools could not load.", "err"); return; }
+  fr.onload = () => { $("#pdfLoading").style.display = "none"; fr.style.display = "block"; };
+  fr.srcdoc = r.html;
+}
 
 /* ---------------- memory meter ---------------- */
 let MEM = {};

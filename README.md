@@ -2,7 +2,14 @@
 
 Pull a handful of columns out of very large text and Excel extracts — then combine
 several kinds of extract, analyse them on an interactive dashboard, and export it all
-in one go.
+in one go. Four modules along the top of the window:
+
+| Module | For |
+|---|---|
+| **Extract** | The setup: files, columns, filters, added columns, Combine steps, the output — and Run. |
+| **Analytics** | Dashboards, summaries and Studio visuals for each group, combined table or the Overview. |
+| **Data** | Any data file — Parquet, CSV, TXT, Excel — browsed a page at a time, searched for a list of values, converted or combined into Parquet, exported. |
+| **PDF** | Merge, split, reorder, rotate, write on, sign, stamp, protect, convert and search PDFs. |
 
 ```
 pip install -r requirements.txt        (pywebview, polars, fastexcel, openpyxl)
@@ -24,11 +31,70 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `checks.py` | Checks that pass or fail a run: row counts, unique keys, blanks, keys found, totals, a query that must find nothing. |
 | `worker.py` | Runs, counts, Find and full-data dashboards in a process of their own, so running out of memory can't close the window. |
 | `ui.html` | The interface. Inline CSS and JS. |
+| `datamgr.py` | The Data module: a page of any file through a view, counts, many files into one Parquet, exports. |
+| `pdf.html` / `pdfapp.js` | The PDF module, written into the window when it is first opened. |
+| `vendor/` | pdf.js (Apache-2.0) and pdf-lib (@cantoo fork, MIT) — what the PDF module draws, reads and writes PDFs with. |
 | `studio.html` | Measure Studio with ColSift's hooks — the designer and renderer of Studio visuals. |
 | `studio_embed.py` | Makes `studio.html` from a Measure Studio file: `python studio_embed.py measure-studio.html`. |
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.5 — Data and PDF modules
+
+The window has four modules along the top: **Extract** (the setup and Run, as before),
+**Analytics** (the dashboards, now a module of their own), **Data** and **PDF**.
+
+**Data** — the Parquet workbench, for any data file of any size, on the files ticked on
+the left (read with the bar's sheet, header row and separator settings):
+
+- **Browse** — click a file: its rows a page at a time (*‹ Prev* / *Next ›*, 10 – 5,000 rows a
+  page), Parquet's own column types shown. A **view** on the left: the columns to show,
+  filters (the same conditions as the Filters tab, formulas included; all or any must match),
+  a sort (numbers sort as numbers) and *Distinct rows only*. With no filter or sort, a page
+  reads only the start of the file; otherwise the file is read once. **Count rows** counts what
+  the view leaves in every ticked file, file by file. **Column profile** — blanks, distinct
+  values, range, the most common values. The view is saved with the setup.
+- **Bulk search** — the Find tab, moved here: a list of values pasted or loaded from a column of
+  any file, exact / contains / starts / ends, leading zeros, `123.0`, spaces and symbols
+  ignored on both sides; every match exported with `SOURCE_FILE`, `MATCHED_IN`, `MATCH_KEY`
+  and the values not found. It reads Parquet, CSV / TXT (big ones in 8 MB blocks) and Excel
+  alike, one file at a time.
+- **Convert & export** — **One Parquet file per file** (moved here from the Output tab);
+  **Combine into one Parquet file**: every ticked file stacked by column name (a file without
+  a column leaves it blank), numbers and dates typed, a `SOURCE_FILE` column, zstd / snappy /
+  gzip / no compression, optionally through the Browse view; **Export the Browse view** over the
+  ticked files as Excel (split at 1,048,575 rows), CSV, TXT or Parquet — one file, or one per
+  input. All of it runs in the worker process, one file at a time, through staged Parquet.
+
+**PDF** — everything stays on the computer:
+
+- **Pages** — open PDFs (or click one in *PDFs in your folders*; *＋ Folder* adds a folder of
+  PDFs only). Every page of every open document is on one board: drag to reorder (the
+  selected pages move together), rotate, duplicate, delete, add a blank page, move to the
+  start or end, reverse, undo (Ctrl+Z). **Save PDF** writes the board as one PDF — merging
+  is opening several; **Extract selected** and **Split** (every page, every N pages, ranges such
+  as `1-3, 4-9`, or before each selected page) write several. A password-protected PDF asks
+  for its password.
+- **Edit page** — double-click a page: text (double-click to retype; size, bold, colour),
+  highlight, white-out (hides what is under it on the page — the text underneath stays in the
+  file, so it is not a redaction), box, image, a drawn signature, today's date, a tick. Drag
+  to move, the corner to resize; rotated pages keep everything upright.
+- **Stamp & protect** — page numbers (`Page {n} of {total}`, six positions, start number,
+  skip the first page), a watermark, header and footer text (`{n}`, `{total}`, `{date}`,
+  `{file}`), for all pages or a range; title, author, subject, keywords; a password (AES-256)
+  with printing, copying and changes allowed or not; form fields filled in or flattened; a
+  smaller file (compressed object streams).
+- **Convert** — images (JPEG, PNG) to PDF, at their own size or on A4 / Letter; pages to PNG or
+  JPEG at 96, 150 or 300 dpi; the text to a .txt file; **tables to Excel / CSV / Parquet** —
+  each text line a row, cut into columns at wide gaps, with FILE and PAGE columns — ready for
+  the Data module.
+- **Search PDFs** — a list of values over the open documents or the PDFs ticked in the folder
+  list: contains, whole word or a pattern; every hit with its file, page and line, the values
+  not found, a click opens the page, *Export the hits* writes them to Excel.
+
+The PDF module works on PDFs that hold text. A scanned page is a picture: it can be
+reordered, stamped and protected, but its text can't be searched or extracted without OCR.
 
 ## What's new in 2.4 — picking columns while you write a formula
 
@@ -216,7 +282,7 @@ Peak memory of one operation, 6,000,000 rows (four 1.5M-row CSVs, 454 MB), fresh
   sort by it, click a cell to see its rows, heat-map shading, a chart over the pivot, report
   filters picked from a list of values with counts, and "follow the dashboard filters".
 - **PDF export** of the dashboard and the summaries — separately or together, from the
-  Analysis tab (exactly what is on screen) or with every run.
+  Analytics module (exactly what is on screen) or with every run.
 - **Setups travel.** Export one setup, or every setup in one file; import them on another
   machine. Names that clash get " (2)".
 - **A much smaller exe.** `build.bat` builds in a clean environment into one compressed
@@ -336,10 +402,10 @@ Other new column kinds: Copy; Part of a column (cut at a separator, −1 = last 
   for the dashboard on screen. Full-data results are kept: switching *Data* shows them again,
   with the time they were worked out; *↻ Refresh sample* or editing a card works them out anew.
 - **then dashboards** (beside *Run*, saved with the setup): the run works out the dashboards
-  from the data it has just read and the Analysis tab opens on them.
+  from the data it has just read and the Analytics module opens on them.
 
 
-The Analysis tab reads the extracted frame — after filters, renames and computed columns, the same rows the output is written from — so what you see and what lands in the sheets is one computation. **↻ Refresh sample** reads the first rows of each ticked file (100 by default — *rows per file* beside it), the file you clicked first; **▶ Every file** runs the whole batch, one file at a time, like Count.
+The Analytics module reads the extracted frame — after filters, renames and computed columns, the same rows the output is written from — so what you see and what lands in the sheets is one computation. **↻ Refresh sample** reads the first rows of each ticked file (100 by default — *rows per file* beside it), the file you clicked first; **▶ Every file** runs the whole batch, one file at a time, like Count.
 
 **Dashboard.** Cards you add, arrange and keep with the setup:
 

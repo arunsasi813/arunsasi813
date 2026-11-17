@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ColSift PDF</title>
+<style>
+:root{
+  --ink:#0e1418; --muted:#5d6b70; --faint:#8a979c;
+  --paper:#eceeec; --surface:#ffffff; --line:#d6dbd8; --line-2:#e6eae7;
+  --teal:#0d6e66; --teal-2:#0a564f; --teal-soft:#e0efed;
+  --amber:#b26a00; --amber-soft:#fdf1de; --red:#9c2f2f; --red-soft:#fbeceb;
+  --ui:"IBM Plex Sans","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  --mono:"IBM Plex Mono","Cascadia Mono",Consolas,monospace; --r:3px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:12.5px/1.45 var(--ui);color:var(--ink);background:var(--paper);overflow:hidden}
+button,input,select,textarea{font:inherit;color:inherit}
+input[type=text],input[type=number],input[type=password],select,textarea{border:1px solid var(--line);border-radius:var(--r);
+  background:var(--surface);padding:3px 6px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--teal);box-shadow:0 0 0 2px var(--teal-soft)}
+input[type=checkbox],input[type=radio]{accent-color:var(--teal);margin:0}
+.btn{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:4px 10px;font-weight:500;
+  white-space:nowrap;cursor:pointer}
+.btn:hover{border-color:#b6bfba;background:#f7f8f7}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.pri{background:var(--teal);border-color:var(--teal);color:#fff}.btn.pri:hover{background:var(--teal-2)}
+.btn.sm{padding:2px 8px;font-size:11.5px}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}.btn.ghost:hover{background:#e2e6e3;color:var(--ink)}
+.btn.on{background:var(--teal-soft);border-color:var(--teal);color:var(--teal-2)}
+.btn.danger{color:var(--red)}
+.lbl{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.f{display:flex;align-items:center;gap:6px}
+.hint{color:var(--muted);font-size:11.5px;margin:4px 0 8px}
+.app{display:grid;grid-template-columns:250px 1fr;height:100%}
+aside{background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+aside .sec{padding:10px 12px;border-bottom:1px solid var(--line-2)}
+aside .grow{flex:1;min-height:0;display:flex;flex-direction:column}
+aside h4{margin:0 0 6px;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);display:flex;gap:6px;align-items:center}
+.list{overflow:auto;flex:1;min-height:0}
+.li{display:flex;gap:6px;align-items:center;padding:4px 6px;border-radius:3px;cursor:pointer;font-size:12px}
+.li:hover{background:var(--teal-soft)}
+.li .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.li .sz{font-size:10.5px;color:var(--faint);font-family:var(--mono)}
+.li input{flex:none}
+.fold{font-size:10.5px;color:var(--faint);padding:6px 6px 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.tabs{display:flex;gap:2px;padding:0 10px;background:var(--surface);border-bottom:1px solid var(--line)}
+.tab{border:0;background:none;padding:9px 12px;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer}
+.tab.on{color:var(--teal);border-bottom-color:var(--teal);font-weight:600}
+.toolbar{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:7px 12px;background:var(--surface);border-bottom:1px solid var(--line-2)}
+.toolbar .sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.view{display:none;flex:1;min-height:0;overflow:auto;padding:12px}
+.view.on{display:block}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.th{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:6px;position:relative;cursor:pointer;user-select:none}
+.th.sel{border-color:var(--teal);box-shadow:0 0 0 2px var(--teal-soft)}
+.th canvas{display:block;margin:0 auto;max-width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.th .cap{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);margin-top:5px;gap:4px}
+.th .cap span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th .badge{position:absolute;top:4px;left:4px;background:var(--amber-soft);color:var(--amber);border-radius:8px;font-size:10px;padding:0 6px}
+.th.drop-before{box-shadow:-4px 0 0 var(--teal)}
+.th.drop-after{box-shadow:4px 0 0 var(--teal)}
+.th .ph{height:190px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:11px}
+.empty{color:var(--muted);text-align:center;padding:40px 10px}
+.empty h3{margin:0 0 6px;color:var(--ink);font-size:14px}
+footer{display:flex;align-items:center;gap:8px;padding:7px 12px;background:var(--surface);border-top:1px solid var(--line)}
+#status{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+#status.ok{color:var(--teal-2)}#status.err{color:var(--red)}
+.bar{height:3px;background:var(--line-2)}.bar i{display:block;height:100%;width:0;background:var(--teal);transition:width .15s}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:12px;margin-bottom:10px}
+.card h3{margin:0 0 6px;font-size:13px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px;align-items:start}
+.cards .card{margin:0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:5px 0}
+.row label.lbl{min-width:70px}
+/* editor */
+.edwrap{display:grid;grid-template-columns:1fr 240px;gap:12px;height:100%}
+.stage{overflow:auto;background:#d9dddb;border-radius:4px;padding:16px;position:relative;min-height:0}
+.pagebox{position:relative;margin:0 auto;box-shadow:0 2px 10px rgba(0,0,0,.2);background:#fff}
+.pagebox canvas{display:block}
+.layer{position:absolute;inset:0}
+.ov{position:absolute;transform-origin:0 100%;cursor:move;outline:1px dashed transparent}
+.ov:hover,.ov.sel{outline-color:var(--teal)}
+.ov.text{white-space:pre;line-height:1.2;font-family:Helvetica,Arial,sans-serif}
+.ov.text[contenteditable=true]{cursor:text;outline:1px solid var(--teal);background:rgba(224,239,237,.4)}
+.ov img{width:100%;height:100%;display:block;pointer-events:none}
+.ov .hd{position:absolute;right:-5px;bottom:-5px;width:10px;height:10px;background:var(--teal);border-radius:2px;cursor:nwse-resize;display:none}
+.ov.sel .hd{display:block}
+.props{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:10px;overflow:auto}
+.props h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.tools{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:10px}
+.tools .btn{text-align:left}
+table.hits{border-collapse:collapse;width:100%;font-size:12px;background:var(--surface)}
+table.hits th{text-align:left;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--line);padding:5px 8px;position:sticky;top:0;background:#f3f5f3}
+table.hits td{border-bottom:1px solid var(--line-2);padding:4px 8px;vertical-align:top}
+table.hits tr.go{cursor:pointer}table.hits tr.go:hover td{background:var(--teal-soft)}
+mark{background:#fff1a8;padding:0 1px}
+.modal{position:fixed;inset:0;background:rgba(15,22,28,.45);display:none;align-items:center;justify-content:center;z-index:50}
+.modal.on{display:flex}
+.modal .box{background:var(--surface);border-radius:6px;padding:14px;min-width:360px;max-width:640px;box-shadow:0 12px 40px rgba(0,0,0,.3)}
+.modal h3{margin:0 0 8px}
+#sigPad{border:1px solid var(--line);border-radius:4px;background:#fff;touch-action:none;cursor:crosshair;display:block}
+.mono{font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="sec">
+      <div class="f" style="flex-wrap:wrap;gap:5px">
+        <button class="btn pri" id="openBtn" title="Open one or more PDFs — their pages join the board">Open PDFs…</button>
+        <button class="btn" id="imgBtn" title="JPEG or PNG images, one page each">Images → PDF…</button>
+        <button class="btn ghost" id="clearBtn" title="Close every document">Clear</button>
+      </div>
+    </div>
+    <div class="sec"><h4>Open documents</h4><div id="docs" class="list" style="max-height:170px"><div class="hint">None yet.</div></div></div>
+    <div class="sec grow">
+      <h4 style="justify-content:space-between">PDFs in your folders <span><button class="btn ghost sm" id="addFolder" title="Another folder of PDFs">＋ Folder</button><button class="btn ghost sm" id="rescan" title="Look again">↻</button></span></h4>
+      <label class="f" style="font-size:11px;margin-bottom:5px;color:var(--muted)"><input type="checkbox" id="fsub"> include subfolders of added folders</label>
+      <input type="text" id="fq" placeholder="Filter by name" style="width:100%;margin-bottom:6px">
+      <div id="folderList" class="list"><div class="hint">The folders open in ColSift are listed here — or add one with ＋ Folder.</div></div>
+    </div>
+  </aside>
+
+  <main>
+    <nav class="tabs" id="tabs">
+      <button class="tab on" data-v="pages">▦ Pages</button>
+      <button class="tab" data-v="edit">✎ Edit page</button>
+      <button class="tab" data-v="tools">⚙ Stamp &amp; protect</button>
+      <button class="tab" data-v="convert">⇄ Convert</button>
+      <button class="tab" data-v="search">⌕ Search PDFs</button>
+    </nav>
+    <div class="bar"><i id="prog"></i></div>
+
+    <!-- PAGES -->
+    <div class="toolbar" id="tbPages">
+      <button class="btn sm" data-a="all" title="Select every page (Ctrl+A)">Select all</button>
+      <button class="btn sm" data-a="none">None</button>
+      <span class="sep"></span>
+      <button class="btn sm" data-a="rotl" title="Rotate the selected pages left">⟲</button>
+      <button class="btn sm" data-a="rotr" title="Rotate the selected pages right">⟳</button>
+      <button class="btn sm" data-a="dup" title="Duplicate the selected pages">⧉ Duplicate</button>
+      <button class="btn sm" data-a="blank" title="A blank page after the selection">＋ Blank page</button>
+      <button class="btn sm danger" data-a="del" title="Remove the selected pages (Delete)">✕ Delete</button>
+      <span class="sep"></span>
+      <button class="btn sm" data-a="first" title="Move the selected pages to the start">⇤ To start</button>
+      <button class="btn sm" data-a="last" title="Move the selected pages to the end">To end ⇥</button>
+      <button class="btn sm" data-a="reverse" title="Reverse the order of the selected pages (all, if none)">⇅ Reverse</button>
+      <span class="sep"></span>
+      <button class="btn sm" data-a="extract" title="The selected pages as a new PDF">⤓ Extract selected</button>
+      <button class="btn sm" data-a="split" title="Cut the document into several PDFs">✂ Split…</button>
+      <span class="sep"></span>
+      <button class="btn sm ghost" data-a="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
+      <span id="selInfo" style="margin-left:auto;color:var(--muted);font-size:11.5px"></span>
+    </div>
+    <section class="view on" id="v-pages">
+      <div id="grid" class="grid"></div>
+    </section>
+
+    <!-- EDIT -->
+    <section class="view" id="v-edit">
+      <div class="edwrap">
+        <div class="stage" id="stage"><div class="empty"><h3>Pick a page</h3>Double-click a page on the Pages tab, or use the arrows.</div></div>
+        <div class="props">
+          <div class="f" style="justify-content:space-between;margin-bottom:8px">
+            <button class="btn sm" id="edPrev">‹ Prev</button><span id="edInfo" style="font-size:11.5px;color:var(--muted)"></span><button class="btn sm" id="edNext">Next ›</button>
+          </div>
+          <h4>Add</h4>
+          <div class="tools" id="edTools">
+            <button class="btn sm" data-t="text" title="Click on the page where the text goes">Ａ Text</button>
+            <button class="btn sm" data-t="highlight" title="Drag over what to highlight">▬ Highlight</button>
+            <button class="btn sm" data-t="cover" title="Drag a white box over something — it hides it on the page (the text underneath stays in the file)">■ White-out</button>
+            <button class="btn sm" data-t="box" title="Drag a rectangle">▢ Box</button>
+            <button class="btn sm" data-t="image" title="A PNG or JPEG image">🖼 Image</button>
+            <button class="btn sm" data-t="sig" title="Draw your signature">✍ Signature</button>
+            <button class="btn sm" data-t="date" title="Today's date as text">📅 Date</button>
+            <button class="btn sm" data-t="check" title="A tick mark">✓ Tick</button>
+          </div>
+          <div id="ovProps"><p class="hint">Pick a tool, then click or drag on the page. Click something you added to change, move (drag) or resize it (corner). It is written into the PDF when you save.</p></div>
+          <h4 style="margin-top:12px">On this page</h4>
+          <div id="ovList" class="hint">Nothing added.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TOOLS -->
+    <section class="view" id="v-tools">
+      <p class="hint">Everything here is applied when the PDF is saved — Save, Extract and Split alike — to every page unless a range is given.</p>
+      <div class="cards">
+        <div class="card"><h3><label class="f"><input type="checkbox" id="pnOn"> Page numbers</label></h3>
+          <div class="row"><label class="lbl">Text</label><input type="text" id="pnFmt" value="Page {n} of {total}" style="flex:1"></div>
+          <div class="row"><label class="lbl">Where</label><select id="pnPos"><option value="bc">Bottom centre</option><option value="br">Bottom right</option>
+            <option value="bl">Bottom left</option><option value="tc">Top centre</option><option value="tr">Top right</option><option value="tl">Top left</option></select>
+            <label class="lbl" style="min-width:0">Size</label><input type="number" id="pnSize" value="10" min="5" max="40" style="width:56px"></div>
+          <div class="row"><label class="lbl">Start at</label><input type="number" id="pnStart" value="1" style="width:64px">
+            <label class="f" style="font-size:11.5px"><input type="checkbox" id="pnSkip"> not on the first page</label></div>
+        </div>
+        <div class="card"><h3><label class="f"><input type="checkbox" id="wmOn"> Watermark</label></h3>
+          <div class="row"><label class="lbl">Text</label><input type="text" id="wmText" value="CONFIDENTIAL" style="flex:1"></div>
+          <div class="row"><label class="lbl">Size</label><input type="number" id="wmSize" value="60" min="8" max="200" style="width:60px">
+            <label class="lbl" style="min-width:0">Angle</label><input type="number" id="wmAngle" value="45" min="-90" max="90" style="width:56px">
+            <label class="lbl" style="min-width:0">Opacity</label><input type="number" id="wmOp" value="0.15" min="0.02" max="1" step="0.05" style="width:60px"></div>
+          <div class="row"><label class="lbl">Colour</label><input type="color" id="wmColor" value="#9c2f2f"></div>
+        </div>
+        <div class="card"><h3><label class="f"><input type="checkbox" id="hfOn"> Header and footer</label></h3>
+          <div class="row"><label class="lbl">Header</label><input type="text" id="hdText" placeholder="{file} · {date}" style="flex:1"></div>
+          <div class="row"><label class="lbl">Footer</label><input type="text" id="ftText" placeholder="Prepared by …" style="flex:1"></div>
+          <div class="row"><label class="lbl">Align</label><select id="hfAlign"><option value="l">Left</option><option value="c">Centre</option><option value="r">Right</option></select>
+            <label class="lbl" style="min-width:0">Size</label><input type="number" id="hfSize" value="9" min="5" max="30" style="width:56px"></div>
+          <p class="hint">{n} page, {total} pages, {date} today, {file} the first document's name.</p>
+        </div>
+        <div class="card"><h3>Pages these apply to</h3>
+          <div class="row"><label class="lbl">Range</label><input type="text" id="stRange" placeholder="all — or e.g. 2-5, 8" style="flex:1"></div>
+          <p class="hint">Page numbers count from the first page of the saved file.</p>
+        </div>
+        <div class="card"><h3>Document properties</h3>
+          <div class="row"><label class="lbl">Title</label><input type="text" id="mdTitle" style="flex:1"></div>
+          <div class="row"><label class="lbl">Author</label><input type="text" id="mdAuthor" style="flex:1"></div>
+          <div class="row"><label class="lbl">Subject</label><input type="text" id="mdSubject" style="flex:1"></div>
+          <div class="row"><label class="lbl">Keywords</label><input type="text" id="mdKeys" style="flex:1"></div>
+        </div>
+        <div class="card"><h3><label class="f"><input type="checkbox" id="pwOn"> Password protect (AES-256)</label></h3>
+          <div class="row"><label class="lbl">To open</label><input type="password" id="pwUser" style="flex:1" autocomplete="new-password"></div>
+          <div class="row"><label class="lbl">Owner</label><input type="password" id="pwOwner" placeholder="to change permissions (optional)" style="flex:1" autocomplete="new-password"></div>
+          <div class="row"><label class="f" style="font-size:11.5px"><input type="checkbox" id="pwPrint" checked> Allow printing</label>
+            <label class="f" style="font-size:11.5px"><input type="checkbox" id="pwCopy" checked> Allow copying text</label>
+            <label class="f" style="font-size:11.5px"><input type="checkbox" id="pwEdit"> Allow changes</label></div>
+          <p class="hint">A protected PDF opened here asks for its password; saved without this box ticked, it is saved without one.</p>
+        </div>
+        <div class="card"><h3>File</h3>
+          <label class="f" style="font-size:12px"><input type="checkbox" id="optSmall" checked> Smaller file (compressed object streams)</label>
+          <label class="f" style="font-size:12px;margin-top:5px"><input type="checkbox" id="optFlatten"> Flatten form fields (their values become plain page content)</label>
+          <div id="formBox" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONVERT -->
+    <section class="view" id="v-convert">
+      <div class="cards">
+        <div class="card"><h3>Images → PDF</h3>
+          <p class="hint">JPEG and PNG images, one page each, in the order picked. The new pages join the board — save them on their own or with other PDFs.</p>
+          <div class="row"><label class="lbl">Page</label><select id="imPage"><option value="fit">The image's own size</option><option value="a4p">A4 portrait</option>
+            <option value="a4l">A4 landscape</option><option value="letter">Letter portrait</option></select>
+            <label class="lbl" style="min-width:0">Margin</label><input type="number" id="imMargin" value="18" min="0" max="100" style="width:56px"></div>
+          <button class="btn" id="imPick">Pick images…</button>
+        </div>
+        <div class="card"><h3>Pages → images</h3>
+          <p class="hint">Each selected page (every page if none is selected) as a PNG or JPEG file.</p>
+          <div class="row"><label class="lbl">Format</label><select id="rxFmt"><option value="png">PNG</option><option value="jpeg">JPEG</option></select>
+            <label class="lbl" style="min-width:0">Quality</label><select id="rxDpi"><option value="96">Screen (96 dpi)</option><option value="150" selected>Good (150 dpi)</option><option value="300">Print (300 dpi)</option></select></div>
+          <button class="btn" id="rxGo">Save the pages as images…</button>
+        </div>
+        <div class="card"><h3>Text → .txt</h3>
+          <p class="hint">The text of each page, in reading order, lines kept — for PDFs made from text (a scan has none: it needs OCR).</p>
+          <button class="btn" id="txGo">Save the text…</button>
+        </div>
+        <div class="card"><h3>Tables → Excel / CSV / Parquet</h3>
+          <p class="hint">Statements and reports: every text line becomes a row, cut into columns where there is a wide gap. Open the result in the Data module to filter and combine it.</p>
+          <div class="row"><label class="lbl">Gap</label><input type="number" id="tbGap" value="12" min="3" max="80" style="width:60px"><span class="hint" style="margin:0">points of space that start a new column</span></div>
+          <div class="row"><label class="f" style="font-size:11.5px"><input type="checkbox" id="tbPage" checked> PAGE column</label>
+            <label class="f" style="font-size:11.5px"><input type="checkbox" id="tbFile" checked> FILE column</label></div>
+          <button class="btn" id="tbGo">Save as a table…</button>
+          <div id="tbPrev" style="margin-top:8px;max-height:220px;overflow:auto"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SEARCH -->
+    <section class="view" id="v-search">
+      <div class="card">
+        <h3>Search inside PDFs</h3>
+        <div style="display:grid;grid-template-columns:1fr 280px;gap:12px">
+          <div><textarea id="sqVals" rows="5" placeholder="One value per line — ticket numbers, names, amounts…" style="width:100%;font-family:var(--mono);font-size:11.5px"></textarea></div>
+          <div>
+            <div class="row"><label class="lbl">In</label><select id="sqScope" style="flex:1"><option value="open">The open documents</option><option value="folder">PDFs ticked in your folders</option></select></div>
+            <div class="row"><label class="lbl">Match</label><select id="sqMode" style="flex:1"><option value="contains">Contains</option><option value="word">Whole word</option><option value="regex">Pattern (regex)</option></select></div>
+            <label class="f" style="font-size:11.5px"><input type="checkbox" id="sqCase"> Case sensitive</label>
+            <label class="f" style="font-size:11.5px;margin-top:4px"><input type="checkbox" id="sqSpace" checked> Ignore spaces inside values</label>
+          </div>
+        </div>
+        <div class="f" style="margin-top:8px">
+          <button class="btn pri" id="sqGo">Search</button>
+          <button class="btn" id="sqExport" disabled>Export the hits…</button>
+          <button class="btn ghost" id="sqStop" style="display:none">Stop</button>
+          <span id="sqInfo" style="margin-left:auto;color:var(--muted)"></span>
+        </div>
+      </div>
+      <div id="sqMiss"></div>
+      <div id="sqOut"></div>
+    </section>
+
+    <footer>
+      <span id="status">Open a PDF to start — from the button on the left, or from your folders.</span>
+      <button class="btn" id="saveSel" title="Only the selected pages">Save selected…</button>
+      <button class="btn pri" id="saveAll" title="Every page on the board, in this order, as one PDF">Save PDF…</button>
+    </footer>
+  </main>
+</div>
+
+<!-- split -->
+<div class="modal" id="splitDlg"><div class="box">
+  <h3>Split into several PDFs</h3>
+  <label class="f" style="margin:5px 0"><input type="radio" name="sp" value="each" checked> Every page on its own</label>
+  <label class="f" style="margin:5px 0"><input type="radio" name="sp" value="every"> Every <input type="number" id="spN" value="2" min="1" style="width:60px"> pages</label>
+  <label class="f" style="margin:5px 0"><input type="radio" name="sp" value="ranges"> These ranges: <input type="text" id="spRanges" placeholder="1-3, 4-9, 10" style="flex:1"></label>
+  <label class="f" style="margin:5px 0"><input type="radio" name="sp" value="sel"> Before each selected page</label>
+  <div class="row"><label class="lbl">Name</label><input type="text" id="spName" value="part" style="width:150px"><span class="hint" style="margin:0">→ part_01.pdf, part_02.pdf …</span></div>
+  <div class="f" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-close>Cancel</button><button class="btn pri" id="spGo">Choose a folder and split</button></div>
+</div></div>
+<!-- signature -->
+<div class="modal" id="sigDlg"><div class="box">
+  <h3>Draw your signature</h3>
+  <canvas id="sigPad" width="520" height="180"></canvas>
+  <div class="f" style="margin-top:8px"><label class="lbl">Ink</label><input type="color" id="sigInk" value="#13306b">
+    <button class="btn sm ghost" id="sigClear">Clear</button>
+    <span style="flex:1"></span><button class="btn" data-close>Cancel</button><button class="btn pri" id="sigUse">Place it</button></div>
+</div></div>
+
+<script>/*@VENDOR:pdf-lib.min.js@*/</script>
+<script type="text/plain" id="pdfjsWorkerSrc">/*@VENDOR:pdf.worker.min.mjs@*/</script>
+<script type="module">/*@VENDOR:pdf.min.mjs@*/</script>
+<script type="module" id="appCode">
+/*@APP@*/
+</script>
+</body>
+</html>

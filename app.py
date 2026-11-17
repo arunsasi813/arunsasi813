@@ -33,6 +33,8 @@ def _webview():
 HERE = Path(__file__).resolve().parent
 UI = HERE / "ui.html"
 STUDIO = HERE / "studio.html"          # Measure Studio, with ColSift's hooks (studio_embed.py)
+PDFAPP = HERE / "pdf.html"             # the PDF module; its libraries come from vendor/
+VENDOR = HERE / "vendor"
 
 # pywebview walks every PUBLIC attribute of the js_api object to build its JS shim.
 # A webview.Window hanging off `self` sends it into the native GUI objects, where the
@@ -53,8 +55,9 @@ def _load_modules() -> None:
         import analysis as A
         import engine as E
         import formula as F
+        import datamgr as D
         import workspace as W
-        _MODS.update(A=A, E=E, F=F, W=W)
+        _MODS.update(A=A, E=E, F=F, W=W, D=D)
     except Exception as exc:  # noqa: BLE001 — reported by the first call that needs it
         _MODS["error"] = exc
         traceback.print_exc()
@@ -68,6 +71,18 @@ def _m():
     if "error" in _MODS:
         raise RuntimeError(f"The engine could not start: {_MODS['error']}")
     return _MODS["E"], _MODS["A"], _MODS["F"], _MODS["W"]
+
+
+def _dm():
+    _m()
+    return _MODS["D"]
+
+
+# files the PDF module streams in and out, a few MB per call
+CHUNK = 4 << 20
+_SAVES: dict[str, dict] = {}
+PDF_EXT = {".pdf"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg"}
 
 
 def _win() -> "webview.Window | None":
@@ -682,6 +697,154 @@ class Api:
         return _heavy("convert", {"job": job}, lambda: E.convert_to_parquet(
             job, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
 
+    # -- Data module (datamgr.py) --------------------------------------------
+    @guard
+    @_reading
+    def data_schema(self, p: dict) -> dict:
+        return _dm().schema(p)
+
+    @guard
+    @_reading
+    def data_browse(self, p: dict) -> dict:
+        """One page of the clicked file through the Data module's view."""
+        return _dm().browse(p)
+
+    @guard
+    def data_count(self, p: dict) -> dict:
+        return _heavy("data_count", {"p": p}, lambda: _dm().count(
+            p, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
+    def data_combine(self, p: dict) -> dict:
+        """The ticked files into one Parquet file, in a worker."""
+        return _heavy("data_combine", {"p": p}, lambda: _dm().combine(
+            p, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
+    def data_export(self, p: dict) -> dict:
+        """The view over the ticked files as CSV / TXT / Excel / Parquet, in a worker."""
+        return _heavy("data_export", {"p": p}, lambda: _dm().export(
+            p, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
+    def write_rows(self, p: dict) -> dict:
+        """A small table (PDF text, search hits) to CSV / Excel / Parquet; asks where
+        unless a path is given."""
+        if not p.get("path"):
+            got = self.save_dialog({"filename": p.get("filename") or "table.xlsx", "folder": p.get("folder") or "",
+                                    "types": ("Excel (*.xlsx)", "CSV (*.csv)", "Parquet (*.parquet)")})
+            if not got.get("path"):
+                return {"ok": False, "cancelled": True}
+            p = {**p, "path": got["path"]}
+        return _dm().write_rows(p)
+
+    # -- PDF module: files in and out, a chunk at a time ------------------------
+    @guard
+    def pdf_html(self) -> dict:
+        """The PDF module's page with pdf.js and pdf-lib written into it."""
+        if not PDFAPP.exists():
+            return {"ok": False, "error": f"pdf.html is missing (looked in {HERE})"}
+        html = PDFAPP.read_text(encoding="utf-8")
+        for name in ("pdf-lib.min.js", "pdf.min.mjs", "pdf.worker.min.mjs"):
+            f = VENDOR / name
+            if not f.exists():
+                return {"ok": False, "error": f"vendor/{name} is missing"}
+            code = f.read_text(encoding="utf-8").replace("</script", "<\\/script").replace("<!--", "<\\!--")
+            html = html.replace(f"/*@VENDOR:{name}@*/", code, 1)
+        app_js = HERE / "pdfapp.js"
+        if not app_js.exists():
+            return {"ok": False, "error": "pdfapp.js is missing"}
+        html = html.replace("/*@APP@*/", app_js.read_text(encoding="utf-8").replace("</script", "<\\/script"), 1)
+        return {"ok": True, "html": html}
+
+    @guard
+    def pdf_list(self, p: dict) -> dict:
+        """PDFs (and images, for Images → PDF) in the open folders."""
+        out, seen = [], set()
+        want = PDF_EXT | (IMAGE_EXT if p.get("images") else set())
+        for f in p.get("folders") or []:
+            root = Path(f.get("path") or "")
+            if not root.is_dir():
+                continue
+            it = root.rglob("*") if f.get("recursive") else root.glob("*")
+            for x in it:
+                try:
+                    if x.suffix.lower() in want and x.is_file() and str(x) not in seen:
+                        seen.add(str(x))
+                        st = x.stat()
+                        out.append({"path": str(x), "name": x.name, "size": st.st_size, "mtime": st.st_mtime,
+                                    "folder": str(x.parent)})
+                except OSError:
+                    continue
+                if len(out) >= 5000:
+                    break
+        out.sort(key=lambda r: (r["folder"].lower(), r["name"].lower()))
+        return {"ok": True, "files": out}
+
+    @guard
+    def file_read(self, p: dict) -> dict:
+        """A slice of a PDF or image, base64: {path, offset}. Big files come in several calls."""
+        import base64
+        path = Path(p.get("path") or "")
+        if path.suffix.lower() not in PDF_EXT | IMAGE_EXT:
+            return {"ok": False, "error": "Only PDFs and PNG / JPEG images are read here."}
+        size = path.stat().st_size
+        off = max(0, int(p.get("offset") or 0))
+        with open(path, "rb") as fh:
+            fh.seek(off)
+            data = fh.read(CHUNK)
+        return {"ok": True, "b64": base64.b64encode(data).decode("ascii"), "size": size,
+                "next": off + len(data), "done": off + len(data) >= size, "name": path.name}
+
+    @guard
+    def file_save_begin(self, p: dict) -> dict:
+        """Where a PDF / image goes: {path} as given, {folder, filename} straight in, or a
+        save dialog. Returns a token for file_save_chunk / file_save_end."""
+        import uuid
+        if p.get("path"):
+            target = Path(p["path"])
+        elif p.get("folder") and p.get("filename") and not p.get("ask"):
+            target = Path(p["folder"]) / p["filename"]
+        else:
+            got = self.save_dialog({"filename": p.get("filename") or "document.pdf", "folder": p.get("folder") or "",
+                                    "types": tuple(p.get("types") or ("PDF (*.pdf)",))})
+            if not got.get("path"):
+                return {"ok": False, "cancelled": True}
+            target = Path(got["path"])
+        if target.suffix.lower() not in PDF_EXT | IMAGE_EXT | {".txt"}:
+            return {"ok": False, "error": "Only PDFs, images and text files are saved here."}
+        if target.exists() and p.get("overwrite") is False:
+            stem, i = target.stem, 1
+            while target.exists():
+                target = target.with_name(f"{stem} ({i}){target.suffix}")
+                i += 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tok = uuid.uuid4().hex
+        tmp = target.with_name(target.name + ".part")
+        _SAVES[tok] = {"path": target, "tmp": tmp, "fh": open(tmp, "wb")}   # noqa: SIM115 — closed in _end
+        return {"ok": True, "token": tok, "path": str(target)}
+
+    @guard
+    def file_save_chunk(self, p: dict) -> dict:
+        import base64
+        s = _SAVES.get(p.get("token") or "")
+        if not s:
+            return {"ok": False, "error": "That save was not started."}
+        s["fh"].write(base64.b64decode(p.get("b64") or ""))
+        return {"ok": True}
+
+    @guard
+    def file_save_end(self, p: dict) -> dict:
+        s = _SAVES.pop(p.get("token") or "", None)
+        if not s:
+            return {"ok": False, "error": "That save was not started."}
+        s["fh"].close()
+        if p.get("abort"):
+            s["tmp"].unlink(missing_ok=True)
+            return {"ok": True, "aborted": True}
+        os.replace(s["tmp"], s["path"])
+        return {"ok": True, "path": str(s["path"]), "size": s["path"].stat().st_size}
+
     @guard
     @_params
     def ws_checks(self, p: dict) -> dict:
@@ -876,6 +1039,13 @@ def selftest(out: str) -> int:
                                                     "output": job["output"]}}, lambda: {"ok": False, "in_process": True})
         res["convert"] = _heavy("convert", {"job": {"files": job["files"], "folder": str(d / "pq")}},
                                 lambda: {"ok": False, "in_process": True})
+        res["browse"] = Api().data_browse({"path": str(d / "t.csv"), "limit": 10,
+                                           "view": {"filters": [{"column": "TAX_CODE", "op": "equals", "value": "YR"}]}})
+        res["combine"] = _heavy("data_combine", {"p": {"files": job["files"], "folder": str(d / "dm"), "name": "all"}},
+                                lambda: {"ok": False, "in_process": True})
+        pdf = Api().pdf_html()
+        res["pdf"] = {"ok": bool(pdf.get("ok")), "bytes": len(pdf.get("html") or ""), "error": pdf.get("error"),
+                      "libraries": all(k in (pdf.get("html") or "") for k in ("globalThis.pdfjsLib", "PDFLib", "window.pdfApp"))}
         st = Api().studio_html()
         res["studio"] = {"ok": bool(st.get("ok")), "bytes": len(st.get("html") or ""),
                          "hooks": "ColSift live data" in (st.get("html") or ""), "error": st.get("error")}
@@ -894,6 +1064,9 @@ def selftest(out: str) -> int:
         "Convert to Parquet in the worker": bool(res["convert"].get("ok")) and any(
             str(p).endswith(".parquet") for p in res["convert"].get("written") or []),
         "Measure Studio ships with the app": res["studio"]["ok"] and res["studio"]["hooks"],
+        "Data module browses a filtered page": bool(res["browse"].get("ok")) and len(res["browse"].get("rows") or []) == 10,
+        "Data module combines into Parquet in the worker": res["combine"].get("rows") == 5000,
+        "PDF module ships with pdf.js and pdf-lib": res["pdf"]["ok"] and res["pdf"]["libraries"],
     }
     res["checks"] = checks
     Path(out).write_text(json.dumps(res, indent=2, default=str), encoding="utf-8")
