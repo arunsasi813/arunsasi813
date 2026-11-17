@@ -64,7 +64,7 @@ async function readFile(path){
 async function saveFile(bytes, opt){
   const b = await api().file_save_begin(opt);
   if (!b?.ok){ if (!b?.cancelled) throw new Error(b?.error || "Could not save"); return null; }
-  const CH = 3 << 20;
+  const CH = 2 << 20;
   try {
     for (let at = 0; at < bytes.length; at += CH){
       const r = await api().file_save_chunk({token: b.token, b64: await bytesB64(bytes.subarray(at, at + CH))});

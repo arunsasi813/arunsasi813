@@ -79,7 +79,7 @@ def _dm():
 
 
 # files the PDF module streams in and out, a few MB per call
-CHUNK = 4 << 20
+CHUNK = 2 << 20
 _SAVES: dict[str, dict] = {}
 PDF_EXT = {".pdf"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg"}
