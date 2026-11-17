@@ -18,8 +18,9 @@ before you hand it over.
 - **Score tracker.** Every answered MCQ is recorded per user (section, correct/
   total) in a local Room database and summarised in the owner area.
 - **Mark for review.** Tap the ☆ on any question or flashcard to flag it; a
-  floating "★ Review (n)" panel lists everything you've marked. Flags are kept
-  in the WebView and mirrored into the database.
+  floating "★ Review (n)" panel lists everything you've marked. Tapping a listed
+  MCQ jumps straight to that question (opens its section's practice and
+  highlights it). Flags are kept in the WebView and mirrored into the database.
 - **Owner area (PIN-gated).** Reachable only via a hidden gesture — long-press
   the top-left corner — plus an owner
   PIN. Shows *your own* study stats and lets you point the app at a backend.

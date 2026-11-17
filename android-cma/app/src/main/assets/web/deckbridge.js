@@ -156,12 +156,15 @@
     else html += keys.map(function (k) {
       var r = m[k];
       return '<div class="cma-item"><span class="cma-kind">' + esc(r.kind) + '</span>'
-        + '<span class="cma-lbl">' + esc(r.label || k) + '</span>'
+        + '<span class="cma-lbl" role="button" tabindex="0" data-k="' + esc(k) + '">' + esc(r.label || k) + '</span>'
         + '<button class="cma-un" type="button" data-k="' + esc(k) + '">remove</button></div>';
     }).join("");
     panel.innerHTML = html;
     panel.classList.add("open");
     panel.querySelector(".cma-x").onclick = function () { panel.classList.remove("open"); };
+    panel.querySelectorAll(".cma-lbl").forEach(function (el) {
+      el.onclick = function () { navigateTo(el.getAttribute("data-k")); };
+    });
     panel.querySelectorAll(".cma-un").forEach(function (b) {
       b.onclick = function () {
         var k = b.getAttribute("data-k");
@@ -174,6 +177,46 @@
         openPanel();
       };
     });
+  }
+
+  /* ---------- jump to a marked item ---------- */
+  function navigateTo(k) {
+    if (!k) return;
+    panel.classList.remove("open");
+    if (k.indexOf("mcq:") === 0) {
+      var parts = k.split(":");
+      var sec = parts[1], targetHash = parts[2];
+      if (location.hash !== "#" + sec) location.hash = sec;
+      openPractice(sec, 0);
+      findQuestion(sec, targetHash, 0);
+    } else if (k.indexOf("flash:") === 0) {
+      if (location.hash !== "#cards") location.hash = "cards";
+      // The deck draws one flashcard at a time with no addressable index, so we
+      // land on the Flashcards view rather than guess a specific card.
+    }
+  }
+  function openPractice(sec, n) {
+    var host = document.querySelector("#v-" + sec);
+    if (host) {
+      var b = host.querySelector("button[onclick*='practice']");
+      if (b) { b.click(); return; }
+    }
+    if (n < 25) setTimeout(function () { openPractice(sec, n + 1); }, 100);
+  }
+  function findQuestion(sec, targetHash, n) {
+    var qs = document.querySelectorAll("#v-" + sec + " .q");
+    for (var i = 0; i < qs.length; i++) {
+      var stem = qs[i].querySelector(".q-stem") || qs[i].querySelector(".q-text");
+      var txt = (stem || qs[i]).textContent.trim().slice(0, 160);
+      if (hash(txt) === targetHash) {
+        var el = qs[i];
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+        el.classList.add("cma-hl");
+        setTimeout(function () { el.classList.remove("cma-hl"); }, 2000);
+        return;
+      }
+    }
+    if (n < 40) setTimeout(function () { findQuestion(sec, targetHash, n + 1); }, 100);
   }
 
   /* ---------- styles ---------- */
@@ -192,7 +235,8 @@
       + '.cma-empty{font-size:13px;color:#7d94a1;padding:8px 2px}'
       + '.cma-item{display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid rgba(125,148,161,.2);font-size:13px}'
       + '.cma-kind{font-size:10px;font-weight:800;text-transform:uppercase;color:#0f7a5a;flex:0 0 auto}'
-      + '.cma-lbl{flex:1;color:inherit;word-break:break-word}'
+      + '.cma-lbl{flex:1;color:inherit;word-break:break-word;cursor:pointer;text-decoration:underline;text-decoration-color:rgba(15,122,90,.4)}'
+      + '.cma-hl{outline:3px solid #0f7a5a;outline-offset:3px;border-radius:10px}'
       + '.cma-un{background:transparent;border:1px solid #d3dcdf;border-radius:6px;font-size:11px;padding:3px 7px;cursor:pointer;color:inherit;flex:0 0 auto}'
       + '.topbar{backdrop-filter:none !important;-webkit-backdrop-filter:none !important;background:#f5f7f8 !important}'
       + 'body.dark .topbar{background:#0d1f2d !important}';
