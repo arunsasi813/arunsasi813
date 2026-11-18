@@ -930,6 +930,37 @@ def pdf_module(ui: UI, d: dict) -> None:
     fr.locator("#spGo").click()
     fr.locator("#status.ok:has-text('Split into 4 PDFs')").wait_for(timeout=30000)
     assert sorted(x.name for x in out.glob("part_*.pdf")) == ["part_01.pdf", "part_02.pdf", "part_03.pdf", "part_04.pdf"]
+    # redaction: the third page (statement p3) burned to a picture, its text gone from the file
+    fr.locator(".tab[data-v=pages]").click()
+    fr.locator("#grid .th").nth(2).dblclick()
+    fr.locator("#layer").wait_for()
+    page.wait_for_timeout(300)
+    fr.locator("#edTools [data-t=redact]").click()
+    box = fr.locator("#layer").bounding_box()
+    page.mouse.move(box["x"] + 20, box["y"] + 20)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] - 20, box["y"] + box["height"] * 0.6, steps=5)
+    page.mouse.up()
+    fr.locator("#status.ok:has-text('Redaction marked')").wait_for()
+    fr.locator("#saveAll").click()
+    fr.locator("#status.ok:has-text('Saved 4 pages')").wait_for(timeout=30000)
+    red = fr.locator("#status").inner_text().split(" — ")[-1]
+    ui.js(f"{app}.openPaths([{json.dumps(red)}])")
+    page.wait_for_function(f"{app}.state.pages.length === 8")
+    text = ui.js(f"""(async () => {{ const d = {app}.state.docs.at(-1); const out = [];
+        for (let n = 1; n <= d.n; n++) out.push((await {app}.pageLines(d.js, n, 6)).map(c => c.join(' ')).join('|'));
+        return out; }})()""")
+    assert text[2] == "" and "1761000025" not in "".join(text), "the redacted page holds no text"
+    assert "1761000000" in text[1] and "Annex" in text[0], text
+    dark = ui.js(f"""(async () => {{ const d = {app}.state.docs.at(-1), pg = await d.js.getPage(3);
+        const vp = pg.getViewport({{scale: 0.5}}), c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+        await pg.render({{canvas: c, canvasContext: c.getContext('2d'), viewport: vp}}).promise;
+        const px = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+        for (let i = 0; i < px.length; i += 4) if (px[i] < 60 && px[i + 1] < 60 && px[i + 2] < 60) n++;
+        return n / (px.length / 4); }})()""")
+    assert 0.4 < dark < 0.75, f"the page is a picture with the box burned in ({dark:.2f} of it black)"
+    fr.locator("#docs [data-close]").last.click()
+    ui.js(f"{app}.state.pages[2].ov = []")
     # a table out of the statement pages
     fr.locator(".tab[data-v=convert]").click()
     fr.locator("#tbGo").click()

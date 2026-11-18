@@ -374,7 +374,8 @@ function drawOverlays(){
     const sel = S.ovSel === o.id ? " sel" : "";
     if (o.type === "text") return `<div class="ov text${sel}" data-o="${o.id}" style="${st}font-size:${o.size * ED.scale}px;color:${o.color};font-weight:${o.bold ? 700 : 400}">${esc(o.text)}<span class="hd"></span></div>`;
     if (o.type === "image") return `<div class="ov${sel}" data-o="${o.id}" style="${st}"><img src="${o.src}"><span class="hd"></span></div>`;
-    const fill = o.type === "cover" ? `background:${o.color || "#ffffff"};` : o.type === "highlight" ? `background:${o.color || "#ffe14d"};opacity:${o.opacity ?? 0.4};` : "";
+    const fill = o.type === "cover" ? `background:${o.color || "#ffffff"};` : o.type === "highlight" ? `background:${o.color || "#ffe14d"};opacity:${o.opacity ?? 0.4};`
+      : o.type === "redact" ? "background:#000;" : "";
     const border = o.type === "box" ? `border:${Math.max(1, (o.width || 1.5) * ED.scale)}px solid ${o.color || "#9c2f2f"};` : "";
     return `<div class="ov${sel}" data-o="${o.id}" style="${st}${fill}${border}"><span class="hd"></span></div>`;
   }).join("");
@@ -382,7 +383,7 @@ function drawOverlays(){
 }
 function drawOvList(){
   const pg = S.pages.find(p => p.id === S.edit);
-  $("#ovList").innerHTML = pg && pg.ov.length ? pg.ov.map(o => `<div class="li" data-pick="${o.id}"><span class="nm">${esc({text: "Text", highlight: "Highlight", cover: "White-out",
+  $("#ovList").innerHTML = pg && pg.ov.length ? pg.ov.map(o => `<div class="li" data-pick="${o.id}"><span class="nm">${esc({text: "Text", highlight: "Highlight", cover: "White-out", redact: "Redaction",
       box: "Box", image: o.sig ? "Signature" : "Image"}[o.type])}${o.type === "text" ? `: ${esc(o.text.slice(0, 30))}` : ""}</span>
       <button class="btn ghost sm" data-delov="${o.id}" title="Remove">✕</button></div>`).join("") : `<span class="hint">Nothing added.</span>`;
 }
@@ -399,7 +400,8 @@ function drawProps(){
   box.innerHTML = `${o.type === "text" ? `<div class="row"><textarea id="pText" rows="3" style="width:100%">${esc(o.text)}</textarea></div>
       <div class="row"><label class="lbl">Size</label><input type="number" id="pSize" value="${o.size}" min="4" max="200" style="width:60px">
         <label class="f" style="font-size:11.5px"><input type="checkbox" id="pBold" ${o.bold ? "checked" : ""}> Bold</label></div>` : ""}
-    ${o.type !== "image" ? `<div class="row"><label class="lbl">Colour</label><input type="color" id="pColor" value="${col || "#000000"}"></div>` : ""}
+    ${o.type !== "image" && o.type !== "redact" ? `<div class="row"><label class="lbl">Colour</label><input type="color" id="pColor" value="${col || "#000000"}"></div>` : ""}
+    ${o.type === "redact" ? `<p class="hint">When saved, this page becomes a picture with the box painted black: what is under it is gone from the file. The page's other text can then no longer be selected or searched.</p>` : ""}
     ${o.type === "highlight" ? `<div class="row"><label class="lbl">Opacity</label><input type="number" id="pOp" value="${o.opacity ?? 0.4}" min="0.05" max="1" step="0.05" style="width:64px"></div>` : ""}
     <div class="row"><button class="btn sm danger" id="pDel">✕ Remove</button><button class="btn sm" id="pDone">Done</button></div>
     ${o.type === "text" ? `<p class="hint">Standard PDF fonts: letters outside Western European ones are written as “?”.</p>` : ""}`;
@@ -494,7 +496,7 @@ document.addEventListener("mousemove", e => {
   if (gest.kind === "new"){
     let g = $("#ghost"); if (!g){ g = document.createElement("div"); g.id = "ghost"; g.className = "ov sel"; layer.append(g); }
     Object.assign(g.style, {left: `${Math.min(x, gest.x)}px`, top: `${Math.min(y, gest.y)}px`, width: `${Math.abs(x - gest.x)}px`, height: `${Math.abs(y - gest.y)}px`,
-      background: gest.type === "cover" ? "#fff" : gest.type === "highlight" ? "rgba(255,225,77,.45)" : "transparent", border: gest.type === "box" ? "2px solid #9c2f2f" : ""});
+      background: gest.type === "cover" ? "#fff" : gest.type === "redact" ? "#000" : gest.type === "highlight" ? "rgba(255,225,77,.45)" : "transparent", border: gest.type === "box" ? "2px solid #9c2f2f" : ""});
     return;
   }
   const dx = x - gest.x, dy = y - gest.y, o = gest.o;
@@ -525,10 +527,12 @@ document.addEventListener("mouseup", e => {
   const x0 = Math.min(x, g.x), y0 = Math.min(y, g.y), w = Math.abs(x - g.x), h = Math.abs(y - g.y);
   if (w < 4 || h < 4){ say("Drag over the page to draw it.", "err"); return; }
   const pg = S.pages.find(p => p.id === S.edit);
+  if (g.type === "redact" && pg.blank){ say("A blank page has nothing to redact — use a box or white-out.", "err"); return; }
   const [ax, ay] = ED.vp.convertToPdfPoint(x0, y0 + h);
   const o = {id: uid(), type: g.type, ax, ay, w: w / ED.scale, h: h / ED.scale, theta: ED.rot,
              color: g.type === "cover" ? "#ffffff" : g.type === "highlight" ? "#ffe14d" : "#9c2f2f", opacity: 0.4, width: 1.5};
   snapshot(); pg.ov.push(o); S.ovSel = o.id; drawOverlays();
+  if (g.type === "redact") say("Redaction marked — on save this page becomes a picture with the box burned in.", "ok");
 });
 $("#stage").addEventListener("dblclick", e => {
   const el = e.target.closest(".ov.text"); if (!el) return;
@@ -635,13 +639,42 @@ function drawSeen(page, text, fx, fy, align, size, font, color, opacity = 1){
   const [x, y] = seenPoint(page, fx + dx / W, fy);
   page.drawText(t, {x, y, size, font, color, opacity, rotate: L.degrees(r)});
 }
+/* Redaction for real: the page is drawn as a picture with the boxes painted black, and
+   that picture replaces the page — whatever was under a box is gone from the file, not
+   just hidden. The page's other text goes with it (a picture has no text layer). */
+const REDACT_DPI = 200;
+function ovCorners(o){
+  const t = o.theta * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
+  return [[0, 0], [o.w, 0], [o.w, o.h], [0, o.h]].map(([x, y]) => [o.ax + x * c - y * s, o.ay + x * s + y * c]);
+}
+async function burnedPage(out, p){
+  const d = docOf(p.doc), src = await d.js.getPage(p.index + 1);
+  const [x0, y0, x1, y1] = src.view, w = x1 - x0, h = y1 - y0;
+  const vp = src.getViewport({scale: REDACT_DPI / 72, rotation: 0});
+  const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
+  await src.render({canvas: c, canvasContext: x, viewport: vp}).promise;
+  x.fillStyle = "#000";
+  for (const o of p.ov.filter(v => v.type === "redact")){
+    const pts = ovCorners(o).map(([px, py]) => vp.convertToViewportPoint(px, py));
+    x.beginPath(); x.moveTo(...pts[0]); pts.slice(1).forEach(q => x.lineTo(...q)); x.closePath(); x.fill();
+  }
+  const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.9));
+  const img = await out.embedJpg(new Uint8Array(await blob.arrayBuffer()));
+  const page = out.addPage([w, h]);
+  page.setMediaBox(x0, y0, w, h);
+  page.drawImage(img, {x: x0, y: y0, width: w, height: h});
+  if (src.rotate) page.setRotation(L.degrees(src.rotate));
+  return page;
+}
 async function build(pages, opts){
   const out = await L.PDFDocument.create();
   const fonts = {reg: await out.embedFont(L.StandardFonts.Helvetica), bold: await out.embedFont(L.StandardFonts.HelveticaBold),
                  zapf: await out.embedFont(L.StandardFonts.ZapfDingbats)};
   // copy each document's pages in one go (shared fonts and images are copied once)
   const want = new Map();
-  pages.forEach(p => { if (!p.blank){ if (!want.has(p.doc)) want.set(p.doc, []); want.get(p.doc).push(p.index); } });
+  const burns = p => !p.blank && p.ov.some(o => o.type === "redact");
+  pages.forEach(p => { if (!p.blank && !burns(p)){ if (!want.has(p.doc)) want.set(p.doc, []); want.get(p.doc).push(p.index); } });
   const copied = new Map();
   let k = 0;
   for (const [id, idx] of want){
@@ -653,6 +686,7 @@ async function build(pages, opts){
   for (const p of pages){
     let page;
     if (p.blank) page = out.addPage([p.blank.w, p.blank.h]);
+    else if (burns(p)) page = await burnedPage(out, p);
     else { const n = used.get(p.doc) || 0; used.set(p.doc, n + 1); page = out.addPage(copied.get(p.doc)[n]); }
     if (p.rot) page.setRotation(L.degrees((page.getRotation().angle + p.rot) % 360));
     for (const o of p.ov) await drawOv(out, page, o, fonts);
