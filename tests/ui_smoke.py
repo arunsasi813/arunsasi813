@@ -1014,9 +1014,63 @@ def pdf_module(ui: UI, d: dict) -> None:
     fr.locator("#status.ok:has-text('2 hits saved')").wait_for(timeout=30000)
 
 
+def scheduled_runs(ui: UI, d: dict) -> None:
+    """Schedule a saved setup, start it with Run now (the dev server runs `app.py --run`
+    with no window, as Task Scheduler would), see the run, its file and its log."""
+    sys.path.insert(0, str(ROOT))
+    import engine as E
+    import workspace as W
+    page = ui.page
+    out = d["out"] / "scheduled"
+    ws = W.normalize({"name": "Nightly", "folders": [str(d["jan"])],
+                      "groups": [{"name": "Sales", "match": {"mode": "pattern", "value": "sales_*"},
+                                  "setup": {"columns": [{"name": "DOC_NO", "include": True}, {"name": "TAX_CODE", "include": True}],
+                                            "filters": {"type": "group", "mode": "and", "children": [
+                                                {"type": "rule", "column": "TAX_CODE", "op": "equals", "value": "YQ"}]}}}],
+                      "output": {"folder": str(out), "basename": "nightly", "format": "csv"}})
+    E._PROFILE_DIR = None
+    E.save_profile("Nightly", ws)
+    E.save_profile("Loose", {"name": "Loose", "groups": [{"name": "G", "setup": {}}], "output": {"folder": str(out)}})
+    ui.tab("out")
+    ui.js("refreshProfiles()")
+    page.click("#schedOpen")
+    page.wait_for_selector("#sched.on")
+    page.select_option("#scSetup", "Loose")
+    page.dispatch_event("#scSetup", "change")
+    page.wait_for_selector("#scWarn .warn:has-text('without folders or files')")
+    page.select_option("#scSetup", "Nightly")
+    page.dispatch_event("#scSetup", "change")
+    page.wait_for_function("!document.querySelector('#scWarn').textContent")
+    page.select_option("#scKind", "weekly")
+    page.dispatch_event("#scKind", "change")
+    assert page.is_visible("#scDays") and not page.is_visible("#scDay")
+    page.uncheck("#scDays input[value=MON]")
+    ui.then("Pick the day(s) of the week", lambda: page.click("#scCreate"))
+    page.check("#scDays input[value=WED]")
+    page.check("#scDays input[value=FRI]")
+    page.fill("#scTime", "06:30")
+    ui.then("runs every Wednesday, Friday at 06:30", lambda: page.click("#scCreate"))
+    page.wait_for_selector("#scList td:has-text('every Wednesday, Friday at 06:30')")
+    assert "not run yet" in page.inner_text("#scList")
+    ui.then("started", lambda: page.click("#scList [data-scrun='Nightly']"))
+    page.wait_for_selector("#scRuns td .ok:has-text('done')", timeout=60000)
+    assert "finished" in page.inner_text("#scList")
+    written = sorted(x.name for x in out.iterdir())
+    assert written == ["nightly.csv"], written
+    rows = (out / "nightly.csv").read_text(encoding="utf-8").splitlines()
+    assert rows[0].startswith("DOC_NO") and all(",YQ" in r for r in rows[1:]) and len(rows) > 1
+    log = ui.js("SC.data.runs[0].log")
+    assert "the setup “Nightly”" in Path(log).read_text(encoding="utf-8")
+    ui.shot("scheduled_runs")
+    page.click("#scList [data-scdel='Nightly']")
+    page.wait_for_selector("#scList .hint:has-text('Nothing scheduled yet')")
+    page.click("#scClose")
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
             "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual,
-            "basics": dashboard_basics, "formulas": formula_helper, "datamod": data_module, "cmpsql": compare_and_sql, "pdf": pdf_module}
+            "basics": dashboard_basics, "formulas": formula_helper, "datamod": data_module, "cmpsql": compare_and_sql, "pdf": pdf_module,
+            "sched": scheduled_runs}
 
 
 def main() -> int:
@@ -1030,7 +1084,7 @@ def main() -> int:
         shots.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="colsift_ui_"))
     d = make_data(tmp)
-    env = {**os.environ, "COLSIFT_PROFILES": str(tmp / "profiles"), "COLSIFT_CACHE": str(tmp / "cache"), "COLSIFT_FAKE_OCR": "1"}
+    env = {**os.environ, "COLSIFT_PROFILES": str(tmp / "profiles"), "COLSIFT_CACHE": str(tmp / "cache"), "COLSIFT_FAKE_OCR": "1", "COLSIFT_FAKE_SCHED": "1"}
     (tmp / "profiles").mkdir()
     os.environ.update({k: env[k] for k in ("COLSIFT_PROFILES", "COLSIFT_CACHE")})
     os.environ["COLSIFT_SAVED"] = str(tmp / "saved")

@@ -20,6 +20,7 @@ import argparse
 import os
 import json
 import secrets
+import sys
 import threading
 import time
 import webbrowser
@@ -88,6 +89,46 @@ class DevApi(app.Api):
             if p.get("cleanup"):
                 Path(x).unlink(missing_ok=True)
         return {"ok": True, "pages": pages}
+
+    # COLSIFT_FAKE_SCHED=1: Task Scheduler kept in memory; "Run now" really starts
+    # `app.py --run <setup>` without a window, as the task would
+    _TASKS: dict = {}
+
+    def schedule_list(self) -> dict:
+        if not os.environ.get("COLSIFT_FAKE_SCHED"):
+            return super().schedule_list()
+        import scheduling as SC
+        h = SC.history(limit=30)
+        return {"ok": True, "tasks": sorted(self._TASKS.values(), key=lambda t: t["name"].lower()),
+                "runs": h["runs"], "folder": h["folder"]}
+
+    def schedule_create(self, p: dict) -> dict:
+        if not os.environ.get("COLSIFT_FAKE_SCHED"):
+            return super().schedule_create(p)
+        import scheduling as SC
+        try:
+            SC.task_xml(p)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        name = SC.task_name(p["setup"])
+        self._TASKS[name] = {"name": name, "setup": p["setup"], "when": SC.describe(p), "state": "Ready",
+                             "next": "2099-01-01 " + p["time"], "last": "", "result": SC.NEVER_RAN, "status": "not run yet"}
+        return {"ok": True, "name": name, "when": SC.describe(p)}
+
+    def schedule_delete(self, p: dict) -> dict:
+        if not os.environ.get("COLSIFT_FAKE_SCHED"):
+            return super().schedule_delete(p)
+        self._TASKS.pop(p.get("name"), None)
+        return {"ok": True}
+
+    def schedule_run_now(self, p: dict) -> dict:
+        if not os.environ.get("COLSIFT_FAKE_SCHED"):
+            return super().schedule_run_now(p)
+        import subprocess
+        t = self._TASKS[p["name"]]
+        code = subprocess.run([sys.executable, str(HERE / "app.py"), "--run", t["setup"]], cwd=str(HERE), timeout=300).returncode
+        t.update(last=time.strftime("%Y-%m-%d %H:%M"), result=code, status={0: "finished", 3: "stopped by a check"}.get(code, "failed"))
+        return {"ok": True}
 
     def pick_folder(self, start: str = "") -> dict:
         return {"ok": True, "folder": ""}

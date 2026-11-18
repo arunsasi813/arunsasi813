@@ -13,12 +13,6 @@ Tests replace `_run` with a stand-in.
 
 from __future__ import annotations
 
-import base64
-import json
-import os
-import subprocess
-import sys
-
 TIMEOUT = 600
 
 _PRELUDE = r"""
@@ -71,27 +65,8 @@ def _ps_quote(s: str) -> str:
 
 def _run(script: str) -> dict:
     """Run a Windows PowerShell script, no window, and read the JSON it prints."""
-    if not sys.platform.startswith("win"):
-        return {"ok": False, "available": False,
-                "error": "OCR uses the engine built into Windows — it runs in the Windows app."}
-    exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    try:
-        cp = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
-                            capture_output=True, timeout=TIMEOUT, creationflags=0x08000000)   # CREATE_NO_WINDOW
-    except FileNotFoundError:
-        return {"ok": False, "available": False, "error": "Windows PowerShell was not found, so the Windows OCR engine can't be reached."}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "OCR took too long and was stopped."}
-    out = cp.stdout.decode("utf-8", "replace").strip()
-    if cp.returncode != 0 or not out:
-        err = cp.stderr.decode("utf-8", "replace").strip().splitlines()
-        msg = next((x for x in err if x.strip() and not x.startswith(("At line", "+", "    +"))), "") or "OCR failed"
-        return {"ok": False, "error": msg.strip()[:400]}
-    try:
-        return json.loads(out[out.index("{"):])
-    except ValueError:
-        return {"ok": False, "error": f"OCR answered something unexpected: {out[:200]}"}
+    import winps
+    return winps.powershell(script, "OCR", TIMEOUT)
 
 
 def available() -> dict:

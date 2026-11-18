@@ -810,6 +810,35 @@ class Api:
         out.sort(key=lambda r: (r["folder"].lower(), r["name"].lower()))
         return {"ok": True, "files": out}
 
+    # -- scheduled runs (schedule.py) ---------------------------------------------
+    @guard
+    def schedule_list(self) -> dict:
+        """The ColSift tasks in Task Scheduler and the runs logged."""
+        import scheduling as SC
+        r = SC.listing()
+        h = SC.history(limit=30)
+        return {**r, "tasks": r.get("tasks") or [], "runs": h["runs"], "folder": h["folder"]}
+
+    @guard
+    def schedule_create(self, p: dict) -> dict:
+        """{setup, kind, time, days, day}: a task that runs the saved setup."""
+        import scheduling as SC
+        name = str(p.get("setup") or "")
+        if not _m()[0].load_profile(name).get("ok"):
+            return {"ok": False, "error": f"No saved setup named “{name}” — save it first."}
+        return SC.create(p)
+
+    @guard
+    def schedule_delete(self, p: dict) -> dict:
+        import scheduling as SC
+        return SC.delete(str(p.get("name") or ""))
+
+    @guard
+    def schedule_run_now(self, p: dict) -> dict:
+        """Start the task now — the same headless run the schedule makes."""
+        import scheduling as SC
+        return SC.run_now(str(p.get("name") or ""))
+
     # -- OCR with the engine Windows has (ocr.py) --------------------------------
     @guard
     def ocr_info(self) -> dict:
@@ -1065,6 +1094,81 @@ class Api:
             ws, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
 
+def headless_run(argv: list[str]) -> int:
+    """`ColSift.exe --run "<setup>" [--set NAME=VALUE …] [--out FOLDER]` — what a scheduled
+    task starts: the saved setup run with no window, as the Run button would, its
+    messages in a log under profiles\\runs. Exit code 0 done, 3 a check stopped it, 1 failed."""
+    import contextlib
+
+    i = argv.index("--run")
+    if len(argv) <= i + 1 or argv[i + 1].startswith("--"):
+        print('usage: ColSift.exe --run "<saved setup>" [--set NAME=VALUE] [--out FOLDER]', file=sys.stderr)
+        return 2
+    name, rest = argv[i + 1], argv[i + 2:]
+    _load_modules()
+    E = _m()[0]
+    import scheduling as SC
+    start = datetime.now()
+    log = SC.runs_dir() / f"{SC.task_name(name)}_{start:%Y%m%d-%H%M%S}.log"
+    code, res = 1, {}
+    with open(log, "w", encoding="utf-8", buffering=1) as fh, contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh):
+        print(f"ColSift — the setup “{name}”, started {start:%Y-%m-%d %H:%M:%S}" + (f" ({' '.join(rest)})" if rest else ""))
+        E._cli.last = {}
+        try:
+            code = E._cli(["--profile", name, *rest])
+        except SystemExit as e:              # argparse: a bad --set and the like
+            code = e.code if isinstance(e.code, int) else 2
+        except Exception:                    # noqa: BLE001 — logged; the exit code says it failed
+            traceback.print_exc()
+            code = 1
+        res = getattr(E._cli, "last", {}) or {}
+        end = datetime.now()
+        print(f"\nfinished {end:%Y-%m-%d %H:%M:%S} — {SC.result_text(code, 'ran')} (exit code {code})")
+    SC.log_run({"setup": name, "start": f"{start:%Y-%m-%d %H:%M:%S}", "seconds": round((end - start).total_seconds(), 1),
+                "code": code, "ok": code == 0, "stopped": code == 3, "log": str(log),
+                "written": [str(x) for x in res.get("written") or []], "error": res.get("error")})
+    return code
+
+
+def _selftest_headless(d: Path, job: dict) -> dict:
+    """The exe started as a scheduled task starts it: --run on a saved setup, no window."""
+    import scheduling as SC
+    try:
+        prof = d / "profiles"
+        prof.mkdir(exist_ok=True)
+        W = _m()[3]
+        setup = W.normalize({"name": "Selftest", "folders": [str(d)],
+                             "groups": [{"name": "T", "match": {"mode": "pattern", "value": "t.csv"},
+                                         "setup": {"columns": job["columns"], "filters": job["filters"]}}],
+                             "output": {"folder": str(d / "sched"), "basename": "scheduled", "format": "csv"}})
+        (prof / "Selftest.json").write_text(json.dumps(setup), encoding="utf-8")
+        exe, pre = SC.launcher()
+        cp = subprocess.run([exe, *pre, "--run", "Selftest"], env={**os.environ, "COLSIFT_PROFILES": str(prof)},
+                            timeout=600, capture_output=True, creationflags=0x08000000 if sys.platform.startswith("win") else 0)
+        hist = prof / "runs" / "history.jsonl"
+        entry = json.loads(hist.read_text(encoding="utf-8").splitlines()[-1]) if hist.exists() else {}
+        out = d / "sched" / "scheduled.csv"
+        rows = len(out.read_text(encoding="utf-8").splitlines()) - 1 if out.exists() else 0
+        return {"exe": exe, "code": cp.returncode, "entry": entry, "rows": rows,
+                "log": Path(entry["log"]).read_text(encoding="utf-8")[-600:] if entry.get("log") else ""}
+    except Exception as e:  # noqa: BLE001 — reported as a failed check
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _selftest_schedule() -> dict:
+    """A task made in Task Scheduler, listed, deleted (told, not checked: build machines differ)."""
+    try:
+        import scheduling as SC
+        made = SC.create({"setup": "ColSift selftest", "kind": "weekly", "days": ["SUN"], "time": "03:17"})
+        listed = SC.listing() if made.get("ok") else {}
+        gone = SC.delete("ColSift selftest") if made.get("ok") else {}
+        return {"create": made, "listed": [t.get("name") for t in listed.get("tasks") or []],
+                "when": next((t.get("when") for t in listed.get("tasks") or [] if t.get("name") == "ColSift selftest"), None),
+                "list_error": listed.get("error"), "delete": gone}
+    except Exception as e:  # noqa: BLE001 — informational only
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def _selftest_ocr(d: Path) -> dict:
     """Windows' OCR engine on a picture of known text."""
     try:
@@ -1130,6 +1234,8 @@ def selftest(out: str) -> int:
                          "hooks": "ColSift live data" in (st.get("html") or ""), "error": st.get("error")}
         res["memory"] = Api().memory()
         res["ocr"] = _selftest_ocr(d)          # told, not checked: the build machine may have no OCR language
+        res["headless"] = _selftest_headless(d, job)
+        res["schedule"] = _selftest_schedule()  # told, not checked
     finally:
         _js = keep
     w, c, n, r, m = res["worker"], res["crash"], res["count"], res["run"], res["memory"]
@@ -1147,6 +1253,8 @@ def selftest(out: str) -> int:
         "Data module browses a filtered page": bool(res["browse"].get("ok")) and len(res["browse"].get("rows") or []) == 10,
         "Data module combines into Parquet in the worker": res["combine"].get("rows") == 5000,
         "PDF module ships with pdf.js and pdf-lib": res["pdf"]["ok"] and res["pdf"]["libraries"],
+        "a scheduled run (--run) works with no window": res["headless"].get("code") == 0
+            and bool(res["headless"].get("entry", {}).get("ok")) and res["headless"].get("rows") == 1667,
     }
     res["checks"] = checks
     Path(out).write_text(json.dumps(res, indent=2, default=str), encoding="utf-8")
@@ -1164,6 +1272,8 @@ def main() -> None:
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
         raise SystemExit(selftest(sys.argv[i + 1] if len(sys.argv) > i + 1 else "colsift-selftest.json"))
+    if "--run" in sys.argv:
+        raise SystemExit(headless_run(sys.argv[1:]))
     if not UI.exists():
         print(f"ui.html missing next to app.py (looked in {HERE})", file=sys.stderr)
         raise SystemExit(1)

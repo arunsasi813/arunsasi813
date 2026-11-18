@@ -460,6 +460,15 @@ textarea.fx{width:100%;font-family:var(--mono);font-size:12px;min-height:52px;re
 .modal header{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line)}
 .modal header h3{margin:0;font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .modal .mbody{overflow:auto;padding:0}
+.scform{display:flex;flex-direction:column;gap:8px;padding-bottom:12px;border-bottom:1px solid var(--line-2)}
+.scform .lbl{min-width:84px}
+h4.sch{margin:14px 0 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+table.sct{width:100%;border-collapse:collapse;font-size:12px}
+table.sct th{text-align:left;font-weight:600;color:var(--muted);font-size:11px;padding:4px 6px;border-bottom:1px solid var(--line)}
+table.sct td{padding:5px 6px;border-bottom:1px solid var(--line-2);vertical-align:middle}
+table.sct td.act{white-space:nowrap;text-align:right}
+table.sct a{color:var(--teal-2)}
+.sct .ok{color:var(--teal-2);font-weight:600}.sct .bad{color:var(--red);font-weight:600}.sct .warn{color:var(--amber);font-weight:600}
 .modal .minfo{padding:6px 12px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--line-2)}
 /* ---------- 2.0: groups ---------- */
 .modbar{display:flex;gap:3px;align-items:center;background:var(--rail);padding:5px 10px 0;border-bottom:1px solid var(--rail-line)}
@@ -612,10 +621,11 @@ table.matrix tr.unas td.fn{color:var(--faint)}
       <button class="btn sm" id="saveProfile">Save</button>
       <button class="btn sm" id="delProfile" title="Delete selected">Del</button>
     </div>
-    <div class="f" style="margin-top:5px;gap:4px">
+    <div class="f" style="margin-top:5px;gap:4px;flex-wrap:wrap">
       <button class="btn sm" id="expProfile" title="Save the selected setup to a file — to back it up or share it">Export</button>
       <button class="btn sm" id="expAll" title="Every saved setup in one file">Export all</button>
       <button class="btn sm" id="impProfile" title="Add setups from exported files">Import…</button>
+      <button class="btn sm" id="schedOpen" title="Have Windows run a saved setup by itself — every day, on weekdays, weekly or monthly">Schedule…</button>
     </div>
     <small style="display:block;margin-top:5px;line-height:1.35">A setup keeps every group — its files' rule, columns, filters, added columns, dashboards — the combine steps and the output.</small>
     <div class="f" style="margin-top:9px;gap:6px">
@@ -1267,6 +1277,27 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 </main>
 
 <div class="msed" id="msEd" style="display:none"><iframe id="msEdFrame" title="Measure Studio"></iframe></div>
+<div class="modal" id="sched"><div class="box" style="width:min(860px,94vw)">
+  <header><h3>Scheduled runs</h3><button class="btn sm" id="scRefresh" title="Read Task Scheduler again">↻</button><button class="btn sm" id="scClose">Close</button></header>
+  <div class="mbody" style="padding:12px 14px 14px">
+    <div class="scform">
+      <div class="f"><label class="lbl">Saved setup</label><select id="scSetup" style="flex:1"></select></div>
+      <div class="f"><label class="lbl">How often</label>
+        <select id="scKind"><option value="daily">Every day</option><option value="weekdays">Monday to Friday</option><option value="weekly">Weekly, on…</option><option value="monthly">Monthly, on day…</option></select>
+        <label class="lbl" style="min-width:0">at</label><input type="time" id="scTime" value="07:00" style="width:96px">
+        <span id="scDays" class="f" style="gap:6px;display:none"></span>
+        <select id="scDay" style="display:none;width:110px"></select>
+      </div>
+      <div id="scWarn"></div>
+      <p class="hint">Windows starts ColSift without a window and runs the <b>saved</b> setup as Run would: its folders, its parameters such as {PERIOD} worked out on the day, its checks and its output. Change the setup? Save it — the schedule runs what is saved. It runs while you are signed in to Windows; if the PC was off at that time, it runs when it is back on.</p>
+      <div class="f"><button class="btn pri" id="scCreate">Schedule it</button><span class="hint" id="scSays" style="margin:0"></span></div>
+    </div>
+    <h4 class="sch">Scheduled</h4>
+    <div id="scList"><div class="hint">Reading Task Scheduler…</div></div>
+    <h4 class="sch">Recent runs <small id="scFolder" style="font-weight:400;text-transform:none;letter-spacing:0"></small></h4>
+    <div id="scRuns"></div>
+  </div>
+</div></div>
 <div class="modal" id="drill"><div class="box">
   <header><h3 id="drillTitle">Rows</h3><button class="btn sm" id="drillCopy" title="Copy as tab-separated text — paste into Excel">Copy</button><button class="btn sm" id="drillClose">Close</button></header>
   <div class="minfo" id="drillInfo"></div>
@@ -1365,6 +1396,8 @@ function show(p){
   if (p === "cmp") cmEnter();
   if (p === "sql") sqEnter();
   if (p === "pdf") pdfEnter();
+  // the formula helper's column list belongs to a formula box: gone with it
+  try { if ($("#refPanel").classList.contains("on") && !(FX.el && FX.el.offsetParent)) refShow(false); } catch (e) { /* not set up yet */ }
 }
 
 /* ---------------- folder + files ---------------- */
@@ -3620,6 +3653,98 @@ async function openDrill(filters, title){
     r.rows.map(row => `<tr>${row.map(v => `<td class="${v === "" ? "nul" : (NUMRX.test(v) ? "num" : "")}" title="${esc(v)}">${v === "" ? "·" : esc(v)}</td>`).join("")}</tr>`).join("") + `</tbody></table>`;
 }
 $("#drillClose").onclick = () => $("#drill").classList.remove("on");
+
+/* ---------------- scheduled runs ----------------
+   Windows Task Scheduler starts ColSift.exe --run "<setup>" with no window; the run logs
+   under profiles\runs. The list and the run history come from schedule_list. */
+const SC = {data: null};
+$("#scDays").innerHTML = "MON TUE WED THU FRI SAT SUN".split(" ").map(d =>
+  `<label class="f" style="gap:3px;font-size:11.5px"><input type="checkbox" value="${d}"${d === "MON" ? " checked" : ""}>${d[0] + d.slice(1).toLowerCase()}</label>`).join("");
+$("#scDay").innerHTML = Array.from({length: 31}, (_, i) => `<option value="${i + 1}">day ${i + 1}</option>`).join("") + `<option value="last">last day</option>`;
+function scSpec(){
+  return {setup: $("#scSetup").value, kind: $("#scKind").value, time: $("#scTime").value,
+          days: $$("#scDays input:checked").map(x => x.value), day: $("#scDay").value};
+}
+function scForm(){
+  const k = $("#scKind").value;
+  $("#scDays").style.display = k === "weekly" ? "" : "none";
+  $("#scDay").style.display = k === "monthly" ? "" : "none";
+  const big = k === "monthly" && +$("#scDay").value > 28;
+  $("#scSays").textContent = big ? "Months without that day are skipped — “last day” runs every month." : "";
+}
+["#scKind", "#scDay"].forEach(id => $(id).addEventListener("change", scForm));
+async function scCheckSetup(){
+  const name = $("#scSetup").value; $("#scWarn").innerHTML = "";
+  if (!name) return;
+  const r = await api().load_profile(name);
+  const st = r?.setup || {}, groups = st.groups || [];
+  const folders = (st.folders || []).length + groups.reduce((n, g) => n + (g.folders || []).length, 0);
+  const files = groups.reduce((n, g) => n + (g.files || []).length, 0);
+  if (!folders && !files)
+    $("#scWarn").innerHTML = `<div class="warn" style="margin:0">“${esc(name)}” was saved without folders or files, so a scheduled run would find nothing. Add its folder on the left, Load the setup, and Save it again.</div>`;
+  else if (!folders)
+    $("#scWarn").innerHTML = `<div class="hint">“${esc(name)}” keeps the ${files} file${files === 1 ? "" : "s"} it was saved with — new files only come in through folders.</div>`;
+}
+$("#scSetup").addEventListener("change", scCheckSetup);
+async function scOpen(){
+  const r = await api().profiles();
+  const names = (r?.profiles || []).map(p => p.name);
+  $("#scSetup").innerHTML = names.length ? names.map(n => `<option>${esc(n)}</option>`).join("") : `<option value="">no saved setups — save one first</option>`;
+  const cur = $("#profileName").value.trim() || $("#profileList").value;
+  if (names.includes(cur)) $("#scSetup").value = cur;
+  scForm(); scCheckSetup();
+  $("#sched").classList.add("on");
+  scLoad();
+}
+const scWhen = s => s ? s.replace(/^(\d{4})-(\d\d)-(\d\d)/, "$3/$2/$1") : "–";
+async function scLoad(){
+  const r = await api().schedule_list();
+  SC.data = r;
+  const tasks = r?.tasks || [], runs = r?.runs || [];
+  $("#scList").innerHTML = !r?.ok ? `<div class="hint">${esc(r?.error || "Task Scheduler could not be read.")}</div>`
+    : !tasks.length ? `<div class="hint">Nothing scheduled yet.</div>`
+    : `<table class="sct"><tr><th>Setup</th><th>When</th><th>Next run</th><th>Last run</th><th></th></tr>${tasks.map(t => {
+        const cls = t.status === "finished" ? "ok" : /failed|code/.test(t.status) ? "bad" : t.status === "stopped by a check" ? "warn" : "";
+        return `<tr><td><b>${esc(t.setup || t.name)}</b>${t.state === "Disabled" ? ` <small>(turned off)</small>` : ""}</td><td>${esc(t.when || "–")}</td>
+          <td>${esc(scWhen(t.next))}</td><td>${t.last ? `${esc(scWhen(t.last))} · <span class="${cls}">${esc(t.status)}</span>` : esc(t.status)}</td>
+          <td class="act"><button class="btn sm" data-scrun="${esc(t.name)}" title="Start it now — the same run, without a window">Run now</button>
+            <button class="btn sm" data-scdel="${esc(t.name)}">Delete</button></td></tr>`; }).join("")}</table>`;
+  $("#scFolder").textContent = r?.folder ? `· logs in ${r.folder}` : "";
+  $("#scRuns").innerHTML = !runs.length ? `<div class="hint">No runs logged yet.</div>`
+    : `<table class="sct"><tr><th>Setup</th><th>Started</th><th>Took</th><th>Result</th><th>Wrote</th><th></th></tr>${runs.slice(0, 15).map(x => {
+        const res = x.ok ? `<span class="ok">done</span>` : x.stopped ? `<span class="warn">stopped by a check</span>` : `<span class="bad">failed</span>`;
+        const wrote = (x.written || []).length;
+        return `<tr><td>${esc(x.setup)}</td><td>${esc(scWhen(x.start))}</td><td>${x.seconds != null ? `${x.seconds}s` : ""}</td><td title="${esc(x.error || "")}">${res}</td>
+          <td>${wrote ? `<a href="#" data-scfile="${esc(x.written[0])}" title="${esc(x.written.join("\n"))}">${wrote} file${wrote === 1 ? "" : "s"}</a>` : "–"}</td>
+          <td class="act"><button class="btn sm" data-sclog="${esc(x.log)}">Log</button></td></tr>`; }).join("")}</table>`;
+}
+$("#schedOpen").onclick = scOpen;
+$("#scRefresh").onclick = scLoad;
+$("#scClose").onclick = () => $("#sched").classList.remove("on");
+$("#sched").addEventListener("click", async e => {
+  if (e.target.id === "sched"){ $("#sched").classList.remove("on"); return; }
+  const b = e.target.closest("[data-scrun],[data-scdel],[data-sclog],[data-scfile]"); if (!b) return;
+  e.preventDefault();
+  if (b.dataset.sclog){ api().open_file(b.dataset.sclog); return; }
+  if (b.dataset.scfile){ api().open_file(b.dataset.scfile); return; }
+  if (b.dataset.scdel){
+    if (!confirm(`Delete the schedule “${b.dataset.scdel}”? The setup itself stays.`)) return;
+    const r = await api().schedule_delete({name: b.dataset.scdel});
+    say(r?.ok ? `Schedule “${b.dataset.scdel}” deleted.` : (r?.error || "Not deleted."), r?.ok ? "ok" : "err");
+  } else {
+    b.disabled = true;
+    const r = await api().schedule_run_now({name: b.dataset.scrun});
+    say(r?.ok ? `“${b.dataset.scrun}” started — it runs without a window; ↻ shows how it went.` : (r?.error || "Not started."), r?.ok ? "ok" : "err");
+  }
+  scLoad();
+});
+$("#scCreate").onclick = async () => {
+  const p = scSpec();
+  if (!p.setup){ say("Save the setup first — a schedule runs a saved setup.", "err"); return; }
+  const r = await api().schedule_create(p);
+  if (r?.ok){ say(`Scheduled: “${p.setup}” runs ${r.when}.`, "ok"); scLoad(); }
+  else say(r?.error || "Not scheduled.", "err");
+};
 $("#drill").addEventListener("click", e => { if (e.target.id === "drill") $("#drill").classList.remove("on"); });
 $("#drillCopy").onclick = async () => {
   const r = S.lastDrill; if (!r) return;
@@ -5491,6 +5616,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "F5"){ e.preventDefault(); preview(); }
   if (e.ctrlKey && e.key === "Enter"){ e.preventDefault(); $("#btnRun").click(); }
   if (e.key === "Escape" && $("#drill").classList.contains("on")) $("#drill").classList.remove("on");
+  if (e.key === "Escape" && $("#sched").classList.contains("on")) $("#sched").classList.remove("on");
   if (e.ctrlKey && (e.key === "f" || e.key === "F")){ e.preventDefault(); show("find"); $("#findVals").focus(); }
 });
 </script>

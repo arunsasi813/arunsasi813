@@ -6,10 +6,10 @@ in one go. Four modules along the top of the window:
 
 | Module | For |
 |---|---|
-| **Extract** | The setup: files, columns, filters, added columns, Combine steps, the output — and Run. |
+| **Extract** | The setup: files, columns, filters, added columns, Combine steps, the output — and Run, now or on a schedule. |
 | **Analytics** | Dashboards, summaries and Studio visuals for each group, combined table or the Overview. |
-| **Data** | Any data file — Parquet, CSV, TXT, Excel — browsed a page at a time, searched for a list of values, converted or combined into Parquet, exported. |
-| **PDF** | Merge, split, reorder, rotate, write on, sign, stamp, protect, convert and search PDFs. |
+| **Data** | Any data file — Parquet, CSV, TXT, Excel — browsed a page at a time, searched for a list of values, compared, queried with SQL, converted or combined into Parquet, exported. |
+| **PDF** | Merge, split, reorder, rotate, write on, sign, redact, stamp, protect, convert, OCR and search PDFs. |
 
 ```
 pip install -r requirements.txt        (pywebview, polars, fastexcel, openpyxl)
@@ -31,7 +31,10 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `checks.py` | Checks that pass or fail a run: row counts, unique keys, blanks, keys found, totals, a query that must find nothing. |
 | `worker.py` | Runs, counts, Find and full-data dashboards in a process of their own, so running out of memory can't close the window. |
 | `ui.html` | The interface. Inline CSS and JS. |
-| `datamgr.py` | The Data module: a page of any file through a view, counts, many files into one Parquet, exports. |
+| `datamgr.py` | The Data module: a page of any file through a view, counts, many files into one Parquet, exports, Compare, SQL. |
+| `scheduling.py` | Scheduled runs: the Task Scheduler task that starts `ColSift.exe --run "<setup>"`, and the run log. |
+| `ocr.py` | Reads scanned PDF pages with the OCR engine built into Windows. |
+| `winps.py` | Starts Windows PowerShell and `schtasks` with no window, for OCR and scheduling. |
 | `pdf.html` / `pdfapp.js` | The PDF module, written into the window when it is first opened. |
 | `vendor/` | pdf.js (Apache-2.0) and pdf-lib (@cantoo fork, MIT) — what the PDF module draws, reads and writes PDFs with. |
 | `studio.html` | Measure Studio with ColSift's hooks — the designer and renderer of Studio visuals. |
@@ -39,6 +42,41 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.6 — compare, SQL, redaction, OCR, scheduled runs
+
+- **Compare two files** (Data → *Compare*). Tick two files, pick **A — the old one** and
+  **B — the new one**, the key column(s) that identify a row and the columns to compare. You
+  get rows **added** (in B only), **removed** (in A only) and **changed** (one row per changed
+  cell: the key, the column, the old and the new value), per-column counts, and the keys that
+  appear more than once. Spaces at the ends, upper / lower case and leading zeros in the key can
+  be ignored; numbers compare by value (`10.00` = `10`), optionally within a tolerance. Export
+  to one Excel workbook (Summary, Added, Removed, Changed sheets) or CSV / Parquet files.
+- **SQL** (Data → *SQL*). Every ticked file is a table named after the file, and `files` is all
+  of them stacked with a `SOURCE_FILE` column. `SELECT … GROUP BY … ORDER BY …`, joins between
+  files, Ctrl+Enter runs; the first rows show, **Export every row** writes Excel, CSV or Parquet.
+  *Numbers as numbers* makes columns that hold only numbers sum and sort as numbers.
+- **Redaction that removes** (PDF → Edit page → **▇ Redact**). Drag over what must go. On
+  save, that page is replaced by a picture of itself (200 dpi) with the boxes painted black,
+  so the text under them is gone from the file — not just covered. The page's other text goes
+  too (a picture has no text); other pages are untouched. White-out still only hides.
+- **OCR for scanned pages**, with the OCR engine Windows already has — nothing to install,
+  nothing added to the exe. *Search PDFs*, *Text → .txt* and *Tables* read pages that have no
+  text (tick *Read scanned pages with OCR*). PDF → Convert → **Read the scanned pages** reads the
+  selected (or all) pages that have no text; **Save PDF** then adds the words as an invisible
+  layer exactly where they are seen, so the scan searches, copies and extracts like a typed
+  PDF. The language list shows the OCR languages installed in Windows (*Settings → Time &
+  language → Language*, a language's *Optical character recognition* feature). Redacted pages
+  never get a text layer.
+- **Scheduled runs** (Saved setups → **Schedule…**). Pick a saved setup and when — every day,
+  Monday to Friday, weekly on chosen days, or monthly on a day (or the last day) — at a time.
+  Windows Task Scheduler then starts `ColSift.exe --run "<setup>"` with no window: the saved
+  setup runs as the Run button would — its folders, its parameters such as `{PERIOD}` worked out
+  on the day, its checks, its output. Each run leaves a log; the dialog lists the schedules
+  (next run, last result), the recent runs with what they wrote and their logs, and has
+  **Run now** and **Delete**. The task runs as you, while you are signed in; if the PC was off
+  at the time, it runs when it is back on, on battery too. Tasks sit in Task Scheduler's
+  *ColSift* folder.
 
 ## What's new in 2.5 — Data and PDF modules
 
@@ -78,7 +116,7 @@ the left (read with the bar's sheet, header row and separator settings):
   for its password.
 - **Edit page** — double-click a page: text (double-click to retype; size, bold, colour),
   highlight, white-out (hides what is under it on the page — the text underneath stays in the
-  file, so it is not a redaction), box, image, a drawn signature, today's date, a tick. Drag
+  file; use **▇ Redact** to remove it), box, image, a drawn signature, today's date, a tick. Drag
   to move, the corner to resize; rotated pages keep everything upright.
 - **Stamp & protect** — page numbers (`Page {n} of {total}`, six positions, start number,
   skip the first page), a watermark, header and footer text (`{n}`, `{total}`, `{date}`,
@@ -93,8 +131,7 @@ the left (read with the bar's sheet, header row and separator settings):
   list: contains, whole word or a pattern; every hit with its file, page and line, the values
   not found, a click opens the page, *Export the hits* writes them to Excel.
 
-The PDF module works on PDFs that hold text. A scanned page is a picture: it can be
-reordered, stamped and protected, but its text can't be searched or extracted without OCR.
+A scanned page is a picture: its text is read with OCR (2.6, above).
 
 ## What's new in 2.4 — picking columns while you write a formula
 
@@ -704,9 +741,11 @@ Limits worth knowing (1.3):
 
 ## Headless
 
-Same engine, no window — for a scheduled monthly run:
+Same engine, no window — for a scheduled monthly run (or let **Schedule…** set one up):
 
 ```
+ColSift.exe --run "Monthly YQ tax"                              # a saved setup, no window, logged
+ColSift.exe --run "Monthly" --set PERIOD=2026-09
 python engine.py --profile "Monthly YQ tax" --folder D:\extracts\2026-07 --pattern "TAX_*"
 python engine.py --profile "Monthly YQ tax" --folder D:\extracts\2026-07 --count
 python engine.py --profile "Monthly" --set PERIOD=2026-09        # a run parameter
@@ -715,6 +754,8 @@ ColSift.exe --selftest result.json                              # no window: che
 ```
 
 Exit codes: 0 done, 1 failed, 2 setup not found, 3 a check stopped the run (nothing written).
+`--run` writes everything it says to a log in `profiles\runs\` and adds a line to
+`profiles\runs\history.jsonl` (setup, start, seconds, exit code, files written, log).
 
 ## Building a small, fast exe
 

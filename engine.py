@@ -4337,6 +4337,7 @@ def _cli(argv: list[str]) -> int:
         if a.out:
             ws["output"]["folder"] = a.out
         res = W.run_setup(ws, on_progress=lambda p: print(f"  {p}", file=sys.stderr))
+        _cli.last = res                      # a scheduled run logs what it wrote
         print(json.dumps(res, indent=2, default=str))
         for line in C.log_lines(res.get("checks") or [])[1:]:
             print(line, file=sys.stderr)
@@ -4366,6 +4367,7 @@ def _cli(argv: list[str]) -> int:
         return 0
 
     res = run(job, on_progress=lambda p: print(f"  {p}", file=sys.stderr))
+    _cli.last = res
     print(json.dumps(res, indent=2))
     return 0 if res.get("ok") else 1
 
