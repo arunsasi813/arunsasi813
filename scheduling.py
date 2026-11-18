@@ -2,10 +2,12 @@
 times chosen; that run has no window, works the saved setup as the Run button would
 (parameters such as {PERIOD} worked out on the day) and leaves a log.
 
-    create({setup, kind, time, days, day})   kind: daily | weekdays | weekly | monthly
+    create({setup, kind, time, days, day, notify})   kind: daily | weekdays | weekly | monthly
     listing()                                the ColSift tasks, with next and last run
-    delete(name) / run_now(name)
+    delete(name) / run_now(name) / repair(name)      repair: point a task at this ColSift
     history(setup=None)                      the runs logged, newest first
+    news() / mark_seen()                     the runs since the window last showed them
+    notify(title, text, open_path)           a Windows notification (--notify)
 
 Tasks live in Task Scheduler's ColSift folder and run as the person who made them,
 while they are signed in; one the PC was off for runs when it is back on.
@@ -57,12 +59,18 @@ def _quote(s: str) -> str:
     return f'"{s}"'
 
 
-def arguments(setup: str, sets: dict | None = None) -> str:
+def arguments(setup: str, sets: dict | None = None, notify: bool = False) -> str:
     _, pre = launcher()
     parts = [_quote(x) for x in pre] + ["--run", _quote(setup)]
     for k, v in (sets or {}).items():
         parts += ["--set", _quote(f"{k}={v}")]
-    return " ".join(parts)
+    return " ".join(parts + (["--notify"] if notify else []))
+
+
+def parse_arguments(args: str) -> dict:
+    """What a task's arguments ask for: {setup, sets, notify}."""
+    sets = dict(kv.partition("=")[::2] for kv in re.findall(r'--set\s+"([^"]*)"', args or ""))
+    return {"setup": setup_of(args), "sets": sets, "notify": "--notify" in (args or "")}
 
 
 def _check(p: dict) -> tuple[str, str, list[str], str]:
@@ -158,7 +166,7 @@ def task_xml(p: dict, today: datetime | None = None) -> str:
   <Actions Context="Author">
     <Exec>
       <Command>{escape(exe)}</Command>
-      <Arguments>{escape(arguments(setup, p.get("sets")))}</Arguments>
+      <Arguments>{escape(arguments(setup, p.get("sets"), bool(p.get("notify"))))}</Arguments>
       <WorkingDirectory>{escape(str(Path(exe).parent))}</WorkingDirectory>
     </Exec>
   </Actions>
@@ -211,6 +219,30 @@ $out = @(foreach ($t in $tasks) {
 """.replace("__FOLDER__", FOLDER)
 
 
+_REPAIR = r"""
+$ErrorActionPreference = 'Stop'
+$new = New-ScheduledTaskAction -Execute $exe -Argument $arg -WorkingDirectory $dir
+Set-ScheduledTask -TaskPath '\__FOLDER__\' -TaskName $name -Action $new | Out-Null
+'{"ok": true}'
+""".replace("__FOLDER__", FOLDER)
+
+
+def repair(name: str, args: str) -> dict:
+    """Point a task at this ColSift (moved, or a copy elsewhere), keeping its schedule."""
+    a = parse_arguments(args)
+    if not a["setup"]:
+        return {"ok": False, "error": "That task was not made by ColSift."}
+    exe, _ = launcher()
+    head = (f"$name = {winps.ps_quote(task_name(name))}\n$exe = {winps.ps_quote(exe)}\n"
+            f"$dir = {winps.ps_quote(str(Path(exe).parent))}\n$arg = {winps.ps_quote(arguments(a['setup'], a['sets'], a['notify']))}\n")
+    return winps.powershell(head + _REPAIR, "Scheduling", 120)
+
+
+def same_exe(a: str, b: str) -> bool:
+    norm = lambda x: str(x or "").strip().strip('"').replace("/", "\\").lower()  # noqa: E731
+    return norm(a) == norm(b)
+
+
 def setup_of(args: str) -> str:
     m = re.search(r'--run\s+"([^"]*)"', args or "")
     return m.group(1) if m else ""
@@ -230,8 +262,11 @@ def listing() -> dict:
         return r
     tasks = r.get("tasks") or []
     tasks = tasks if isinstance(tasks, list) else [tasks]
+    here, _ = launcher()
     for t in tasks:
         t["setup"] = setup_of(t.get("args"))
+        t["notify"] = "--notify" in (t.get("args") or "")
+        t["moved"] = bool(t["setup"]) and not same_exe(t.get("exe"), here)
         t["status"] = result_text(t.get("result"), t.get("last"))
         when = re.search(r"” (.*?)\. Logs:", t.get("description") or "")
         t["when"] = when.group(1) if when else ""
@@ -263,3 +298,44 @@ def history(setup: str | None = None, limit: int = 50) -> dict:
             if setup is None or e.get("setup") == setup:
                 rows.append(e)
     return {"ok": True, "runs": rows[::-1][:limit], "folder": str(runs_dir())}
+
+
+def news() -> dict:
+    """Runs since the window last showed them (none the first time: no backlog)."""
+    seen = runs_dir() / "seen.txt"
+    if not seen.exists():
+        mark_seen()
+        return {"ok": True, "runs": []}
+    mark = seen.read_text(encoding="utf-8").strip()
+    return {"ok": True, "runs": [r for r in history(limit=100)["runs"] if str(r.get("start") or "") > mark]}
+
+
+def mark_seen() -> dict:
+    newest = next(iter(history(limit=1)["runs"]), {}).get("start") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    (runs_dir() / "seen.txt").write_text(str(newest), encoding="utf-8")
+    return {"ok": True}
+
+
+# ---- a Windows notification when a scheduled run ends -------------------------------
+_TOAST = r"""
+$ErrorActionPreference = 'Stop'
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+$doc = New-Object Windows.Data.Xml.Dom.XmlDocument
+$doc.LoadXml($xml)
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell1.0\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($doc))
+'{"ok": true}'
+"""
+
+
+def toast_xml(title: str, text: str, open_path: str | None = None) -> str:
+    from xml.sax.saxutils import quoteattr
+    launch = f" activationType=\"protocol\" launch={quoteattr(Path(open_path).as_uri())}" if open_path else ""
+    return (f"<toast{launch}><visual><binding template=\"ToastGeneric\"><text>{escape(title)}</text>"
+            f"<text>{escape(text)}</text></binding></visual></toast>")
+
+
+def notify(title: str, text: str, open_path: str | None = None) -> dict:
+    """Shown by Windows (as from Windows PowerShell); a click opens open_path."""
+    return winps.powershell(f"$xml = {winps.ps_quote(toast_xml(title, text, open_path))}\n" + _TOAST, "A notification", 60)

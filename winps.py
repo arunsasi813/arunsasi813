@@ -28,6 +28,11 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
+def ps_quote(s: str) -> str:
+    """A PowerShell single-quoted string."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
 def _first_error(err: str, default: str) -> str:
     lines = [x.strip() for x in err.splitlines()]
     msg = next((x for x in lines if x and not x.startswith(("At line", "+", "CategoryInfo", "FullyQualifiedErrorId"))), "")

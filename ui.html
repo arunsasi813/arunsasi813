@@ -468,7 +468,12 @@ table.sct th{text-align:left;font-weight:600;color:var(--muted);font-size:11px;p
 table.sct td{padding:5px 6px;border-bottom:1px solid var(--line-2);vertical-align:middle}
 table.sct td.act{white-space:nowrap;text-align:right}
 table.sct a{color:var(--teal-2)}
-.sct .ok{color:var(--teal-2);font-weight:600}.sct .bad{color:var(--red);font-weight:600}.sct .warn{color:var(--amber);font-weight:600}
+.sct .ok{color:var(--teal-2);font-weight:600}.sct .bad{color:var(--red);font-weight:600}.sct .stop{color:var(--amber);font-weight:600}
+.sct .moved{display:block;color:var(--red);font-size:11px;font-weight:400}
+.newsbar{display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap;padding:6px 12px;background:var(--teal-soft);border-bottom:1px solid var(--line);font-size:12px}
+.newsbar.hasbad{background:var(--red-soft)}
+.newsbar .nb-ok{color:var(--teal-2)}.newsbar .nb-bad{color:var(--red);font-weight:600}.newsbar .nb-stop{color:var(--amber);font-weight:600}
+.newsbar .nb-act{margin-left:auto;display:flex;gap:4px}
 .modal .minfo{padding:6px 12px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--line-2)}
 /* ---------- 2.0: groups ---------- */
 .modbar{display:flex;gap:3px;align-items:center;background:var(--rail);padding:5px 10px 0;border-bottom:1px solid var(--rail-line)}
@@ -646,6 +651,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <button class="mod" data-m="pdf" title="Merge, split, reorder, edit, sign, stamp, protect and search PDFs">▤ PDF</button>
     <span class="modhint" id="modHint"></span>
   </nav>
+  <div class="newsbar" id="newsBar" style="display:none" role="status"></div>
   <div class="groupbar" id="groupBar"></div>
   <div class="srcbar">
     <div class="grp" id="sheetGrp" style="display:none">
@@ -1288,6 +1294,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
         <span id="scDays" class="f" style="gap:6px;display:none"></span>
         <select id="scDay" style="display:none;width:110px"></select>
       </div>
+      <label class="f" style="gap:6px;font-size:11.5px"><input type="checkbox" id="scNotify" checked> Tell me when it finishes — a Windows notification; click it for the run's log</label>
       <div id="scWarn"></div>
       <p class="hint">Windows starts ColSift without a window and runs the <b>saved</b> setup as Run would: its folders, its parameters such as {PERIOD} worked out on the day, its checks and its output. Change the setup? Save it — the schedule runs what is saved. It runs while you are signed in to Windows; if the PC was off at that time, it runs when it is back on.</p>
       <div class="f"><button class="btn pri" id="scCreate">Schedule it</button><span class="hint" id="scSays" style="margin:0"></span></div>
@@ -3663,7 +3670,7 @@ $("#scDays").innerHTML = "MON TUE WED THU FRI SAT SUN".split(" ").map(d =>
 $("#scDay").innerHTML = Array.from({length: 31}, (_, i) => `<option value="${i + 1}">day ${i + 1}</option>`).join("") + `<option value="last">last day</option>`;
 function scSpec(){
   return {setup: $("#scSetup").value, kind: $("#scKind").value, time: $("#scTime").value,
-          days: $$("#scDays input:checked").map(x => x.value), day: $("#scDay").value};
+          days: $$("#scDays input:checked").map(x => x.value), day: $("#scDay").value, notify: $("#scNotify").checked};
 }
 function scForm(){
   const k = $("#scKind").value;
@@ -3695,8 +3702,25 @@ async function scOpen(){
   scForm(); scCheckSetup();
   $("#sched").classList.add("on");
   scLoad();
+  api().schedule_seen(); $("#newsBar").style.display = "none";
 }
-const scWhen = s => s ? s.replace(/^(\d{4})-(\d\d)-(\d\d)/, "$3/$2/$1") : "–";
+/* runs that happened while the window was closed (or since it last looked): a line under the modules */
+async function checkNews(){
+  const r = await api().schedule_news(), runs = r?.runs || [], bar = $("#newsBar");
+  if (!runs.length){ bar.style.display = "none"; return; }
+  const one = x => x.ok ? `<span class="nb-ok">✓ ${esc(x.setup)} · ${esc(scWhen(x.start))} · ${(x.written || []).length} file${(x.written || []).length === 1 ? "" : "s"}</span>`
+    : x.stopped ? `<span class="nb-stop">■ ${esc(x.setup)} · ${esc(scWhen(x.start))} · stopped by a check</span>`
+    : `<span class="nb-bad" title="${esc(x.error || "")}">✗ ${esc(x.setup)} · ${esc(scWhen(x.start))} · failed</span>`;
+  bar.innerHTML = `<b>Scheduled runs since you last looked:</b> ${runs.slice(0, 4).map(one).join("")}${runs.length > 4 ? `<span>+${runs.length - 4} more</span>` : ""}
+    <span class="nb-act"><button class="btn sm" id="newsShow">Show</button><button class="btn sm" id="newsHide" title="Hide until the next run">✕</button></span>`;
+  bar.classList.toggle("hasbad", runs.some(x => !x.ok));
+  bar.style.display = "";
+}
+$("#newsBar").addEventListener("click", async e => {
+  if (e.target.id === "newsShow") scOpen();
+  if (e.target.id === "newsHide"){ await api().schedule_seen(); $("#newsBar").style.display = "none"; }
+});
+const scWhen = s => s ? s.replace(/^(\d{4})-(\d\d)-(\d\d)/, "$3/$2/$1").replace(/(\d\d:\d\d):\d\d$/, "$1") : "–";
 async function scLoad(){
   const r = await api().schedule_list();
   SC.data = r;
@@ -3704,15 +3728,18 @@ async function scLoad(){
   $("#scList").innerHTML = !r?.ok ? `<div class="hint">${esc(r?.error || "Task Scheduler could not be read.")}</div>`
     : !tasks.length ? `<div class="hint">Nothing scheduled yet.</div>`
     : `<table class="sct"><tr><th>Setup</th><th>When</th><th>Next run</th><th>Last run</th><th></th></tr>${tasks.map(t => {
-        const cls = t.status === "finished" ? "ok" : /failed|code/.test(t.status) ? "bad" : t.status === "stopped by a check" ? "warn" : "";
-        return `<tr><td><b>${esc(t.setup || t.name)}</b>${t.state === "Disabled" ? ` <small>(turned off)</small>` : ""}</td><td>${esc(t.when || "–")}</td>
+        const cls = t.status === "finished" ? "ok" : /failed|code/.test(t.status) ? "bad" : t.status === "stopped by a check" ? "stop" : "";
+        return `<tr><td><b>${esc(t.setup || t.name)}</b>${t.state === "Disabled" ? ` <small>(turned off)</small>` : ""}
+            ${t.moved ? `<span class="moved" title="${esc(t.exe || "")}">starts a ColSift that is somewhere else — Update points it here</span>` : ""}</td>
+          <td>${esc(t.when || "–")}${t.notify ? ` <span title="A Windows notification when it finishes">· notifies</span>` : ""}</td>
           <td>${esc(scWhen(t.next))}</td><td>${t.last ? `${esc(scWhen(t.last))} · <span class="${cls}">${esc(t.status)}</span>` : esc(t.status)}</td>
-          <td class="act"><button class="btn sm" data-scrun="${esc(t.name)}" title="Start it now — the same run, without a window">Run now</button>
+          <td class="act">${t.moved ? `<button class="btn sm pri" data-screp="${esc(t.name)}" data-args="${esc(t.args || "")}" title="Have it start this ColSift.exe — same schedule">Update</button>` : ""}
+            <button class="btn sm" data-scrun="${esc(t.name)}" title="Start it now — the same run, without a window">Run now</button>
             <button class="btn sm" data-scdel="${esc(t.name)}">Delete</button></td></tr>`; }).join("")}</table>`;
   $("#scFolder").textContent = r?.folder ? `· logs in ${r.folder}` : "";
   $("#scRuns").innerHTML = !runs.length ? `<div class="hint">No runs logged yet.</div>`
     : `<table class="sct"><tr><th>Setup</th><th>Started</th><th>Took</th><th>Result</th><th>Wrote</th><th></th></tr>${runs.slice(0, 15).map(x => {
-        const res = x.ok ? `<span class="ok">done</span>` : x.stopped ? `<span class="warn">stopped by a check</span>` : `<span class="bad">failed</span>`;
+        const res = x.ok ? `<span class="ok">done</span>` : x.stopped ? `<span class="stop">stopped by a check</span>` : `<span class="bad">failed</span>`;
         const wrote = (x.written || []).length;
         return `<tr><td>${esc(x.setup)}</td><td>${esc(scWhen(x.start))}</td><td>${x.seconds != null ? `${x.seconds}s` : ""}</td><td title="${esc(x.error || "")}">${res}</td>
           <td>${wrote ? `<a href="#" data-scfile="${esc(x.written[0])}" title="${esc(x.written.join("\n"))}">${wrote} file${wrote === 1 ? "" : "s"}</a>` : "–"}</td>
@@ -3723,11 +3750,14 @@ $("#scRefresh").onclick = scLoad;
 $("#scClose").onclick = () => $("#sched").classList.remove("on");
 $("#sched").addEventListener("click", async e => {
   if (e.target.id === "sched"){ $("#sched").classList.remove("on"); return; }
-  const b = e.target.closest("[data-scrun],[data-scdel],[data-sclog],[data-scfile]"); if (!b) return;
+  const b = e.target.closest("[data-scrun],[data-scdel],[data-sclog],[data-scfile],[data-screp]"); if (!b) return;
   e.preventDefault();
   if (b.dataset.sclog){ api().open_file(b.dataset.sclog); return; }
   if (b.dataset.scfile){ api().open_file(b.dataset.scfile); return; }
-  if (b.dataset.scdel){
+  if (b.dataset.screp){
+    const r = await api().schedule_repair({name: b.dataset.screp, args: b.dataset.args});
+    say(r?.ok ? `“${b.dataset.screp}” now starts this ColSift.` : (r?.error || "Not updated."), r?.ok ? "ok" : "err");
+  } else if (b.dataset.scdel){
     if (!confirm(`Delete the schedule “${b.dataset.scdel}”? The setup itself stays.`)) return;
     const r = await api().schedule_delete({name: b.dataset.scdel});
     say(r?.ok ? `Schedule “${b.dataset.scdel}” deleted.` : (r?.error || "Not deleted."), r?.ok ? "ok" : "err");
@@ -5609,6 +5639,7 @@ window.addEventListener("pywebviewready", async () => {
   syncOutput(); drawRules(); drawAdds(); syncFind(); syncOutputControls(); syncPdf();
   drawGroupBar(); drawOutputMode(); wsDraw();
   pollMem();
+  checkNews(); setInterval(checkNews, 5 * 60 * 1000);
   say("Choose a source folder to begin.");
 });
 

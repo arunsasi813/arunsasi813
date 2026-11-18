@@ -1081,10 +1081,35 @@ def scheduled_runs(ui: UI, d: dict) -> None:
     assert rows[0].startswith("DOC_NO") and all(",YQ" in r for r in rows[1:]) and len(rows) > 1
     log = ui.js("SC.data.runs[0].log")
     assert "the setup “Nightly”" in Path(log).read_text(encoding="utf-8")
+    assert page.is_checked("#scNotify") and "notifies" in page.inner_text("#scList")
+    assert ui.js("SC.data.runs[0].notified") is False                  # (no Windows here to show it)
+    # the exe moved: the task says so, and Update points it at this one
+    ui.js("api().dev_task_moved('Nightly')")
+    page.click("#scRefresh")
+    page.wait_for_selector("#scList .moved")
+    ui.then("now starts this ColSift", lambda: page.click("#scList [data-screp='Nightly']"))
+    page.wait_for_function("!document.querySelector('#scList .moved')")
     ui.shot("scheduled_runs")
+    page.click("#scClose")
+    # the run, as the window shows it the next time it looks (opening the dialog marks it seen)
+    page.click("#schedOpen")
+    page.wait_for_selector("#sched.on")
+    ui.then("started", lambda: page.click("#scList [data-scrun='Nightly']"))
+    page.wait_for_function("SC.data && SC.data.runs.length === 2", timeout=60000)
+    page.click("#scClose")
+    ui.js("checkNews()")
+    page.wait_for_selector("#newsBar .nb-ok:has-text('Nightly')")
+    assert "1 file" in page.inner_text("#newsBar")
+    ui.shot("scheduled_news")
+    page.click("#newsShow")
+    page.wait_for_selector("#sched.on")
+    assert not page.is_visible("#newsBar")
     page.click("#scList [data-scdel='Nightly']")
     page.wait_for_selector("#scList .hint:has-text('Nothing scheduled yet')")
     page.click("#scClose")
+    ui.js("checkNews()")
+    page.wait_for_timeout(300)
+    assert not page.is_visible("#newsBar"), "seen when shown"
 
 
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,

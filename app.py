@@ -843,6 +843,22 @@ class Api:
         return SC.create(p)
 
     @guard
+    def schedule_repair(self, p: dict) -> dict:
+        """Point a task at this ColSift.exe — after the exe was moved or replaced elsewhere."""
+        import scheduling as SC
+        return SC.repair(str(p.get("name") or ""), str(p.get("args") or ""))
+
+    @guard
+    def schedule_news(self) -> dict:
+        import scheduling as SC
+        return SC.news()
+
+    @guard
+    def schedule_seen(self) -> dict:
+        import scheduling as SC
+        return SC.mark_seen()
+
+    @guard
     def schedule_delete(self, p: dict) -> dict:
         import scheduling as SC
         return SC.delete(str(p.get("name") or ""))
@@ -1131,6 +1147,8 @@ def headless_run(argv: list[str]) -> int:
         print('usage: ColSift.exe --run "<saved setup>" [--set NAME=VALUE] [--out FOLDER]', file=sys.stderr)
         return 2
     name, rest = argv[i + 1], argv[i + 2:]
+    notify = "--notify" in rest
+    rest = [x for x in rest if x != "--notify"]
     _load_modules()
     E = _m()[0]
     import scheduling as SC
@@ -1150,9 +1168,18 @@ def headless_run(argv: list[str]) -> int:
         res = getattr(E._cli, "last", {}) or {}
         end = datetime.now()
         print(f"\nfinished {end:%Y-%m-%d %H:%M:%S} — {SC.result_text(code, 'ran')} (exit code {code})")
-    SC.log_run({"setup": name, "start": f"{start:%Y-%m-%d %H:%M:%S}", "seconds": round((end - start).total_seconds(), 1),
-                "code": code, "ok": code == 0, "stopped": code == 3, "log": str(log),
-                "written": [str(x) for x in res.get("written") or []], "error": res.get("error")})
+    written = [str(x) for x in res.get("written") or []]
+    entry = {"setup": name, "start": f"{start:%Y-%m-%d %H:%M:%S}", "seconds": round((end - start).total_seconds(), 1),
+             "code": code, "ok": code == 0, "stopped": code == 3, "log": str(log), "written": written, "error": res.get("error")}
+    if notify:
+        text = (f"Finished — {len(written)} file{'' if len(written) == 1 else 's'} written." if code == 0
+                else "Stopped by a check — nothing written. Click for the log." if code == 3
+                else f"Failed: {str(res.get('error') or 'see the log')[:140]} — click for the log.")
+        try:
+            entry["notified"] = bool(SC.notify(f"ColSift — {name}", text, str(log)).get("ok"))
+        except Exception:  # noqa: BLE001 — a notification never fails a run
+            entry["notified"] = False
+    SC.log_run(entry)
     return code
 
 
@@ -1185,12 +1212,17 @@ def _selftest_schedule() -> dict:
     """A task made in Task Scheduler, listed, deleted (told, not checked: build machines differ)."""
     try:
         import scheduling as SC
-        made = SC.create({"setup": "ColSift selftest", "kind": "weekly", "days": ["SUN"], "time": "03:17"})
+        made = SC.create({"setup": "ColSift selftest", "kind": "weekly", "days": ["SUN"], "time": "03:17", "notify": True})
         listed = SC.listing() if made.get("ok") else {}
+        mine = next((t for t in listed.get("tasks") or [] if t.get("name") == "ColSift selftest"), {})
+        fixed = SC.repair("ColSift selftest", mine.get("args") or "") if mine else {}
+        again = SC.listing() if fixed.get("ok") else {}
         gone = SC.delete("ColSift selftest") if made.get("ok") else {}
         return {"create": made, "listed": [t.get("name") for t in listed.get("tasks") or []],
-                "when": next((t.get("when") for t in listed.get("tasks") or [] if t.get("name") == "ColSift selftest"), None),
-                "list_error": listed.get("error"), "delete": gone}
+                "when": mine.get("when"), "args": mine.get("args"), "moved": mine.get("moved"), "list_error": listed.get("error"),
+                "repair": fixed, "after_repair": [(t.get("name"), t.get("moved"), t.get("args")) for t in again.get("tasks") or []],
+                "notify": SC.notify("ColSift self-test", "A notification from the build check.", None),
+                "delete": gone}
     except Exception as e:  # noqa: BLE001 — informational only
         return {"error": f"{type(e).__name__}: {e}"}
 

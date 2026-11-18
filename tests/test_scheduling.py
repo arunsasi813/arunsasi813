@@ -144,3 +144,65 @@ def test_a_headless_run_works_the_saved_setup_and_logs_it(data):
     assert "No setup named Nope" in open(runs[0]["log"], encoding="utf-8").read()
     assert app.headless_run(["--run"]) == 2
     assert all(json.dumps(r) for r in runs)
+
+
+def test_notify_rides_in_the_arguments_and_comes_back_out():
+    args = SC.arguments("Month end", {"PERIOD": "2026-10"}, notify=True)
+    assert args.endswith('--run "Month end" --set "PERIOD=2026-10" --notify')
+    assert SC.parse_arguments(args) == {"setup": "Month end", "sets": {"PERIOD": "2026-10"}, "notify": True}
+    t = parsed({"setup": "Month end", "kind": "daily", "time": "07:00", "notify": True})
+    assert t.find("t:Actions/t:Exec/t:Arguments", NS).text.endswith("--notify")
+    x = SC.toast_xml("ColSift — A&B", "Failed <oops>", "/tmp/a b.log")
+    assert 'launch="file:///tmp/a%20b.log"' in x and "A&amp;B" in x and "&lt;oops&gt;" in x
+    ET.fromstring(x)                                                      # well-formed
+
+
+def test_a_task_that_starts_another_copy_is_noticed_and_repaired(monkeypatch):
+    exe, _ = SC.launcher()
+    old = {"name": "Month end", "exe": r"D:\old\ColSift.exe", "args": '--run "Month end" --notify', "result": 0, "last": "x"}
+    same = {"name": "Daily", "exe": exe.upper(), "args": SC.arguments("Daily"), "result": 0, "last": "x"}
+    seen = {}
+
+    def ps(script, what, timeout):
+        seen.setdefault("scripts", []).append(script)
+        return {"ok": True, "tasks": [old, same]}
+    monkeypatch.setattr(SC.winps, "powershell", ps)
+    t = {x["name"]: x for x in SC.listing()["tasks"]}
+    assert t["Month end"]["moved"] is True and t["Month end"]["notify"] is True
+    assert t["Daily"]["moved"] is False
+    assert SC.repair("Month end", old["args"])["ok"]
+    head = seen["scripts"][-1].splitlines()
+    assert head[0] == "$name = 'Month end'" and head[1] == f"$exe = '{exe}'"
+    assert head[3].startswith("$arg = ") and head[3].endswith('--run "Month end" --notify\'')
+    assert "Set-ScheduledTask" in seen["scripts"][-1]
+    assert SC.repair("x", "--something")["ok"] is False
+
+
+def test_news_is_what_ran_since_the_window_last_looked(monkeypatch):
+    assert SC.news()["runs"] == []                                        # first time: no backlog
+    SC.log_run({"setup": "A", "start": "2999-01-01 07:00:00", "ok": True})
+    SC.log_run({"setup": "B", "start": "2999-01-01 08:00:00", "ok": False})
+    assert [r["setup"] for r in SC.news()["runs"]] == ["B", "A"]
+    SC.mark_seen()
+    assert SC.news()["runs"] == []
+    SC.log_run({"setup": "C", "start": "2999-01-02 07:00:00", "ok": True})
+    assert [r["setup"] for r in SC.news()["runs"]] == ["C"]
+
+
+def test_a_run_with_notify_tells_windows(data, monkeypatch):
+    import app
+    tmp, f = data
+    told = []
+    monkeypatch.setattr(SC, "notify", lambda title, text, path: told.append((title, text, path)) or {"ok": True})
+    E.save_profile("Quick", W.normalize({"name": "Quick", "folders": [str(tmp / "jan")],
+                                         "groups": [{"name": "S", "match": {"mode": "pattern", "value": "sales_*"},
+                                                     "setup": {"columns": [{"name": "DOC_NO", "include": True}]}}],
+                                         "output": {"folder": str(tmp / "q"), "format": "csv", "basename": "q"}}))
+    assert app.headless_run(["--run", "Quick", "--notify"]) == 0
+    assert app.headless_run(["--run", "Missing", "--notify"]) == 2
+    assert told[0][0] == "ColSift — Quick" and told[0][1] == "Finished — 1 file written." and told[0][2].endswith(".log")
+    assert told[1][1].startswith("Failed:") and "click for the log" in told[1][1]
+    runs = SC.history()["runs"]
+    assert runs[0]["notified"] is True and runs[1]["notified"] is True
+    assert app.headless_run(["--run", "Quick"]) == 0 and len(told) == 2  # no --notify, no notification
+    assert "notified" not in SC.history()["runs"][0]

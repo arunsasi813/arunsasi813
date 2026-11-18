@@ -36,12 +36,33 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `ocr.py` | Reads scanned PDF pages with the OCR engine built into Windows. |
 | `winps.py` | Starts Windows PowerShell and `schtasks` with no window, for OCR and scheduling. |
 | `pdf.html` / `pdfapp.js` | The PDF module, written into the window when it is first opened. |
-| `vendor/` | pdf.js (Apache-2.0) and pdf-lib (@cantoo fork, MIT) — what the PDF module draws, reads and writes PDFs with. |
+| `vendor/` | pdf.js (Apache-2.0), pdf-lib and fontkit (@cantoo forks, MIT) — what the PDF module draws, reads and writes PDFs with. |
 | `studio.html` | Measure Studio with ColSift's hooks — the designer and renderer of Studio visuals. |
 | `studio_embed.py` | Makes `studio.html` from a Measure Studio file: `python studio_embed.py measure-studio.html`. |
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.7 — following scheduled runs; searchable redactions; OCR in any alphabet
+
+- **Since you last looked.** When ColSift opens (and every few minutes while it is open), a line
+  under the modules lists the scheduled runs that happened meanwhile — ✓ done with the number of
+  files written, ■ stopped by a check, ✗ failed — with **Show** (the Scheduled runs dialog) and ✕.
+- **A notification when a run ends.** *Tell me when it finishes* (on by default in **Schedule…**)
+  has Windows show a notification at the end of each scheduled run — finished and how many
+  files, stopped by a check, or failed and why; clicking it opens the run's log. Windows shows it
+  as coming from Windows PowerShell. Focus assist / Do not disturb can hold it back.
+- **A schedule that starts an old copy.** If `ColSift.exe` was moved, or the schedule was made by
+  a copy somewhere else, the dialog says so on that schedule and **Update** points it at this
+  ColSift — same setup, same times.
+- **Redacted pages stay searchable.** A redacted page is still saved as a picture with the boxes
+  burned in; that picture is now read back with OCR on Save, so the rest of the page can be
+  searched and copied again. The black boxes read as nothing, so what was under them can't come
+  back this way. (PDF → Convert: *Keep redacted pages searchable*, on by default.)
+- **OCR words in any alphabet.** The invisible text layer now keeps Arabic, Greek, Cyrillic and
+  Hebrew words too (before, only Western European letters), written with a font Windows already
+  has (Arial, else Segoe UI or Tahoma) and only the letters used embedded. Chinese, Japanese and
+  Korean are still found by *Search PDFs* but left out of the saved layer.
 
 ## What's new in 2.6 — compare, SQL, redaction, OCR, scheduled runs
 
@@ -755,7 +776,8 @@ ColSift.exe --selftest result.json                              # no window: che
 
 Exit codes: 0 done, 1 failed, 2 setup not found, 3 a check stopped the run (nothing written).
 `--run` writes everything it says to a log in `profiles\runs\` and adds a line to
-`profiles\runs\history.jsonl` (setup, start, seconds, exit code, files written, log).
+`profiles\runs\history.jsonl` (setup, start, seconds, exit code, files written, log);
+`--notify` also has Windows show a notification when it ends.
 
 ## Building a small, fast exe
 

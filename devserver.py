@@ -118,9 +118,25 @@ class DevApi(app.Api):
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         name = SC.task_name(p["setup"])
+        exe, _ = SC.launcher()
         self._TASKS[name] = {"name": name, "setup": p["setup"], "when": SC.describe(p), "state": "Ready",
-                             "next": "2099-01-01 " + p["time"], "last": "", "result": SC.NEVER_RAN, "status": "not run yet"}
+                             "next": "2099-01-01 " + p["time"], "last": "", "result": SC.NEVER_RAN, "status": "not run yet",
+                             "exe": exe, "args": SC.arguments(p["setup"], p.get("sets"), bool(p.get("notify"))),
+                             "notify": bool(p.get("notify")), "moved": False}
         return {"ok": True, "name": name, "when": SC.describe(p)}
+
+    def schedule_repair(self, p: dict) -> dict:
+        if not os.environ.get("COLSIFT_FAKE_SCHED"):
+            return super().schedule_repair(p)
+        import scheduling as SC
+        t = self._TASKS[p["name"]]
+        t.update(exe=SC.launcher()[0], moved=False)
+        return {"ok": True}
+
+    def dev_task_moved(self, name: str) -> dict:
+        """As if the task's ColSift.exe had been moved away."""
+        self._TASKS[name].update(exe=r"D:\old\ColSift.exe", moved=True)
+        return {"ok": True}
 
     def schedule_delete(self, p: dict) -> dict:
         if not os.environ.get("COLSIFT_FAKE_SCHED"):
@@ -133,7 +149,8 @@ class DevApi(app.Api):
             return super().schedule_run_now(p)
         import subprocess
         t = self._TASKS[p["name"]]
-        code = subprocess.run([sys.executable, str(HERE / "app.py"), "--run", t["setup"]], cwd=str(HERE), timeout=300).returncode
+        code = subprocess.run([sys.executable, str(HERE / "app.py"), "--run", t["setup"], *(["--notify"] if t.get("notify") else [])],
+                              cwd=str(HERE), timeout=300).returncode
         t.update(last=time.strftime("%Y-%m-%d %H:%M"), result=code, status={0: "finished", 3: "stopped by a check"}.get(code, "failed"))
         return {"ok": True}
 

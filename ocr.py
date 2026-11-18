@@ -60,7 +60,8 @@ $pages = foreach ($path in $paths) {
 
 
 def _ps_quote(s: str) -> str:
-    return "'" + str(s).replace("'", "''") + "'"
+    import winps
+    return winps.ps_quote(s)
 
 
 def _run(script: str) -> dict:
