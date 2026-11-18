@@ -346,3 +346,271 @@ def write_rows(p: dict) -> dict:
     else:
         df.write_csv(path, separator="\t" if fmt == "txt" else ",")
     return {"ok": True, "path": str(path), "rows": df.height}
+
+
+# ---- compare two files by key ---------------------------------------------------
+
+CMP_PREVIEW = 500
+KEY_SEP = "\x1f"
+
+
+def _cmp_text(e: pl.Expr, o: dict) -> pl.Expr:
+    """A value as compared: text, trimmed unless asked not to, case folded on request."""
+    t = e.cast(pl.String).fill_null("")
+    if o.get("trim", True) is not False:
+        t = t.str.strip_chars()
+    if o.get("case"):
+        t = t.str.to_uppercase()
+    return t
+
+
+def _cmp_key(cols: list[str], o: dict) -> pl.Expr:
+    parts = []
+    for c in cols:
+        k = _cmp_text(pl.col(c), {**o, "case": o.get("key_case", True)})
+        if o.get("zeros"):
+            k = k.str.replace(r"^0+(\d)", "$1")
+        parts.append(k)
+    return pl.concat_str(parts, separator=KEY_SEP).alias("__k")
+
+
+def _num_of(t: pl.Expr) -> pl.Expr:
+    """Text as a number, as ColSift reads amounts: 1,234.50 and (250) included."""
+    return t.str.replace_all(r"[,\s]", "").str.replace_all(r"^\((.*)\)$", r"-$1").cast(pl.Float64, strict=False)
+
+
+def _differs(a: pl.Expr, b: pl.Expr, o: dict) -> pl.Expr:
+    """True where the two sides differ. Both numbers: by number, within `tol`."""
+    ta, tb = _cmp_text(a, o), _cmp_text(b, o)
+    if o.get("numbers", True) is False:
+        return ta != tb
+    na, nb = _num_of(ta), _num_of(tb)
+    tol = float(o.get("tol") or 0)
+    both = na.is_not_null() & nb.is_not_null()
+    return pl.when(both).then((na - nb).abs() > tol + 1e-9).otherwise(ta != tb)
+
+
+def compare(p: dict, on_progress=None, cancel=None) -> dict:
+    """Two files — an old and a new extract, two months, two systems — lined up by a key.
+
+    {a, b: paths, source, keys: [...], columns: [...] (default: every column both have),
+     trim, case, zeros (leading zeros in keys), numbers (1.50 = 1.5), tol, folder, name,
+     format: "xlsx" | "csv" | "parquet" | "" (no file)}
+
+    Returns the counts — only in A (removed), only in B (added), changed, the same —
+    the changes per column, keys that repeat, and the first rows of each. With a folder,
+    writes them: one workbook with Summary, Added, Removed and Changed sheets (Changed:
+    a row per changed value — the key, the column, old and new)."""
+    t0 = time.time()
+    a, b = p.get("a") or "", p.get("b") or ""
+    if not a or not b:
+        return {"ok": False, "error": "Pick the two files to compare."}
+    keys = [k for k in p.get("keys") or [] if k]
+    if not keys:
+        return {"ok": False, "error": "Pick the column (or columns) that identify a row — a ticket or document number."}
+    o = {k: p.get(k) for k in ("trim", "case", "zeros", "numbers", "tol", "key_case")}
+    stage = E._stage_dir()
+    try:
+        frames = {}
+        for side, path in (("A", a), ("B", b)):
+            E._check_cancel(cancel)
+            if on_progress:
+                on_progress({"stage": "read", "file": Path(path).name, "index": 1 if side == "A" else 2, "total": 2})
+            lf = _plain(_frame(path, p.get("source"), None))
+            have = lf.collect_schema().names()
+            miss = [k for k in keys if k not in have]
+            if miss:
+                return {"ok": False, "error": f"{Path(path).name} has no column {', '.join(miss)}"}
+            frames[side] = (lf, have)
+        common = [c for c in frames["A"][1] if c in frames["B"][1] and c not in keys]
+        cols = [c for c in (p.get("columns") or common) if c in common]
+        only_a = [c for c in frames["A"][1] if c not in frames["B"][1]]
+        only_b = [c for c in frames["B"][1] if c not in frames["A"][1]]
+        staged = {}
+        for side in ("A", "B"):
+            lf, have = frames[side]
+            want = keys + [c for c in cols]
+            path = stage / f"{side}.parquet"
+            E._sink(lf.select([pl.col(c) for c in want]).with_columns(_cmp_key(keys, o)).with_row_index("__r"), path)
+            staged[side] = path
+        A, B = pl.scan_parquet(staged["A"]), pl.scan_parquet(staged["B"])
+        dups = {}
+        for side, lf in (("A", A), ("B", B)):
+            d = lf.group_by("__k").agg(pl.len().alias("n"), pl.first(keys[0]).alias("key")).filter(pl.col("n") > 1)
+            got = d.select(pl.len(), pl.col("n").sum()).collect()
+            ex = d.sort("n", descending=True).head(10).collect()
+            dups[side] = {"keys": int(got.item(0, 0)), "rows": int(got.item(0, 1) or 0),
+                          "examples": [f"{k} ×{n}" for k, n in zip(ex["key"], ex["n"])]}
+        A1, B1 = A.unique("__k", keep="first", maintain_order=True), B.unique("__k", keep="first", maintain_order=True)
+        rename = {c: f"{c}__b" for c in keys + cols + ["__r"]}
+        joined = A1.join(B1.rename(rename), on="__k", how="full", coalesce=True, nulls_equal=True)
+        in_a = pl.col(keys[0]).is_not_null()
+        in_b = pl.col(f"{keys[0]}__b").is_not_null()
+        jpath = stage / "joined.parquet"
+        E._check_cancel(cancel)
+        if on_progress:
+            on_progress({"stage": "write", "part": "comparing"})
+        diff = [_differs(pl.col(c), pl.col(f"{c}__b"), o).alias(f"__d_{i}") for i, c in enumerate(cols)]
+        E._sink(joined.with_columns(in_a.alias("__a"), in_b.alias("__b"), *diff), jpath)
+        J = pl.scan_parquet(jpath)
+        dcols = [f"__d_{i}" for i in range(len(cols))]
+        both = J.filter(pl.col("__a") & pl.col("__b"))
+        anyd = pl.any_horizontal([pl.col(c) for c in dcols]) if dcols else pl.lit(False)
+        stats = J.select(
+            (pl.col("__a") & ~pl.col("__b")).sum().alias("removed"), (~pl.col("__a") & pl.col("__b")).sum().alias("added"),
+            (pl.col("__a") & pl.col("__b")).sum().alias("both"),
+            (pl.col("__a") & pl.col("__b") & anyd).sum().alias("changed"),
+            *[(pl.col("__a") & pl.col("__b") & pl.col(c)).sum().alias(c) for c in dcols]).collect().row(0, named=True)
+        per_col = {c: int(stats[f"__d_{i}"]) for i, c in enumerate(cols) if stats[f"__d_{i}"]}
+        # in file order: removed as A has them, added as B has them, changes row by row
+        removed = J.filter(pl.col("__a") & ~pl.col("__b")).sort("__r").select(keys + cols)
+        added = J.filter(~pl.col("__a") & pl.col("__b")).sort("__r__b").select([pl.col(f"{c}__b").alias(c) for c in keys + cols])
+        long = pl.concat([both.filter(pl.col(f"__d_{i}")).select(
+            pl.col("__r"), pl.lit(i, dtype=pl.UInt32).alias("__c"),
+            *[pl.col(k) for k in keys], pl.lit(c).alias("COLUMN"), pl.col(c).cast(pl.String).alias("OLD"),
+            pl.col(f"{c}__b").cast(pl.String).alias("NEW")) for i, c in enumerate(cols)], how="vertical") \
+            .sort(["__r", "__c"]).drop(["__r", "__c"]) \
+            if cols else pl.DataFrame(schema={**{k: pl.String for k in keys}, "COLUMN": pl.String, "OLD": pl.String,
+                                              "NEW": pl.String}).lazy()
+        n = int(p.get("preview") or CMP_PREVIEW)
+        rows = lambda lf: [["" if v is None else str(v) for v in r] for r in lf.head(n).collect().iter_rows()]  # noqa: E731
+        res = {"ok": True, "a": Path(a).name, "b": Path(b).name, "keys": keys, "columns": cols,
+               "only_in_a_columns": only_a, "only_in_b_columns": only_b,
+               "counts": {"removed": int(stats["removed"]), "added": int(stats["added"]), "same": int(stats["both"]) - int(stats["changed"]),
+                          "changed": int(stats["changed"]), "values_changed": sum(per_col.values())},
+               "per_column": per_col, "duplicates": dups,
+               "removed": {"columns": keys + cols, "rows": rows(removed)},
+               "added": {"columns": keys + cols, "rows": rows(added)},
+               "changed": {"columns": keys + ["COLUMN", "OLD", "NEW"], "rows": rows(long)}}
+        fmt = p.get("format") or ""
+        if fmt and p.get("folder"):
+            E._check_cancel(cancel)
+            stem = E._safe_name((p.get("name") or "compare").strip() or "compare", 120)
+            summary = pl.DataFrame({"WHAT": ["File A (old)", "File B (new)", "Key", "Only in A — removed", "Only in B — added",
+                                             "In both, changed", "In both, the same", "Values changed",
+                                             "Keys repeated in A", "Keys repeated in B"] +
+                                            [f"Changed: {c}" for c in per_col],
+                                    "VALUE": [res["a"], res["b"], " + ".join(keys), *[str(res["counts"][k]) for k in
+                                              ("removed", "added", "changed", "same", "values_changed")],
+                                              str(dups["A"]["keys"]), str(dups["B"]["keys"])] + [str(v) for v in per_col.values()]})
+            parts = {"Summary": summary.lazy(), "Added": added, "Removed": removed, "Changed": long}
+            out = {**(p.get("output") or {}), "folder": p["folder"]}
+            written = []
+            if fmt == "xlsx":
+                sheets = []
+                for name, lf in parts.items():
+                    cnt = int(lf.select(pl.len()).collect().item())
+                    if cnt > E.XLSX_MAX_ROWS:
+                        raise ValueError(f"{name} has {cnt:,} rows — too many for one Excel sheet. Choose CSV or Parquet.")
+                    sheets.append({"name": name, "lf": lf, "rows": cnt})
+                path = E._out_path(out, stem, "xlsx")
+                E.write_xlsx_book(path, sheets, {"header": True, "autofilter": True, **out}, cancel)
+                written.append(str(path))
+            else:
+                for name, lf in parts.items():
+                    cnt = int(lf.select(pl.len()).collect().item())
+                    written += E.write_parts(lf, cnt, {**out, "format": fmt}, f"{stem}_{name.lower()}", fmt, cancel)
+            res["written"] = written
+        res["elapsed"] = round(time.time() - t0, 2)
+        return res
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+# ---- SQL over the ticked files -------------------------------------------------
+
+ALL_TABLE = "files"
+
+
+def table_names(files: list[str]) -> list[tuple[str, str]]:
+    """Each file's table name: its name without the extension, letters, digits and _
+    (sales_JAN.csv → sales_JAN); a name used twice gets _2, _3."""
+    import re
+    out, used = [], {ALL_TABLE}
+    for f in files:
+        base = re.sub(r"\W+", "_", Path(f).stem).strip("_") or "file"
+        if base[0].isdigit():
+            base = f"t_{base}"
+        name, i = base, 2
+        while name.lower() in used:
+            name, i = f"{base}_{i}", i + 1
+        used.add(name.lower())
+        out.append((name, f))
+    return out
+
+
+def tables(p: dict) -> dict:
+    """The tables a query can name, with their columns (headers only)."""
+    files = [f for f in p.get("files") or [] if f]
+    out = []
+    for name, f in table_names(files):
+        try:
+            cols = list(_frame(f, p.get("source"), 50).collect_schema().names())
+            out.append({"name": name, "file": Path(f).name, "path": f, "columns": cols})
+        except Exception as exc:  # noqa: BLE001
+            out.append({"name": name, "file": Path(f).name, "path": f, "columns": [], "error": E.brief(exc)})
+    if len(files) > 1:
+        cols = []
+        for t in out:
+            cols += [c for c in t["columns"] if c not in cols]
+        out.append({"name": ALL_TABLE, "file": f"every ticked file, stacked, with {SOURCE_COL}", "path": "",
+                    "columns": cols + [SOURCE_COL]})
+    return {"ok": True, "tables": out}
+
+
+def sql(p: dict, on_progress=None, cancel=None) -> dict:
+    """A SELECT over the ticked files: each is a table named after the file, and `files`
+    is all of them stacked (with SOURCE_FILE). Columns that hold only numbers read as
+    numbers (IDs and codes stay text) unless `numbers` is "text". Shows the first
+    `limit` rows; with `format` and a folder, writes every row of the result."""
+    import workspace as W
+    t0 = time.time()
+    files = [f for f in p.get("files") or [] if f]
+    if not files:
+        return {"ok": False, "error": "Tick the files to query on the left."}
+    names = dict(table_names(files))
+
+    def get(name: str) -> pl.LazyFrame:
+        if name == ALL_TABLE:
+            parts = [_plain(_frame(f, p.get("source"), None)).with_columns(pl.lit(Path(f).name).alias(SOURCE_COL))
+                     for f in files]
+            return pl.concat(parts, how="diagonal_relaxed")
+        return _plain(_frame(names[name], p.get("source"), None))
+
+    try:
+        lf, used = W.sql_over(p.get("query"), [*names, ALL_TABLE], get, p.get("numbers") or "auto")
+    except W.WorkspaceError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — polars' own message says what is wrong
+        return {"ok": False, "error": E.brief(exc)}
+    if on_progress:
+        on_progress({"stage": "read", "file": ", ".join(used), "index": 1, "total": 1})
+    limit = max(1, min(int(p.get("limit") or 500), PAGE_MAX))
+    try:
+        res: dict = {"ok": True, "used": used}
+        fmt = p.get("format") or ""
+        if fmt and p.get("folder"):
+            stage = E._stage_dir()
+            try:
+                part = stage / "result.parquet"
+                E._sink(lf, part)
+                total = int(pl.scan_parquet(part).select(pl.len()).collect().item())
+                out = {**(p.get("output") or {}), "folder": p["folder"], "format": fmt}
+                stem = E._safe_name((p.get("name") or "query").strip() or "query", 120)
+                if on_progress:
+                    on_progress({"stage": "write", "part": stem})
+                res["written"] = E.write_parts(pl.scan_parquet(part), total, out, stem, fmt, cancel)
+                res["total"] = total
+                df = pl.scan_parquet(part).head(limit + 1).collect()
+            finally:
+                shutil.rmtree(stage, ignore_errors=True)
+        else:
+            df = lf.head(limit + 1).collect(engine="streaming")
+    except E.Cancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": E.brief(exc)}
+    res.update({"columns": df.columns, "dtypes": [str(t) for t in df.dtypes], "more": df.height > limit,
+                "rows": [["" if v is None else str(v) for v in r] for r in df.head(limit).iter_rows()],
+                "elapsed": round(time.time() - t0, 2)})
+    return res

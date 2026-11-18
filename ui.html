@@ -489,6 +489,20 @@ body[data-mod=pdf] .body{padding:0;overflow:hidden}
 .dmf .c{width:100px}.dmf .o{width:120px}.dmf .v{flex:1;min-width:70px}
 #dmGrid th .t{display:block;font-size:9.5px;color:var(--faint);font-weight:400;text-transform:none;letter-spacing:0}
 #dmGrid td.rn,#dmGrid th.rn{color:var(--faint);text-align:right;background:#f7f8f7}
+.cmpgrid{display:grid;grid-template-columns:1fr auto 1fr;gap:8px}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:10px 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px}
+.tile b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.tile span{font-size:11px;color:var(--muted)}
+.tile.add b{color:var(--teal-2)}.tile.rem b{color:var(--red)}.tile.chg b{color:var(--amber)}
+.sqlwrap{display:grid;grid-template-columns:250px 1fr;gap:12px;align-items:start}
+.sqlside{max-height:calc(100vh - 220px);overflow:auto}
+.sqt{margin-bottom:8px}
+.sqt .tn{font-family:var(--mono);font-weight:600;cursor:pointer;color:var(--teal-2)}
+.sqt .tf{font-size:10.5px;color:var(--faint)}
+.sqt .tc{display:flex;flex-wrap:wrap;gap:3px;margin-top:3px}
+.sqt .tc span{font-family:var(--mono);font-size:10.5px;border:1px solid var(--line-2);border-radius:8px;padding:0 6px;cursor:pointer}
+.sqt .tc span:hover,.sqt .tn:hover{background:var(--teal-soft)}
 .cards2{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:10px;align-items:start}
 .cards2 .card{margin:0}
 .groupbar{background:#f4f6f5;border-bottom:1px solid var(--line);padding:6px 14px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
@@ -685,6 +699,8 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <button class="tab" role="tab" data-p="anal" style="display:none">Dashboards <span class="n" id="nAnal">0</span></button>
     <button class="tab" role="tab" data-p="browse" style="display:none" title="Any file a page at a time: columns, filters, sort, profile">Browse</button>
     <button class="tab" role="tab" data-p="find" style="display:none" title="Look up a list of values in every ticked file">Bulk search</button>
+    <button class="tab" role="tab" data-p="cmp" style="display:none" title="Two files lined up by a key: what was added, removed or changed">Compare</button>
+    <button class="tab" role="tab" data-p="sql" style="display:none" title="A SELECT over the ticked files">SQL</button>
     <button class="tab" role="tab" data-p="conv" style="display:none" title="To Parquet — one per file or all in one — and export the Browse view">Convert &amp; export</button>
     <button class="tab" role="tab" data-p="pdf" style="display:none">PDF</button>
   </div>
@@ -913,6 +929,67 @@ table.matrix tr.unas td.fn{color:var(--faint)}
           </div>
           <div id="dmStatOut"></div>
           <div class="gridwrap" id="dmGrid"><div class="empty">Click a file on the left — Parquet, CSV, TXT or Excel, of any size. Its first rows show here; set columns, filters and a sort on the left.</div></div>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- DATA: COMPARE -->
+    <section class="pane" id="p-cmp">
+      <div class="card">
+        <div class="cmpgrid">
+          <div><label class="lbl">A — the old one</label><select id="cmA" style="width:100%"></select></div>
+          <button class="btn sm" id="cmSwap" title="Swap A and B" style="align-self:end">⇄</button>
+          <div><label class="lbl">B — the new one</label><select id="cmB" style="width:100%"></select></div>
+        </div>
+        <div class="row2" style="margin-top:10px;grid-template-columns:1fr 1fr;gap:14px">
+          <div><label class="lbl">Key — what identifies a row</label>
+            <div class="multi" id="cmKeys" style="max-height:150px"><div class="sub">Tick at least two files on the left.</div></div></div>
+          <div><label class="lbl">Columns to compare <span class="sub" id="cmColN" style="margin:0"></span></label>
+            <div class="multi" id="cmCols" style="max-height:150px"></div></div>
+        </div>
+        <div class="f" style="gap:14px;flex-wrap:wrap;margin-top:10px">
+          <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="cmTrim" checked> Ignore spaces at the ends</label>
+          <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="cmCase"> Ignore upper / lower case</label>
+          <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="cmZeros"> Ignore leading zeros in the key</label>
+          <label class="f" style="gap:5px;font-size:11.5px"><input type="checkbox" id="cmNum" checked> Numbers by value (10.00 = 10)</label>
+          <label class="f" style="gap:5px;font-size:11.5px">within <input type="number" id="cmTol" value="0" min="0" step="0.01" style="width:70px"></label>
+        </div>
+        <div class="f" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+          <button class="btn pri" id="cmGo">Compare</button>
+          <span class="sub" style="margin:0">Export:</span>
+          <input type="text" id="cmName" value="compare" style="width:130px">
+          <select id="cmFmt"><option value="xlsx">Excel — Summary, Added, Removed, Changed</option><option value="csv">CSV files</option><option value="parquet">Parquet files</option></select>
+          <button class="btn" id="cmExport">Compare and export</button>
+          <span class="stat" id="cmInfo" style="margin-left:auto"></span>
+        </div>
+      </div>
+      <div id="cmOut"></div>
+    </section>
+
+    <!-- DATA: SQL -->
+    <section class="pane" id="p-sql">
+      <div class="sqlwrap">
+        <div class="card sqlside">
+          <h3 style="margin:0 0 6px">Tables</h3>
+          <div id="sqTables" class="sub">Tick files on the left: each is a table named after the file.</div>
+        </div>
+        <div>
+          <div class="card">
+            <textarea id="sqQuery" rows="7" spellcheck="false" placeholder="SELECT TAX_CODE, SUM(AMOUNT) AS TOTAL, COUNT(*) AS N FROM sales_JAN GROUP BY TAX_CODE ORDER BY TOTAL DESC"
+              style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical"></textarea>
+            <div class="f" style="margin-top:6px;gap:8px;flex-wrap:wrap">
+              <button class="btn pri" id="sqRun" title="Ctrl+Enter">Run</button>
+              <label class="lbl">Show</label><input type="number" id="sqLimit" value="500" min="10" max="5000" style="width:76px">
+              <label class="f" style="gap:5px;font-size:11.5px" title="Columns that hold only numbers read as numbers, so SUM and > work; IDs and codes stay text"><input type="checkbox" id="sqNums" checked> Numbers as numbers</label>
+              <span class="sub" style="margin:0 0 0 10px">Export every row:</span>
+              <input type="text" id="sqName" value="query" style="width:110px">
+              <select id="sqFmt"><option value="xlsx">Excel</option><option value="csv">CSV</option><option value="parquet">Parquet</option></select>
+              <button class="btn" id="sqExport">Export</button>
+              <span class="stat" id="sqInfo" style="margin-left:auto"></span>
+            </div>
+          </div>
+          <div class="gridwrap" id="sqGrid"><div class="empty">Write a SELECT and press Run. Joins, GROUP BY, WHERE, ORDER BY, window functions — the tables are on the left; click a name to put it in.</div></div>
         </div>
       </div>
     </section>
@@ -1256,7 +1333,7 @@ $$(".tab").forEach(t => t.onclick = () => show(t.dataset.p));
    Each module shows its own tabs; the bars above them (groups, how files are read)
    only where they apply. show(pane) switches to the pane's module by itself. */
 const MODS = {extract: ["peek", "cols", "filt", "add", "ws", "out", "res"], analytics: ["anal"],
-              data: ["browse", "find", "conv"], pdf: ["pdf"]};
+              data: ["browse", "find", "cmp", "sql", "conv"], pdf: ["pdf"]};
 const PANE_MOD = Object.fromEntries(Object.entries(MODS).flatMap(([m, ps]) => ps.map(x => [x, m])));
 const MOD_HINT = {extract: "", analytics: "Dashboards over each group, combined table or the Overview",
                   data: "Works on the files ticked on the left — any size, one file at a time",
@@ -1285,6 +1362,8 @@ function show(p){
   if (p === "ws"){ syncBack(); wsDraw(); if (!S.wsSchema) wsSchemaRefresh(true); }
   if (p === "browse") dmEnter();
   if (p === "conv") dmConvDraw();
+  if (p === "cmp") cmEnter();
+  if (p === "sql") sqEnter();
   if (p === "pdf") pdfEnter();
 }
 
@@ -5237,6 +5316,123 @@ $("#dmExport").onclick = async () => {
   if (r) say(`Exported ${r.rows.toLocaleString()} rows into ${r.written.length} file${r.written.length === 1 ? "" : "s"} in ${r.elapsed}s` +
              ((r.errors || []).length ? ` · ${r.errors.length} file(s) failed` : "") + ".", (r.errors || []).length ? "err" : "ok");
 };
+
+
+/* ---- Compare: two files lined up by a key ---- */
+S.cm = {cols: {}, keys: [], use: null};
+const cmName = p => p.split(/[\\/]/).pop();
+async function cmEnter(){
+  const files = dmTicked();
+  const opts = files.map(f => `<option value="${esc(f)}">${esc(cmName(f))}</option>`).join("");
+  const a0 = files.includes($("#cmA").value) ? $("#cmA").value : files[0] || "", b0 = files.includes($("#cmB").value) ? $("#cmB").value : files.find(f => f !== a0) || "";
+  $("#cmA").innerHTML = opts; $("#cmB").innerHTML = opts;
+  $("#cmA").value = a0; $("#cmB").value = b0;
+  await cmColumns();
+}
+async function cmColumns(){
+  const a = $("#cmA").value, b = $("#cmB").value;
+  if (!a || !b){ $("#cmKeys").innerHTML = `<div class="sub">Tick at least two files on the left.</div>`; $("#cmCols").innerHTML = ""; return; }
+  for (const f of [a, b]) if (!S.cm.cols[f]){
+    const r = await api().data_schema({path: f, source: job().source});
+    S.cm.cols[f] = r?.ok ? r.columns : [];
+  }
+  const A = S.cm.cols[a], B = S.cm.cols[b], common = A.filter(c => B.includes(c));
+  if (!S.cm.keys.length || !S.cm.keys.every(k => common.includes(k))){
+    const guess = common.find(c => /(^|_)(DOC|DOCUMENT|TICKET|TKT|INVOICE|REF|ID|KEY|NO|NUMBER)(_|$)/i.test(c)) || common[0];
+    S.cm.keys = guess ? [guess] : [];
+  }
+  $("#cmKeys").innerHTML = common.map(c => `<label><input type="checkbox" data-ck="${esc(c)}" ${S.cm.keys.includes(c) ? "checked" : ""}>${esc(c)}</label>`).join("")
+    || `<div class="sub">The two files share no column.</div>`;
+  const comp = common.filter(c => !S.cm.keys.includes(c));
+  const use = S.cm.use ? S.cm.use.filter(c => comp.includes(c)) : comp;
+  $("#cmCols").innerHTML = comp.map(c => `<label><input type="checkbox" data-cc="${esc(c)}" ${use.includes(c) ? "checked" : ""}>${esc(c)}</label>`).join("");
+  $("#cmColN").textContent = `${use.length} of ${comp.length}` + (A.length !== B.length || common.length < Math.max(A.length, B.length) ? ` · ${A.length - common.length} only in A, ${B.length - common.length} only in B` : "");
+}
+$("#cmA").onchange = cmColumns; $("#cmB").onchange = cmColumns;
+$("#cmSwap").onclick = () => { const a = $("#cmA").value; $("#cmA").value = $("#cmB").value; $("#cmB").value = a; cmColumns(); };
+$("#cmKeys").addEventListener("change", () => { S.cm.keys = [...$$("#cmKeys [data-ck]")].filter(x => x.checked).map(x => x.dataset.ck); cmColumns(); });
+$("#cmCols").addEventListener("change", () => { S.cm.use = [...$$("#cmCols [data-cc]")].filter(x => x.checked).map(x => x.dataset.cc); });
+function cmTable(t, empty){
+  if (!t.rows.length) return `<div class="sub" style="padding:6px 0">${empty}</div>`;
+  return `<div class="gridwrap" style="max-height:340px"><table class="grid"><thead><tr>${t.columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+    t.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join("")}</tr>`).join("") + `</tbody></table></div>`;
+}
+async function cmRun(exportIt){
+  const a = $("#cmA").value, b = $("#cmB").value;
+  if (!a || !b || a === b){ say("Pick two different files — tick them on the left.", "err"); return; }
+  if (!S.cm.keys.length){ say("Tick the key column — what identifies a row (a ticket or document number).", "err"); return; }
+  if (exportIt && !S.output.folder){ say("Choose a folder to write to (Convert & export → Change…).", "err"); return; }
+  const cols = [...$$("#cmCols [data-cc]")].filter(x => x.checked).map(x => x.dataset.cc);
+  busy(true); $("#btnCancel").style.display = ""; say(`Comparing ${cmName(a)} with ${cmName(b)}…`);
+  const r = await api().data_compare({a, b, source: job().source, keys: S.cm.keys, columns: cols,
+    trim: $("#cmTrim").checked, case: $("#cmCase").checked, zeros: $("#cmZeros").checked, numbers: $("#cmNum").checked,
+    tol: +$("#cmTol").value || 0, ...(exportIt ? {folder: S.output.folder, name: $("#cmName").value, format: $("#cmFmt").value, output: S.output} : {})});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ say(r?.error || "Could not compare.", r?.cancelled ? "" : "err"); return; }
+  const c = r.counts, n = v => v.toLocaleString();
+  const dupA = r.duplicates.A, dupB = r.duplicates.B;
+  const per = Object.entries(r.per_column).sort((x, y) => y[1] - x[1]);
+  $("#cmOut").innerHTML = `<div class="tiles">
+      <div class="tile rem"><b>${n(c.removed)}</b><span>only in A — removed</span></div>
+      <div class="tile add"><b>${n(c.added)}</b><span>only in B — added</span></div>
+      <div class="tile chg"><b>${n(c.changed)}</b><span>in both, changed (${n(c.values_changed)} value${c.values_changed === 1 ? "" : "s"})</span></div>
+      <div class="tile"><b>${n(c.same)}</b><span>in both, the same</span></div></div>
+    ${dupA.keys || dupB.keys ? `<div class="warn">Keys that repeat — each is compared once, on its first row: ${dupA.keys ? `A ${n(dupA.keys)} (${dupA.examples.slice(0, 5).map(esc).join(", ")})` : ""}${dupA.keys && dupB.keys ? " · " : ""}${dupB.keys ? `B ${n(dupB.keys)} (${dupB.examples.slice(0, 5).map(esc).join(", ")})` : ""}</div>` : ""}
+    ${r.only_in_a_columns.length || r.only_in_b_columns.length ? `<div class="sub">Not compared — only in A: ${r.only_in_a_columns.map(esc).join(", ") || "none"}; only in B: ${r.only_in_b_columns.map(esc).join(", ") || "none"}.</div>` : ""}
+    ${per.length ? `<div class="card"><h3>Changes by column</h3>${per.map(([k, v]) => `<span class="chip" style="margin:2px;display:inline-block">${esc(k)} <b>${n(v)}</b></span>`).join("")}</div>` : ""}
+    <div class="card"><h3>Changed — one row per changed value</h3>${cmTable(r.changed, "Nothing changed.")}</div>
+    <div class="card"><h3>Added — only in B</h3>${cmTable(r.added, "Nothing added.")}</div>
+    <div class="card"><h3>Removed — only in A</h3>${cmTable(r.removed, "Nothing removed.")}</div>
+    ${(r.written || []).length ? `<div class="results"><table>${r.written.map(x => `<tr><td><a class="link" data-open="${esc(x)}">${esc(x)}</a></td></tr>`).join("")}</table></div>` : ""}`;
+  $("#cmOut").querySelectorAll("[data-open]").forEach(x => x.onclick = () => api().open_path(x.dataset.open));
+  $("#cmInfo").textContent = `${r.elapsed}s`;
+  say(`${cmName(a)} → ${cmName(b)}: ${n(c.added)} added, ${n(c.removed)} removed, ${n(c.changed)} changed, ${n(c.same)} the same` +
+      ((r.written || []).length ? ` · written to ${r.written.length} file${r.written.length === 1 ? "" : "s"}` : "") + ".", "ok");
+}
+$("#cmGo").onclick = () => cmRun(false);
+$("#cmExport").onclick = () => cmRun(true);
+
+/* ---- SQL over the ticked files ---- */
+S.sq = {tables: [], key: ""};
+async function sqEnter(){
+  const files = dmTicked(), key = files.join("|") + JSON.stringify(job().source);
+  if (key === S.sq.key) return;
+  S.sq.key = key;
+  if (!files.length){ $("#sqTables").innerHTML = `<div class="sub">Tick files on the left: each is a table named after the file.</div>`; return; }
+  const r = await api().data_tables({files, source: job().source});
+  S.sq.tables = r?.tables || [];
+  $("#sqTables").innerHTML = S.sq.tables.map(t => `<div class="sqt"><div><span class="tn" data-ins="${esc(t.name)}" title="Put the name in the query">${esc(t.name)}</span></div>
+      <div class="tf">${esc(t.file)}</div>${t.error ? `<div class="itemerr">${esc(t.error)}</div>` : ""}
+      <div class="tc">${t.columns.slice(0, 80).map(c => `<span data-ins="${esc(/^[A-Za-z_][A-Za-z0-9_]*$/.test(c) ? c : `"${c}"`)}">${esc(c)}</span>`).join("")}</div></div>`).join("");
+  if (!$("#sqQuery").value.trim() && S.sq.tables[0]) $("#sqQuery").value = `SELECT *\nFROM ${S.sq.tables[0].name}\nLIMIT 100`;
+}
+$("#sqTables").addEventListener("mousedown", e => { if (e.target.closest("[data-ins]")) e.preventDefault(); });
+$("#sqTables").addEventListener("click", e => {
+  const x = e.target.closest("[data-ins]"); if (!x) return;
+  const t = $("#sqQuery"), a = t.selectionStart ?? t.value.length, b = t.selectionEnd ?? a;
+  t.focus(); t.setRangeText(x.dataset.ins, a, b, "end");
+});
+async function sqRun(exportIt){
+  const files = dmTicked(), q = $("#sqQuery").value.trim();
+  if (!files.length){ say("Tick the files to query on the left.", "err"); return; }
+  if (!q){ say("Write a SELECT first.", "err"); return; }
+  if (exportIt && !S.output.folder){ say("Choose a folder to write to (Convert & export → Change…).", "err"); return; }
+  sqEnter();                                   // the table list follows the ticks
+  busy(true); $("#btnCancel").style.display = ""; say(exportIt ? "Running the query and writing every row…" : "Running the query…");
+  const r = await api().data_sql({files, source: job().source, query: q, limit: +$("#sqLimit").value || 500, numbers: $("#sqNums").checked ? "auto" : "text",
+    ...(exportIt ? {folder: S.output.folder, name: $("#sqName").value, format: $("#sqFmt").value, output: S.output} : {})});
+  busy(false); $("#btnCancel").style.display = "none"; $("#btnCancel").disabled = false;
+  if (!r?.ok){ $("#sqGrid").innerHTML = `<div class="empty" style="color:var(--red);font-family:var(--mono);white-space:pre-wrap">${esc(r?.error || "The query failed.")}</div>`;
+               say(r?.error || "The query failed.", r?.cancelled ? "" : "err"); return; }
+  $("#sqGrid").innerHTML = r.rows.length ? `<table class="grid"><thead><tr>${r.columns.map((c, i) => `<th title="${esc(r.dtypes[i])}">${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+    r.rows.map(row => `<tr>${row.map((v, i) => `<td class="${/Int|Float|Decimal/.test(r.dtypes[i]) ? "num" : ""}">${esc(v)}</td>`).join("")}</tr>`).join("") + `</tbody></table>`
+    : `<div class="empty">No rows.</div>`;
+  $("#sqInfo").textContent = `${r.rows.length.toLocaleString()}${r.more ? "+" : ""} rows · ${r.elapsed}s`;
+  say(`Query over ${r.used.join(", ")}: ${r.total != null ? `${r.total.toLocaleString()} rows written to ${(r.written || []).length} file(s)` : `${r.rows.length.toLocaleString()}${r.more ? " (first)" : ""} rows`}.`, "ok");
+}
+$("#sqRun").onclick = () => sqRun(false);
+$("#sqExport").onclick = () => sqRun(true);
+$("#sqQuery").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter"){ e.preventDefault(); e.stopPropagation(); sqRun(false); } });
 
 /* ======================= PDF module ======================= */
 window.pdfHost = {api: () => api(), say: (m, k) => say(m, k),

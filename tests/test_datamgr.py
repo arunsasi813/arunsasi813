@@ -164,3 +164,61 @@ def test_pdfs_in_the_open_folders_and_the_pdf_page(tmp_path):
     assert "globalThis.pdfjsLib" in html and "PDFLib" in html and "window.pdfApp" in html
     # the libraries are inlined: only the page's own script tags close
     assert html.count("</script>") == 4
+
+
+# ---- compare and SQL -----------------------------------------------------------
+
+@pytest.fixture
+def months(tmp_path):
+    old = tmp_path / "jan.csv"
+    old.write_text("DOC_NO,AMOUNT,TAX,NOTE\n0001,10.00,YQ,a\n0002,20,YR,b\n0003,30,XT,c\n0003,31,XT,dup\n0004,40,YQ,d\n",
+                   encoding="utf-8")
+    new = tmp_path / "feb.parquet"
+    pl.DataFrame({"DOC_NO": ["1", "0002", "0004", "0005"], "AMOUNT": ["10", "25", "40", "50"],
+                  "TAX": ["YQ", "yr", "YQ", "ZR"], "EXTRA": ["x", "y", "z", "w"]}).write_parquet(new)
+    return tmp_path, str(old), str(new)
+
+
+def test_compare_two_files_by_key(months):
+    tmp, a, b = months
+    r = D.compare({"a": a, "b": b, "keys": ["DOC_NO"]})
+    assert r["ok"] and r["columns"] == ["AMOUNT", "TAX"]
+    assert r["only_in_a_columns"] == ["NOTE"] and r["only_in_b_columns"] == ["EXTRA"]
+    # 0001 vs 1: different keys unless leading zeros are ignored
+    assert r["counts"] == {"removed": 2, "added": 2, "same": 1, "changed": 1, "values_changed": 2}
+    assert r["changed"]["rows"] == [["0002", "AMOUNT", "20", "25"], ["0002", "TAX", "YR", "yr"]]
+    assert r["duplicates"]["A"] == {"keys": 1, "rows": 2, "examples": ["0003 ×2"]}
+    z = D.compare({"a": a, "b": b, "keys": ["DOC_NO"], "zeros": True, "case": True, "tol": 5})
+    assert z["counts"] == {"removed": 1, "added": 1, "same": 3, "changed": 0, "values_changed": 0}, "10.00 = 10, 20 ≈ 25 within 5"
+    assert D.compare({"a": a, "b": b, "keys": ["NOPE"]})["error"].endswith("has no column NOPE")
+
+
+def test_compare_writes_a_workbook_or_files(months):
+    tmp, a, b = months
+    r = D.compare({"a": a, "b": b, "keys": ["DOC_NO"], "folder": str(tmp / "out"), "name": "jan_feb", "format": "xlsx"})
+    wb = openpyxl.load_workbook(r["written"][0])
+    assert wb.sheetnames == ["Summary", "Added", "Removed", "Changed"]
+    assert [list(x) for x in wb["Changed"].iter_rows(values_only=True)][0] == ["DOC_NO", "COLUMN", "OLD", "NEW"]
+    assert [x[0] for x in wb["Added"].iter_rows(values_only=True)] == ["DOC_NO", "1", "0005"]
+    r = D.compare({"a": a, "b": b, "keys": ["DOC_NO"], "folder": str(tmp / "out"), "name": "c", "format": "csv"})
+    assert sorted(p.replace("\\", "/").split("/")[-1] for p in r["written"]) == \
+        ["c_added.csv", "c_changed.csv", "c_removed.csv", "c_summary.csv"]
+
+
+def test_sql_over_the_files(months):
+    tmp, a, b = months
+    t = D.tables({"files": [a, b]})["tables"]
+    assert [x["name"] for x in t] == ["jan", "feb", "files"] and t[2]["columns"][-1] == "SOURCE_FILE"
+    r = D.sql({"files": [a, b], "query": "SELECT TAX, SUM(AMOUNT) AS total FROM jan GROUP BY TAX ORDER BY total DESC"})
+    assert r["ok"] and r["rows"][0] == ["XT", "61.0"], r
+    j = D.sql({"files": [a, b], "query": "SELECT j.DOC_NO, j.AMOUNT, f.AMOUNT AS NEW FROM jan j JOIN feb f ON j.DOC_NO = f.DOC_NO "
+                                         "WHERE j.AMOUNT <> f.AMOUNT"})
+    assert j["rows"] == [["0002", "20.0", "25.0"]], "DOC_NO stays text: 0002 keeps its zeros"
+    s = D.sql({"files": [a, b], "query": "SELECT SOURCE_FILE, COUNT(*) AS n FROM files GROUP BY SOURCE_FILE ORDER BY 1",
+               "folder": str(tmp / "q"), "format": "parquet", "name": "counts"})
+    assert s["total"] == 2 and pl.read_parquet(tmp / "q" / "counts.parquet").to_dicts() == \
+        [{"SOURCE_FILE": "feb.parquet", "n": 4}, {"SOURCE_FILE": "jan.csv", "n": 5}]
+    assert "only SELECT" in D.sql({"files": [a], "query": "DROP TABLE jan"})["error"]
+    assert "NOPE" in D.sql({"files": [a], "query": "SELECT NOPE FROM jan"})["error"]
+    txt = D.sql({"files": [a], "query": "SELECT MAX(AMOUNT) AS m FROM jan", "numbers": "text"})
+    assert txt["rows"] == [["40"]], "as text, MAX compares letters"

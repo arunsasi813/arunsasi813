@@ -805,6 +805,48 @@ def data_module(ui: UI, d: dict) -> None:
     assert saved["data_view"]["sort"] == {"column": "AMOUNT", "desc": True}
 
 
+def compare_and_sql(ui: UI, d: dict) -> None:
+    """Data → Compare: two months by DOC_NO; Data → SQL: a GROUP BY and a join, exported."""
+    page = ui.page
+    new_setup(ui)
+    src = d["jan"].parent / "cmp_src"
+    src.mkdir(exist_ok=True)
+    jan = (d["jan"] / "sales_JAN.csv").read_text(encoding="utf-8").splitlines()
+    (src / "a_jan.csv").write_text("\n".join(jan) + "\n", encoding="utf-8")
+    # B: the first row's amount changed, the last row gone, one row added
+    head, rows = jan[0], jan[1:]
+    first = rows[0].split(",")
+    first[2] = "999.00"
+    new = [",".join(first)] + rows[1:-1] + ["E9999,YQ,12.50,01/01/2026,USD"]
+    (src / "b_jan_rev.csv").write_text("\n".join([head] + new) + "\n", encoding="utf-8")
+    ui.folders(src)
+    page.wait_for_function("S.files.length === 2")
+    ui.tab("cmp")
+    page.wait_for_function("document.querySelector('#cmKeys [data-ck=DOC_NO]')?.checked")
+    assert page.input_value("#cmA").endswith("a_jan.csv") and page.input_value("#cmB").endswith("b_jan_rev.csv")
+    ui.then("1 added, 1 removed, 1 changed", lambda: page.click("#cmGo"))
+    assert page.locator("#cmOut .tile b").all_inner_texts() == ["1", "1", "1", "34"]
+    assert "AMOUNT" in page.inner_text("#cmOut") and "999.00" in page.inner_text("#cmOut")
+    ui.shot("compare")
+    out = d["out"] / "cmp"
+    ui.js(f"S.output.folder = {json.dumps(str(out))}")
+    ui.then("written to 1 file", lambda: page.click("#cmExport"))
+    import openpyxl
+    assert openpyxl.load_workbook(out / "compare.xlsx").sheetnames == ["Summary", "Added", "Removed", "Changed"]
+    # SQL
+    ui.tab("sql")
+    page.wait_for_selector("#sqTables .tn[data-ins=a_jan]")
+    page.fill("#sqQuery", "SELECT TAX_CODE, COUNT(*) AS N, SUM(AMOUNT) AS TOTAL FROM files GROUP BY TAX_CODE ORDER BY TAX_CODE")
+    ui.then("Query over files", lambda: page.click("#sqRun"))
+    assert page.locator("#sqGrid thead th").all_inner_texts() == ["TAX_CODE", "N", "TOTAL"]
+    assert page.locator("#sqGrid tbody tr").count() == 4
+    page.fill("#sqQuery", "SELECT a.DOC_NO, a.AMOUNT, b.AMOUNT AS NEW FROM a_jan a JOIN b_jan_rev b ON a.DOC_NO = b.DOC_NO WHERE a.AMOUNT <> b.AMOUNT")
+    page.select_option("#sqFmt", "csv")
+    ui.then("rows written", lambda: page.click("#sqExport"))
+    assert (out / "query.csv").read_text(encoding="utf-8-sig").splitlines()[1].startswith("E10000,35.5,999.0")
+    ui.shot("sql")
+
+
 def pdf_module(ui: UI, d: dict) -> None:
     """The PDF module: open from the folders, reorder, rotate, delete, write on a page,
     stamp, protect, save, open it again with its password, split, read a table, search."""
@@ -913,7 +955,7 @@ def pdf_module(ui: UI, d: dict) -> None:
 
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
             "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual,
-            "basics": dashboard_basics, "formulas": formula_helper, "datamod": data_module, "pdf": pdf_module}
+            "basics": dashboard_basics, "formulas": formula_helper, "datamod": data_module, "cmpsql": compare_and_sql, "pdf": pdf_module}
 
 
 def main() -> int:

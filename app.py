@@ -727,6 +727,24 @@ class Api:
             p, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
 
     @guard
+    def data_compare(self, p: dict) -> dict:
+        """Two files lined up by a key: added, removed, changed — in a worker."""
+        return _heavy("data_compare", {"p": p}, lambda: _dm().compare(
+            p, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
+    @_reading
+    def data_tables(self, p: dict) -> dict:
+        """The tables a Data module query can name (headers only)."""
+        return _dm().tables(p)
+
+    @guard
+    def data_sql(self, p: dict) -> dict:
+        """A SELECT over the ticked files, in a worker; with a format, every row written."""
+        return _heavy("data_sql", {"p": p}, lambda: _dm().sql(
+            p, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+
+    @guard
     def write_rows(self, p: dict) -> dict:
         """A small table (PDF text, search hits) to CSV / Excel / Parquet; asks where
         unless a path is given."""
