@@ -163,7 +163,7 @@ def test_pdfs_in_the_open_folders_and_the_pdf_page(tmp_path):
     assert "/*@VENDOR" not in html and "/*@APP@*/" not in html
     assert "globalThis.pdfjsLib" in html and "PDFLib" in html and "window.pdfApp" in html
     # the libraries are inlined: only the page's own script tags close
-    assert html.count("</script>") == 4
+    assert html.count("</script>") == 5
 
 
 # ---- compare and SQL -----------------------------------------------------------

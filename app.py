@@ -89,6 +89,20 @@ _OCR: dict = {}
 _OCR_LOCK = threading.Lock()
 
 
+# fonts that have Latin, Greek, Cyrillic, Hebrew and Arabic letters, in the order tried
+_FONTS = ["arial.ttf", "segoeui.ttf", "tahoma.ttf", "DejaVuSans.ttf"]
+_FONT_DIRS = [Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Fonts",
+              Path("/usr/share/fonts/truetype/dejavu"), Path("/Library/Fonts")]
+
+
+def _unicode_font() -> Path | None:
+    for name in _FONTS:
+        for d in _FONT_DIRS:
+            if (d / name).is_file():
+                return d / name
+    return None
+
+
 def _ocr_dir() -> Path:
     import tempfile
     d = Path(tempfile.gettempdir()) / "colsift-ocr"
@@ -774,7 +788,7 @@ class Api:
         if not PDFAPP.exists():
             return {"ok": False, "error": f"pdf.html is missing (looked in {HERE})"}
         html = PDFAPP.read_text(encoding="utf-8")
-        for name in ("pdf-lib.min.js", "pdf.min.mjs", "pdf.worker.min.mjs"):
+        for name in ("pdf-lib.min.js", "fontkit.umd.min.js", "pdf.min.mjs", "pdf.worker.min.mjs"):
             f = VENDOR / name
             if not f.exists():
                 return {"ok": False, "error": f"vendor/{name} is missing"}
@@ -863,11 +877,23 @@ class Api:
                         Path(x).unlink(missing_ok=True)
 
     @guard
+    def pdf_font(self) -> dict:
+        """The font the PDF module writes non-Latin OCR words with — one Windows already has."""
+        f = _unicode_font()
+        return {"ok": bool(f), "path": str(f) if f else "", "name": f.name if f else "",
+                "error": None if f else "No font with Arabic, Greek and Cyrillic letters was found."}
+
+    @guard
     def file_read(self, p: dict) -> dict:
-        """A slice of a PDF or image, base64: {path, offset}. Big files come in several calls."""
+        """A slice of a PDF or image, base64: {path, offset}. Big files come in several calls.
+        {font: true} reads the font pdf_font names, and nothing else outside PDFs and images."""
         import base64
         path = Path(p.get("path") or "")
-        if path.suffix.lower() not in PDF_EXT | IMAGE_EXT:
+        if p.get("font"):
+            path = _unicode_font()
+            if path is None:
+                return {"ok": False, "error": "No font with Arabic, Greek and Cyrillic letters was found."}
+        elif path.suffix.lower() not in PDF_EXT | IMAGE_EXT:
             return {"ok": False, "error": "Only PDFs and PNG / JPEG images are read here."}
         size = path.stat().st_size
         off = max(0, int(p.get("offset") or 0))
@@ -1228,7 +1254,7 @@ def selftest(out: str) -> int:
                                 lambda: {"ok": False, "in_process": True})
         pdf = Api().pdf_html()
         res["pdf"] = {"ok": bool(pdf.get("ok")), "bytes": len(pdf.get("html") or ""), "error": pdf.get("error"),
-                      "libraries": all(k in (pdf.get("html") or "") for k in ("globalThis.pdfjsLib", "PDFLib", "window.pdfApp"))}
+                      "libraries": all(k in (pdf.get("html") or "") for k in ("globalThis.pdfjsLib", "PDFLib", "fontkit", "window.pdfApp"))}
         st = Api().studio_html()
         res["studio"] = {"ok": bool(st.get("ok")), "bytes": len(st.get("html") or ""),
                          "hooks": "ColSift live data" in (st.get("html") or ""), "error": st.get("error")}

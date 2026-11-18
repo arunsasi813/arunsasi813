@@ -70,6 +70,13 @@ class DevApi(app.Api):
     """The desktop Api, with the three native dialogs replaced — and, with
     COLSIFT_FAKE_OCR=1, a stand-in for Windows' OCR engine (the UI tests run on Linux)."""
 
+    _WORDS = [("SCANNED", 0.10, 0.10, 0.18), ("TICKET", 0.30, 0.10, 0.14), ("1761009999", 0.47, 0.10, 0.25)]
+
+    def dev_ocr_words(self, words: list) -> dict:
+        """What the stand-in OCR reads off every picture: [[text, x, y, width], …] as page fractions."""
+        DevApi._WORDS = [tuple(x) for x in words]
+        return {"ok": True}
+
     def ocr_info(self) -> dict:
         if os.environ.get("COLSIFT_FAKE_OCR"):
             return {"ok": True, "available": True, "languages": ["en-US"]}
@@ -83,8 +90,8 @@ class DevApi(app.Api):
         for x in p.get("paths") or []:
             raw = Path(x).read_bytes()
             w, h = struct.unpack(">II", raw[16:24]) if raw[:8] == b"\x89PNG\r\n\x1a\n" else (1000, 1400)
-            words = [("SCANNED", 0.10, 0.10, 0.18), ("TICKET", 0.30, 0.10, 0.14), ("1761009999", 0.47, 0.10, 0.25)]
-            pages.append({"width": w, "height": h, "lang": "en-US", "angle": 0, "lines": [{"text": "SCANNED TICKET 1761009999", "words": [
+            words = self._WORDS
+            pages.append({"width": w, "height": h, "lang": "en-US", "angle": 0, "lines": [{"text": " ".join(x[0] for x in words), "words": [
                 {"t": t, "x": fx * w, "y": fy * h, "w": fw * w, "h": 0.02 * h} for t, fx, fy, fw in words]}]})
             if p.get("cleanup"):
                 Path(x).unlink(missing_ok=True)

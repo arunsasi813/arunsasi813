@@ -62,7 +62,8 @@ HEAVY_INSTALLED = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "PyQt5",
 MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "checks", "pdfout", "worker", "datamgr", "ocr", "winps", "scheduling"]
 # the PDF module's page and the libraries it is written with (pdf.js, pdf-lib): data, not code
 PDF_FILES = ["pdf.html", "pdfapp.js", "vendor/pdf.min.mjs", "vendor/pdf.worker.min.mjs", "vendor/pdf-lib.min.js",
-             "vendor/LICENSE.pdfjs.txt", "vendor/LICENSE.pdf-lib.txt"]
+             "vendor/fontkit.umd.min.js", "vendor/LICENSE.pdfjs.txt", "vendor/LICENSE.pdf-lib.txt",
+             "vendor/LICENSE.fontkit.txt"]
 
 
 def human(n: float) -> str:

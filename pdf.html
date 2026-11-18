@@ -258,6 +258,7 @@ mark{background:#fff1a8;padding:0 1px}
           <p class="hint">Pages that are pictures — scans, photos — are read with the OCR engine Windows already has. The words go into the PDF as an invisible layer on Save, so it searches, copies and extracts like a typed one. Selected pages, or every page; pages that already have text are left alone.</p>
           <div class="row"><label class="lbl">Language</label><select id="ocrLang"><option value="">Windows' own language</option></select></div>
           <div class="row"><button class="btn" id="ocrGo">Read the scanned pages</button><span class="hint" id="ocrState" style="margin:0"></span></div>
+          <label class="f" style="font-size:11.5px;margin-top:8px" title="A redacted page is saved as a picture; this reads the picture back so the rest of the page can still be searched and copied — the black boxes read as nothing"><input type="checkbox" id="redOcr" checked> Keep redacted pages searchable (read them back with OCR on Save)</label>
         </div>
         <div class="card"><h3>Text → .txt</h3>
           <p class="hint">The text of each page, in reading order, lines kept. Scanned pages are read with OCR.</p>
@@ -328,6 +329,7 @@ mark{background:#fff1a8;padding:0 1px}
 </div></div>
 
 <script>/*@VENDOR:pdf-lib.min.js@*/</script>
+<script>/*@VENDOR:fontkit.umd.min.js@*/</script>
 <script type="text/plain" id="pdfjsWorkerSrc">/*@VENDOR:pdf.worker.min.mjs@*/</script>
 <script type="module">/*@VENDOR:pdf.min.mjs@*/</script>
 <script type="module" id="appCode">

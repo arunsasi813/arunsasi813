@@ -47,10 +47,10 @@ async function b64bytes(b64){ return new Uint8Array(await (await fetch(`data:app
 function bytesB64(u8){
   return new Promise(res => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",", 2)[1] || ""); r.readAsDataURL(new Blob([u8])); });
 }
-async function readFile(path){
+async function readFile(path, opt = {}){
   const parts = []; let off = 0, size = 0, name = path.split(/[\\/]/).pop();
   for (;;){
-    const r = await api().file_read({path, offset: off});
+    const r = await api().file_read({...opt, path, offset: off});
     if (!r?.ok) throw new Error(r?.error || `Could not read ${name}`);
     size = r.size; name = r.name || name;
     parts.push(await b64bytes(r.b64)); off = r.next;
@@ -402,7 +402,7 @@ function drawProps(){
       <div class="row"><label class="lbl">Size</label><input type="number" id="pSize" value="${o.size}" min="4" max="200" style="width:60px">
         <label class="f" style="font-size:11.5px"><input type="checkbox" id="pBold" ${o.bold ? "checked" : ""}> Bold</label></div>` : ""}
     ${o.type !== "image" && o.type !== "redact" ? `<div class="row"><label class="lbl">Colour</label><input type="color" id="pColor" value="${col || "#000000"}"></div>` : ""}
-    ${o.type === "redact" ? `<p class="hint">When saved, this page becomes a picture with the box painted black: what is under it is gone from the file. The page's other text can then no longer be selected or searched.</p>` : ""}
+    ${o.type === "redact" ? `<p class="hint">When saved, this page becomes a picture with the box painted black: what is under it is gone from the file. The rest of the page is read back with OCR, so it can still be searched (Convert tab: <i>Keep redacted pages searchable</i>).</p>` : ""}
     ${o.type === "highlight" ? `<div class="row"><label class="lbl">Opacity</label><input type="number" id="pOp" value="${o.opacity ?? 0.4}" min="0.05" max="1" step="0.05" style="width:64px"></div>` : ""}
     <div class="row"><button class="btn sm danger" id="pDel">✕ Remove</button><button class="btn sm" id="pDone">Done</button></div>
     ${o.type === "text" ? `<p class="hint">Standard PDF fonts: letters outside Western European ones are written as “?”.</p>` : ""}`;
@@ -648,7 +648,7 @@ function ovCorners(o){
   const t = o.theta * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
   return [[0, 0], [o.w, 0], [o.w, o.h], [0, o.h]].map(([x, y]) => [o.ax + x * c - y * s, o.ay + x * s + y * c]);
 }
-async function burnedPage(out, p){
+async function burnedPage(out, p, fonts){
   const d = docOf(p.doc), src = await d.js.getPage(p.index + 1);
   const [x0, y0, x1, y1] = src.view, w = x1 - x0, h = y1 - y0;
   const vp = src.getViewport({scale: REDACT_DPI / 72, rotation: 0});
@@ -666,10 +666,29 @@ async function burnedPage(out, p){
   page.setMediaBox(x0, y0, w, h);
   page.drawImage(img, {x: x0, y: y0, width: w, height: h});
   if (src.rotate) page.setRotation(L.degrees(src.rotate));
+  // the rest of the page stays searchable: the picture, boxes painted in, is read with OCR
+  // (a black box reads as nothing, so what was under it can't come back this way)
+  if ($("#redOcr")?.checked && (await ocrInfo()).available){
+    try {
+      const seen = turned(c, src.rotate), vs = src.getViewport({scale: REDACT_DPI / 72, rotation: src.rotate});
+      await drawOcrLayer(out, page, (await ocrCanvas(seen, vs, src.rotate)).flat(), fonts);
+      S.redactRead = (S.redactRead || 0) + 1;
+    } catch (e){ console.warn("OCR of a redacted page", e); S.redactUnread = (S.redactUnread || 0) + 1; }
+  }
   return page;
+}
+/* a canvas turned the way the page is seen (pdf.js draws /Rotate clockwise) */
+function turned(c, deg){
+  if (!deg) return c;
+  const t = document.createElement("canvas"), q = deg % 180 !== 0;
+  t.width = q ? c.height : c.width; t.height = q ? c.width : c.height;
+  const x = t.getContext("2d");
+  x.translate(t.width / 2, t.height / 2); x.rotate(deg * Math.PI / 180); x.drawImage(c, -c.width / 2, -c.height / 2);
+  return t;
 }
 async function build(pages, opts){
   const out = await L.PDFDocument.create();
+  S.redactRead = 0; S.redactUnread = 0;
   const fonts = {reg: await out.embedFont(L.StandardFonts.Helvetica), bold: await out.embedFont(L.StandardFonts.HelveticaBold),
                  zapf: await out.embedFont(L.StandardFonts.ZapfDingbats)};
   // copy each document's pages in one go (shared fonts and images are copied once)
@@ -687,10 +706,10 @@ async function build(pages, opts){
   for (const p of pages){
     let page;
     if (p.blank) page = out.addPage([p.blank.w, p.blank.h]);
-    else if (burns(p)) page = await burnedPage(out, p);
+    else if (burns(p)) page = await burnedPage(out, p, fonts);
     else { const n = used.get(p.doc) || 0; used.set(p.doc, n + 1); page = out.addPage(copied.get(p.doc)[n]); }
     if (p.rot) page.setRotation(L.degrees((page.getRotation().angle + p.rot) % 360));
-    if (p.ocr && !burns(p)){ const r = S.ocrCache.get(`${p.doc}:${p.index}`); if (r) drawOcrLayer(page, r.lines.flat(), fonts.reg); }
+    if (p.ocr && !burns(p)){ const r = S.ocrCache.get(`${p.doc}:${p.index}`); if (r) await drawOcrLayer(out, page, r.lines.flat(), fonts); }
     for (const o of p.ov) await drawOv(out, page, o, fonts);
   }
   const all = out.getPages(), n = all.length, pick = parseRanges(opts.range, n);
@@ -743,7 +762,9 @@ async function saveDoc(pages, why, name){
     const first = docOf(pages.find(p => !p.blank)?.doc);
     const base = name || (first ? first.name.replace(/\.pdf$/i, "") + (why === "extract" ? "_pages" : "_edited") : "document");
     const path = await saveFile(bytes, {filename: `${base}.pdf`, folder: outFolder(), types: ["PDF (*.pdf)"], ask: true});
-    if (path) say(`Saved ${pages.length} page${pages.length === 1 ? "" : "s"} — ${human(bytes.length)} — ${path}`, "ok");
+    const red = S.redactRead ? ` (${S.redactRead} redacted page${S.redactRead === 1 ? "" : "s"} read back with OCR)` : "",
+          miss = S.redactUnread ? ` (${S.redactUnread} redacted page${S.redactUnread === 1 ? "" : "s"} could not be read back — not searchable)` : "";
+    if (path) say(`Saved ${pages.length} page${pages.length === 1 ? "" : "s"} — ${human(bytes.length)}${red}${miss} — ${path}`, "ok");
     return path;
   } catch (e){ say(`Not saved: ${e.message || e}`, "err"); return null; }
   finally { await busy(false); }
@@ -975,6 +996,12 @@ async function ocrPage(d, index){
   const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
   const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
   await page.render({canvas: c, canvasContext: x, viewport: vp}).promise;
+  const res = {lines: await ocrCanvas(c, vp, page.rotate)};
+  S.ocrCache.set(key, res);
+  return res;
+}
+/* a picture of a page as seen (vp: the viewport it was drawn with) → its words in PDF space */
+async function ocrCanvas(c, vp, rotate){
   const blob = await new Promise(r => c.toBlob(r, "image/png"));
   const path = await saveFile(new Uint8Array(await blob.arrayBuffer()), {temp: true, filename: `ocr_${uid()}.png`});
   const r = await api().ocr_read({paths: [path], lang: $("#ocrLang")?.value || null, cleanup: true});
@@ -984,16 +1011,40 @@ async function ocrPage(d, index){
   const lines = (pg.lines || []).map(l => (l.words || []).map(w => {
     const wx = w.x * k, wy = w.y * k, ww = w.w * k, wh = w.h * k;
     const [ax, ay] = vp.convertToPdfPoint(wx, wy + wh);
-    return {t: w.t, ax, ay, w: ww / vp.scale, h: wh / vp.scale, theta: page.rotate, sx: wx / vp.scale, sy: wy / vp.scale};
+    return {t: w.t, ax, ay, w: ww / vp.scale, h: wh / vp.scale, theta: rotate, sx: wx / vp.scale, sy: wy / vp.scale};
   })).filter(ws => ws.length);
-  const res = {lines};
-  S.ocrCache.set(key, res);
-  return res;
+  return lines;
 }
 /* the words, invisible, where they are seen: the page searches and copies like a typed one */
-function drawOcrLayer(page, words, font){
+S.uniFont = undefined;
+async function uniFontBytes(){
+  if (S.uniFont === undefined){
+    try {
+      const f = await api().pdf_font();
+      S.uniFont = f?.ok ? (await readFile(f.path, {font: true})).bytes : null;
+    } catch (e){ console.warn("font", e); S.uniFont = null; }
+  }
+  return S.uniFont;
+}
+async function uniFont(out, fonts){
+  if (fonts.uni === undefined){
+    fonts.uni = null;
+    const bytes = await uniFontBytes();
+    if (bytes && window.fontkit){
+      try { out.registerFontkit(window.fontkit); fonts.uni = await out.embedFont(bytes, {subset: true}); }
+      catch (e){ console.warn("font", e); }
+    }
+  }
+  return fonts.uni;
+}
+async function drawOcrLayer(out, page, words, fonts){
   for (const w of words){
-    const t = safeText(w.t); if (!t.trim()) continue;
+    let t = String(w.t ?? "").replace(/\s+/g, " "), font = fonts.reg;
+    if (safeText(t) !== t){                       // Arabic, Greek, Cyrillic…: a font that has them
+      const u = await uniFont(out, fonts);
+      if (u) font = u; else t = safeText(t);
+    }
+    if (!t.trim()) continue;
     const size = Math.max(2, Math.min(w.h * 0.95, w.w / Math.max(0.01, font.widthOfTextAtSize(t, 1))));
     const th = w.theta * Math.PI / 180, up = w.h * 0.2;
     page.drawText(t, {x: w.ax - Math.sin(th) * up, y: w.ay + Math.cos(th) * up, size, font, opacity: 0, rotate: L.degrees(w.theta)});
@@ -1101,5 +1152,5 @@ $("#sqExport").onclick = async () => {
 };
 
 /* ---------------- start ---------------- */
-window.pdfApp = {scanFolders, openPaths, addFolder, ocrInfo, ocrPage, state: S, build, show, act, stampOpts, saveDoc, pageLines, imagesToPdf};
+window.pdfApp = {scanFolders, openPaths, addFolder, ocrInfo, ocrPage, uniFontBytes, state: S, build, show, act, stampOpts, saveDoc, pageLines, imagesToPdf};
 drawGrid(); scanFolders(); ocrInfo();

@@ -942,6 +942,8 @@ def pdf_module(ui: UI, d: dict) -> None:
     page.mouse.move(box["x"] + box["width"] - 20, box["y"] + box["height"] * 0.6, steps=5)
     page.mouse.up()
     fr.locator("#status.ok:has-text('Redaction marked')").wait_for()
+    fr.locator(".tab[data-v=convert]").click()
+    fr.locator("#redOcr").uncheck()                      # first the page as a bare picture
     fr.locator("#saveAll").click()
     fr.locator("#status.ok:has-text('Saved 4 pages')").wait_for(timeout=30000)
     red = fr.locator("#status").inner_text().split(" — ")[-1]
@@ -990,6 +992,24 @@ def pdf_module(ui: UI, d: dict) -> None:
     assert abs(got["x"] - 0.47) < 0.02 and 0.10 < got["y"] < 0.125, f"the hidden words sit where they are seen: {got}"
     fr.locator("#docs [data-close]").last.click()
     fr.locator("#docs [data-close]").last.click()
+    # the redacted page again, read back with OCR on save — in four alphabets this time
+    ui.js("""api().dev_ocr_words([["ΚΑΛΗΜΕΡΑ", 0.10, 0.70, 0.2], ["Привет", 0.35, 0.70, 0.15],
+                                   ["مرحبا", 0.55, 0.70, 0.12], ["1761009999", 0.72, 0.70, 0.2]])""")
+    fr.locator(".tab[data-v=convert]").click()
+    fr.locator("#redOcr").check()
+    fr.locator(".tab[data-v=pages]").click()
+    fr.locator("#grid .th").nth(2).click()
+    fr.locator("#tbPages [data-a=extract]").click()
+    fr.locator("#status.ok:has-text('1 redacted page read back with OCR')").wait_for(timeout=30000)
+    back = fr.locator("#status").inner_text().split(" — ")[-1]
+    ui.js(f"{app}.openPaths([{json.dumps(back)}])")
+    page.wait_for_function(f"{app}.state.pages.length === 5")
+    got = ui.js(f"""(async () => {{ const d = {app}.state.docs.at(-1), pg = await d.js.getPage(1), tc = await pg.getTextContent();
+        return tc.items.map(i => i.str).filter(Boolean); }})()""")
+    assert "1761000025" not in " ".join(got), got
+    assert [g for g in got if g.strip()] == ["ΚΑΛΗΜΕΡΑ", "Привет", "مرحبا", "1761009999"], got
+    fr.locator("#docs [data-close]").last.click()
+    ui.js("api().dev_ocr_words([['SCANNED', 0.10, 0.10, 0.18], ['TICKET', 0.30, 0.10, 0.14], ['1761009999', 0.47, 0.10, 0.25]])")
     ui.js(f"{app}.state.pages[2].ov = []")
     # a table out of the statement pages
     fr.locator(".tab[data-v=convert]").click()

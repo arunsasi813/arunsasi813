@@ -102,3 +102,22 @@ def test_the_app_deletes_its_page_images(tmp_path, monkeypatch):
     other.write_bytes(b"x")
     r = api.ocr_read({"paths": [path, str(other)], "cleanup": True})
     assert r["ok"] and not (tmp_path / "colsift-ocr" / "page.png").exists() and other.exists()
+
+
+def test_the_font_for_other_alphabets_and_only_it(tmp_path, monkeypatch):
+    import app
+    fonts = tmp_path / "Fonts"
+    fonts.mkdir()
+    (fonts / "tahoma.ttf").write_bytes(b"\0\1\0\0tahoma")
+    (fonts / "arial.ttf").write_bytes(b"\0\1\0\0arial")
+    (tmp_path / "secret.txt").write_text("no")
+    monkeypatch.setattr(app, "_FONT_DIRS", [fonts])
+    api = app.Api()
+    r = api.pdf_font()
+    assert r["ok"] and r["name"] == "arial.ttf"                     # Arial first
+    got = api.file_read({"font": True, "path": str(tmp_path / "secret.txt"), "offset": 0})
+    assert base64.b64decode(got["b64"]) == b"\0\1\0\0arial"       # the font, whatever path is sent
+    assert api.file_read({"path": str(tmp_path / "secret.txt")})["ok"] is False
+    monkeypatch.setattr(app, "_FONT_DIRS", [tmp_path / "none"])
+    assert api.pdf_font()["ok"] is False
+    assert api.file_read({"font": True, "path": str(tmp_path / "secret.txt")})["ok"] is False
