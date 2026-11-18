@@ -59,6 +59,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .th .cap{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted);margin-top:5px;gap:4px}
 .th .cap span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .th .badge{position:absolute;top:4px;left:4px;background:var(--amber-soft);color:var(--amber);border-radius:8px;font-size:10px;padding:0 6px}
+.th .badge.ocr{left:auto;right:4px;background:var(--teal-soft);color:var(--teal)}
 .th.drop-before{box-shadow:-4px 0 0 var(--teal)}
 .th.drop-after{box-shadow:4px 0 0 var(--teal)}
 .th .ph{height:190px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:11px}
@@ -253,9 +254,15 @@ mark{background:#fff1a8;padding:0 1px}
             <label class="lbl" style="min-width:0">Quality</label><select id="rxDpi"><option value="96">Screen (96 dpi)</option><option value="150" selected>Good (150 dpi)</option><option value="300">Print (300 dpi)</option></select></div>
           <button class="btn" id="rxGo">Save the pages as images…</button>
         </div>
+        <div class="card"><h3>Scanned pages → searchable (OCR)</h3>
+          <p class="hint">Pages that are pictures — scans, photos — are read with the OCR engine Windows already has. The words go into the PDF as an invisible layer on Save, so it searches, copies and extracts like a typed one. Selected pages, or every page; pages that already have text are left alone.</p>
+          <div class="row"><label class="lbl">Language</label><select id="ocrLang"><option value="">Windows' own language</option></select></div>
+          <div class="row"><button class="btn" id="ocrGo">Read the scanned pages</button><span class="hint" id="ocrState" style="margin:0"></span></div>
+        </div>
         <div class="card"><h3>Text → .txt</h3>
-          <p class="hint">The text of each page, in reading order, lines kept — for PDFs made from text (a scan has none: it needs OCR).</p>
+          <p class="hint">The text of each page, in reading order, lines kept. Scanned pages are read with OCR.</p>
           <button class="btn" id="txGo">Save the text…</button>
+          <label class="f" style="font-size:11.5px;margin-top:8px"><input type="checkbox" id="cvOcr" checked> Read scanned pages with OCR (here and in Tables)</label>
         </div>
         <div class="card"><h3>Tables → Excel / CSV / Parquet</h3>
           <p class="hint">Statements and reports: every text line becomes a row, cut into columns where there is a wide gap. Open the result in the Data module to filter and combine it.</p>
@@ -279,6 +286,7 @@ mark{background:#fff1a8;padding:0 1px}
             <div class="row"><label class="lbl">Match</label><select id="sqMode" style="flex:1"><option value="contains">Contains</option><option value="word">Whole word</option><option value="regex">Pattern (regex)</option></select></div>
             <label class="f" style="font-size:11.5px"><input type="checkbox" id="sqCase"> Case sensitive</label>
             <label class="f" style="font-size:11.5px;margin-top:4px"><input type="checkbox" id="sqSpace" checked> Ignore spaces inside values</label>
+            <label class="f" style="font-size:11.5px;margin-top:4px" title="Pages without text are read with Windows' OCR engine — slower"><input type="checkbox" id="sqOcr" checked> Read scanned pages with OCR</label>
           </div>
         </div>
         <div class="f" style="margin-top:8px">

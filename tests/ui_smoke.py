@@ -959,6 +959,36 @@ def pdf_module(ui: UI, d: dict) -> None:
         for (let i = 0; i < px.length; i += 4) if (px[i] < 60 && px[i + 1] < 60 && px[i + 2] < 60) n++;
         return n / (px.length / 4); }})()""")
     assert 0.4 < dark < 0.75, f"the page is a picture with the box burned in ({dark:.2f} of it black)"
+    # OCR (the dev server's stand-in reads "SCANNED TICKET 1761009999" off any picture):
+    # search finds it on the burned page, and "Read the scanned pages" makes it searchable
+    assert "Ready" in fr.locator("#ocrState").inner_text()
+    fr.locator(".tab[data-v=search]").click()
+    fr.locator("#sqScope").select_option("open")
+    fr.locator("#sqVals").fill("1761009999")
+    fr.locator("#sqGo").click()
+    fr.locator("#status.ok:has-text('1 hits in 3 files')").wait_for(timeout=30000)
+    assert ui.js(f"{app}.state.hits.map(h => h.page + ':' + h.line.replace(/\\s+/g, ' '))") == ["3:SCANNED TICKET 1761009999"]
+    fr.locator(".tab[data-v=pages]").click()
+    fr.locator("#grid .th").nth(6).click()
+    fr.locator(".tab[data-v=convert]").click()
+    fr.locator("#ocrGo").click()
+    fr.locator("#status.ok:has-text('1 scanned page read — 3 words')").wait_for(timeout=30000)
+    assert fr.locator("#grid .th").nth(6).locator(".badge.ocr").count() == 1
+    ui.shot("pdf_ocr")
+    fr.locator(".tab[data-v=pages]").click()
+    fr.locator("#tbPages [data-a=extract]").click()
+    fr.locator("#status.ok:has-text('Saved 1 page')").wait_for(timeout=30000)
+    ocred = fr.locator("#status").inner_text().split(" — ")[-1]
+    ui.js(f"{app}.openPaths([{json.dumps(ocred)}])")
+    page.wait_for_function(f"{app}.state.pages.length === 9")
+    got = ui.js(f"""(async () => {{ const d = {app}.state.docs.at(-1), pg = await d.js.getPage(1);
+        const tc = await pg.getTextContent(), it = tc.items.find(i => i.str === '1761009999');
+        return {{text: (await {app}.pageLines(d.js, 1, 6)).map(c => c.join(' ')).join('|'),
+                 x: it ? (it.transform[4] - pg.view[0]) / (pg.view[2] - pg.view[0]) : -1,
+                 y: it ? (pg.view[3] - it.transform[5]) / (pg.view[3] - pg.view[1]) : -1}}; }})()""")
+    assert got["text"] == "SCANNED TICKET 1761009999", got
+    assert abs(got["x"] - 0.47) < 0.02 and 0.10 < got["y"] < 0.125, f"the hidden words sit where they are seen: {got}"
+    fr.locator("#docs [data-close]").last.click()
     fr.locator("#docs [data-close]").last.click()
     ui.js(f"{app}.state.pages[2].ov = []")
     # a table out of the statement pages
@@ -1000,7 +1030,7 @@ def main() -> int:
         shots.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="colsift_ui_"))
     d = make_data(tmp)
-    env = {**os.environ, "COLSIFT_PROFILES": str(tmp / "profiles"), "COLSIFT_CACHE": str(tmp / "cache")}
+    env = {**os.environ, "COLSIFT_PROFILES": str(tmp / "profiles"), "COLSIFT_CACHE": str(tmp / "cache"), "COLSIFT_FAKE_OCR": "1"}
     (tmp / "profiles").mkdir()
     os.environ.update({k: env[k] for k in ("COLSIFT_PROFILES", "COLSIFT_CACHE")})
     os.environ["COLSIFT_SAVED"] = str(tmp / "saved")

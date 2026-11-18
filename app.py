@@ -85,6 +85,17 @@ PDF_EXT = {".pdf"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg"}
 
 
+_OCR: dict = {}
+_OCR_LOCK = threading.Lock()
+
+
+def _ocr_dir() -> Path:
+    import tempfile
+    d = Path(tempfile.gettempdir()) / "colsift-ocr"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _win() -> "webview.Window | None":
     if _WINDOW is not None:
         return _WINDOW
@@ -799,6 +810,29 @@ class Api:
         out.sort(key=lambda r: (r["folder"].lower(), r["name"].lower()))
         return {"ok": True, "files": out}
 
+    # -- OCR with the engine Windows has (ocr.py) --------------------------------
+    @guard
+    def ocr_info(self) -> dict:
+        """Is Windows' OCR engine there, and which languages it reads."""
+        if "info" not in _OCR:
+            import ocr
+            _OCR["info"] = ocr.available()
+        return _OCR["info"]
+
+    @guard
+    def ocr_read(self, p: dict) -> dict:
+        """Read page images: {paths, lang, cleanup} — cleanup deletes images in the OCR folder."""
+        import ocr
+        paths = [str(x) for x in p.get("paths") or []]
+        try:
+            with _OCR_LOCK:
+                return ocr.read(paths, p.get("lang") or None)
+        finally:
+            if p.get("cleanup"):
+                for x in paths:
+                    if Path(x).parent == _ocr_dir():
+                        Path(x).unlink(missing_ok=True)
+
     @guard
     def file_read(self, p: dict) -> dict:
         """A slice of a PDF or image, base64: {path, offset}. Big files come in several calls."""
@@ -819,7 +853,9 @@ class Api:
         """Where a PDF / image goes: {path} as given, {folder, filename} straight in, or a
         save dialog. Returns a token for file_save_chunk / file_save_end."""
         import uuid
-        if p.get("path"):
+        if p.get("temp"):                     # a page image for OCR
+            target = _ocr_dir() / Path(p.get("filename") or f"{uuid.uuid4().hex}.png").name
+        elif p.get("path"):
             target = Path(p["path"])
         elif p.get("folder") and p.get("filename") and not p.get("ask"):
             target = Path(p["folder"]) / p["filename"]
@@ -1029,6 +1065,31 @@ class Api:
             ws, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
 
+def _selftest_ocr(d: Path) -> dict:
+    """Windows' OCR engine on a picture of known text."""
+    try:
+        import ocr
+        info = ocr.available()
+        if not info.get("available"):
+            return {"info": info}
+        img = d / "ocr.png"
+        drawn = ocr._run("Add-Type -AssemblyName System.Drawing\n"
+                         "$b = New-Object System.Drawing.Bitmap 1200, 220\n"
+                         "$g = [System.Drawing.Graphics]::FromImage($b); $g.Clear([System.Drawing.Color]::White)\n"
+                         "$g.DrawString('TICKET 1761009999', (New-Object System.Drawing.Font 'Arial', 54), "
+                         "[System.Drawing.Brushes]::Black, 30, 60)\n"
+                         f"$b.Save({ocr._ps_quote(str(img))}, [System.Drawing.Imaging.ImageFormat]::Png)\n"
+                         "'{\"ok\": true}'")
+        if not drawn.get("ok"):
+            return {"info": info, "draw": drawn}
+        r = ocr.read([str(img)])
+        text = " ".join(ln.get("text") or "" for pg in r.get("pages") or [] for ln in pg.get("lines") or [])
+        return {"info": info, "ok": bool(r.get("ok")), "text": text, "error": r.get("error"),
+                "read_back": "1761009999" in text.replace(" ", "")}
+    except Exception as e:  # noqa: BLE001 — informational only
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def selftest(out: str) -> int:
     """`ColSift.exe --selftest result.json`: checks a build without opening a window —
     the worker process starts from the exe, does real work, reports progress and its
@@ -1068,6 +1129,7 @@ def selftest(out: str) -> int:
         res["studio"] = {"ok": bool(st.get("ok")), "bytes": len(st.get("html") or ""),
                          "hooks": "ColSift live data" in (st.get("html") or ""), "error": st.get("error")}
         res["memory"] = Api().memory()
+        res["ocr"] = _selftest_ocr(d)          # told, not checked: the build machine may have no OCR language
     finally:
         _js = keep
     w, c, n, r, m = res["worker"], res["crash"], res["count"], res["run"], res["memory"]

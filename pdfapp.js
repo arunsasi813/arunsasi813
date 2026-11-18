@@ -201,6 +201,7 @@ function drawGrid(){
     const d = docOf(p.doc);
     return `<div class="th ${S.sel.has(p.id) ? "sel" : ""}" draggable="true" data-id="${p.id}">
       ${p.ov.length ? `<span class="badge" title="Things added on this page">✎ ${p.ov.length}</span>` : ""}
+      ${p.ocr ? `<span class="badge ocr" title="Read with OCR: Save PDF adds its words as a searchable text layer">OCR</span>` : ""}
       <canvas></canvas>
       <div class="cap"><span title="${esc(d ? d.name : "blank page")}">${esc(p.blank ? "blank page" : `${d?.name || "?"} · p${p.index + 1}`)}</span><span>${i + 1}${p.rot ? ` · ${p.rot}°` : ""}</span></div></div>`;
   }).join("");
@@ -689,6 +690,7 @@ async function build(pages, opts){
     else if (burns(p)) page = await burnedPage(out, p);
     else { const n = used.get(p.doc) || 0; used.set(p.doc, n + 1); page = out.addPage(copied.get(p.doc)[n]); }
     if (p.rot) page.setRotation(L.degrees((page.getRotation().angle + p.rot) % 360));
+    if (p.ocr && !burns(p)){ const r = S.ocrCache.get(`${p.doc}:${p.index}`); if (r) drawOcrLayer(page, r.lines.flat(), fonts.reg); }
     for (const o of p.ov) await drawOv(out, page, o, fonts);
   }
   const all = out.getPages(), n = all.length, pick = parseRanges(opts.range, n);
@@ -872,9 +874,18 @@ $("#rxGo").onclick = async () => {
   finally { await busy(false); }
 };
 /* a page's text as lines: items on one baseline joined left to right, cells where the gap is wide */
-async function pageLines(js, n, gap = 12){
+async function pageLines(js, n, gap = 12, ocrDoc = null){
   const page = await js.getPage(n), tc = await page.getTextContent();
   const items = tc.items.filter(it => it.str && it.str.trim()).map(it => ({s: it.str, x: it.transform[4], y: it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || 10}));
+  if (!items.length && ocrDoc && (await ocrInfo()).available){       // a scanned page: read it
+    const r = await ocrPage(ocrDoc, n - 1);
+    return r.lines.map(words => {
+      const ws = [...words].sort((a, b) => a.sx - b.sx), cells = []; let cell = null, end = -1e9;
+      for (const w of ws){ if (cell != null && w.sx - end > gap){ cells.push(cell); cell = null; } cell = cell == null ? w.t : `${cell} ${w.t}`; end = w.sx + w.w; }
+      if (cell != null) cells.push(cell);
+      return cells;
+    });
+  }
   items.sort((a, b) => b.y - a.y || a.x - b.x);
   const lines = [];
   for (const it of items){
@@ -901,12 +912,12 @@ $("#txGo").onclick = async () => {
     const parts = []; let i = 0;
     for (const p of S.pages){
       i++; if (p.blank) continue;
-      const lines = await pageLines(docOf(p.doc).js, p.index + 1, 6);
+      const lines = await pageLines(docOf(p.doc).js, p.index + 1, 6, $("#cvOcr").checked ? docOf(p.doc) : null);
       parts.push(`--- page ${i} ---\n` + lines.map(c => c.join("   ")).join("\n"));
       prog(i / S.pages.length);
     }
     const text = parts.join("\n\n");
-    if (!text.replace(/--- page \d+ ---/g, "").trim()){ say("No text in these pages — scanned pages are pictures and need OCR.", "err"); return; }
+    if (!text.replace(/--- page \d+ ---/g, "").trim()){ say("No text in these pages — scanned pages are pictures: tick “Read scanned pages with OCR”.", "err"); return; }
     const first = S.docs[0]?.name.replace(/\.pdf$/i, "") || "document";
     const path = await saveFile(new TextEncoder().encode(text), {filename: `${first}.txt`, folder: outFolder(), types: ["Text (*.txt)"], ask: true});
     if (path) say(`Text saved — ${path}`, "ok");
@@ -921,13 +932,13 @@ $("#tbGo").onclick = async () => {
     for (const p of S.pages){
       i++; if (p.blank) continue;
       const d = docOf(p.doc);
-      for (const cells of await pageLines(d.js, p.index + 1, gap)){
+      for (const cells of await pageLines(d.js, p.index + 1, gap, $("#cvOcr").checked ? d : null)){
         const r = [...($("#tbFile").checked ? [d.name] : []), ...($("#tbPage").checked ? [String(i)] : []), ...cells];
         rows.push(r); width = Math.max(width, r.length);
       }
       prog(i / S.pages.length);
     }
-    if (!rows.length){ say("No text in these pages — scanned pages are pictures and need OCR.", "err"); return; }
+    if (!rows.length){ say("No text in these pages — scanned pages are pictures: tick “Read scanned pages with OCR”.", "err"); return; }
     const fixed = ($("#tbFile").checked ? 1 : 0) + ($("#tbPage").checked ? 1 : 0);
     const cols = [...($("#tbFile").checked ? ["FILE"] : []), ...($("#tbPage").checked ? ["PAGE"] : [])];
     for (let k = 1; cols.length < width; k++) cols.push(`COL_${k}`);
@@ -938,6 +949,76 @@ $("#tbGo").onclick = async () => {
     if (r?.ok) say(`${rows.length.toLocaleString()} rows in ${cols.length - fixed} columns — ${r.path}`, "ok");
     else if (!r?.cancelled) say(r?.error || "Not saved.", "err");
   } catch (e){ say(`Could not read the tables: ${e.message || e}`, "err"); }
+  finally { await busy(false); }
+};
+
+/* ---------------- OCR: Windows' own engine reads scanned pages ----------------
+   A page with no text is drawn at 200 dpi, as it is seen, and read; each word comes back
+   with its box, turned into PDF coordinates like anything added on the Edit tab. */
+const OCR_DPI = 200;
+S.ocrInfo = null; S.ocrCache = new Map();
+async function ocrInfo(){
+  if (!S.ocrInfo){
+    try { S.ocrInfo = await api().ocr_info(); } catch (e){ S.ocrInfo = {ok: false, available: false, error: String(e)}; }
+    S.ocrInfo = S.ocrInfo || {available: false};
+    const sel = $("#ocrLang");
+    if (sel) sel.innerHTML = `<option value="">Windows' own language</option>` + (S.ocrInfo.languages || []).map(l => `<option>${esc(l)}</option>`).join("");
+    $("#ocrState").textContent = S.ocrInfo.available ? `Ready — reads ${(S.ocrInfo.languages || []).join(", ")}.` : (S.ocrInfo.error || "Not available here.");
+  }
+  return S.ocrInfo;
+}
+async function ocrPage(d, index){
+  const key = `${d.id}:${index}`;
+  if (S.ocrCache.has(key)) return S.ocrCache.get(key);
+  const page = await d.js.getPage(index + 1);
+  const vp = page.getViewport({scale: OCR_DPI / 72, rotation: page.rotate});
+  const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  const x = c.getContext("2d"); x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
+  await page.render({canvas: c, canvasContext: x, viewport: vp}).promise;
+  const blob = await new Promise(r => c.toBlob(r, "image/png"));
+  const path = await saveFile(new Uint8Array(await blob.arrayBuffer()), {temp: true, filename: `ocr_${uid()}.png`});
+  const r = await api().ocr_read({paths: [path], lang: $("#ocrLang")?.value || null, cleanup: true});
+  if (!r?.ok) throw new Error(r?.error || "OCR failed");
+  const pg = (r.pages || [])[0] || {lines: [], width: c.width};
+  const k = pg.width ? c.width / pg.width : 1;
+  const lines = (pg.lines || []).map(l => (l.words || []).map(w => {
+    const wx = w.x * k, wy = w.y * k, ww = w.w * k, wh = w.h * k;
+    const [ax, ay] = vp.convertToPdfPoint(wx, wy + wh);
+    return {t: w.t, ax, ay, w: ww / vp.scale, h: wh / vp.scale, theta: page.rotate, sx: wx / vp.scale, sy: wy / vp.scale};
+  })).filter(ws => ws.length);
+  const res = {lines};
+  S.ocrCache.set(key, res);
+  return res;
+}
+/* the words, invisible, where they are seen: the page searches and copies like a typed one */
+function drawOcrLayer(page, words, font){
+  for (const w of words){
+    const t = safeText(w.t); if (!t.trim()) continue;
+    const size = Math.max(2, Math.min(w.h * 0.95, w.w / Math.max(0.01, font.widthOfTextAtSize(t, 1))));
+    const th = w.theta * Math.PI / 180, up = w.h * 0.2;
+    page.drawText(t, {x: w.ax - Math.sin(th) * up, y: w.ay + Math.cos(th) * up, size, font, opacity: 0, rotate: L.degrees(w.theta)});
+  }
+}
+$("#ocrGo").onclick = async () => {
+  const info = await ocrInfo();
+  if (!info.available){ say(info.error || "OCR is not available here.", "err"); return; }
+  const pages = (selected().length ? selected() : S.pages).filter(p => !p.blank);
+  if (!pages.length){ say("Open a PDF first.", "err"); return; }
+  await busy(true, "Looking for pages without text…");
+  let done = 0, words = 0, skipped = 0;
+  try {
+    for (const p of pages){
+      const d = docOf(p.doc), pg = await d.js.getPage(p.index + 1), tc = await pg.getTextContent();
+      if (tc.items.some(it => it.str && it.str.trim()) || p.ov.some(o => o.type === "redact")){ skipped++; continue; }
+      say(`Reading page ${S.pages.indexOf(p) + 1} with OCR…`);
+      const r = await ocrPage(d, p.index);
+      p.ocr = true; words += r.lines.reduce((n, l) => n + l.length, 0); done++;
+      prog((done + skipped) / pages.length);
+    }
+    drawGrid();
+    say(done ? `${done} scanned page${done === 1 ? "" : "s"} read — ${words.toLocaleString()} words. Save PDF writes them as a searchable text layer.`
+             : `Every page already has text${skipped ? ` (${skipped} checked)` : ""} — nothing to read.`, "ok");
+  } catch (e){ say(`OCR stopped: ${e.message || e}`, "err"); }
   finally { await busy(false); }
 };
 
@@ -972,7 +1053,7 @@ $("#sqGo").onclick = async () => {
       try {
         if (!js){ const f = await readFile(t.path); js = await J.getDocument({data: f.bytes, isEvalSupported: false}).promise; own = true; }
         for (let n = 1; n <= js.numPages && !S.stop; n++){
-          const lines = await pageLines(js, n, 6);
+          const lines = await pageLines(js, n, 6, $("#sqOcr").checked ? (t.doc || {id: t.path, js}) : null);
           for (const cells of lines){
             const line = cells.join("  ");
             for (const tt of tests) if (tt.test(line)){ S.hits.push({file: t.name, path: t.path, doc: t.doc?.id, page: n, value: tt.v, line}); found.add(tt.v); }
@@ -1020,5 +1101,5 @@ $("#sqExport").onclick = async () => {
 };
 
 /* ---------------- start ---------------- */
-window.pdfApp = {scanFolders, openPaths, addFolder, state: S, build, show, act, stampOpts, saveDoc, pageLines, imagesToPdf};
-drawGrid(); scanFolders();
+window.pdfApp = {scanFolders, openPaths, addFolder, ocrInfo, ocrPage, state: S, build, show, act, stampOpts, saveDoc, pageLines, imagesToPdf};
+drawGrid(); scanFolders(); ocrInfo();
