@@ -146,14 +146,15 @@ def test_a_headless_run_works_the_saved_setup_and_logs_it(data):
     assert all(json.dumps(r) for r in runs)
 
 
-def test_notify_rides_in_the_arguments_and_comes_back_out():
+def test_notify_rides_in_the_arguments_and_comes_back_out(tmp_path):
     args = SC.arguments("Month end", {"PERIOD": "2026-10"}, notify=True)
     assert args.endswith('--run "Month end" --set "PERIOD=2026-10" --notify')
     assert SC.parse_arguments(args) == {"setup": "Month end", "sets": {"PERIOD": "2026-10"}, "notify": True}
     t = parsed({"setup": "Month end", "kind": "daily", "time": "07:00", "notify": True})
     assert t.find("t:Actions/t:Exec/t:Arguments", NS).text.endswith("--notify")
-    x = SC.toast_xml("ColSift — A&B", "Failed <oops>", "/tmp/a b.log")
-    assert 'launch="file:///tmp/a%20b.log"' in x and "A&amp;B" in x and "&lt;oops&gt;" in x
+    log = tmp_path / "a b.log"
+    x = SC.toast_xml("ColSift — A&B", "Failed <oops>", str(log))
+    assert f'launch="{log.resolve().as_uri()}"' in x and "a%20b.log" in x and "A&amp;B" in x and "&lt;oops&gt;" in x
     ET.fromstring(x)                                                      # well-formed
 
 

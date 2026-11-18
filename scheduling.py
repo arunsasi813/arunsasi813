@@ -331,7 +331,7 @@ $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell1.0\powershell.
 
 def toast_xml(title: str, text: str, open_path: str | None = None) -> str:
     from xml.sax.saxutils import quoteattr
-    launch = f" activationType=\"protocol\" launch={quoteattr(Path(open_path).as_uri())}" if open_path else ""
+    launch = f" activationType=\"protocol\" launch={quoteattr(Path(open_path).resolve().as_uri())}" if open_path else ""
     return (f"<toast{launch}><visual><binding template=\"ToastGeneric\"><text>{escape(title)}</text>"
             f"<text>{escape(text)}</text></binding></visual></toast>")
 
