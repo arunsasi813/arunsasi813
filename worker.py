@@ -89,6 +89,11 @@ def main(kind: str, payload: dict, q, cancel, settings: dict) -> None:
     os.environ.update({k: str(v) for k, v in (settings.get("env") or {}).items()})
     import engine as E
 
+    try:
+        import prefs
+        prefs.apply()                      # the PC's performance profile: piece sizes for big jobs
+    except Exception:  # noqa: BLE001 — the defaults are fine
+        pass
     if settings.get("cache") is False:
         E.set_cache(False)
 

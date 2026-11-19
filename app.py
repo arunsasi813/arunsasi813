@@ -58,6 +58,11 @@ def _load_modules() -> None:
         import datamgr as D
         import workspace as W
         _MODS.update(A=A, E=E, F=F, W=W, D=D)
+        try:
+            import prefs
+            prefs.apply()                  # this PC's performance profile
+        except Exception:  # noqa: BLE001 — the defaults are fine
+            traceback.print_exc()
     except Exception as exc:  # noqa: BLE001 — reported by the first call that needs it
         _MODS["error"] = exc
         traceback.print_exc()
@@ -273,6 +278,28 @@ class _NoWorker(Exception):
     pass
 
 
+def _guard(p, g: dict, E) -> None:
+    """The memory guard: when the PC's free memory stays below the floor for a couple
+    of seconds while a worker runs, the worker is stopped — before Windows starts
+    swapping everything to disk, or ends the work (or something else) by itself."""
+    if not g["on"] or g["hit"] or p is None or not p.is_alive():
+        return
+    now = time.monotonic()
+    if now - g["at"] < 0.25:
+        return
+    g["at"] = now
+    import prefs
+    mem = E.system_memory()
+    if not mem or not prefs.short_of_memory(*mem):
+        g["since"] = None
+        return
+    g["since"] = g["since"] or now
+    if now - g["since"] >= prefs.GUARD_SECONDS:
+        _sample_child(p)
+        g["hit"] = (mem[1], _CHILD["rss"])
+        p.terminate()
+
+
 def _in_child(kind: str, payload: dict) -> dict:
     import multiprocessing as mp
     import queue
@@ -283,8 +310,10 @@ def _in_child(kind: str, payload: dict) -> dict:
     try:
         ctx = mp.get_context("spawn")
         q, ev = ctx.Queue(), ctx.Event()
+        import prefs
+        prefs_now = prefs.load()
         settings = {"cache": E.cache_on(), "crash_log": str(_crash_log()),
-                    "env": {k: v for k, v in os.environ.items() if k.startswith("COLSIFT_")}}
+                    "env": {**{k: v for k, v in os.environ.items() if k.startswith("COLSIFT_")}, **prefs.worker_env(prefs_now)}}
         p = ctx.Process(target=worker.main, args=(kind, payload, q, ev, settings),
                         name=f"colsift-{kind}", daemon=True)
         p.start()
@@ -292,8 +321,10 @@ def _in_child(kind: str, payload: dict) -> dict:
         raise _NoWorker(str(exc)) from exc
     _CHILD.update(proc=p, rss=0, peak=0, kind=kind)
     res, last, pending, asked = None, 0.0, None, None
+    guard = {"on": prefs_now["memory_guard"], "since": None, "at": 0.0, "hit": None}
     try:
         while True:
+            _guard(p, guard, E)
             if _CANCEL.is_set() and asked is None:
                 ev.set()
                 asked = time.monotonic()
@@ -329,6 +360,13 @@ def _in_child(kind: str, payload: dict) -> dict:
         peak, code = _CHILD["peak"], p.exitcode
         _CHILD.update(proc=None, rss=0, kind="")
     if res is None:
+        if guard["hit"]:
+            free, used = guard["hit"]
+            _log(f"worker {kind} stopped by the memory guard: {_human(free)} free, worker {_human(used)}")
+            return {"ok": False, "guarded": True, "peak_memory": peak,
+                    "error": f"Stopped before the PC ran out of memory — only {_human(free)} was free and the work was "
+                             f"using {_human(used)}. Settings (⚙) → Low memory makes big jobs use less; ticking fewer "
+                             "files, “One file at a time” or CSV instead of Excel help too. Nothing finished was replaced."}
         if asked is not None:
             return {"ok": False, "cancelled": True, "error": "Cancelled — the work was stopped.", "peak_memory": peak}
         _log(f"worker {kind} died: exit code {code}, peak {_human(peak)}")
@@ -677,8 +715,14 @@ class Api:
         """The Run button: every group's ColSift work, then the combine steps, then one
         export. A one-group setup is the classic extract. Results land on onRunDone()."""
         W = _m()[3]
-        return _background("setup", lambda: _heavy("run_setup", {"setup": setup}, lambda: W.run_setup(
-            setup, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
+
+        def work() -> dict:
+            t0 = datetime.now()
+            res = _heavy("run_setup", {"setup": setup}, lambda: W.run_setup(
+                setup, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL))
+            _log_manual_run(setup, res, t0)
+            return res
+        return _background("setup", work)
 
     @guard
     @_params
@@ -824,6 +868,42 @@ class Api:
         out.sort(key=lambda r: (r["folder"].lower(), r["name"].lower()))
         return {"ok": True, "files": out}
 
+    # -- settings, autosave, diagnostics (prefs.py) ---------------------------------
+    @guard
+    def settings_get(self) -> dict:
+        import prefs
+        E = _m()[0]
+        s = prefs.load()
+        total, avail = E.system_memory() or (0, 0)
+        return {"ok": True, "settings": s, "profile": prefs.profile(s), "auto": prefs.profile({**s, "performance": "auto"}),
+                "labels": prefs.LABELS, "cpus": os.cpu_count() or 1, "memory": {"total": total, "available": avail},
+                "cache": E.cache_info()}
+
+    @guard
+    def settings_save(self, p: dict) -> dict:
+        import prefs
+        return prefs.save(p or {})
+
+    @guard
+    def autosave_put(self, p: dict) -> dict:
+        import prefs
+        return prefs.autosave_put(p or {})
+
+    @guard
+    def autosave_get(self) -> dict:
+        import prefs
+        return prefs.autosave_get()
+
+    @guard
+    def autosave_clear(self) -> dict:
+        import prefs
+        return prefs.autosave_clear()
+
+    @guard
+    def diagnostics(self) -> dict:
+        """What to send when something goes wrong: versions, the PC, the settings, folders."""
+        return diagnostics()
+
     # -- scheduled runs (schedule.py) ---------------------------------------------
     @guard
     def schedule_list(self) -> dict:
@@ -854,9 +934,9 @@ class Api:
         return SC.news()
 
     @guard
-    def schedule_seen(self) -> dict:
+    def schedule_seen(self, p: dict | None = None) -> dict:
         import scheduling as SC
-        return SC.mark_seen()
+        return SC.mark_seen((p or {}).get("upto") or None)
 
     @guard
     def schedule_delete(self, p: dict) -> dict:
@@ -1136,6 +1216,19 @@ class Api:
             ws, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
 
+def _log_manual_run(setup: dict, res: dict, t0: datetime) -> None:
+    """A Run pressed in the window goes into the same history as scheduled runs."""
+    try:
+        import scheduling as SC
+        ok, stopped = bool(res.get("ok")), bool(res.get("stopped"))
+        SC.log_run({"setup": str(setup.get("name") or "") or "(not saved)", "start": f"{t0:%Y-%m-%d %H:%M:%S}",
+                    "seconds": round((datetime.now() - t0).total_seconds(), 1), "code": 0 if ok else 3 if stopped else 1,
+                    "ok": ok, "stopped": stopped, "log": res.get("log") or "", "written": [str(x) for x in res.get("written") or []],
+                    "error": res.get("error"), "source": "manual", "peak_memory": res.get("peak_memory")})
+    except Exception:  # noqa: BLE001 — history never fails a run
+        traceback.print_exc()
+
+
 def headless_run(argv: list[str]) -> int:
     """`ColSift.exe --run "<setup>" [--set NAME=VALUE …] [--out FOLDER]` — what a scheduled
     task starts: the saved setup run with no window, as the Run button would, its
@@ -1181,6 +1274,50 @@ def headless_run(argv: list[str]) -> int:
             entry["notified"] = False
     SC.log_run(entry)
     return code
+
+
+def diagnostics() -> dict:
+    import platform
+
+    import prefs
+    from version import VERSION
+    E = _m()[0]
+
+    def ver(mod: str) -> str:
+        try:
+            from importlib.metadata import version
+            return version(mod)
+        except Exception:  # noqa: BLE001
+            try:
+                return str(getattr(__import__(mod), "__version__", "?"))
+            except Exception:  # noqa: BLE001
+                return "not installed"
+    s = prefs.load()
+    total, avail = E.system_memory() or (0, 0)
+    me = E.process_memory() or (0, 0)
+    cache = E.cache_info()
+    import scheduling as SC
+    info = {
+        "ColSift": VERSION + (" (exe)" if E.frozen() else " (from source)"),
+        "System": platform.platform(),
+        "Python": platform.python_version(),
+        "polars": ver("polars"), "fastexcel": ver("fastexcel"), "openpyxl": ver("openpyxl"), "pywebview": ver("pywebview"),
+        "Processors": str(os.cpu_count() or "?"),
+        "Memory": f"{_human(total)} in all, {_human(avail)} free; the window uses {_human(me[0])}",
+        "Performance": f"{prefs.LABELS[s['performance']]} → {prefs.LABELS[prefs.profile(s)]}"
+                       + (f", {s['threads']} threads" if s["threads"] else ", all processors"),
+        "Memory guard": "on" if s["memory_guard"] else "off",
+        "Worker process": "on" if _isolation() else "off (COLSIFT_INPROCESS)",
+        "Setups": str(E.profile_dir()),
+        "Cache": f"{cache.get('dir') or 'off'} — {cache.get('size_h') or _human(cache.get('bytes') or 0)}"
+                 f" of {s['cache_gb']:g} GB",
+        "Run logs": str(SC.runs_dir()),
+        "Crash log": str(_crash_log()),
+        "Program": str(E.app_dir()),
+    }
+    text = "\n".join(f"{k}: {v}" for k, v in info.items())
+    return {"ok": True, "version": VERSION, "info": info, "text": text, "log": str(_crash_log()),
+            "logs_dir": str(_crash_log().parent), "runs_dir": str(SC.runs_dir())}
 
 
 def _selftest_headless(d: Path, job: dict) -> dict:
@@ -1293,6 +1430,12 @@ def selftest(out: str) -> int:
         res["memory"] = Api().memory()
         res["ocr"] = _selftest_ocr(d)          # told, not checked: the build machine may have no OCR language
         res["headless"] = _selftest_headless(d, job)
+        try:
+            import prefs
+            dg = diagnostics()
+            res["diagnostics"] = {"ok": dg["ok"], "version": dg["version"], "profile": prefs.apply(), "text": dg["text"]}
+        except Exception as e:  # noqa: BLE001 — reported as a failed check
+            res["diagnostics"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         res["schedule"] = _selftest_schedule()  # told, not checked
     finally:
         _js = keep
@@ -1311,6 +1454,7 @@ def selftest(out: str) -> int:
         "Data module browses a filtered page": bool(res["browse"].get("ok")) and len(res["browse"].get("rows") or []) == 10,
         "Data module combines into Parquet in the worker": res["combine"].get("rows") == 5000,
         "PDF module ships with pdf.js and pdf-lib": res["pdf"]["ok"] and res["pdf"]["libraries"],
+        "settings, diagnostics and the version": bool(res["diagnostics"].get("ok")) and bool(res["diagnostics"].get("version")),
         "a scheduled run (--run) works with no window": res["headless"].get("code") == 0
             and bool(res["headless"].get("entry", {}).get("ok")) and res["headless"].get("rows") == 1667,
     }

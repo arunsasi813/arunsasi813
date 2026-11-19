@@ -1079,27 +1079,25 @@ def scheduled_runs(ui: UI, d: dict) -> None:
     assert written == ["nightly.csv"], written
     rows = (out / "nightly.csv").read_text(encoding="utf-8").splitlines()
     assert rows[0].startswith("DOC_NO") and all(",YQ" in r for r in rows[1:]) and len(rows) > 1
-    log = ui.js("SC.data.runs[0].log")
+    log = ui.js("SC.data.runs.find(r => r.setup === 'Nightly').log")
     assert "the setup “Nightly”" in Path(log).read_text(encoding="utf-8")
     assert page.is_checked("#scNotify") and "notifies" in page.inner_text("#scList")
-    assert ui.js("SC.data.runs[0].notified") is False                  # (no Windows here to show it)
+    assert ui.js("SC.data.runs.find(r => r.setup === 'Nightly').notified") is False   # (no Windows here to show it)
     # the exe moved: the task says so, and Update points it at this one
     ui.js("api().dev_task_moved('Nightly')")
-    page.click("#scRefresh")
-    page.wait_for_selector("#scList .moved")
+    page.wait_for_function("(async () => { await scLoad(); return !!document.querySelector('#scList .moved'); })()")
     ui.then("now starts this ColSift", lambda: page.click("#scList [data-screp='Nightly']"))
     page.wait_for_function("!document.querySelector('#scList .moved')")
     ui.shot("scheduled_runs")
     page.click("#scClose")
-    # the run, as the window shows it the next time it looks (opening the dialog marks it seen)
-    page.click("#schedOpen")
-    page.wait_for_selector("#sched.on")
-    ui.then("started", lambda: page.click("#scList [data-scrun='Nightly']"))
-    page.wait_for_function("SC.data && SC.data.runs.length === 2", timeout=60000)
-    page.click("#scClose")
-    ui.js("checkNews()")
-    page.wait_for_selector("#newsBar .nb-ok:has-text('Nightly')")
-    assert "1 file" in page.inner_text("#newsBar")
+    # a scheduled run while the window is busy elsewhere: the next look says so
+    # (what the dialog has shown is seen — opening it marks that much)
+    subprocess.run([sys.executable, str(ROOT / "app.py"), "--run", "Nightly"], cwd=str(ROOT), check=True, timeout=300,
+                   capture_output=True)
+    page.wait_for_function("(async () => { await checkNews(); "
+                           "return [...document.querySelectorAll('#newsBar .nb-ok')].some(x => x.textContent.includes('Nightly')); })()")
+    assert "1 file" in page.inner_text("#newsBar"), page.inner_text("#newsBar")
+    assert ui.js("SC.data.runs.filter(r => r.setup === 'Nightly').length") == 1, "the dialog had shown one run"
     ui.shot("scheduled_news")
     page.click("#newsShow")
     page.wait_for_selector("#sched.on")
@@ -1112,10 +1110,54 @@ def scheduled_runs(ui: UI, d: dict) -> None:
     assert not page.is_visible("#newsBar"), "seen when shown"
 
 
+def settings_and_recovery(ui: UI, d: dict) -> None:
+    """Settings: a performance profile, processors, saved and read back; About. Autosave:
+    a change the setup was never saved with comes back after the window reloads."""
+    page = ui.page
+    new_setup(ui)
+    page.click("#prOpen")
+    page.wait_for_selector("#prefs.on")
+    page.wait_for_function("document.querySelector('#prAbout').textContent.includes('ColSift')")
+    assert page.is_checked("#prPerf input[value=auto]") and page.is_checked("#prGuard") and page.is_checked("#prAutosave")
+    assert "of memory →" in page.inner_text("#prAutoSays")
+    page.check("#prPerf input[value=low]")
+    page.select_option("#prThreads", "2")
+    page.click("#prSave")
+    page.wait_for_selector("#prSaid:has-text('Saved — Low memory in force')")
+    saved = json.loads((Path(os.environ["COLSIFT_PROFILES"]) / "app" / "settings.json").read_text())
+    assert saved["performance"] == "low" and saved["threads"] == 2
+    ui.shot("settings")
+    page.click("#prClose")
+    page.click("#prOpen")
+    page.wait_for_selector("#prefs.on")
+    assert page.is_checked("#prPerf input[value=low]") and page.input_value("#prThreads") == "2"
+    page.check("#prPerf input[value=auto]")
+    page.select_option("#prThreads", "0")
+    page.click("#prSave")
+    page.wait_for_selector("#prSaid:has-text('Saved')")
+    page.click("#prClose")
+    # a change, autosaved, then the window reloads as if ColSift had closed
+    ui.tab("out")
+    page.select_option("#outFormat", "parquet")
+    page.dispatch_event("#outFormat", "change")
+    ui.js("asTick()")
+    page.wait_for_function("AS.last && AS.last.includes('parquet')")
+    auto = json.loads((Path(os.environ["COLSIFT_PROFILES"]) / "app" / "autosave.json").read_text())
+    assert auto["saved"] is False and auto["setup"]["output"]["format"] == "parquet"
+    page.reload()
+    page.wait_for_function("S.meta && S.meta.ops && S.meta.ops.length")
+    page.wait_for_selector("#recoverBar:has-text('Unsaved work found')")
+    assert ui.js("S.output.format") != "parquet"
+    ui.shot("recover")
+    page.click("#recRestore")
+    page.wait_for_function("S.output.format === 'parquet'")
+    assert not page.is_visible("#recoverBar")
+
+
 SECTIONS = {"folders": folders_and_loading, "dash": overview_dashboard, "dups": duplicates_across_files,
             "params": parameters, "checks": run_checks, "data": parquet_and_lookup, "studio": studio_visual,
             "basics": dashboard_basics, "formulas": formula_helper, "datamod": data_module, "cmpsql": compare_and_sql, "pdf": pdf_module,
-            "sched": scheduled_runs}
+            "sched": scheduled_runs, "prefs": settings_and_recovery}
 
 
 def main() -> int:

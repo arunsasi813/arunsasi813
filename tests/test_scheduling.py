@@ -207,3 +207,11 @@ def test_a_run_with_notify_tells_windows(data, monkeypatch):
     assert runs[0]["notified"] is True and runs[1]["notified"] is True
     assert app.headless_run(["--run", "Quick"]) == 0 and len(told) == 2  # no --notify, no notification
     assert "notified" not in SC.history()["runs"][0]
+
+
+def test_seen_goes_only_as_far_as_what_was_shown():
+    SC.news()
+    SC.log_run({"setup": "A", "start": "2999-01-01 07:00:00", "ok": True})
+    SC.log_run({"setup": "B", "start": "2999-01-01 08:00:00", "ok": True})     # ended after the window looked
+    SC.mark_seen(upto="2999-01-01 07:00:00")
+    assert [r["setup"] for r in SC.news()["runs"]] == ["B"]

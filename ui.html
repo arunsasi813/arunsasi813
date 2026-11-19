@@ -472,6 +472,20 @@ table.sct a{color:var(--teal-2)}
 .sct .moved{display:block;color:var(--red);font-size:11px;font-weight:400}
 .newsbar{display:flex;gap:6px 14px;align-items:center;flex-wrap:wrap;padding:6px 12px;background:var(--teal-soft);border-bottom:1px solid var(--line);font-size:12px}
 .newsbar.hasbad{background:var(--red-soft)}
+.newsbar.recover{background:var(--amber-soft);color:#5a3a00}
+.modtool{border:0;background:transparent;color:var(--rail-ink);font-size:16px;line-height:1;padding:4px 9px 6px;border-radius:5px;cursor:pointer;margin-left:6px}
+.modtool:hover{background:var(--rail-2);color:#fff}
+.prperf{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:10px}
+.prperf label{display:flex;gap:8px;align-items:flex-start;border:1px solid var(--line);border-radius:6px;padding:8px 10px;cursor:pointer;font-size:12px;line-height:1.35}
+.prperf label:has(input:checked){border-color:var(--teal);background:var(--teal-soft)}
+.prperf b{display:block;font-size:12.5px;margin-bottom:2px}
+.prperf small{color:var(--muted)}
+.prrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0;font-size:12px}
+.prcheck{display:flex;gap:8px;align-items:flex-start;margin:7px 0;font-size:12px;line-height:1.45;cursor:pointer}
+.prcheck input{margin-top:2px;flex:none}
+table.sct.about td:first-child{color:var(--muted);white-space:nowrap;width:1%}
+table.sct.about td{word-break:break-all}
+kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--surface)}
 .newsbar .nb-ok{color:var(--teal-2)}.newsbar .nb-bad{color:var(--red);font-weight:600}.newsbar .nb-stop{color:var(--amber);font-weight:600}
 .newsbar .nb-act{margin-left:auto;display:flex;gap:4px}
 .modal .minfo{padding:6px 12px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--line-2)}
@@ -650,7 +664,9 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <button class="mod" data-m="data" title="Browse, search, convert and export any data file — Parquet, CSV, Excel — however big">⛁ Data</button>
     <button class="mod" data-m="pdf" title="Merge, split, reorder, edit, sign, stamp, protect and search PDFs">▤ PDF</button>
     <span class="modhint" id="modHint"></span>
+    <button class="modtool" id="prOpen" title="Settings — performance, memory, autosave — and About" aria-label="Settings">⚙</button>
   </nav>
+  <div class="newsbar recover" id="recoverBar" style="display:none" role="alert"></div>
   <div class="newsbar" id="newsBar" style="display:none" role="status"></div>
   <div class="groupbar" id="groupBar"></div>
   <div class="srcbar">
@@ -1283,6 +1299,35 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 </main>
 
 <div class="msed" id="msEd" style="display:none"><iframe id="msEdFrame" title="Measure Studio"></iframe></div>
+<div class="modal" id="prefs"><div class="box" style="width:min(780px,94vw)">
+  <header><h3>Settings</h3><button class="btn sm" id="prClose">Close</button></header>
+  <div class="mbody" style="padding:12px 14px 16px">
+    <h4 class="sch" style="margin-top:2px">Performance and memory</h4>
+    <p class="hint" style="margin-top:0">Big jobs — a first read of a big text file, Compare, duplicates, writing a workbook — are worked a piece at a time. Smaller pieces use less memory and take a little longer. Runs, Count, Find and dashboards over every file pick this up the next time they start.</p>
+    <div class="prperf" id="prPerf">
+      <label><input type="radio" name="prPerf" value="auto"><span><b>Automatic</b><small id="prAutoSays">Chosen for this PC's memory.</small></span></label>
+      <label><input type="radio" name="prPerf" value="low"><span><b>Low memory</b><small>4–8 GB PCs, or when other programs need the memory. Smallest pieces, one block at a time.</small></span></label>
+      <label><input type="radio" name="prPerf" value="balanced"><span><b>Balanced</b><small>8–16 GB. Measured: 6 million rows compared in about 430 MB.</small></span></label>
+      <label><input type="radio" name="prPerf" value="fast"><span><b>Fast</b><small>16 GB or more. Bigger pieces and more of them at once.</small></span></label>
+    </div>
+    <div class="prrow"><label class="lbl" style="min-width:0">Processors to use</label><select id="prThreads"></select><span class="hint" id="prThreadsSays" style="margin:0"></span></div>
+    <h4 class="sch">Safety</h4>
+    <label class="prcheck"><input type="checkbox" id="prGuard"> <span><b>Memory guard</b> — stop a big job when the PC is about to run out of memory, and say why, instead of letting Windows slow to a crawl or end it. Nothing finished is replaced.</span></label>
+    <label class="prcheck"><input type="checkbox" id="prAutosave"> <span><b>Autosave</b> the open setup every 30 seconds — if ColSift closes before it is saved, the changes are offered back the next time it opens.</span></label>
+    <h4 class="sch">Cache</h4>
+    <div class="prrow"><span id="prCache"></span><label class="lbl" style="min-width:0;margin-left:auto">Keep at most</label><input type="number" id="prCacheGb" min="0.5" max="1000" step="0.5" style="width:76px"> GB
+      <button class="btn sm" id="prCacheClear" title="Delete every cached copy — the next read of each file is a first read again">Clear the cache</button></div>
+    <p class="hint" style="margin-top:0">After the first read, a workbook or a big text file is kept as a fast Parquet copy; the oldest go when the cache is full.</p>
+    <div class="prrow"><button class="btn pri" id="prSave">Save settings</button><span class="hint" id="prSaid" style="margin:0"></span></div>
+    <h4 class="sch">About ColSift</h4>
+    <table class="sct about" id="prAbout"></table>
+    <div class="prrow"><button class="btn sm" id="prCopy" title="Versions, this PC, the settings and the folders — to paste into an e-mail when something goes wrong">Copy diagnostics</button>
+      <button class="btn sm" id="prLogs">Open the log folder</button><button class="btn sm" id="prRuns">Open the run logs</button></div>
+    <h4 class="sch">Keyboard</h4>
+    <div class="prrow" style="gap:6px 18px"><span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> Run</span><span><kbd>F5</kbd> Preview</span><span><kbd>Ctrl</kbd>+<kbd>F</kbd> Bulk search</span>
+      <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> columns in a formula</span><span><kbd>Esc</kbd> close a dialog</span><span>PDF: <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo, <kbd>Del</kbd> delete pages</span></div>
+  </div>
+</div></div>
 <div class="modal" id="sched"><div class="box" style="width:min(860px,94vw)">
   <header><h3>Scheduled runs</h3><button class="btn sm" id="scRefresh" title="Read Task Scheduler again">↻</button><button class="btn sm" id="scClose">Close</button></header>
   <div class="mbody" style="padding:12px 14px 14px">
@@ -1301,7 +1346,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     </div>
     <h4 class="sch">Scheduled</h4>
     <div id="scList"><div class="hint">Reading Task Scheduler…</div></div>
-    <h4 class="sch">Recent runs <small id="scFolder" style="font-weight:400;text-transform:none;letter-spacing:0"></small></h4>
+    <h4 class="sch">Recent runs — scheduled and by hand <small id="scFolder" style="font-weight:400;text-transform:none;letter-spacing:0"></small></h4>
     <div id="scRuns"></div>
   </div>
 </div></div>
@@ -3661,6 +3706,89 @@ async function openDrill(filters, title){
 }
 $("#drillClose").onclick = () => $("#drill").classList.remove("on");
 
+/* ---------------- settings, about, autosave ---------------- */
+const PR = {data: null, diag: null};
+const gb = n => n ? `${(n / 1024 ** 3).toFixed(1)} GB` : "?";
+async function prOpen(){
+  const [r, d] = await Promise.all([api().settings_get(), api().diagnostics()]);
+  if (!r?.ok){ say(r?.error || "Settings could not be read.", "err"); return; }
+  PR.data = r; PR.diag = d;
+  const st = r.settings;
+  $$("#prPerf input").forEach(x => x.checked = x.value === st.performance);
+  $("#prAutoSays").textContent = `This PC: ${gb(r.memory.total)} of memory → ${r.labels[r.auto]}.`;
+  $("#prThreads").innerHTML = `<option value="0">All ${r.cpus}</option>` +
+    Array.from({length: Math.max(0, r.cpus - 1)}, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join("");
+  $("#prThreads").value = String(st.threads || 0);
+  $("#prThreadsSays").textContent = "Fewer keeps the PC responsive for other work during a big run.";
+  $("#prGuard").checked = !!st.memory_guard;
+  $("#prAutosave").checked = !!st.autosave;
+  $("#prCacheGb").value = st.cache_gb;
+  $("#prCache").textContent = r.cache?.dir ? `In use: ${r.cache.size_h || "0 B"} · ${r.cache.entries || 0} files` : "The cache is off.";
+  $("#prSaid").textContent = `In force: ${r.labels[r.profile]}.`;
+  $("#prAbout").innerHTML = d?.ok ? Object.entries(d.info).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("") : "";
+  $("#prefs").classList.add("on");
+}
+$("#prOpen").onclick = prOpen;
+$("#prClose").onclick = () => $("#prefs").classList.remove("on");
+$("#prefs").addEventListener("click", e => { if (e.target.id === "prefs") $("#prefs").classList.remove("on"); });
+$("#prSave").onclick = async () => {
+  const r = await api().settings_save({performance: ($$("#prPerf input").find(x => x.checked) || {}).value || "auto",
+    threads: +$("#prThreads").value || 0, memory_guard: $("#prGuard").checked, autosave: $("#prAutosave").checked,
+    cache_gb: +$("#prCacheGb").value || 10});
+  if (!r?.ok){ say(r?.error || "Not saved.", "err"); return; }
+  AS.on = !!r.settings.autosave;
+  $("#prSaid").textContent = `Saved — ${PR.data?.labels?.[r.profile] || r.profile} in force.`;
+  say(`Settings saved — ${PR.data?.labels?.[r.profile] || r.profile}.`, "ok");
+};
+$("#prCacheClear").onclick = async () => {
+  if (!confirm("Delete every cached copy? The next read of each file is a first read again.")) return;
+  await api().cache_clear(); refreshCache(); prOpen();
+};
+function copyText(t){
+  const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select(); let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.parentNode.removeChild(ta);
+  return ok;
+}
+$("#prCopy").onclick = () => { const ok = PR.diag && copyText(PR.diag.text); say(ok ? "Diagnostics copied — paste them into an e-mail." : "Select the table and copy it.", ok ? "ok" : "err"); };
+$("#prLogs").onclick = () => PR.diag && api().open_path(PR.diag.log);
+$("#prRuns").onclick = () => PR.diag && api().open_path(PR.diag.runs_dir + "/history.jsonl");
+
+/* Autosave: the open setup, every 30 seconds when it changed; marked "saved" when it is
+   what Save / Load / New left. If ColSift closes with unsaved changes, they are offered
+   back on the next start. */
+const AS = {on: true, last: null, saved: null};
+function asJSON(){ try { return JSON.stringify(setupPayload()); } catch (e) { return null; } }
+function asMarkSaved(){
+  AS.saved = AS.last = asJSON();
+  if (AS.on && AS.saved) api().autosave_put({setup: JSON.parse(AS.saved), name: WS.name || "", saved: true});
+}
+async function asTick(){
+  if (!AS.on || S.busy) return;
+  const j = asJSON();
+  if (!j || j === AS.last) return;
+  AS.last = j;
+  await api().autosave_put({setup: JSON.parse(j), name: WS.name || $("#profileName").value.trim() || "", saved: j === AS.saved});
+}
+async function asRecover(){
+  const r = await api().autosave_get(), base = asJSON();
+  AS.saved = AS.last = base;
+  if (!r?.found || r.saved || !r.setup || JSON.stringify(r.setup) === base) return;
+  const bar = $("#recoverBar");
+  bar.innerHTML = `<b>Unsaved work found.</b> <span>ColSift closed before ${r.name ? `“${esc(r.name)}”` : "the open setup"} was saved — the changes from ${esc(scWhen(r.time))} are kept.</span>
+    <span class="nb-act"><button class="btn sm pri" id="recRestore">Restore</button><button class="btn sm" id="recDrop">Discard</button></span>`;
+  bar.style.display = "";
+  $("#recRestore").onclick = async () => {
+    bar.style.display = "none";
+    await openSetup(r.setup, r.name || "");
+    $("#profileName").value = r.name || "";
+    AS.last = asJSON();
+    say(`Restored the unsaved work${r.name ? ` on “${r.name}”` : ""} — Save to keep it.`, "ok");
+  };
+  $("#recDrop").onclick = async () => { bar.style.display = "none"; await api().autosave_clear(); };
+}
+
 /* ---------------- scheduled runs ----------------
    Windows Task Scheduler starts ColSift.exe --run "<setup>" with no window; the run logs
    under profiles\runs. The list and the run history come from schedule_list. */
@@ -3701,13 +3829,15 @@ async function scOpen(){
   if (names.includes(cur)) $("#scSetup").value = cur;
   scForm(); scCheckSetup();
   $("#sched").classList.add("on");
+  SC.markSeen = true;                  // what this opening shows is seen — no more
   scLoad();
-  api().schedule_seen(); $("#newsBar").style.display = "none";
+  $("#newsBar").style.display = "none";
 }
 /* runs that happened while the window was closed (or since it last looked): a line under the modules */
 async function checkNews(){
   const r = await api().schedule_news(), runs = r?.runs || [], bar = $("#newsBar");
   if (!runs.length){ bar.style.display = "none"; return; }
+  SC.newsUpto = runs.map(x => x.start || "").sort().pop();
   const one = x => x.ok ? `<span class="nb-ok">✓ ${esc(x.setup)} · ${esc(scWhen(x.start))} · ${(x.written || []).length} file${(x.written || []).length === 1 ? "" : "s"}</span>`
     : x.stopped ? `<span class="nb-stop">■ ${esc(x.setup)} · ${esc(scWhen(x.start))} · stopped by a check</span>`
     : `<span class="nb-bad" title="${esc(x.error || "")}">✗ ${esc(x.setup)} · ${esc(scWhen(x.start))} · failed</span>`;
@@ -3718,12 +3848,17 @@ async function checkNews(){
 }
 $("#newsBar").addEventListener("click", async e => {
   if (e.target.id === "newsShow") scOpen();
-  if (e.target.id === "newsHide"){ await api().schedule_seen(); $("#newsBar").style.display = "none"; }
+  if (e.target.id === "newsHide"){ await api().schedule_seen({upto: SC.newsUpto}); $("#newsBar").style.display = "none"; }
 });
 const scWhen = s => s ? s.replace(/^(\d{4})-(\d\d)-(\d\d)/, "$3/$2/$1").replace(/(\d\d:\d\d):\d\d$/, "$1") : "–";
 async function scLoad(){
   const r = await api().schedule_list();
   SC.data = r;
+  if (SC.markSeen){
+    SC.markSeen = false;
+    const shown = (r?.runs || []).filter(x => x.source !== "manual").map(x => x.start || "").sort().pop();
+    if (shown) await api().schedule_seen({upto: shown});
+  }
   const tasks = r?.tasks || [], runs = r?.runs || [];
   $("#scList").innerHTML = !r?.ok ? `<div class="hint">${esc(r?.error || "Task Scheduler could not be read.")}</div>`
     : !tasks.length ? `<div class="hint">Nothing scheduled yet.</div>`
@@ -3738,12 +3873,12 @@ async function scLoad(){
             <button class="btn sm" data-scdel="${esc(t.name)}">Delete</button></td></tr>`; }).join("")}</table>`;
   $("#scFolder").textContent = r?.folder ? `· logs in ${r.folder}` : "";
   $("#scRuns").innerHTML = !runs.length ? `<div class="hint">No runs logged yet.</div>`
-    : `<table class="sct"><tr><th>Setup</th><th>Started</th><th>Took</th><th>Result</th><th>Wrote</th><th></th></tr>${runs.slice(0, 15).map(x => {
+    : `<table class="sct"><tr><th>Setup</th><th>How</th><th>Started</th><th>Took</th><th>Result</th><th>Wrote</th><th></th></tr>${runs.slice(0, 15).map(x => {
         const res = x.ok ? `<span class="ok">done</span>` : x.stopped ? `<span class="stop">stopped by a check</span>` : `<span class="bad">failed</span>`;
         const wrote = (x.written || []).length;
-        return `<tr><td>${esc(x.setup)}</td><td>${esc(scWhen(x.start))}</td><td>${x.seconds != null ? `${x.seconds}s` : ""}</td><td title="${esc(x.error || "")}">${res}</td>
+        return `<tr><td>${esc(x.setup)}</td><td>${x.source === "manual" ? "by hand" : "scheduled"}</td><td>${esc(scWhen(x.start))}</td><td>${x.seconds != null ? `${x.seconds}s` : ""}</td><td title="${esc(x.error || "")}">${res}</td>
           <td>${wrote ? `<a href="#" data-scfile="${esc(x.written[0])}" title="${esc(x.written.join("\n"))}">${wrote} file${wrote === 1 ? "" : "s"}</a>` : "–"}</td>
-          <td class="act"><button class="btn sm" data-sclog="${esc(x.log)}">Log</button></td></tr>`; }).join("")}</table>`;
+          <td class="act">${x.log ? `<button class="btn sm" data-sclog="${esc(x.log)}">Log</button>` : ""}</td></tr>`; }).join("")}</table>`;
 }
 $("#schedOpen").onclick = scOpen;
 $("#scRefresh").onclick = scLoad;
@@ -4916,15 +5051,27 @@ $("#btnRun").onclick = async () => {
   const r = await api().run_setup(p);
   if (!r?.ok){ busy(false); $("#btnCancel").style.display = "none"; say(r?.error || "Could not start.", "err"); }
 };
+/* time left: from how far a stage got since it started (files read, rows written) —
+   said only once there is enough to go on, so the first guess isn't a wild one */
+const ETA = {key: "", t0: 0, f0: 0};
+function fmtDur(sec){ return sec < 60 ? `${Math.max(1, Math.round(sec))} s` : sec < 3600 ? `${Math.round(sec / 60)} min` : `${(sec / 3600).toFixed(1)} h`; }
+function eta(key, frac){
+  const now = performance.now();
+  if (ETA.key !== key){ Object.assign(ETA, {key, t0: now, f0: frac}); return ""; }
+  const el = (now - ETA.t0) / 1000, df = frac - ETA.f0;
+  if (el < 3 || df < 0.03 || frac >= 1) return "";
+  const left = el / df * (1 - frac);
+  return left >= 2 ? ` — about ${fmtDur(left)} left` : "";
+}
 window.onProgress = p => {
   if (p.mem) showMem({worker: p.mem});
   // a progress line that arrives after the work finished must not cover its result
   if (!S.busy && ["build", "analyse", "read", "write"].includes(p.stage)) return;
   if (p.stage === "build") say(`Building ${p.part}…`);
   if (p.stage === "analyse") say(`Working out ${p.part}…`);
-  if (p.stage === "prepare") say(`First read of ${p.file} (${p.index} of ${p.total}) — cached after this…`);
-  if (p.stage === "read") say(`Reading ${p.file} (${p.index} of ${p.total})…`);
-  if (p.stage === "write") say(p.total ? `Writing ${p.part} — ${(p.rows||0).toLocaleString()} of ${p.total.toLocaleString()} rows…` : `Writing ${p.part}…`);
+  if (p.stage === "prepare") say(`First read of ${p.file} (${p.index} of ${p.total}) — cached after this…${p.total > 1 ? eta("prepare", (p.index - 1) / p.total) : ""}`);
+  if (p.stage === "read") say(`Reading ${p.file} (${p.index} of ${p.total})${p.total > 1 ? eta("read", (p.index - 1) / p.total) : ""}…`);
+  if (p.stage === "write") say(p.total ? `Writing ${p.part} — ${(p.rows||0).toLocaleString()} of ${p.total.toLocaleString()} rows${eta("write:" + p.part, (p.rows || 0) / p.total)}…` : `Writing ${p.part}…`);
 };
 function fileRow(f){
   return `<tr><td>${esc(f.file)}${f.note?` <span style="color:var(--amber);font-family:var(--ui)">· ${esc(f.note)}</span>`:""}</td>
@@ -5096,7 +5243,7 @@ $("#saveProfile").onclick = async () => {
   if (!name){ say("Give the setup a name first.", "err"); return; }
   WS.name = name;
   const r = await api().save_profile({name, job: setupPayload()});
-  if (r?.ok){ await refreshProfiles(); $("#profileList").value = r.name;
+  if (r?.ok){ await refreshProfiles(); $("#profileList").value = r.name; asMarkSaved();
     say(`Saved “${r.name}” — ${WS.groups.length} group${WS.groups.length === 1 ? "" : "s"}${WS.steps.length ? `, ${WS.steps.length} combine step${WS.steps.length === 1 ? "" : "s"}` : ""}.`, "ok"); }
 };
 $("#loadProfile").onclick = async () => {
@@ -5104,6 +5251,7 @@ $("#loadProfile").onclick = async () => {
   const r = await api().load_profile(name);
   if (!r?.ok){ say(r?.error||"Could not load.", "err"); return; }
   const o = await openSetup(r.setup, name);
+  asMarkSaved();
   say(`Loaded “${name}” — ${WS.groups.length} group${WS.groups.length === 1 ? "" : "s"}.` +
       (o.gone.length ? ` Not in the open folders, so left out: ${o.gone.join(", ")}.` : "") + o.note +
       " Reload columns if the layout changed.", o.gone.length ? "" : "ok");
@@ -5113,6 +5261,7 @@ $("#newProfile").onclick = async () => {
   const d = DEFAULT_OUTPUT();
   await openSetup({groups: [makeGroup("Group 1", {source: DEFAULT_SOURCE()}, [], null)], output: {...d, folder: S.output.folder}}, "");
   $("#profileName").value = "";
+  asMarkSaved();
   say("New setup — one group reading the ticked files.", "ok");
 };
 $("#delProfile").onclick = async () => {
@@ -5640,6 +5789,9 @@ window.addEventListener("pywebviewready", async () => {
   drawGroupBar(); drawOutputMode(); wsDraw();
   pollMem();
   checkNews(); setInterval(checkNews, 5 * 60 * 1000);
+  try { const st = await api().settings_get(); AS.on = st?.ok ? !!st.settings.autosave : true; } catch (e) { AS.on = true; }
+  if (AS.on) await asRecover(); else AS.saved = AS.last = asJSON();
+  setInterval(asTick, 30 * 1000);
   say("Choose a source folder to begin.");
 });
 
@@ -5648,6 +5800,7 @@ document.addEventListener("keydown", e => {
   if (e.ctrlKey && e.key === "Enter"){ e.preventDefault(); $("#btnRun").click(); }
   if (e.key === "Escape" && $("#drill").classList.contains("on")) $("#drill").classList.remove("on");
   if (e.key === "Escape" && $("#sched").classList.contains("on")) $("#sched").classList.remove("on");
+  if (e.key === "Escape" && $("#prefs").classList.contains("on")) $("#prefs").classList.remove("on");
   if (e.ctrlKey && (e.key === "f" || e.key === "F")){ e.preventDefault(); show("find"); $("#findVals").focus(); }
 });
 </script>

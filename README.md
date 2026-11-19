@@ -35,6 +35,9 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `scheduling.py` | Scheduled runs: the Task Scheduler task that starts `ColSift.exe --run "<setup>"`, and the run log. |
 | `ocr.py` | Reads scanned PDF pages with the OCR engine built into Windows. |
 | `winps.py` | Starts Windows PowerShell and `schtasks` with no window, for OCR and scheduling. |
+| `prefs.py` | Settings: the performance profile, processors, the memory guard, the cache size; autosave. |
+| `version.py` | The version, for the build and the About box. |
+| `bench.py` | The benchmark: `python bench.py make --dir D:\bench`, then `python bench.py run --dir D:\bench`. |
 | `pdf.html` / `pdfapp.js` | The PDF module, written into the window when it is first opened. |
 | `vendor/` | pdf.js (Apache-2.0), pdf-lib and fontkit (@cantoo forks, MIT) — what the PDF module draws, reads and writes PDFs with. |
 | `studio.html` | Measure Studio with ColSift's hooks — the designer and renderer of Studio visuals. |
@@ -42,6 +45,64 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.8 — faster, leaner, safer
+
+**Measured.** `bench.py` makes 6,000,000 rows (four 1.5M-row CSVs, 14 columns, 520 MB) and runs
+every heavy operation in a fresh process, as the worker does, with an empty cache (a first run),
+and reports seconds and the process's peak memory. Same machine (4 cores, 16 GB), before and after:
+
+| Operation | 2.7 | 2.8 | Peak memory 2.7 | 2.8 | 2.8, *Low memory* |
+|---|---:|---:|---:|---:|---:|
+| Compare two 1.5M-row files | 8.3 s | 7.1 s | **2,581 MB** | **415 MB** | 341 MB |
+| Compare and write Added / Removed / Changed | 8.9 s | 9.0 s | **2,614 MB** | **423 MB** | 349 MB |
+| Convert to Parquet (4 files) | **36.0 s** | **11.1 s** | 368 MB | 375 MB | 392 MB |
+| Combine into one Parquet | **38.3 s** | **8.7 s** | 426 MB | 375 MB | 401 MB |
+| Extract → Parquet (3M rows kept) | 10.3 s | 4.8 s | 242 MB | 230 MB | 228 MB |
+| Export the Browse view → Excel (1.5M rows, 15 columns) | 9.8 s | 9.6 s | 662 MB | 451 MB | 373 MB |
+| Dashboards on every file (4 visuals) | 10.4 s | 7.3 s | 458 MB | 440 MB | 442 MB |
+| Extract → CSV (3M rows kept) | 4.7 s | 3.9 s | 219 MB | 226 MB | 224 MB |
+| Extract → Excel (1.5M rows) | 6.9 s | 6.2 s | 413 MB | 410 MB | 334 MB |
+| Extract with duplicates across files | 6.0 s | 5.7 s | 367 MB | 368 MB | 278 MB |
+| Count | 3.7 s | 3.3 s | 171 MB | 202 MB | 172 MB |
+| Bulk search, 2,000 values | 4.0 s | 3.5 s | 172 MB | 213 MB | 175 MB |
+| SQL: group-by over every file | 4.4 s | 3.7 s | 184 MB | 214 MB | 187 MB |
+
+(First reads of big text files now parse two blocks at a time — about a second faster, ~40 MB
+more; *Low memory* parses one.) What changed:
+
+- **Type detection for Parquet** decides most columns on the first 100,000 rows — one value that
+  isn't a number or a date settles a column — and reads only the columns still in the running in
+  full; a date column is checked against the one layout it uses. Same types and values as before.
+- **Compare** lines the files up a bucket of keys at a time (sized by the number of columns), each
+  bucket on disk before the next; numbers are read only where the text differs (equal text is
+  never a change); the written lists are put in file order a range of rows at a time.
+- **Reading numbers and dates** — under filters, formulas, dashboards and outputs — got faster:
+  a number is cast first and cleaned (`1,234.50`, `(250)`, `5%`) only when the cast can't read it
+  (5× faster); a date is read only by the layout its pattern matches. Checked equal to the old
+  readers on 200,000 mixed values.
+- Pivots work out a plain field's sort keys per group, not per row; workbook chunks are sized by
+  cells, so wide sheets use less memory.
+
+**Settings (⚙, top right).**
+
+- **Performance and memory** — *Automatic* (chosen from the PC's memory), *Low memory* (4–8 GB
+  PCs), *Balanced* (8–16 GB), *Fast* (16 GB+). They size the pieces big jobs are cut into: blocks
+  of a big text file parsed at once, keys Compare and duplicates line up at once, cells written to
+  a workbook at once. **Processors to use** — fewer keeps the PC responsive during a big run.
+- **Memory guard** (on) — if the PC's free memory stays under 300 MB (or 4 %) for two seconds
+  while a job runs, the job is stopped and the window says why and what to change, instead of
+  Windows slowing to a crawl or ending something by itself.
+- **Autosave** (on) — the open setup is saved every 30 seconds when it changed. If ColSift closes
+  before it was saved, a line at the top offers **Restore** / **Discard** the next time.
+- **Cache** — what it holds, a size limit, *Clear the cache*.
+- **About ColSift** — version, Windows, polars, the PC's memory, the settings in force and every
+  folder ColSift uses; **Copy diagnostics** puts all of it on the clipboard for an e-mail; the log
+  folders open from here. The keyboard shortcuts are listed.
+
+**Also:** every Run pressed in the window goes into the run history beside scheduled runs
+(*Schedule… → Recent runs*, with *How*: by hand or scheduled); long jobs say **about how long is
+left** once there is enough to go on; the version lives in `version.py`.
 
 ## What's new in 2.7 — following scheduled runs; searchable redactions; OCR in any alphabet
 

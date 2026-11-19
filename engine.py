@@ -818,7 +818,7 @@ def cache_clear() -> dict:
 
 TEXT_CACHE_MB = float(os.environ.get("COLSIFT_TEXT_CACHE_MB") or 48)
 TEXT_BLOCK = 8 << 20
-TEXT_INFLIGHT = max(1, min(3, (os.cpu_count() or 2) - 1))   # blocks parsed at once on a first read
+TEXT_INFLIGHT = 2              # blocks parsed at once on a first read (prefs.py sets it per PC)
 TEXT_SAMPLE_BYTES = 8 << 20
 TEXT_CACHE_VERSION = 2
 

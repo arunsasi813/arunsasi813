@@ -1,7 +1,7 @@
 """How fast, and how much memory: every heavy operation on a big, realistic batch.
 
     python bench.py make --dir D:\\bench [--rows 1500000] [--files 4]
-    python bench.py run  --dir D:\\bench [--only run_csv,compare] [--warm] [--json out.json]
+    python bench.py run  --dir D:\\bench [--only run_csv,compare] [--warm] [--profile low] [--json out.json]
 
 `make` writes FILES CSVs of ROWS rows and 14 columns (ticket-like data: codes, amounts,
 dates, names, a quoted note with commas), each file's keys overlapping the next one's by
@@ -129,6 +129,9 @@ def ops(d: Path) -> dict:
 
 def one(name: str, d: Path) -> dict:
     import engine as E
+    import prefs
+
+    prefs.apply({**prefs.DEFAULTS, "performance": os.environ.get("COLSIFT_BENCH_PROFILE") or "balanced"})
 
     fn = ops(d)[name]
     t0 = time.perf_counter()
@@ -140,14 +143,15 @@ def one(name: str, d: Path) -> dict:
             "error": (r.get("error") if isinstance(r, dict) else None)}
 
 
-def run(d: Path, only: list[str], warm: bool) -> list[dict]:
+def run(d: Path, only: list[str], warm: bool, profile: str = "balanced") -> list[dict]:
     names = only or _names()
     res = []
     for name in names:
         cache = d / "cache" / name
         shutil.rmtree(cache, ignore_errors=True)
         shutil.rmtree(d / "out", ignore_errors=True)
-        env = {**os.environ, "COLSIFT_CACHE": str(cache), "COLSIFT_PROFILES": str(d / "profiles")}
+        env = {**os.environ, "COLSIFT_CACHE": str(cache), "COLSIFT_PROFILES": str(d / "profiles"),
+               "COLSIFT_BENCH_PROFILE": profile}
         for attempt in (["cold"] + (["warm"] if warm else [])):
             if attempt == "warm":
                 shutil.rmtree(d / "out", ignore_errors=True)
@@ -178,6 +182,7 @@ def main() -> int:
     ap.add_argument("--only", default="")
     ap.add_argument("--warm", action="store_true")
     ap.add_argument("--json", default="")
+    ap.add_argument("--profile", default="balanced", choices=["low", "balanced", "fast"])
     a = ap.parse_args()
     d = Path(a.dir)
     if a.cmd == "make":
@@ -185,7 +190,7 @@ def main() -> int:
     elif a.cmd == "op":
         print(json.dumps(one(a.name, d)))
     else:
-        res = run(d, [x for x in a.only.split(",") if x], a.warm)
+        res = run(d, [x for x in a.only.split(",") if x], a.warm, a.profile)
         if a.json:
             Path(a.json).write_text(json.dumps(res, indent=1), encoding="utf-8")
     return 0

@@ -307,11 +307,16 @@ def news() -> dict:
         mark_seen()
         return {"ok": True, "runs": []}
     mark = seen.read_text(encoding="utf-8").strip()
-    return {"ok": True, "runs": [r for r in history(limit=100)["runs"] if str(r.get("start") or "") > mark]}
+    return {"ok": True, "runs": [r for r in history(limit=100)["runs"]
+                                 if str(r.get("start") or "") > mark and r.get("source") != "manual"]}
 
 
-def mark_seen() -> dict:
+def mark_seen(upto: str | None = None) -> dict:
+    """Runs up to `upto` (the newest one the window showed) are no longer news; with no
+    `upto`, everything logged so far — a run that ends later is still news."""
     newest = next(iter(history(limit=1)["runs"]), {}).get("start") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if upto:
+        newest = min(str(upto), str(newest))
     (runs_dir() / "seen.txt").write_text(str(newest), encoding="utf-8")
     return {"ok": True}
 

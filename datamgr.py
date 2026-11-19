@@ -487,16 +487,20 @@ def compare(p: dict, on_progress=None, cancel=None) -> dict:
             (pl.col("__a") & pl.col("__b") & anyd).sum().alias("changed"),
             *[(pl.col("__a") & pl.col("__b") & pl.col(c)).sum().alias(c) for c in dcols]).collect().row(0, named=True)
         per_col = {c: int(stats[f"__d_{i}"]) for i, c in enumerate(cols) if stats[f"__d_{i}"]}
-        # in file order: removed as A has them, added as B has them, changes row by row
-        removed = J.filter(pl.col("__a") & ~pl.col("__b")).sort("__r").select(keys + cols)
-        added = J.filter(~pl.col("__a") & pl.col("__b")).sort("__r__b").select([pl.col(f"{c}__b").alias(c) for c in keys + cols])
-        long = pl.concat([both.filter(pl.col(f"__d_{i}")).select(
+        # in file order: removed as A has them, added as B has them, changes row by row.
+        # __r is the row's place in its file; the lists keep it until they are put in order.
+        removed_u = J.filter(pl.col("__a") & ~pl.col("__b")).select(["__r", *keys, *cols])
+        added_u = J.filter(~pl.col("__a") & pl.col("__b")).select(
+            [pl.col("__r__b").alias("__r"), *[pl.col(f"{c}__b").alias(c) for c in keys + cols]])
+        long_u = pl.concat([both.filter(pl.col(f"__d_{i}")).select(
             pl.col("__r"), pl.lit(i, dtype=pl.UInt32).alias("__c"),
             *[pl.col(k) for k in keys], pl.lit(c).alias("COLUMN"), pl.col(c).cast(pl.String).alias("OLD"),
             pl.col(f"{c}__b").cast(pl.String).alias("NEW")) for i, c in enumerate(cols)], how="vertical") \
-            .sort(["__r", "__c"]).drop(["__r", "__c"]) \
-            if cols else pl.DataFrame(schema={**{k: pl.String for k in keys}, "COLUMN": pl.String, "OLD": pl.String,
-                                              "NEW": pl.String}).lazy()
+            if cols else pl.DataFrame(schema={"__r": pl.UInt32, "__c": pl.UInt32, **{k: pl.String for k in keys},
+                                              "COLUMN": pl.String, "OLD": pl.String, "NEW": pl.String}).lazy()
+        order = {"removed": (removed_u, ["__r"], sizes["A"]), "added": (added_u, ["__r"], sizes["B"]),
+                 "changed": (long_u, ["__r", "__c"], sizes["A"])}
+        removed, added, long = (lf.sort(by).drop(by) for lf, by, _ in order.values())   # for the first rows shown
         n = int(p.get("preview") or CMP_PREVIEW)
         rows = lambda lf: [["" if v is None else str(v) for v in r] for r in lf.head(n).collect().iter_rows()]  # noqa: E731
         res = {"ok": True, "a": Path(a).name, "b": Path(b).name, "keys": keys, "columns": cols,
@@ -518,7 +522,10 @@ def compare(p: dict, on_progress=None, cancel=None) -> dict:
                                     "VALUE": [res["a"], res["b"], " + ".join(keys), *[str(res["counts"][k]) for k in
                                               ("removed", "added", "changed", "same", "values_changed")],
                                               str(dups["A"]["keys"]), str(dups["B"]["keys"])] + [str(v) for v in per_col.values()]})
-            parts = {"Summary": summary.lazy(), "Added": added, "Removed": removed, "Changed": long}
+            # each list written in file order a range of rows at a time, onto disk — the
+            # writers then read it in slices without sorting it again (and again)
+            done = {k: _in_order(lf, by, upto, stage / f"order_{k}", cancel) for k, (lf, by, upto) in order.items()}
+            parts = {"Summary": summary.lazy(), "Added": done["added"], "Removed": done["removed"], "Changed": done["changed"]}
             out = {**(p.get("output") or {}), "folder": p["folder"]}
             written = []
             if fmt == "xlsx":
@@ -540,6 +547,22 @@ def compare(p: dict, on_progress=None, cancel=None) -> dict:
         return res
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+
+
+ORDER_STEP = 250_000      # rows of a file put in order at once when a Compare is written out
+
+
+def _in_order(lf: pl.LazyFrame, by: list[str], upto: int, folder: Path, cancel=None) -> pl.LazyFrame:
+    """`lf` sorted by its row number (__r, then `by`), written a range of row numbers at a
+    time — never the whole list in memory — and read back in that order, without __r."""
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for k, lo in enumerate(range(0, max(1, upto), ORDER_STEP)):
+        E._check_cancel(cancel)
+        part = folder / f"{k:05d}.parquet"
+        E._sink(lf.filter(pl.col("__r").is_between(lo, lo + ORDER_STEP - 1)).sort(by), part)
+        paths.append(str(part))
+    return pl.scan_parquet(paths).drop(by)
 
 
 # ---- SQL over the ticked files -------------------------------------------------
