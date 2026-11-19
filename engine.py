@@ -818,6 +818,7 @@ def cache_clear() -> dict:
 
 TEXT_CACHE_MB = float(os.environ.get("COLSIFT_TEXT_CACHE_MB") or 48)
 TEXT_BLOCK = 8 << 20
+TEXT_INFLIGHT = max(1, min(3, (os.cpu_count() or 2) - 1))   # blocks parsed at once on a first read
 TEXT_SAMPLE_BYTES = 8 << 20
 TEXT_CACHE_VERSION = 2
 
@@ -959,13 +960,30 @@ def build_text_cache(src: "Source", on_block=None) -> dict:
         shutil.rmtree(parts, ignore_errors=True)
         parts.mkdir(parents=True)
         rows = n = 0
+
+        def one(k: int, piece: bytes) -> int:
+            df = _parse_block(piece, names, sep, q, src.comment_prefix)
+            df.write_parquet(parts / f"{k:06d}.parquet", compression="lz4", row_group_size=STAGE_RG)
+            return df.height
         try:
-            for n, piece in enumerate(_text_blocks(target, skip, q, TEXT_BLOCK), 1):
-                df = _parse_block(piece, names, sep, q, src.comment_prefix)
-                rows += df.height
-                df.write_parquet(parts / f"{n:06d}.parquet", compression="lz4", row_group_size=STAGE_RG)
-                del df
-                if on_block:
+            # blocks are cut in order by this thread and parsed + written by a few others
+            # (polars lets go of the GIL); at most TEXT_INFLIGHT blocks wait at a time, so
+            # memory stays a few blocks' worth. Parts are numbered: the order is kept.
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+            with ThreadPoolExecutor(max_workers=TEXT_INFLIGHT) as pool:
+                busy = set()
+                for n, piece in enumerate(_text_blocks(target, skip, q, TEXT_BLOCK), 1):
+                    if len(busy) >= TEXT_INFLIGHT:
+                        done, busy = wait(busy, return_when=FIRST_COMPLETED)
+                        for f in done:
+                            rows += f.result()
+                        if on_block:
+                            on_block(rows)
+                    busy.add(pool.submit(one, n, piece))
+                    del piece
+                for f in busy:
+                    rows += f.result()
+                if on_block and busy:
                     on_block(rows)
             if n == 0:
                 pl.DataFrame(schema={c: pl.String for c in names}).write_parquet(parts / "000000.parquet")
@@ -1384,31 +1402,93 @@ def parquet_plan(lf: pl.LazyFrame, formats: dict | None = None, detect: bool = T
     rest = [c for c, t in sch.items() if t == pl.String and c not in given and not _IDLIKE_NAME.search(c)] if detect else []
     if not rest:
         return exprs
-    probes = []
-    for i, c in enumerate(rest):
-        v = pl.col(c).str.strip_chars()
-        nn = v.is_not_null() & (v != "")
-        probes += [nn.sum().alias(f"n{i}"),
-                   (nn & F.clean_number(v).is_null()).sum().alias(f"x{i}"),
-                   (nn & ~v.str.contains(r"^-?[\d,]+$")).sum().alias(f"f{i}"),
-                   (nn & v.str.contains(r"^-?0\d[\d,]*(\.\d+)?$")).sum().alias(f"z{i}"),
-                   (nn & v.str.contains(r"^\d{12,}$")).sum().alias(f"L{i}"),
-                   (nn & (F.parse_date(v).is_null() | ~v.str.contains(r"[/\-.A-Za-z]"))).sum().alias(f"d{i}"),
-                   (nn & v.str.contains(r"[ T]\d{1,2}:\d{2}")).sum().alias(f"t{i}")]
+    # A column is typed only when EVERY value reads as a number (or a date), so one value
+    # that doesn't, anywhere, settles it. The first PLAN_SAMPLE rows settle most columns
+    # (names, codes, notes); only the columns still in the running are read in full —
+    # and a date column with one layout is checked against that layout alone.
     try:
-        st = lf.select(probes).collect(engine="streaming").row(0, named=True)
+        st = lf.head(PLAN_SAMPLE).select(_type_probes(rest, sample=True)).collect(engine="streaming").row(0, named=True)
     except Exception:  # noqa: BLE001 — a plan the probe can't take: write as text
         return exprs
+    full, verdict = [], {}
     for i, c in enumerate(rest):
-        if not st[f"n{i}"]:
-            continue
+        if not st[f"n{i}"]:                               # blank in the sample: the whole column decides
+            verdict[c] = "any"
+            full += _type_probes([c], tag=i)
+        elif st[f"x{i}"] == 0 and not st[f"z{i}"] and not st[f"L{i}"]:
+            verdict[c] = "number"
+            full += _type_probes([c], tag=i, only="number")
+        elif st[f"d{i}"] == 0:
+            layout = next((k for k in range(len(F.AUTO_DATE_FORMATS)) if st[f"r{i}_{k}"] == 0), None)
+            if layout is not None and not st[f"t{i}"]:
+                verdict[c] = ("layout", layout)
+                rx, fmt = F.AUTO_DATE_FORMATS[layout]
+                v = pl.col(c).str.strip_chars()
+                full.append(((v.is_not_null() & (v != "")) & ~(v.str.contains(rx) & v.str.to_date(fmt, strict=False).is_not_null()))
+                            .sum().alias(f"q{i}"))
+            else:
+                verdict[c] = "date"
+                full += _type_probes([c], tag=i, only="date")
+    if not full:
+        return exprs
+    try:
+        st = lf.select(full).collect(engine="streaming").row(0, named=True)
+    except Exception:  # noqa: BLE001
+        return exprs
+    again = []
+    for i, c in enumerate(rest):
+        how = verdict.get(c)
         v = pl.col(c).str.strip_chars()
-        if st[f"x{i}"] == 0 and not st[f"z{i}"] and not st[f"L{i}"]:
+        if isinstance(how, tuple):
+            if st[f"q{i}"] == 0:
+                rx, fmt = F.AUTO_DATE_FORMATS[how[1]]
+                exprs.append(v.str.to_date(fmt, strict=False).alias(c))
+            else:                                          # another layout later on: the general check
+                again.append(c)
+            continue
+        if how is None or (how != "date" and not st[f"n{i}"]):
+            continue
+        if how in ("number", "any") and st[f"x{i}"] == 0 and not st[f"z{i}"] and not st[f"L{i}"]:
             num = F.clean_number(v)
             exprs.append((num.cast(pl.Int64) if st[f"f{i}"] == 0 else num).alias(c))
-        elif st[f"d{i}"] == 0:
+        elif how in ("date", "any") and st[f"d{i}"] == 0:
             exprs.append((F.parse_datetime(v) if st[f"t{i}"] else F.parse_date(v)).alias(c))
+    if again:
+        try:
+            st = lf.select(_type_probes(again, only="date")).collect(engine="streaming").row(0, named=True)
+        except Exception:  # noqa: BLE001
+            return exprs
+        for i, c in enumerate(again):
+            if st[f"d{i}"] == 0:
+                v = pl.col(c).str.strip_chars()
+                exprs.append((F.parse_datetime(v) if st[f"t{i}"] else F.parse_date(v)).alias(c))
     return exprs
+
+
+PLAN_SAMPLE = 100_000
+
+
+def _type_probes(cols: list[str], tag: int | None = None, only: str = "", sample: bool = False) -> list[pl.Expr]:
+    """Counts that say whether every value of each column reads as a number / a date:
+    n non-blank, x not a number, f not a whole number, z leading zero, L 12+ digits,
+    d not a date, t has a time; on the sample, r<k> not in date layout k."""
+    probes = []
+    for j, c in enumerate(cols):
+        i = j if tag is None else tag
+        v = pl.col(c).str.strip_chars()
+        nn = v.is_not_null() & (v != "")
+        probes.append(nn.sum().alias(f"n{i}"))
+        if only in ("", "number"):
+            probes += [(nn & F.clean_number(v).is_null()).sum().alias(f"x{i}"),
+                       (nn & ~v.str.contains(r"^-?[\d,]+$")).sum().alias(f"f{i}"),
+                       (nn & v.str.contains(r"^-?0\d[\d,]*(\.\d+)?$")).sum().alias(f"z{i}"),
+                       (nn & v.str.contains(r"^\d{12,}$")).sum().alias(f"L{i}")]
+        if only in ("", "date"):
+            probes += [(nn & (F.parse_date(v).is_null() | ~v.str.contains(r"[/\-.A-Za-z]"))).sum().alias(f"d{i}"),
+                       (nn & v.str.contains(r"[ T]\d{1,2}:\d{2}")).sum().alias(f"t{i}")]
+        if sample:
+            probes += [(nn & ~v.str.contains(rx)).sum().alias(f"r{i}_{k}") for k, (rx, _) in enumerate(F.AUTO_DATE_FORMATS)]
+    return probes
 
 
 def write_parquet(lf: pl.LazyFrame, path: Path, plan: list[pl.Expr] | None = None) -> Path:
@@ -2400,6 +2480,11 @@ def _safe_sheet(name: str) -> str:
 
 
 XLSX_CHUNK = 200_000
+XLSX_CHUNK_CELLS = 1_200_000   # a chunk of a wide sheet has fewer rows: memory follows cells, not rows
+
+
+def _xlsx_chunk(ncols: int) -> int:
+    return max(10_000, min(XLSX_CHUNK, XLSX_CHUNK_CELLS // max(1, ncols)))
 MAX_PARTS = 500
 
 
@@ -2563,7 +2648,8 @@ def write_xlsx_book(path: Path, sheets: list[dict], out: dict, cancel=None, prog
                 frozen_hdr = header and out.get("autofilter", True)
                 lf, total = sh["lf"], int(sh["rows"])
                 cols = lf.collect_schema().names()
-                chunk = lf.head(min(total, XLSX_CHUNK)).collect() if total else pl.DataFrame(schema={c: pl.String for c in cols})
+                step = _xlsx_chunk(len(cols))
+                chunk = lf.head(min(total, step)).collect() if total else pl.DataFrame(schema={c: pl.String for c in cols})
                 widths = _col_widths(chunk) if cols else []
                 last_col = _col_letter(max(0, len(cols) - 1))
                 ref = f"A1:{last_col}{max(1, total + (1 if header else 0))}"
@@ -2600,7 +2686,7 @@ def write_xlsx_book(path: Path, sheets: list[dict], out: dict, cancel=None, prog
                             progress(off, total, sh["name"])
                         if off >= total:
                             break
-                        chunk = lf.slice(off, XLSX_CHUNK).collect()
+                        chunk = lf.slice(off, step).collect()
                     w.write(tail.encode("utf-8"))
             z.writestr("xl/workbook.xml",
                 f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{_NS_MAIN}" xmlns:r="{_NS_REL}">'

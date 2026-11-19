@@ -352,6 +352,7 @@ def write_rows(p: dict) -> dict:
 
 CMP_PREVIEW = 500
 KEY_SEP = "\x1f"
+CMP_BUCKET_CELLS = 1_800_000   # values lined up at once in a big Compare (measured: 120k rows × 15 columns ≈ 430 MB peak)
 
 
 def _cmp_text(e: pl.Expr, o: dict) -> pl.Expr:
@@ -426,34 +427,58 @@ def compare(p: dict, on_progress=None, cancel=None) -> dict:
         cols = [c for c in (p.get("columns") or common) if c in common]
         only_a = [c for c in frames["A"][1] if c not in frames["B"][1]]
         only_b = [c for c in frames["B"][1] if c not in frames["A"][1]]
-        staged = {}
+        staged, sizes = {}, {}
         for side in ("A", "B"):
             lf, have = frames[side]
             want = keys + [c for c in cols]
             path = stage / f"{side}.parquet"
             E._sink(lf.select([pl.col(c) for c in want]).with_columns(_cmp_key(keys, o)).with_row_index("__r"), path)
             staged[side] = path
-        A, B = pl.scan_parquet(staged["A"]), pl.scan_parquet(staged["B"])
-        dups = {}
-        for side, lf in (("A", A), ("B", B)):
-            d = lf.group_by("__k").agg(pl.len().alias("n"), pl.first(keys[0]).alias("key")).filter(pl.col("n") > 1)
-            got = d.select(pl.len(), pl.col("n").sum()).collect()
-            ex = d.sort("n", descending=True).head(10).collect()
-            dups[side] = {"keys": int(got.item(0, 0)), "rows": int(got.item(0, 1) or 0),
-                          "examples": [f"{k} ×{n}" for k, n in zip(ex["key"], ex["n"])]}
-        A1, B1 = A.unique("__k", keep="first", maintain_order=True), B.unique("__k", keep="first", maintain_order=True)
+            sizes[side] = int(pl.scan_parquet(path).select(pl.len()).collect().item())
+        # Lined up a bucket of keys at a time (a key's hash picks its bucket, the same on
+        # both sides), each bucket's result on disk before the next: the join never holds
+        # more than a bucket's worth of values a side, however big the files.
+        per = max(20_000, CMP_BUCKET_CELLS // (len(keys) + len(cols) + 2))
+        nb = max(1, -(-max(sizes.values()) // per))
+        bucket = (lambda i: pl.col("__k").hash(seed=7) % nb == i) if nb > 1 else (lambda i: pl.lit(True))
+        jdir = stage / "joined"
+        jdir.mkdir()
         rename = {c: f"{c}__b" for c in keys + cols + ["__r"]}
-        joined = A1.join(B1.rename(rename), on="__k", how="full", coalesce=True, nulls_equal=True)
-        in_a = pl.col(keys[0]).is_not_null()
-        in_b = pl.col(f"{keys[0]}__b").is_not_null()
-        jpath = stage / "joined.parquet"
-        E._check_cancel(cancel)
-        if on_progress:
-            on_progress({"stage": "write", "part": "comparing"})
-        diff = [_differs(pl.col(c), pl.col(f"{c}__b"), o).alias(f"__d_{i}") for i, c in enumerate(cols)]
-        E._sink(joined.with_columns(in_a.alias("__a"), in_b.alias("__b"), *diff), jpath)
-        J = pl.scan_parquet(jpath)
+        # equal text is never a change; numbers are read only where the text differs
+        textdiff = [(_cmp_text(pl.col(c), o) != _cmp_text(pl.col(f"{c}__b"), o)).alias(f"__d_{i}") for i, c in enumerate(cols)]
+        numdiff = [pl.when(pl.col(f"__d_{i}")).then(_differs(pl.col(c), pl.col(f"{c}__b"), o)).otherwise(False).alias(f"__d_{i}")
+                   for i, c in enumerate(cols)]
         dcols = [f"__d_{i}" for i in range(len(cols))]
+        in_a, in_b = pl.col(keys[0]).is_not_null(), pl.col(f"{keys[0]}__b").is_not_null()
+        dup = {"A": [0, 0, []], "B": [0, 0, []]}
+        for i in range(nb):
+            E._check_cancel(cancel)
+            if on_progress:
+                on_progress({"stage": "write", "part": "comparing" + (f" — part {i + 1} of {nb}" if nb > 1 else "")})
+            part = {}
+            for side in ("A", "B"):
+                lf = pl.scan_parquet(staged[side]).filter(bucket(i))
+                if nb > 1:                                 # the bucket once, read twice below
+                    lf = pl.scan_parquet(E._sink(lf, stage / f"{side}_{i}.parquet"))
+                d = lf.group_by("__k").agg(pl.len().alias("n"), pl.col("__r").min().alias("r"),
+                                          pl.first(keys[0]).alias("key")).filter(pl.col("n") > 1).collect()
+                dup[side][0] += d.height
+                dup[side][1] += int(d["n"].sum() or 0)
+                dup[side][2] += list(d.sort(["n", "r"], descending=[True, False]).head(10).select("n", "r", "key").iter_rows())
+                part[side] = lf.sort("__r").unique("__k", keep="first", maintain_order=True)
+            joined = part["A"].join(part["B"].rename(rename), on="__k", how="full", coalesce=True, nulls_equal=True)
+            jb = joined.with_columns(in_a.alias("__a"), in_b.alias("__b"), *textdiff).collect()
+            if dcols and o.get("numbers", True) is not False:
+                hot = pl.col("__a") & pl.col("__b") & pl.any_horizontal([pl.col(c) for c in dcols])
+                jb = pl.concat([jb.filter(~hot), jb.filter(hot).with_columns(numdiff)], how="vertical")
+            jb.write_parquet(jdir / f"part_{i:04d}.parquet", compression="lz4")
+            del jb
+            for side in ("A", "B"):
+                (stage / f"{side}_{i}.parquet").unlink(missing_ok=True)
+        dups = {side: {"keys": v[0], "rows": v[1],
+                       "examples": [f"{k} ×{n}" for n, _, k in sorted(v[2], key=lambda t: (-t[0], t[1]))[:10]]}
+                for side, v in dup.items()}
+        J = pl.scan_parquet(jdir / "*.parquet")
         both = J.filter(pl.col("__a") & pl.col("__b"))
         anyd = pl.any_horizontal([pl.col(c) for c in dcols]) if dcols else pl.lit(False)
         stats = J.select(

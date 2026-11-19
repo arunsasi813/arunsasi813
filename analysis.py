@@ -340,15 +340,24 @@ def facets(lf: pl.LazyFrame, field: dict, columns: list[str], limit: int = FACET
 def _level_lazy(lf: pl.LazyFrame, rfs: list[dict], cfs: list[dict], values: list[dict],
                 columns: list[str]) -> pl.LazyFrame:
     fields = rfs + cfs
-    pre, labels, keys = [], [], []
+    pre, labels, keys, after = [], [], [], []
     for i, f in enumerate(fields):
         lab, kn, kt = _field_exprs(f, columns)
-        pre += [lab.alias(f"__l{i}"), kn.alias(f"__n{i}"), kt.alias(f"__t{i}")]
         labels.append(f"__l{i}")
-        keys += [pl.first(f"__n{i}").alias(f"__n{i}"), pl.first(f"__t{i}").alias(f"__t{i}")]
+        if (f.get("group") or "none") == "none":
+            # a plain field's sort keys come from its label (the trimmed text): worked out
+            # once per group after grouping, not once per row
+            pre.append(lab.alias(f"__l{i}"))
+            after += [F.clean_number(pl.col(f"__l{i}")).alias(f"__n{i}"), pl.col(f"__l{i}").alias(f"__t{i}")]
+        else:
+            pre += [lab.alias(f"__l{i}"), kn.alias(f"__n{i}"), kt.alias(f"__t{i}")]
+            keys += [pl.first(f"__n{i}").alias(f"__n{i}"), pl.first(f"__t{i}").alias(f"__t{i}")]
     aggs = [_agg_expr(v, columns).alias(f"__v{j}") for j, v in enumerate(values)]
     base = lf.with_columns(pre) if pre else lf
-    return base.group_by(labels).agg(aggs + keys) if labels else base.select(aggs)
+    if not labels:
+        return base.select(aggs)
+    out = base.group_by(labels).agg(aggs + keys)
+    return out.with_columns(after) if after else out
 
 
 def _read_level(df: pl.DataFrame, nr: int, nc: int, nv: int) -> tuple[dict, dict]:
