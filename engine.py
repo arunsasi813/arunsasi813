@@ -11,6 +11,7 @@ import csv as _csv
 import hashlib
 import io
 import json
+import operator
 import os
 import re
 import shutil
@@ -599,6 +600,7 @@ def clear_cache() -> None:
     _PEEK_CACHE.clear()
     _HEADER_CACHE.clear()
     _WIDTH_CACHE.clear()
+    _WIDTH_DISK["loaded"] = None
 
 
 # --------------------------------------------------------------------------
@@ -832,19 +834,26 @@ def big_text(p: Path) -> bool:
 
 def _sample_width(target: Path, skip: int, sep: str, q: str) -> int:
     """Widest row within the first TEXT_SAMPLE_BYTES — a sample's columns, without
-    reading the rest of the file."""
+    reading the rest of the file. Remembered for the session."""
+    key = "s|" + _width_key(target, skip, sep, q)
+    if key in _WIDTH_CACHE:
+        return _WIDTH_CACHE[key]
     first = next(_text_blocks(target, skip, q, TEXT_SAMPLE_BYTES, TEXT_SAMPLE_BYTES), b"")
     if not first:
-        return 0
-    if q and q.encode("utf-8") in first:
+        width = 0
+    elif q and q.encode("utf-8") in first:
         rdr = _csv.reader(io.StringIO(first.decode("utf-8", "replace"), newline=""), delimiter=sep, quotechar=q)
-        return max((len(r) for r in rdr), default=0)
-    return max(ln.count(sep.encode("utf-8")) for ln in first.split(b"\n")) + 1
+        width = max((len(r) for r in rdr), default=0)
+    else:
+        width = max(map(operator.methodcaller("count", sep.encode("utf-8")), first.split(b"\n"))) + 1
+    _WIDTH_CACHE[key] = width
+    return width
 
 
-def _text_layout(src: "Source", sample: bool = False) -> tuple[Path, list[str], int, str, str]:
+def _text_layout(src: "Source", sample: bool = False, known: bool = False) -> tuple[Path, list[str], int, str, str] | None:
     """(UTF-8 file, column names, lines to skip, separator, quote) — what scan_csv got.
-    With `sample`, the width comes from the start of the file only."""
+    With `sample`, the width comes from the start of the file only; with `known`, only
+    a width already worked out (in this session or an earlier one) — None when none is."""
     p = _norm(src.path)
     sep, q = resolve_delim(src.delimiter), (src.quote_char or "")
     target = as_utf8(p, src.encoding)
@@ -854,7 +863,13 @@ def _text_layout(src: "Source", sample: bool = False) -> tuple[Path, list[str], 
         names = _csv_header(p, src)
         if not names:
             raise ValueError(f"No header found at row {src.header_row} in {p.name}")
-    width = max(len(names), _sample_width(target, skip, sep, q) if sample else _data_width(target, skip, sep, q))
+    if known:
+        w = _known_width(target, skip, sep, q)
+        if w is None:
+            return None
+    else:
+        w = _sample_width(target, skip, sep, q) if sample else _data_width(target, skip, sep, q)
+    width = max(len(names), w)
     names += [f"col_{i + 1}" for i in range(len(names), width)]
     return target, names, skip, sep, q
 
@@ -916,15 +931,20 @@ def _text_key(p: Path, src: "Source", names: list[str]) -> str:
     return "t_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def cached_text(src: "Source") -> Path | None:
+def cached_text(src: "Source", scan: bool = True) -> Path | None:
     """The cached copy of a text file read with these settings: a folder of Parquet
-    blocks (renamed into place only when complete), or None."""
+    blocks (renamed into place only when complete), or None. With scan=False, a file
+    whose widest row was never measured is taken as not cached (it can't be: building
+    the copy measures it) — a sample then doesn't pay for reading the whole file."""
     d = cache_dir()
     if d is None:
         return None
     p = _norm(src.path)
     try:
-        folder = d / _text_key(p, src, _text_layout(src)[1])
+        layout = _text_layout(src, known=not scan)
+        if layout is None:
+            return None
+        folder = d / _text_key(p, src, layout[1])
     except Exception:  # noqa: BLE001
         return None
     return folder if folder.is_dir() else None
@@ -1306,9 +1326,9 @@ def load_lazy(src: Source, needed: set[str] | None = None) -> pl.LazyFrame:
         if lf is None:
             lf = _excel_frame(p, src.sheet, src.header_row, src.skip_after_header,
                               src.has_header, needed).lazy()
-    elif (src.sample_rows and p.stat().st_size > TEXT_SAMPLE_BYTES and not (cache_on() and cached_text(src))) \
+    elif (src.sample_rows and p.stat().st_size > TEXT_SAMPLE_BYTES and not (cache_on() and cached_text(src, scan=False))) \
             or (big_text(p) and cache_on()):
-        cached = cached_text(src) if cache_on() else None
+        cached = cached_text(src, scan=not src.sample_rows) if cache_on() else None
         if cached is not None:
             lf = scan_text_cache(cached)
         elif src.sample_rows:              # a sample: the first few MB, never the whole file
@@ -1520,7 +1540,60 @@ def _finish(lf: pl.LazyFrame, src: "Source", needed: set[str] | None) -> pl.Lazy
     return lf
 
 
-_WIDTH_CACHE: dict[tuple, int] = {}
+_WIDTH_CACHE: dict[str, int] = {}
+_WIDTH_DISK: dict = {"loaded": None, "lock": threading.Lock()}
+WIDTH_KEEP = 5000                   # widths remembered on disk (most recent first)
+
+
+def _width_key(target: Path, skip: int, sep: str, q: str) -> str:
+    st = target.stat()
+    return f"{target}|{st.st_mtime_ns}|{st.st_size}|{skip}|{sep}|{q}"
+
+
+def _width_file() -> Path | None:
+    d = cache_dir()
+    return d / "widths.json" if d is not None else None
+
+
+def _known_width(target: Path, skip: int, sep: str, q: str) -> int | None:
+    """A file's widest row as measured before — this session, or an earlier one (kept
+    with the cache, by file, modification time and size) — or None."""
+    key = _width_key(target, skip, sep, q)
+    if key in _WIDTH_CACHE:
+        return _WIDTH_CACHE[key]
+    f = _width_file()
+    if f is not None and _WIDTH_DISK["loaded"] != str(f):
+        with _WIDTH_DISK["lock"]:
+            try:
+                _WIDTH_CACHE.update({k: int(v) for k, v in json.loads(f.read_text(encoding="utf-8")).items()
+                                     if k not in _WIDTH_CACHE})
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            _WIDTH_DISK["loaded"] = str(f)
+    return _WIDTH_CACHE.get(key)
+
+
+def _remember_width(key: str, width: int) -> None:
+    _WIDTH_CACHE[key] = width
+    f = _width_file()
+    if f is None:
+        return
+    with _WIDTH_DISK["lock"]:
+        try:
+            try:
+                kept = json.loads(f.read_text(encoding="utf-8"))
+                kept = kept if isinstance(kept, dict) else {}
+            except (OSError, ValueError):
+                kept = {}
+            kept.pop(key, None)
+            kept[key] = width                       # newest last; the oldest go first
+            if len(kept) > WIDTH_KEEP:
+                kept = dict(list(kept.items())[-WIDTH_KEEP:])
+            tmp = f.with_name(f"widths.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps(kept), encoding="utf-8")
+            os.replace(tmp, f)
+        except OSError:
+            pass
 
 
 def _data_width(target: Path, skip: int, sep: str, q: str) -> int:
@@ -1528,11 +1601,12 @@ def _data_width(target: Path, skip: int, sep: str, q: str) -> int:
     counting separators per line — constant memory whatever the file's size (a polars
     scan of every line held about twice the file). Quotes can hide separators inside
     fields, so a quoted file is measured with a proper CSV reader over a sample."""
-    st = target.stat()
-    key = (str(target), st.st_mtime_ns, st.st_size, skip, sep, q)
-    if key in _WIDTH_CACHE:
-        return _WIDTH_CACHE[key]
+    key = _width_key(target, skip, sep, q)
+    known = _known_width(target, skip, sep, q)
+    if known is not None:
+        return known
     bsep, bq = sep.encode("utf-8"), q.encode("utf-8") if q else b""
+    count = operator.methodcaller("count", bsep)
     widest, quoted, line_no, carry = 0, False, 0, b""
     with open(target, "rb") as fh:
         while True:
@@ -1553,7 +1627,7 @@ def _data_width(target: Path, skip: int, sep: str, q: str) -> int:
             else:
                 line_no += len(lines)
             if lines:
-                widest = max(widest, max(ln.count(bsep) for ln in lines))
+                widest = max(widest, max(map(count, lines)))
                 if bq and not quoted and any(bq in ln for ln in lines[:1] + [block[:cut]]):
                     quoted = True
         if carry and line_no >= skip:
@@ -1569,7 +1643,7 @@ def _data_width(target: Path, skip: int, sep: str, q: str) -> int:
             width = max((len(r) for r in rdr), default=0)
     else:
         width = widest + 1
-    _WIDTH_CACHE[key] = width
+    _remember_width(key, width)
     return width
 
 
@@ -1635,10 +1709,12 @@ def _line_candidates(src: "Source", probe: list[str], fold: bool,
 
 
 def columns_of(src_dict: dict) -> dict:
+    """A file's columns as the window lists them — the same names the preview uses:
+    a workbook's from its streamed first rows (no full parse in the window), a big text
+    file's from its header and widest row (no conversion just for names)."""
     src = Source.from_dict(src_dict)
     try:
-        lf = load_lazy(src)
-        return {"ok": True, "columns": lf.collect_schema().names()}
+        return {"ok": True, "columns": _schema_names(src)}
     except Exception as exc:
         return {"ok": False, "error": brief(exc), "columns": []}
 
@@ -2180,7 +2256,7 @@ def _excel_sample_lazy(src: "Source") -> pl.LazyFrame | None:
 def _schema_names(src: Source) -> list[str]:
     p = _norm(src.path)
     if big_text(p) and cache_on():          # the labels and the widest row — no conversion just for names
-        cached = cached_text(src.resolved())
+        cached = cached_text(src.resolved(), scan=not src.sample_rows)
         if cached is not None:
             return scan_text_cache(cached).collect_schema().names()
         return _text_layout(src.resolved(), sample=bool(src.sample_rows))[1]

@@ -62,6 +62,16 @@ def make(d: Path, rows: int, files: int) -> None:
         print(f"{path.name}: {df.height:,} rows, {path.stat().st_size / 1e6:,.0f} MB")
     vals = [f"E{i:09d}" for i in range(0, rows * 2, max(1, rows // 1000))][:2000]
     (d / "find_values.txt").write_text("\n".join(vals), encoding="utf-8")
+    # a workbook: the first 300,000 rows of the first file, typed the way exports are
+    import engine as E
+    xrows = min(300_000, rows)
+    lf = pl.scan_csv(d / "sales_01.csv", infer_schema=False).head(xrows)
+    E.write_xlsx_book(d / "workbook.xlsx", [{"name": "Sales", "lf": lf, "rows": xrows}], {"header": True, "autofilter": True})
+    print(f"workbook.xlsx: {xrows:,} rows, {(d / 'workbook.xlsx').stat().st_size / 1e6:,.0f} MB")
+
+
+def _xlsx(d: Path) -> str:
+    return str(d / "workbook.xlsx")
 
 
 def _files(d: Path) -> list[str]:
@@ -124,6 +134,18 @@ def ops(d: Path) -> dict:
                                              "name": "cmp", "format": "csv"}),
         "sql": lambda: D.sql({"files": f, "query": "SELECT TAX_CODE, CURRENCY, SUM(AMOUNT) AS total, COUNT(*) AS n "
                                                    "FROM files GROUP BY TAX_CODE, CURRENCY ORDER BY total DESC"}),
+        # what the window itself does (interactive, in its own process)
+        "peek_csv": lambda: E.raw_peek(f[0]),
+        "preview_csv": lambda: E.preview({**_job(d, "csv", "p"), "files": f[:1]}),
+        "analyse_sample": lambda: E.analyse(_dash(d)["groups"][0]["setup"], "active"),
+        "browse_csv": lambda: D.browse({"path": f[0], "limit": 200}),
+        # a workbook in
+        "peek_xlsx": lambda: E.raw_peek(_xlsx(d)),
+        "preview_xlsx": lambda: E.preview({**_job(d, "csv", "p"), "files": [_xlsx(d)]}),
+        "columns_xlsx": lambda: E.columns_of({"path": _xlsx(d)}),
+        "browse_xlsx": lambda: D.browse({"path": _xlsx(d), "limit": 200}),
+        "run_from_xlsx": lambda: W.run_setup(_setup({**_job(d, "csv", "xin"), "files": [_xlsx(d)]})),
+        "convert_xlsx": lambda: E.convert_to_parquet({"files": [_xlsx(d)], "folder": str(d / "out" / "xpq")}),
     }
 
 
@@ -169,7 +191,9 @@ def run(d: Path, only: list[str], warm: bool, profile: str = "balanced") -> list
 
 def _names() -> list[str]:
     return ["run_csv", "run_xlsx", "run_parquet", "run_dupes", "count", "find", "dashboards", "convert",
-            "browse_sorted", "data_count", "data_combine", "data_export_xlsx", "compare", "compare_export", "sql"]
+            "browse_sorted", "data_count", "data_combine", "data_export_xlsx", "compare", "compare_export", "sql",
+            "peek_csv", "preview_csv", "analyse_sample", "browse_csv",
+            "peek_xlsx", "preview_xlsx", "columns_xlsx", "browse_xlsx", "run_from_xlsx", "convert_xlsx"]
 
 
 def main() -> int:

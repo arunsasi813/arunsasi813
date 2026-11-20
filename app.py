@@ -711,6 +711,12 @@ class Api:
 
     @guard
     @_params
+    def preflight(self, setup: dict) -> dict:
+        """Before Run: what would make it fail, or fill the disk — said now, not halfway."""
+        return preflight(setup)
+
+    @guard
+    @_params
     def run_setup(self, setup: dict) -> dict:
         """The Run button: every group's ColSift work, then the combine steps, then one
         export. A one-group setup is the classic extract. Results land on onRunDone()."""
@@ -1216,15 +1222,87 @@ class Api:
             ws, on_progress=lambda x: _js("onProgress", x), cancel=_CANCEL)))
 
 
+def _locked(path: Path) -> bool:
+    """A file another program holds (an open workbook in Excel): it can't be replaced."""
+    try:
+        with open(path, "r+b"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _free(path: Path) -> int | None:
+    import shutil
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return None
+
+
+def preflight(setup: dict) -> dict:
+    """{problems: what stops the run, warnings: what may} — the output folder, files the
+    run would replace that another program holds open, room on the disks it writes to
+    (the output, and the staging folder), inputs that are gone."""
+    E = _m()[0]
+    out = setup.get("output") or {}
+    problems, warnings = [], []
+    files = [Path(f) for g in setup.get("groups") or [] if g.get("enabled") is not False for f in g.get("files") or []]
+    missing = [f for f in files if not f.exists()]
+    if missing:
+        warnings.append(f"{len(missing)} ticked file{'' if len(missing) == 1 else 's'} can't be found any more"
+                        f" ({', '.join(f.name for f in missing[:3])}{' …' if len(missing) > 3 else ''}) — the run skips "
+                        f"{'it' if len(missing) == 1 else 'them'}.")
+    need = sum(f.stat().st_size for f in files if f.exists())
+    folder = Path(str(out.get("folder") or "")).expanduser() if out.get("folder") else None
+    if folder is None:
+        problems.append("Choose an output folder on the Output tab.")
+    else:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if not E.writable(folder):
+                problems.append(f"ColSift can't write to {folder} — choose another output folder.")
+        except OSError as exc:
+            problems.append(f"The output folder can't be made: {exc}")
+        stem = E._safe_name(str(out.get("basename") or "extract"))
+        if folder.is_dir():
+            held = [f.name for f in folder.glob(f"{stem}*") if f.is_file() and _locked(f)]
+            if held:
+                problems.append(f"{', '.join(held[:3])} {'is' if len(held) == 1 else 'are'} open in another program "
+                                "(Excel?) — close it so the run can replace it.")
+        free = _free(folder)
+        if free is not None and free < max(512 * 1024 ** 2, need // 2):
+            warnings.append(f"Only {_human(free)} free where the output goes ({folder.anchor or folder}) — "
+                            f"the inputs come to {_human(need)}; the output may not fit.")
+    try:
+        stage = E.cache_dir() or Path(__import__("tempfile").gettempdir())
+        free = _free(stage)
+        if free is not None and need and free < need:
+            warnings.append(f"Only {_human(free)} free on the drive ColSift stages work on ({Path(stage).anchor or stage})"
+                            f" — reading {_human(need)} of files one at a time needs about that much while it runs.")
+    except Exception:  # noqa: BLE001 — a check that can't run says nothing
+        pass
+    return {"ok": True, "problems": problems, "warnings": warnings, "inputs": need, "files": len(files)}
+
+
 def _log_manual_run(setup: dict, res: dict, t0: datetime) -> None:
     """A Run pressed in the window goes into the same history as scheduled runs."""
     try:
+        import report
         import scheduling as SC
         ok, stopped = bool(res.get("ok")), bool(res.get("stopped"))
-        SC.log_run({"setup": str(setup.get("name") or "") or "(not saved)", "start": f"{t0:%Y-%m-%d %H:%M:%S}",
-                    "seconds": round((datetime.now() - t0).total_seconds(), 1), "code": 0 if ok else 3 if stopped else 1,
-                    "ok": ok, "stopped": stopped, "log": res.get("log") or "", "written": [str(x) for x in res.get("written") or []],
-                    "error": res.get("error"), "source": "manual", "peak_memory": res.get("peak_memory")})
+        entry = {"setup": str(setup.get("name") or "") or "(not saved)", "start": f"{t0:%Y-%m-%d %H:%M:%S}",
+                 "seconds": round((datetime.now() - t0).total_seconds(), 1), "code": 0 if ok else 3 if stopped else 1,
+                 "ok": ok, "stopped": stopped, "log": res.get("log") or "", "written": [str(x) for x in res.get("written") or []],
+                 "error": res.get("error"), "source": "manual", "peak_memory": res.get("peak_memory")}
+        if not res.get("cancelled"):
+            entry["report"] = report.write(entry, setup, res)
+            res["report"] = entry["report"]
+        SC.log_run(entry)
     except Exception:  # noqa: BLE001 — history never fails a run
         traceback.print_exc()
 
@@ -1264,6 +1342,12 @@ def headless_run(argv: list[str]) -> int:
     written = [str(x) for x in res.get("written") or []]
     entry = {"setup": name, "start": f"{start:%Y-%m-%d %H:%M:%S}", "seconds": round((end - start).total_seconds(), 1),
              "code": code, "ok": code == 0, "stopped": code == 3, "log": str(log), "written": written, "error": res.get("error")}
+    try:
+        import report
+        got = E.load_profile(name)
+        entry["report"] = report.write(entry, got.get("setup") or {"name": name} if got.get("ok") else {"name": name}, res)
+    except Exception:  # noqa: BLE001 — a report never fails a run
+        traceback.print_exc()
     if notify:
         text = (f"Finished — {len(written)} file{'' if len(written) == 1 else 's'} written." if code == 0
                 else "Stopped by a check — nothing written. Click for the log." if code == 3
@@ -1455,6 +1539,8 @@ def selftest(out: str) -> int:
         "Data module combines into Parquet in the worker": res["combine"].get("rows") == 5000,
         "PDF module ships with pdf.js and pdf-lib": res["pdf"]["ok"] and res["pdf"]["libraries"],
         "settings, diagnostics and the version": bool(res["diagnostics"].get("ok")) and bool(res["diagnostics"].get("version")),
+        "a scheduled run leaves its report": bool((res["headless"].get("entry") or {}).get("report"))
+            and Path((res["headless"].get("entry") or {}).get("report") or "-").exists(),
         "a scheduled run (--run) works with no window": res["headless"].get("code") == 0
             and bool(res["headless"].get("entry", {}).get("ok")) and res["headless"].get("rows") == 1667,
     }

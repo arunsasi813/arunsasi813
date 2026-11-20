@@ -360,6 +360,10 @@ def parameters(ui: UI, d: dict) -> None:
     ui.answers = ["feb"]
     ui.then("Done", lambda: page.click("#btnRun"))
     assert ui.answers == [], "the run asked for {MONTH}"
+    # every run leaves a report beside the run history, linked from the result
+    rep = Path(page.get_attribute("#runResults [data-openf]", "data-openf"))
+    html = rep.read_text(encoding="utf-8")
+    assert rep.exists() and "Run report" in html and "by hand" in html and "{MONTH}" in html and "feb" in html
     written = sorted(x.name for x in (d["out"] / "p_feb").iterdir())
     assert written and all(n.startswith(f"report_{last}") for n in written), written
 
@@ -1136,6 +1140,25 @@ def settings_and_recovery(ui: UI, d: dict) -> None:
     page.click("#prSave")
     page.wait_for_selector("#prSaid:has-text('Saved')")
     page.click("#prClose")
+    # Ctrl+K: any tab, action or saved setup from a few letters
+    page.keyboard.press("Control+K")
+    page.wait_for_selector("#cpal.on")
+    page.keyboard.type("compare")
+    page.wait_for_selector("#cpList li.on:has-text('Compare')")
+    page.keyboard.press("Enter")
+    page.wait_for_function("S.mod === 'data' && document.querySelector('#p-cmp').classList.contains('on')")
+    assert not page.is_visible("#cpal")
+    page.keyboard.press("Control+K")
+    page.keyboard.type("settings")
+    page.keyboard.press("Enter")
+    page.wait_for_selector("#prefs.on")
+    page.click("#prClose")
+    page.keyboard.press("Control+K")
+    page.keyboard.type("zzzq")
+    page.wait_for_selector("#cpList .empty:has-text('Nothing matches')")
+    ui.shot("palette")
+    page.keyboard.press("Escape")
+    assert not page.is_visible("#cpal")
     # a change, autosaved, then the window reloads as if ColSift had closed
     ui.tab("out")
     page.select_option("#outFormat", "parquet")

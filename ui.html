@@ -485,6 +485,17 @@ table.sct a{color:var(--teal-2)}
 .prcheck input{margin-top:2px;flex:none}
 table.sct.about td:first-child{color:var(--muted);white-space:nowrap;width:1%}
 table.sct.about td{word-break:break-all}
+.cpal{position:fixed;inset:0;background:rgba(14,20,24,.32);display:none;align-items:flex-start;justify-content:center;z-index:60;padding-top:12vh}
+.cpal.on{display:flex}
+.cpal .box{background:var(--surface);border-radius:8px;width:min(620px,92vw);box-shadow:0 24px 70px rgba(14,20,24,.35);overflow:hidden}
+.cpal input{width:100%;border:0;border-bottom:1px solid var(--line);padding:13px 16px;font-size:15px;outline:none;background:var(--surface);color:var(--ink)}
+.cpal ul{list-style:none;margin:0;padding:6px;max-height:52vh;overflow:auto}
+.cpal li{display:flex;gap:10px;align-items:baseline;padding:7px 10px;border-radius:5px;cursor:pointer;font-size:13px}
+.cpal li.on{background:var(--teal-soft)}
+.cpal li .k{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);min-width:64px}
+.cpal li .h{margin-left:auto;color:var(--faint,#8a979c);font-size:11.5px}
+.cpal li b{color:var(--teal-2);font-weight:600}
+.cpal .empty{padding:14px 16px;color:var(--muted);font-size:12.5px}
 kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 5px;background:var(--surface)}
 .newsbar .nb-ok{color:var(--teal-2)}.newsbar .nb-bad{color:var(--red);font-weight:600}.newsbar .nb-stop{color:var(--amber);font-weight:600}
 .newsbar .nb-act{margin-left:auto;display:flex;gap:4px}
@@ -664,6 +675,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <button class="mod" data-m="data" title="Browse, search, convert and export any data file — Parquet, CSV, Excel — however big">⛁ Data</button>
     <button class="mod" data-m="pdf" title="Merge, split, reorder, edit, sign, stamp, protect and search PDFs">▤ PDF</button>
     <span class="modhint" id="modHint"></span>
+    <button class="modtool" id="cpOpen" title="Go to anything — tabs, actions, saved setups (Ctrl+K)" aria-label="Command palette">⌘</button>
     <button class="modtool" id="prOpen" title="Settings — performance, memory, autosave — and About" aria-label="Settings">⚙</button>
   </nav>
   <div class="newsbar recover" id="recoverBar" style="display:none" role="alert"></div>
@@ -1299,6 +1311,10 @@ table.matrix tr.unas td.fn{color:var(--faint)}
 </main>
 
 <div class="msed" id="msEd" style="display:none"><iframe id="msEdFrame" title="Measure Studio"></iframe></div>
+<div class="cpal" id="cpal" role="dialog" aria-label="Go to anything"><div class="box">
+  <input type="text" id="cpQ" placeholder="Go to a tab, run an action, load a setup…" autocomplete="off" spellcheck="false">
+  <ul id="cpList" role="listbox"></ul>
+</div></div>
 <div class="modal" id="prefs"><div class="box" style="width:min(780px,94vw)">
   <header><h3>Settings</h3><button class="btn sm" id="prClose">Close</button></header>
   <div class="mbody" style="padding:12px 14px 16px">
@@ -1324,7 +1340,7 @@ table.matrix tr.unas td.fn{color:var(--faint)}
     <div class="prrow"><button class="btn sm" id="prCopy" title="Versions, this PC, the settings and the folders — to paste into an e-mail when something goes wrong">Copy diagnostics</button>
       <button class="btn sm" id="prLogs">Open the log folder</button><button class="btn sm" id="prRuns">Open the run logs</button></div>
     <h4 class="sch">Keyboard</h4>
-    <div class="prrow" style="gap:6px 18px"><span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> Run</span><span><kbd>F5</kbd> Preview</span><span><kbd>Ctrl</kbd>+<kbd>F</kbd> Bulk search</span>
+    <div class="prrow" style="gap:6px 18px"><span><kbd>Ctrl</kbd>+<kbd>K</kbd> go to anything</span><span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> Run</span><span><kbd>F5</kbd> Preview</span><span><kbd>Ctrl</kbd>+<kbd>F</kbd> Bulk search</span>
       <span><kbd>Ctrl</kbd>+<kbd>Space</kbd> columns in a formula</span><span><kbd>Esc</kbd> close a dialog</span><span>PDF: <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo, <kbd>Del</kbd> delete pages</span></div>
   </div>
 </div></div>
@@ -3706,6 +3722,73 @@ async function openDrill(filters, title){
 }
 $("#drillClose").onclick = () => $("#drill").classList.remove("on");
 
+/* ---------------- command palette (Ctrl+K) ----------------
+   Every tab, the main actions and the saved setups, found by a few letters of any word. */
+const CP = {items: [], shown: [], at: 0};
+function cpItems(){
+  const tabs = $$(".tabs .tab").map(t => ({kind: {extract: "Extract", analytics: "Analytics", data: "Data", pdf: "PDF"}[PANE_MOD[t.dataset.p]] || "Tab",
+    label: t.childNodes[0].textContent.trim(), hint: t.title || "", run: () => show(t.dataset.p)}));
+  const click = (id, label, hint, kind = "Action") => $(id) ? [{kind, label, hint, run: () => $(id).click()}] : [];
+  const acts = [
+    ...click("#btnRun", "Run", "every group, the combine steps, the output (Ctrl+Enter)"),
+    ...click("#btnPreview", "Preview", "a dry run on the first file (F5)"),
+    ...click("#doCount", "Count every match", "how many rows the filters keep, in every ticked file"),
+    ...click("#saveProfile", "Save the setup", "under the name in Saved setups"),
+    ...click("#newProfile", "New setup", "an empty setup with one group"),
+    ...click("#schedOpen", "Schedule…", "run a saved setup daily, on weekdays, weekly or monthly"),
+    ...click("#prOpen", "Settings", "performance, memory guard, autosave, cache, About"),
+    ...click("#expProfile", "Export the setup", "to a file, to back it up or share it"),
+    ...click("#impProfile", "Import setups…", "from exported files"),
+    ...click("#peekAllBtn", "Peek all ticked", "every ticked file’s header and layout"),
+    {kind: "Action", label: "Copy diagnostics", hint: "versions, this PC, settings and folders — for an e-mail",
+     run: async () => { const d = await api().diagnostics(); say(d?.ok && copyText(d.text) ? "Diagnostics copied." : "Open Settings to copy them.", "ok"); }},
+    {kind: "Action", label: "Open the run history", hint: "scheduled runs and runs by hand, with their reports", run: () => scOpen()},
+  ];
+  const mods = $$("#modBar [data-m]").map(b => ({kind: "Module", label: b.textContent.replace(/^\W+/, "").trim(), hint: b.title || "",
+                                                 run: () => b.click()}));
+  const setups = $$("#profileList option").filter(o => o.value).map(o => ({kind: "Setup", label: `Load “${o.value}”`, hint: o.textContent,
+    run: () => { $("#profileList").value = o.value; $("#loadProfile").click(); }}));
+  return [...mods, ...tabs, ...acts, ...setups];
+}
+function cpScore(item, q){
+  if (!q) return 1;
+  const hay = `${item.label} ${item.kind} ${item.hint}`.toLowerCase(), words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  let score = 0;
+  for (const w of words){
+    const i = hay.indexOf(w);
+    if (i < 0) return 0;
+    score += item.label.toLowerCase().startsWith(w) ? 6 : item.label.toLowerCase().includes(w) ? 4 : i === 0 || /\W/.test(hay[i - 1]) ? 2 : 1;
+  }
+  return score;
+}
+function cpDraw(){
+  const q = $("#cpQ").value.trim();
+  CP.shown = CP.items.map(it => ({it, sc: cpScore(it, q)})).filter(x => x.sc > 0).sort((a, b) => b.sc - a.sc).slice(0, 40).map(x => x.it);
+  CP.at = Math.min(CP.at, Math.max(0, CP.shown.length - 1));
+  const mark = t => { if (!q) return esc(t); const w = q.split(/\s+/)[0]; const i = t.toLowerCase().indexOf(w.toLowerCase());
+    return i < 0 ? esc(t) : esc(t.slice(0, i)) + `<b>${esc(t.slice(i, i + w.length))}</b>` + esc(t.slice(i + w.length)); };
+  $("#cpList").innerHTML = CP.shown.length ? CP.shown.map((it, i) => `<li class="${i === CP.at ? "on" : ""}" data-i="${i}" role="option">
+      <span class="k">${esc(it.kind)}</span><span>${mark(it.label)}</span><span class="h">${esc(it.hint.slice(0, 70))}</span></li>`).join("")
+    : `<div class="empty">Nothing matches “${esc(q)}”.</div>`;
+  $("#cpList li.on")?.scrollIntoView({block: "nearest"});
+}
+function cpOpen(){
+  CP.items = cpItems(); CP.at = 0;
+  $("#cpQ").value = ""; $("#cpal").classList.add("on"); cpDraw(); $("#cpQ").focus();
+}
+function cpClose(){ $("#cpal").classList.remove("on"); }
+function cpGo(i){ const it = CP.shown[i]; if (!it) return; cpClose(); try { it.run(); } catch (e) { say(String(e), "err"); } }
+$("#cpOpen").onclick = cpOpen;
+$("#cpQ").addEventListener("input", () => { CP.at = 0; cpDraw(); });
+$("#cpQ").addEventListener("keydown", e => {
+  if (e.key === "ArrowDown"){ e.preventDefault(); CP.at = Math.min(CP.shown.length - 1, CP.at + 1); cpDraw(); }
+  else if (e.key === "ArrowUp"){ e.preventDefault(); CP.at = Math.max(0, CP.at - 1); cpDraw(); }
+  else if (e.key === "Enter"){ e.preventDefault(); cpGo(CP.at); }
+  else if (e.key === "Escape"){ e.preventDefault(); cpClose(); }
+});
+$("#cpList").addEventListener("mousedown", e => { const li = e.target.closest("li[data-i]"); if (li){ e.preventDefault(); cpGo(+li.dataset.i); } });
+$("#cpal").addEventListener("mousedown", e => { if (e.target.id === "cpal") cpClose(); });
+
 /* ---------------- settings, about, autosave ---------------- */
 const PR = {data: null, diag: null};
 const gb = n => n ? `${(n / 1024 ** 3).toFixed(1)} GB` : "?";
@@ -3878,7 +3961,8 @@ async function scLoad(){
         const wrote = (x.written || []).length;
         return `<tr><td>${esc(x.setup)}</td><td>${x.source === "manual" ? "by hand" : "scheduled"}</td><td>${esc(scWhen(x.start))}</td><td>${x.seconds != null ? `${x.seconds}s` : ""}</td><td title="${esc(x.error || "")}">${res}</td>
           <td>${wrote ? `<a href="#" data-scfile="${esc(x.written[0])}" title="${esc(x.written.join("\n"))}">${wrote} file${wrote === 1 ? "" : "s"}</a>` : "–"}</td>
-          <td class="act">${x.log ? `<button class="btn sm" data-sclog="${esc(x.log)}">Log</button>` : ""}</td></tr>`; }).join("")}</table>`;
+          <td class="act">${x.report ? `<button class="btn sm" data-sclog="${esc(x.report)}" title="What ran, the files and rows, what was written, the checks">Report</button>` : ""}
+            ${x.log ? `<button class="btn sm" data-sclog="${esc(x.log)}">Log</button>` : ""}</td></tr>`; }).join("")}</table>`;
 }
 $("#schedOpen").onclick = scOpen;
 $("#scRefresh").onclick = scLoad;
@@ -5045,6 +5129,10 @@ $("#btnRun").onclick = async () => {
   if (!p.output.folder){ say("Choose an output folder on the Output tab.", "err"); show("out"); return; }
   const bare = live.filter(g => !g.files.length).map(g => g.name);
   if (!isMulti() && !S.columns.some(c => c.include)){ say("Tick at least one column to keep.", "err"); show("cols"); return; }
+  // before starting: what would make it fail halfway (a workbook open in Excel, a full disk)
+  const pf = await api().preflight(p);
+  if (pf?.ok && pf.problems.length){ say(pf.problems.join(" "), "err"); return; }
+  if (pf?.ok && pf.warnings.length && !confirm(pf.warnings.join("\n\n") + "\n\nRun anyway?")) return;
   busy(true); show("res"); $("#btnCancel").style.display = "";
   say(isMulti() ? `Running ${live.length} group${live.length === 1 ? "" : "s"}, then the combine steps…` +
                   (bare.length ? ` (${bare.join(", ")} ha${bare.length === 1 ? "s" : "ve"} no files)` : "") : "Extracting…");
@@ -5095,7 +5183,8 @@ window.onRunDone = r => {
   const tables = (r.tables || []).length ? head("Tables written") + r.tables.map(t => `<tr><td>${esc(t.sheet)}</td><td>${t.rows.toLocaleString()} rows</td></tr>`).join("") : "";
   const files = (r.files || []).length ? head(r.mode === "combined" ? "Groups — files read" : "Files read") + r.files.map(fileRow).join("") : "";
   const out = head("Written") + r.written.map(p => `<tr><td colspan="2"><a class="link" data-open="${esc(p)}">${esc(p)}</a></td></tr>`).join("");
-  const log = r.log ? `<tr><td colspan="2">Run log: <a class="link" data-open="${esc(r.log)}">${esc(r.log)}</a></td></tr>` : "";
+  const log = (r.log ? `<tr><td colspan="2">Run log: <a class="link" data-open="${esc(r.log)}">${esc(r.log)}</a></td></tr>` : "") +
+    (r.report ? `<tr><td colspan="2">Run report — what ran, the files and rows, what was written, the checks: <a class="link" data-openf="${esc(r.report)}">open it</a></td></tr>` : "");
   const warn = (r.warnings||[]).length ? `<div class="warn" style="margin-top:8px">${r.warnings.map(esc).join("<br>")}</div>` : "";
   if (r.mode === "combined"){               // the grid above is an earlier preview of one group
     $("#gridwrap").innerHTML = `<div class="empty">Written: the tables listed below. Preview any of them on the <a class="link" data-go="ws">Combine</a> tab — Preview here shows the open group.</div>`;
@@ -5106,6 +5195,7 @@ window.onRunDone = r => {
   const checks = checksTable(r.checks, head);
   $("#runResults").innerHTML = `<table>${checks}${files}${tables}${out}${log}${mem}</table>${warn}`;
   $("#runResults").querySelectorAll("[data-open]").forEach(a => a.onclick = () => api().open_path(a.dataset.open));
+  $("#runResults").querySelectorAll("[data-openf]").forEach(a => a.onclick = () => api().open_file(a.dataset.openf));
   refreshCache();
   const errs = (r.errors || []).length;
   const done = (r.mode === "combined" ? `Done — ${(r.tables || []).length} table${(r.tables || []).length === 1 ? "" : "s"}, ` : "Done — ") +
@@ -5796,6 +5886,8 @@ window.addEventListener("pywebviewready", async () => {
 });
 
 document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")){ e.preventDefault(); $("#cpal").classList.contains("on") ? cpClose() : cpOpen(); return; }
+  if ($("#cpal").classList.contains("on")) return;
   if (e.key === "F5"){ e.preventDefault(); preview(); }
   if (e.ctrlKey && e.key === "Enter"){ e.preventDefault(); $("#btnRun").click(); }
   if (e.key === "Escape" && $("#drill").classList.contains("on")) $("#drill").classList.remove("on");

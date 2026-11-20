@@ -59,7 +59,7 @@ EXCLUDE = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "IPython", "PIL"
            # drops the unused ones itself and refuses a build that names them here too.
            "PyQt5", "PyQt6", "PySide2", "PySide6", "qtpy", "gi", "cefpython3"]
 HEAVY_INSTALLED = ["pandas", "pyarrow", "numpy", "matplotlib", "scipy", "PyQt5", "PyQt6", "PySide6"]
-MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "checks", "pdfout", "worker", "datamgr", "ocr", "winps", "scheduling", "prefs", "version"]
+MODULES = ["engine", "formula", "xlsxfast", "analysis", "workspace", "checks", "pdfout", "worker", "datamgr", "ocr", "winps", "scheduling", "prefs", "version", "report"]
 # the PDF module's page and the libraries it is written with (pdf.js, pdf-lib): data, not code
 PDF_FILES = ["pdf.html", "pdfapp.js", "vendor/pdf.min.mjs", "vendor/pdf.worker.min.mjs", "vendor/pdf-lib.min.js",
              "vendor/fontkit.umd.min.js", "vendor/LICENSE.pdfjs.txt", "vendor/LICENSE.pdf-lib.txt",

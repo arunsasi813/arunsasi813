@@ -37,6 +37,7 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `winps.py` | Starts Windows PowerShell and `schtasks` with no window, for OCR and scheduling. |
 | `prefs.py` | Settings: the performance profile, processors, the memory guard, the cache size; autosave. |
 | `version.py` | The version, for the build and the About box. |
+| `report.py` | The run report — one HTML page per run, kept with the run history. |
 | `bench.py` | The benchmark: `python bench.py make --dir D:\bench`, then `python bench.py run --dir D:\bench`. |
 | `pdf.html` / `pdfapp.js` | The PDF module, written into the window when it is first opened. |
 | `vendor/` | pdf.js (Apache-2.0), pdf-lib and fontkit (@cantoo forks, MIT) — what the PDF module draws, reads and writes PDFs with. |
@@ -45,6 +46,42 @@ and tells you so in the bottom-left of the rail. No CDN, no network calls, nothi
 | `build.py` / `build.bat` | The lean exe build — see [Building a small, fast exe](#building-a-small-fast-exe). |
 | `devserver.py` | The same interface in a normal browser, for development and the UI tests. |
 | `tests/` | Unit tests (`python -m pytest tests -q`) and a browser walk-through (`python tests/ui_smoke.py`). |
+
+## What's new in 2.9 — instant first looks; a report for every run; checks before Run
+
+**What the window does is much quicker.** Measured on the same 6M-row batch (`bench.py`), the
+window's own work on files it hasn't read before:
+
+| | 2.8 | 2.9 |
+|---|---:|---:|
+| Open the dashboards (a 100-row sample of each of 4 big CSVs) | 7.7 s | **0.8 s** |
+| Preview, first page of a 130 MB CSV | 0.95 s | **0.18 s** |
+| Browse, first page of a 130 MB CSV | 0.60 s | **0.17 s** |
+| Load columns of a 300,000-row workbook | 2.5 s, **459 MB** | **0.01 s, 53 MB** |
+| Count again (a later session, files read before) | 1.6 s | **0.15 s** |
+| Extract → CSV again (a later session) | 2.2 s | **0.8 s** |
+
+A big text file's widest row (it decides the columns of a ragged file) used to be measured by
+reading the whole file — again in every new process, and even for a 100-row sample. Now it is
+measured once per version of the file and remembered with the cache (`widths.json`), and a sample
+never measures it. *Load columns* takes a workbook's columns from its first rows, as the preview
+does, instead of parsing the whole sheet inside the window.
+
+**A run report for every run.** Each run — by hand or scheduled — leaves an HTML page beside the
+run history: the result, when and how long, the rows written and peak memory, the parameters
+used, what each group keeps and filters, every file read with its rows, every file written with
+its size, each table's rows, the checks, the warnings and errors. *Run report: open it* on the
+Result tab; **Report** beside each run in *Schedule… → Recent runs*. Printable — the record of a
+month-end run.
+
+**Checks before Run.** Pressing Run first checks what would otherwise fail halfway: an output file
+open in another program (a workbook open in Excel — ColSift can't replace it), an output folder
+that can't be written, ticked files that are gone, and room on the disk: where the output goes
+and where work is staged. Problems stop it with the reason; risks ask *Run anyway?*.
+
+**Go to anything — Ctrl+K** (or ⌘ at the top right): type a few letters to jump to any tab in any
+module, run an action (Run, Preview, Count, Save, Schedule, Settings, Copy diagnostics, the run
+history…) or load a saved setup. ↑ ↓ and Enter; Esc closes.
 
 ## What's new in 2.8 — faster, leaner, safer
 
