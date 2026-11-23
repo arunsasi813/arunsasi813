@@ -3761,7 +3761,10 @@ const Store = {
     if (prev && prev.id) idx.delete(prev.id);      // ROUND 4: the superseded id
     map.set(tag, { id, tag, base: Store._jrnlBase || '', tpl: String(tplId),
       file: String(file), pk: String(cell.pk), col: String(cell.col), rec: rec,
-      at: String((cell.rec && cell.rec.at) || new Date().toISOString()) });
+      at: String((cell.rec && cell.rec.at) || new Date().toISOString()),
+      /* T-S10-24. Absent on an entry buffered before this build, and absent
+         means "not flagged", exactly as a row with no _pksig is not refused. */
+      ksig: cell.ksig ? String(cell.ksig) : null });
     idx.set(id, tag);
     if (Store._jrnlSaved) Store._jrnlSchedule();   // keep the durable copy in step
     return id;
@@ -11889,7 +11892,7 @@ const App = {
      share is already serving one of them. */
   async _replayJournal() {
     App._jrnlReplay = { pending: 0, asked: '', applied: [], skipped: [], discarded: [],
-                        declined: false, landed: 0 };
+                        declined: false, landed: 0, moved: [] };
     let list = [];
     try { list = Store._jrnlRead(); } catch (e) { list = []; }
     if (!list.length) return;
@@ -11945,9 +11948,40 @@ const App = {
       return (tpl ? tpl.name : x.tpl) + ' · ' + x.pk + ' / ' + x.col
         + ' = "' + String((x.rec && x.rec.v) != null ? x.rec.v : '') + '"';
     };
+    /* ---- T-S10-24. WHICH OF THESE WERE TYPED UNDER A KEY RULE THAT HAS MOVED.
+       The one dialog that CAN ask a person used to name every key and give no
+       way to judge one, so an accepted replay wrote values under the OLD
+       rule's keys - where the rows today's rule mints will never find them.
+       Each entry now carries the rule it was typed under (Reco._journalKeySig,
+       stamped by Reco._extraValueFlush), and this says which ones differ.
+       NOT A REFUSAL, deliberately: this path is allow-listed out of the
+       dead-key chokepoint (18.11) because refusing would discard work the
+       operator was told was kept, and it runs inside the boot where a toast is
+       addressed to nobody. The gap was never the writing - it was that this
+       dialog did not give the operator the fact they needed. So it gives it,
+       and their answer stands. An entry with no signature was buffered before
+       this build and is not flagged, exactly as a row with no _pksig is not
+       refused at the write. */
+    const moved = want.filter(x => {
+      if (!x.ksig) return false;
+      const t = (AppState.recoTemplates || []).find(tt => tt && tt.id === x.tpl);
+      if (!t) return false;                  // 'noTemplate' is its own skip below
+      return String(x.ksig) !== String(Reco._journalKeySig(t) || '');
+    });
+    App._jrnlReplay.moved = moved.map(x => x.pk + ' / ' + x.col);
     const q = want.length + ' value(s) you typed here last time never reached the shared folder, '
       + 'and they were kept on this PC:\n\n' + want.slice(0, 12).map(x => '  • ' + label(x)).join('\n')
       + (want.length > 12 ? '\n  • …and ' + (want.length - 12) + ' more' : '')
+      + (moved.length
+          ? '\n\n' + moved.length + ' OF THEM WERE TYPED BEFORE SOMEBODY CHANGED HOW THEIR '
+            + 'RECONCILIATION IDENTIFIES ITS ROWS:\n\n'
+            + moved.slice(0, 8).map(x => '  • ' + label(x)).join('\n')
+            + (moved.length > 8 ? '\n  • …and ' + (moved.length - 8) + ' more' : '')
+            + '\n\nTheir row keys may not be keys that reconciliation works out any more. Put back, '
+            + 'they would be kept against those old keys, where today\'s rows will not find them. '
+            + 'If you choose not to put any of them back now, every one stays on this PC and you '
+            + 'can type those values again on today\'s rows instead.'
+          : '')
       + '\n\nPut them on the shared folder now?\n\nA cell somebody else has typed since is LEFT '
       + 'ALONE and named — your value is never written over a newer one.';
     App._jrnlReplay.asked = q;
@@ -21482,6 +21516,12 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
        drop, a backup merge - are derived from records that are already on the
        folder, so journalling them would offer the operator somebody else's
        bookkeeping to replay. */
+    /* T-S10-24: the key rule this value was typed under, so the boot that
+       offers it back can say whether that rule is still the one in force. */
+    if (cell && cell.ksig === undefined) {
+      const kt = (AppState.recoTemplates || []).find(x => x && x.id === tplId);
+      cell.ksig = kt ? Reco._journalKeySig(kt) : null;
+    }
     const tag = cell ? Store.journalIntent(tplId, file, cell) : null;
     const p = Store.mergeWrite('extraValueMaster', mutate, { file, owns, depth: 2, jrnl: tag });
     /* THE CLEAR IS INSIDE THE WRITE PATH (Store._mergeJob) and not here, and
@@ -22750,6 +22790,33 @@ _renderEditableCell(tpl, i, col, val, cls, fmtStyle, args) {
      OPERATION COUNT and never as a clock (handover 16.4a). */
   _keySigCache: new WeakMap(),
   _keySigComputed: 0,
+  /* ---- T-S10-24. THE KEY RULE A JOURNALLED VALUE WAS TYPED UNDER.
+     The owed-write journal (T-S10-9) offers back, at the next boot, values
+     typed while the shared folder was down - and somebody can have changed
+     the reconciliation's key definition in between. Its confirm named every
+     key, which is right, but gave the operator no way to judge one: an
+     accepted replay then wrote the values under the OLD rule's keys, where
+     the rows the current rule mints will never find them.
+
+     NOT keyRuleSig, although the ticket proposes it, and the reason is the
+     common case. keyRuleSig returns null whenever the key names no ADDED
+     column - every template that existed before #24 - which is T-S10-25's
+     gap, so a primaryKeys LIST edit on such a template would replay
+     unflagged. keyRuleSig is null there on purpose: widening it widens the
+     DAY FILE of every template, which is pinned byte for byte. THE JOURNAL
+     IS NOT THE DAY FILE. It lives in this PC's localStorage, nobody else
+     reads it and no baseline pins it, so it can carry the full projection
+     for every key shape at no cost. Same canonical projection
+     (RecoTemplate._keyRuleDefOf, which always carries the pk list), same
+     hash, a different prefix so the two can never be compared by mistake. */
+  _journalKeySig(tpl) {
+    if (!tpl) return null;
+    try {
+      return 'J' + Reco.KEYSIG_VER + ':'
+        + Reco._keySigHash(Reco._keySigCanon(RecoTemplate._keyRuleDefOf(tpl)));
+    } catch (e) { return null; }
+  },
+
   keyRuleSig(tpl) {
     if (!tpl || !Reco._keyExtraSet(tpl)) return null;
     let e = null;

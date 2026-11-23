@@ -7028,3 +7028,47 @@ difference was the order of work: the arms came from the three tickets' own **Te
 written before the mutations, rather than being written afterwards to cover code I had already
 decided on. Writing the arm from the ticket tests the ticket's claim; writing it from the diff tests
 my memory of the diff.
+
+---
+
+## 38. T-S10-24 — the replay names values typed under a key rule that has since moved
+
+### 38.1 The gap was the missing fact, not the write
+
+The owed-write journal (T-S10-9) offers back at boot the values typed while the folder was down. If
+a colleague changed the key rule in between, an accepted replay wrote them under the OLD rule's
+keys, where today's rows never find them — and the confirm named every key without any way to judge
+one. The replay is allow-listed out of the dead-key chokepoint (18.11), and that is still right:
+refusing would discard work the operator was told was kept. So the confirm now says which lines
+were typed under a rule that has moved, and the operator's answer stands either way.
+
+### 38.2 The journal carries its own signature, and why
+
+| signature | covers | why not the other |
+| --- | --- | --- |
+| `Reco.keyRuleSig` (on rows, in the day file) | keys that name an added column | null for a file-column-only key — every pre-#24 template — on purpose: widening it widens every day file, which is pinned byte for byte (T-S10-25) |
+| `Reco._journalKeySig` (on journal entries) | **every** key shape: `_keyRuleDefOf` always carries the pk list | lives in this PC's localStorage; nobody else reads it and no baseline pins it, so the cost argument does not apply |
+
+Same canonical projection and hash, prefix `J1:` rather than `1:`, so the two can never be compared
+by accident. The mutation that swaps in `keyRuleSig` — the ticket's own proposal — turns the
+file-column arm red, which is the measured case for the difference.
+
+**The general point, worth keeping:** a cost argument belongs to the place it was made about.
+T-S10-25 declined a wider signature because of the day file's pinned bytes; that argument says
+nothing about a store with no pinned bytes, and inheriting it would have left the commonest template
+shape unflagged here too.
+
+### 38.3 Absent means "not flagged"
+
+An entry buffered before this build has no signature and is not flagged — the same migration rule
+as a row with no `_pksig`, which is not refused at the write. Without it every journal on every PC
+would be flagged on the day this ships, which is how an operator learns to press Yes unread.
+
+### 38.4 Two probe mistakes, both of the kind that gives a false result
+
+- **An absence asserted alone.** "The unchanged template is not flagged" passes on a build that
+  flags nothing. Each such check now carries a clause naming what must be present; both went from
+  green to red on the previous build once it did.
+- **A dismissed `beforeunload`.** The app raises one while a write is owed; dismissing it cancels
+  the reload, and the probe then waited forever on a page that had been told to stay. The handler
+  now always accepts `beforeunload` and toggles only the app's own confirms.

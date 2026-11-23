@@ -4800,6 +4800,47 @@ the confirm says nothing extra and the replay lands exactly as it does today
 
 ---
 
+**CLOSED — measured by this ticket's own Test, and NOT with the signature its Fix paragraph
+proposes, because that signature is blind to the commonest template there is.**
+
+**The measurement** (`run_store_e2e` `[107] R38`): values typed while the folder is down, a
+COLLEAGUE changes the key rule from another window, the next boot. On the build before this one the
+confirm listed every line and flagged none of them.
+
+**Why not `keyRuleSig`.** It returns **null whenever the key names no added column** — every
+template that existed before #24 — which is T-S10-25's gap. Stamped with it, a `primaryKeys` LIST
+edit on such a template has a null signature before and after, so it replays unflagged. R38a is
+that premise and the mutation grid measures it: the mutation that swaps in `keyRuleSig` — this
+ticket's own proposal — turns R38c and R38f red. `keyRuleSig` is null there *on purpose*, because
+widening it widens the DAY FILE of every template, which is pinned byte for byte. **The journal is
+not the day file.** It lives in this PC's localStorage, nobody else reads it and no baseline pins
+it, so it carries the full `RecoTemplate._keyRuleDefOf` projection — which always includes the pk
+list — as `Reco._journalKeySig`, with a different prefix (`J1:`) so it can never be compared with a
+row signature by mistake.
+
+**What shipped.** `Reco._extraValueFlush` stamps the signature onto the cell when an operator's
+value is journalled (it is the one place that knows the template; `Store.journalIntent` just keeps
+what it is given), and `App._replayJournal` names the lines whose rule has since moved, in the same
+confirm, capped at eight with "…and N more". Absent means "not flagged", exactly as a row with no
+`_pksig` is not refused at the write, so every journal on every PC today is not suddenly flagged
+(R38h).
+
+**Not a refusal**, as this ticket says it must not be: the replay is allow-listed out of the dead-key
+chokepoint because refusing would discard work the operator was told was kept, and "the gap is not
+the writing — it is that the one dialog which CAN ask a person does not give them the fact they
+would need". The operator's answer stands — yes writes them (R38j), no keeps every one on the PC
+and writes nothing (R38l) — and the sentence says both before they choose.
+
+**Two things the probe got wrong first**, recorded because both would have given a false result:
+R38g and R38h assert an ABSENCE, and without a clause naming what must be PRESENT both passed on the
+build before this one, which flags nothing at all; and the decline arm hung, because dismissing
+every dialog also dismissed the page's own `beforeunload` guard — raised while a write is owed —
+which cancels the reload itself.
+
+**Tests** `run_store_e2e` `[107] R38`, 13 checks. **Grid** `scratchpad/jx/mut/run.py`, 6 mutations ×
+13, all six measured on the first pass.
+
+
 ## T-S10-25  A key that names NO ADDED COLUMN gets no signature, so a day file written before its `primaryKeys` LIST was edited is still writable under the old keys
 
 **Where** `apps/Reco.html` — `Reco.keyRuleSig` returns `null` when `Reco._keyExtraSet(tpl)` is null,

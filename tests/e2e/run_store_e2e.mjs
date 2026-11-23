@@ -10757,6 +10757,7 @@ const PORT_R34  = 21546;   // R34 T-S10-31: recoSessions written per template id
 const PORT_R35  = 21550;   // R35 T-S10-3: move a template's values to their own file
 const PORT_R36  = 21554;   // R36 T-F1-1: the row-id memo is verified
 const PORT_R37  = 21558;   // R37 importBackup: what a restore moves
+const PORT_R38  = 21562;   // R38 T-S10-24: the replay names lines under a moved rule (uses +1 too)
 
 const R19_SETTLE = `await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
     if (typeof Versioning.flushQueue === 'function') await Versioning.flushQueue();`;
@@ -19515,6 +19516,293 @@ section(106, 'R37 the restore confirm names the row-key rule, a partial backup a
   check(bx.errors.filter(e => !/Could not save|injected fault|identifies its rows/.test(e)).length === 0,
     'R37o no page or console error beyond the refusal this section provokes', bx.errors.slice(0, 5));
   await bx.ctx.close();
+}
+
+/* ====================================================================
+   T-S10-24. THE REPLAY CONFIRM LISTED ROW KEYS IT COULD NOT VOUCH FOR.
+
+   The owed-write journal (T-S10-9) offers back, at the next boot, values typed
+   while the shared folder was down. If a colleague changed the reconciliation's
+   key definition in between, an accepted replay wrote those values under the
+   OLD rule's keys - where the rows today's rule mints never find them - and
+   the confirm named every key without giving the operator any way to judge one.
+
+   WHAT WAS BUILT: Reco._extraValueFlush stamps the key rule a value was typed
+   under onto its journal entry (Reco._journalKeySig), and App._replayJournal
+   names the lines whose rule has since moved, in the same confirm.
+
+   NOT A REFUSAL, deliberately. The replay is allow-listed out of the dead-key
+   chokepoint (18.11) because refusing would discard work the operator was told
+   was kept. The gap was never the writing - it was that the one dialog which
+   CAN ask a person did not give them the fact they needed. So it gives it, and
+   their answer stands (R38j yes, R38l no).
+
+   AND NOT THE SIGNATURE THE TICKET PROPOSES. It says to stamp keyRuleSig, the
+   row signature. keyRuleSig is NULL whenever the key names no added column -
+   every template that existed before #24 - which is T-S10-25's gap, so a
+   primaryKeys LIST edit on the commonest template shape would have replayed
+   unflagged. keyRuleSig is null there on purpose: widening it widens the DAY
+   FILE of every template, which is pinned byte for byte. The journal is NOT
+   the day file - it is this PC's localStorage, nobody else reads it and no
+   baseline pins it - so it carries the full RecoTemplate._keyRuleDefOf
+   projection, which always includes the pk list, at no cost. R38a is the
+   premise and R38f the arm; the grid's mutation that swaps in keyRuleSig is
+   exactly the ticket's proposal, and it turns R38c and R38f red.
+
+   An entry with NO signature was buffered before this build and is not
+   flagged, exactly as a row with no _pksig is not refused at the write
+   (R38h) - so the journals on every PC today are not suddenly all flagged.
+
+   THE TICKET'S OWN TEST, measured: type with the folder down, a COLLEAGUE
+   changes the key rule from another window, boot, and assert the confirm and
+   the FILES. Three key shapes - an added-column key, a file-column key, and an
+   unchanged control - plus a decline arm on its own share.
+
+   MUTATION GRID: scratchpad/jx/mut/run.py, 6 mutations x the 13 checks of
+   this section's own probe - all six measured on the first pass:
+
+     nothing is stamped                    -> R38c,e,f,g,h,i,k
+     the entry drops the signature         -> R38c,e,f,g,h,i,k
+     stamped with keyRuleSig (the ticket)  -> R38c, R38f
+     an unsigned entry is flagged anyway   -> R38h
+     the comparison is inverted            -> R38e,f,g,h,k
+     worked out but never said             -> R38i
+
+   R38g and R38h assert an ABSENCE, so each carries a clause naming what must be
+   PRESENT as well; without it both passed on the build before this one, which
+   flags nothing at all.
+   ==================================================================== */
+
+section(107, 'R38 T-S10-24 — the replay names the values typed under a key rule that has since moved');
+{
+  const JX = makeRoot('share-r38');
+  const brJX = await startBridge(JX.root, PORT_R38); procs.push(brJX.proc);
+  const MKTPL = `(async function (arg) {
+    const [ID, kind, docs] = arg;
+    RecoTemplate.create();
+    const t = RecoTemplate._editing;
+    t.id = ID; t.name = ID;
+    t.columns = ['Doc','Amount'].map(c => ({
+      name: c, label: c, formats: [], isValue: c === 'Amount', isDate: false }));
+    t.valueColumn = 'Amount'; t.displayColumns = ['Doc','Amount'];
+    t.additionalColumns = (kind === 'extra')
+      ? [{ name: 'Ref', type: 'formula', formula: 'CONCAT({Doc})', _cid: U.uid() },
+         { name: 'Note', type: 'custom', _cid: U.uid() }]
+      : [{ name: 'Note', type: 'custom', _cid: U.uid() }];
+    t.primaryKeys = (kind === 'extra') ? ['Ref'] : ['Doc'];
+    const rc = window.confirm; window.confirm = () => true;
+    try { RecoTemplate.saveTemplate(); } finally { window.confirm = rc; }
+    const live = AppState.recoTemplates.find(x => x.id === ID);
+    RecoTemplate.open(ID); App.closeModal(); AppState.activeRecoId = ID;
+    const rc2 = window.confirm; window.confirm = () => true;
+    try { await Reco.ingestData(live, docs.map((d, i) => ({ Doc: d, Amount: String(10 * (i + 1)) })),
+                                ['Doc','Amount']); }
+    finally { window.confirm = rc2; }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return ((AppState.recoSessionsOwned[ID] || {}).data || []).map(r => r._pk);
+  })`;
+
+  /* THE FOLDER GOES DOWN for the values file - BOTH read doors, because the
+     merge read uses read_file_with_token where the launcher has it - and the
+     operator types. The write is refused, retried and journalled. */
+  const TYPE_DOWN = `(async function (arg) {
+    const [cells] = arg;
+    const api = window.pywebview.api;
+    const realRead = api.read_file, realTok = api.read_file_with_token;
+    const down = (real) => function (rel) {
+      if (/extraValue/.test(String(rel))) return Promise.reject(new Error('the shared folder did not answer'));
+      return real.apply(api, arguments);
+    };
+    api.read_file = down(realRead);
+    if (typeof realTok === 'function') api.read_file_with_token = down(realTok);
+    for (const [id, pk, v] of cells) {
+      const tpl = AppState.recoTemplates.find(x => x.id === id);
+      const sess = AppState.recoSessionsOwned[id];
+      const row = (sess.data || []).find(r => r._pk === pk);
+      await Reco.applyEdits(tpl, sess, [{ row: row, col: 'Note', value: v }],
+                            { source: 'grid', trusted: true });
+    }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 600));      // let the first failure persist the journal
+    /* The fault STAYS ON: the reload below is what ends this window, the way
+       closing it at the end of the day would. */
+    return Store._jrnlRead().map(x => ({ tpl: x.tpl, pk: x.pk, col: x.col,
+                                        v: (x.rec || {}).v, ksig: x.ksig || null }));
+  })`;
+
+  /* ===================== THE ACCEPT ARM ===================== */
+  const A = await openReco(browser, brJX);
+  await A.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_K', 'extra', ['D1', 'D2']]) + ')');
+  await A.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_F', 'file', ['F1']]) + ')');
+  await A.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_C', 'file', ['C1']]) + ')');
+  const sigs = await A.page.evaluate(`(function () {
+    const t = id => AppState.recoTemplates.find(x => x.id === id);
+    return { kRow: Reco.keyRuleSig(t('TPL_K')), fRow: Reco.keyRuleSig(t('TPL_F')),
+             kJ: Reco._journalKeySig ? Reco._journalKeySig(t('TPL_K')) : 'NO-FN',
+             fJ: Reco._journalKeySig ? Reco._journalKeySig(t('TPL_F')) : 'NO-FN' };
+  })()`);
+  note('the two signatures, before anything moved', sigs);
+  check(sigs.kRow && sigs.fRow === null,
+    'R38a PREMISE, AND IT IS THE REASON FOR THE DESIGN: Reco.keyRuleSig - the signature the ticket '
+    + 'proposes - is NULL for TPL_F, whose key names no added column. That is every template that '
+    + 'existed before #24, and it is T-S10-25\'s gap: a journal stamped with keyRuleSig could never '
+    + 'flag a rule change on the commonest template there is', sigs);
+
+  const typed = await A.page.evaluate(TYPE_DOWN + '(' + JSON.stringify([[
+    ['TPL_K', 'D1', 'K-ONE'], ['TPL_K', 'D2', 'K-TWO'], ['TPL_F', 'F1', 'F-ONE'], ['TPL_C', 'C1', 'C-ONE']
+  ]]) + ')');
+  note('the journal on this PC', typed);
+  const evm0 = diskJson(JX.root, 'reco/extraValueMaster.json') || {};
+  check(typed.length === 4 && !JSON.stringify(evm0).match(/K-ONE|K-TWO|F-ONE|C-ONE/),
+    'R38b PREMISE: four values were typed while the folder was down, all four are journalled on this '
+    + 'PC, and none of them is on the shared folder', { journal: typed.length, onShare: evm0 });
+  check(typed.every(x => x.ksig && /^J/.test(x.ksig)),
+    'R38c THE FIX, AT BUFFER TIME: every journal entry carries the key rule it was typed under - '
+    + 'including TPL_F, whose rule keyRuleSig cannot see - stamped by Reco._extraValueFlush, which is '
+    + 'where the template is known', typed.map(x => x.tpl + ':' + (x.ksig ? 'signed' : 'none')));
+
+  /* ONE ENTRY AS IF BUFFERED BEFORE THIS BUILD: its signature is removed from
+     memory AND from the disk copy, so no later persist puts it back. */
+  await A.page.evaluate(`(function () {
+    const tag = 'TPL_K\\u0000D2\\u0000Note';
+    const m = Store._jrnlMap(); const e = m.get(tag); if (e) e.ksig = null;
+    const list = Store._jrnlRead().map(x => (x.tag === tag ? Object.assign({}, x, { ksig: null }) : x));
+    Store._jrnlWrite(list);
+    return true;
+  })()`);
+
+  /* ---- A COLLEAGUE CHANGES TWO KEY RULES, from another window, while this
+     one is down. */
+  const B = await openReco(browser, brJX);
+  const edited = await B.page.evaluate(`(async function () {
+    const rc = window.confirm; window.confirm = () => true;
+    try {
+      RecoTemplate.edit('TPL_K');
+      RecoTemplate._editing.additionalColumns.find(a => a.name === 'Ref').formula = 'CONCAT({Doc},"-X")';
+      RecoTemplate.saveTemplate();
+      if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+      App.closeModal();
+      RecoTemplate.edit('TPL_F');
+      RecoTemplate._editing.primaryKeys = ['Doc', 'Amount'];
+      RecoTemplate.saveTemplate();
+      if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+      App.closeModal();
+    } finally { window.confirm = rc; }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const t = id => AppState.recoTemplates.find(x => x.id === id);
+    return { kFormula: t('TPL_K').additionalColumns.find(a => a.name === 'Ref').formula,
+             fKey: t('TPL_F').primaryKeys.slice() };
+  })()`);
+  const onShare = (diskJson(JX.root, 'reco/recoTemplates.json') || []);
+  const shareK = (onShare.find(t => t.id === 'TPL_K') || {});
+  const shareF = (onShare.find(t => t.id === 'TPL_F') || {});
+  note('what the colleague changed', { edited, shareKFormula: ((shareK.additionalColumns || [])
+    .find(a => a.name === 'Ref') || {}).formula, shareFKey: shareF.primaryKeys });
+  check(/-X/.test(((shareK.additionalColumns || []).find(a => a.name === 'Ref') || {}).formula || '')
+        && JSON.stringify(shareF.primaryKeys) === JSON.stringify(['Doc', 'Amount']),
+    'R38d PREMISE: the colleague\'s two key-rule changes reached the shared folder - TPL_K\'s key formula '
+    + 'and TPL_F\'s primaryKeys LIST - so the rows this PC typed against are keyed by rules that are '
+    + 'no longer in force', { kFormula: (shareK.additionalColumns || []).find(a => a.name === 'Ref'),
+                              fKey: shareF.primaryKeys });
+
+  /* ---- THE NEXT BOOT. Same browser context, so localStorage survives and
+     memory does not - an operator closing the window and opening it tomorrow. */
+  await A.page.reload();
+  await A.page.waitForSelector('#appMain .panel', { timeout: 30000 });
+  await new Promise(r => setTimeout(r, 800));
+  const boot = await A.page.evaluate(`(async function () {
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    await new Promise(r => setTimeout(r, 400));
+    if (typeof Store.idle === 'function') await Store.idle();
+    const r = App._jrnlReplay || {};
+    return { asked: String(r.asked || ''), moved: (r.moved || []).slice(), pending: r.pending,
+             declined: !!r.declined, left: Store._jrnlRead().length };
+  })()`);
+  note('what the boot asked', boot.asked.slice(0, 900));
+  note('the lines it flagged', boot.moved);
+  check(boot.moved.indexOf('D1 / Note') !== -1,
+    'R38e THE FIX, AT THE REPLAY: the confirm names TPL_K\'s line as typed before somebody changed how '
+    + 'that reconciliation identifies its rows. It named every key before and gave the operator no way '
+    + 'to judge one', boot.moved);
+  check(boot.moved.indexOf('F1 / Note') !== -1,
+    'R38f ...AND TPL_F\'s, whose rule keyRuleSig is BLIND to. This is the arm that justifies a journal '
+    + 'signature of its own: with the ticket\'s proposed keyRuleSig both the typed and the current '
+    + 'signature are null here, so a primaryKeys LIST edit on the commonest template shape would '
+    + 'have replayed unflagged', boot.moved);
+  check(boot.moved.length > 0 && boot.moved.indexOf('C1 / Note') === -1,
+    'R38g CONTROL (with a presence clause, so a build that flags nothing cannot pass it): TPL_C, whose rule did not move, is NOT named. A flag on every line is how an '
+    + 'operator learns to press Yes without reading', boot.moved);
+  check(boot.moved.indexOf('D1 / Note') !== -1 && boot.moved.indexOf('D2 / Note') === -1,
+    'R38h AND AN ENTRY WITH NO SIGNATURE IS NOT FLAGGED although its rule moved, while its SIGNED sibling on the same template IS: it was buffered '
+    + 'before this build. Absent means "not flagged", exactly as a row with no _pksig is not refused '
+    + 'at the write - so the journals on every PC today are not suddenly all flagged', boot.moved);
+  check(/TYPED BEFORE SOMEBODY CHANGED HOW THEIR RECONCILIATION IDENTIFIES ITS ROWS/.test(boot.asked)
+        && /today's rows will not find them/.test(boot.asked)
+        && /stays on this PC/.test(boot.asked),
+    'R38i THE SENTENCE SAYS WHAT IT MEANS AND WHAT DECLINING DOES: put back, those values sit under '
+    + 'the old keys where today\'s rows will not find them; declined, every one stays on this PC',
+    boot.asked.slice(0, 700));
+
+  const evm1 = diskJson(JX.root, 'reco/extraValueMaster.json') || {};
+  const val = (id, pk) => (((evm1[id] || {})[pk] || {}).Note || {}).v || null;
+  note('the shared values after the operator said yes', { K_D1: val('TPL_K', 'D1'), K_D2: val('TPL_K', 'D2'),
+                                                          F_F1: val('TPL_F', 'F1'), C_C1: val('TPL_C', 'C1') });
+  check(val('TPL_K', 'D1') === 'K-ONE' && val('TPL_F', 'F1') === 'F-ONE' && val('TPL_C', 'C1') === 'C-ONE',
+    'R38j AND THE OPERATOR\'S ANSWER STANDS: they said yes, so the values are on the shared folder under '
+    + 'the keys they were typed against. This is NOT a refusal - the replay is allow-listed out of the '
+    + 'dead-key chokepoint because refusing would discard work the operator was told was kept. The gap '
+    + 'was the missing fact, not the write', { K_D1: val('TPL_K', 'D1'), F_F1: val('TPL_F', 'F1'),
+                                                C_C1: val('TPL_C', 'C1') });
+
+  /* ===================== THE DECLINE ARM ===================== */
+  const JX2 = makeRoot('share-r38b');
+  const brJX2 = await startBridge(JX2.root, PORT_R38 + 1); procs.push(brJX2.proc);
+  const C = await openReco(browser, brJX2);
+  await C.page.evaluate(MKTPL + '(' + JSON.stringify(['TPL_D', 'extra', ['E1']]) + ')');
+  await C.page.evaluate(TYPE_DOWN + '(' + JSON.stringify([[['TPL_D', 'E1', 'D-ONE']]]) + ')');
+  const D = await openReco(browser, brJX2);
+  await D.page.evaluate(`(async function () {
+    const rc = window.confirm; window.confirm = () => true;
+    try {
+      RecoTemplate.edit('TPL_D');
+      RecoTemplate._editing.additionalColumns.find(a => a.name === 'Ref').formula = 'CONCAT({Doc},"-Y")';
+      RecoTemplate.saveTemplate();
+      if (RecoTemplate._flagGuard) { try { await RecoTemplate._flagGuard; } catch (e) {} }
+    } finally { window.confirm = rc; }
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    return true;
+  })()`);
+  /* The operator answers NO at the boot. The page's own beforeunload guard is
+     still ACCEPTED - the app raises one while a write is owed, and dismissing
+     it cancels the reload itself, which is how this arm first hung. */
+  C.page.removeAllListeners('dialog');
+  C.page.on('dialog', d => (d.type() === 'beforeunload' ? d.accept() : d.dismiss()));
+  await C.page.reload();
+  await C.page.waitForSelector('#appMain .panel', { timeout: 30000 });
+  await new Promise(r => setTimeout(r, 800));
+  const dec = await C.page.evaluate(`(async function () {
+    await AppState.flush(); if (typeof Store.idle === 'function') await Store.idle();
+    const r = App._jrnlReplay || {};
+    return { moved: (r.moved || []).slice(), declined: !!r.declined,
+             kept: Store._jrnlRead().map(x => x.pk + '/' + x.col + '=' + (x.rec || {}).v) };
+  })()`);
+  C.page.removeAllListeners('dialog');
+  C.page.on('dialog', d => d.accept());
+  const evm2 = diskJson(JX2.root, 'reco/extraValueMaster.json') || {};
+  note('the decline arm', { dec, onShare: evm2 });
+  check(dec.moved.indexOf('E1 / Note') !== -1 && dec.declined === true,
+    'R38k THE DECLINE ARM: the confirm names the moved line and the operator answers no', dec);
+  check(!JSON.stringify(evm2).match(/D-ONE/) && dec.kept.indexOf('E1/Note=D-ONE') !== -1,
+    'R38l ...AND THE FILES MATCH THAT ANSWER: nothing reached the shared folder, and the value is still '
+    + 'kept on this PC to be typed again on today\'s rows - "not now", never "gone"',
+    { onShare: evm2, kept: dec.kept });
+
+
+  const jxErrs = [...A.errors, ...B.errors, ...C.errors, ...D.errors]
+    .filter(e => !/Could not save|injected fault|did not answer|could not be read|identifies its rows/.test(e));
+  check(jxErrs.length === 0,
+    'R38m no page or console error beyond the outage this section stages', jxErrs.slice(0, 5));
+  for (const w of [A, B, C, D]) { try { await w.ctx.close(); } catch (e) {} }
 }
 
   const allErrors = [...oa.errors, ...ob.errors].filter(e => !/Could not save|injected fault/.test(e));
